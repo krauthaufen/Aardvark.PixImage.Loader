@@ -90,6 +90,10 @@ namespace PixCodec
             if (rct) { map[0] = r; map[1] = g; map[2] = b; k = 3; }
             for (int i = 0; i < nc; i++)
                 if (!rct || (i != r && i != g && i != b)) map[k++] = i;
+            // the reference keeps R, G, B in front but drops the colour transform as soon as any channel of the
+            // part is subsampled; its reader misreads G and B of a file that has both
+            for (int i = 0; i < nc; i++)
+                if (c.Chans[i].XS != 1 || c.Chans[i].YS != 1) rct = false;
 
             var byChannel = new J2kPlane[nc];
             for (int i = 0; i < nc; i++)
@@ -120,8 +124,10 @@ namespace PixCodec
                 if (!planes[i].Signed) continue;
                 nlt[i] = true;
                 var d = planes[i].Data!;
-                int flip = planes[i].Precision == 16 ? 0x8000 : int.MinValue;
-                for (int j = 0; j < d.Length; j++) if (d[j] < 0) d[j] = ~d[j] ^ flip;
+                if (planes[i].Precision == 16)
+                    for (int j = 0; j < d.Length; j++) { if (d[j] < 0) d[j] = (short)(~d[j] ^ 0x8000); }
+                else
+                    for (int j = 0; j < d.Length; j++) { if (d[j] < 0) d[j] = ~d[j] ^ int.MinValue; }
             }
             // the parameters of the reference writer: lossless 5/3, HT block coder, 5 levels, 128x32 code blocks, RPCL
             var codestream = Jp2.EncodeCodestreamPlanes(new J2kPlanes { Width = c.X1 - c.X0 + 1, Height = c.Y1 - c.Y0 + 1, Planes = planes, NltSignMagnitude = nlt }, new Jp2EncodeOptions

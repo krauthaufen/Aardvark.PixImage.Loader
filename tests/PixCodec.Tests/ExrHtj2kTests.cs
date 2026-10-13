@@ -5,13 +5,10 @@ namespace PixCodec.Tests;
 
 /// <summary>
 /// HTJ2K compression (OpenEXR 3.4, compression values 10 and 11). The codestream coding belongs to the JPEG 2000
-/// codec (Jp2.DecodeCodestreamPlanes / EncodeCodestreamPlanes). Decoding is bit exact against the reference; the
-/// encoding test is skipped until the JPEG 2000 codec can encode HT planes.
+/// codec (Jp2.DecodeCodestreamPlanes / EncodeCodestreamPlanes). Both directions are checked against the reference.
 /// </summary>
 public class ExrHtj2kTests
 {
-    const string Skip = "needs HT plane encoding in the JPEG 2000 codec (Jp2.EncodeCodestreamPlanes, called by ExrHtj2k); remove this Skip when it is implemented";
-
     public static IEnumerable<object[]> Fixtures => TestUtil.Files(Path.Combine("exr", "htj2k"), ".exr");
 
     [Theory]
@@ -31,7 +28,7 @@ public class ExrHtj2kTests
         Assert.Equal((8, 38), (region.Width, region.Height));
     }
 
-    [Theory(Skip = Skip)]
+    [Theory]
     [InlineData(ExrCompression.Htj2k256)]
     [InlineData(ExrCompression.Htj2k32)]
     public void EncodeIsLosslessAndReadByReference(ExrCompression comp)
@@ -65,12 +62,5 @@ public class ExrHtj2kTests
             var oracle = ExrOracle.Decode(data, ".all.exr");
             if (oracle != null) TestUtil.AssertEqual(oracle, Exr.DecodeChannels(data, hd.Channels.Select(c => c.Name).ToArray()));
         }
-    }
-
-    [Fact]
-    public void EncodingWaitsForTheJp2Encoder()
-    {
-        // delete this test together with the Skip above once the JPEG 2000 codec can encode HT planes
-        Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(RawImage.Create(64, 64, ColorModel.Rgb, SampleType.Float32), new MemoryStream(), new ExrEncodeOptions { Compression = ExrCompression.Htj2k32 }));
     }
 }
