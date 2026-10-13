@@ -24,7 +24,7 @@ namespace PixCodec.Compression
         const int PriceCheckLen = 16; // matches up to this length are compared with the price of literals
 
         readonly int lc, lp, pb, depth, niceLen;
-        readonly bool lazy, useShort, useChain;
+        readonly bool lazy, useShort, useChain, optimal;
         readonly ushort[] probs;
         uint state, rep0, rep1, rep2, rep3;
 
@@ -44,6 +44,16 @@ namespace PixCodec.Compression
 
         public int DictionarySize => dictSize;
 
+        /// <summary>Dictionary size the level uses for an input of this length (a power of two, no larger than needed).</summary>
+        public static int DictionarySizeFor(int level, long inputLength)
+        {
+            level = Math.Clamp(level, 0, 9);
+            int maxDict = level <= 3 ? 1 << 20 : level <= 6 ? 1 << 23 : 1 << 25;
+            int d = 1 << 12;
+            while (d < maxDict && d < inputLength) d <<= 1;
+            return d;
+        }
+
         public LzmaEncoder(int level, long inputLength, int lc = 3, int lp = 0, int pb = 2)
         {
             level = Math.Clamp(level, 0, 9);
@@ -54,9 +64,8 @@ namespace PixCodec.Compression
             useChain = depth > 1;
             niceLen = level switch { <= 3 => 32, <= 5 => 64, <= 7 => 128, _ => MaxMatch };
             lazy = level >= 4;
-            int maxDict = level <= 3 ? 1 << 20 : level <= 6 ? 1 << 23 : 1 << 25;
-            int d = 1 << 12;
-            while (d < maxDict && d < inputLength) d <<= 1;
+            optimal = level >= 7;
+            int d = DictionarySizeFor(level, inputLength);
             dictSize = d;
             chain = new int[level <= 1 ? 1 : d];
             // the main hash table is sized to the input (small strips should not pay for megabytes of tables)
@@ -432,6 +441,12 @@ namespace PixCodec.Compression
         /// </summary>
         long Encode(byte* data, long pos, long softEnd, long end, int packedLimit)
         {
+            if (optimal)
+            {
+                // a window can add a few kilobytes at once: stop earlier
+                while (pos < softEnd && rcPos + cacheSize < packedLimit - 8192) pos = OptimalWindow(data, pos, softEnd, end);
+                return pos;
+            }
             while (pos < softEnd && rcPos + cacheSize < packedLimit)
             {
                 int mainLen;
@@ -485,6 +500,273 @@ namespace PixCodec.Compression
                 pos++;
             }
             return pos;
+        }
+
+        // ------------------------------------------------------------------- optimal parsing (levels >= 7)
+
+        const int OptSize = 1024;
+
+        // A position inside the window: cheapest known price to get there, and how (Back: -1 literal, -2 one
+        // byte repeat, 0..3 repeat of that distance, >= 4 match with distance Back - 4), plus the coder state there.
+        struct Node
+        {
+            public uint Price;
+            public int Prev, Back;
+            public uint State, R0, R1, R2, R3;
+        }
+
+        readonly Node[] opt = new Node[OptSize + 2];
+        readonly int[] pairLen = new int[300];
+        readonly uint[] pairDist = new uint[300];
+        readonly int[] lenPrices = new int[2 * 16 * 272], slotPrices = new int[4 * 64], alignPrices = new int[16];
+        readonly int[] pathBack = new int[OptSize + 2], pathLen = new int[OptSize + 2];
+        int pricesAge = int.MaxValue;
+
+        int ReverseTreePrice(int offset, int bits, uint value)
+        {
+            int price = 0;
+            uint m = 1;
+            for (int i = 0; i < bits; i++)
+            {
+                uint b = value & 1;
+                value >>= 1;
+                price += Price(offset + (int)m, b);
+                m = (m << 1) | b;
+            }
+            return price;
+        }
+
+        // Tables for the prices that are looked up most (the model moves slowly; they are refreshed now and then).
+        void FillPrices()
+        {
+            int posStates = 1 << pb;
+            Span<int> high = stackalloc int[256];
+            for (int c = 0; c < 2; c++)
+            {
+                int coder = c == 0 ? LenCoder : RepLenCoder;
+                // lengths 16 and up do not depend on the position state: price their tree once
+                int highBase = Price(coder, 1) + Price(coder + 1, 1);
+                for (uint l = 0; l < 256; l++) high[(int)l] = highBase + TreePrice(coder + LenHigh, 8, l);
+                for (uint ps = 0; ps < posStates; ps++)
+                {
+                    int row = (c * 16 + (int)ps) * 272;
+                    for (uint l = 0; l < 16; l++) lenPrices[row + (int)l] = LengthPrice(coder, l, ps);
+                    high.CopyTo(lenPrices.AsSpan(row + 16, 256));
+                }
+            }
+            for (int ls = 0; ls < 4; ls++)
+                for (uint slot = 0; slot < 64; slot++) slotPrices[ls * 64 + (int)slot] = TreePrice(PosSlot + (ls << 6), 6, slot);
+            for (uint a = 0; a < 16; a++) alignPrices[a] = ReverseTreePrice(Align, 4, a);
+            pricesAge = 0;
+        }
+
+        int DistancePrice(uint dist, int lenState)
+        {
+            if (dist < 4) return slotPrices[lenState * 64 + (int)dist];
+            int hb = BitOperations.Log2(dist);
+            uint slot = (uint)(2 * hb) + ((dist >> (hb - 1)) & 1);
+            int direct = (int)(slot >> 1) - 1;
+            uint baseValue = (2 | (slot & 1)) << direct;
+            int price = slotPrices[lenState * 64 + (int)slot];
+            if (slot < 14) return price + ReverseTreePrice(SpecPos + (int)baseValue - (int)slot, direct, dist - baseValue);
+            return price + 16 * (direct - 4) + alignPrices[dist & 15];
+        }
+
+        int LiteralPriceAt(byte* data, long pos, uint st, uint r0)
+        {
+            uint posState = (uint)pos & ((1u << pb) - 1);
+            uint prev = pos == 0 ? 0u : data[pos - 1];
+            int lit = Literal + 0x300 * (int)((((uint)pos & ((1u << lp) - 1)) << lc) + (prev >> (8 - lc)));
+            int price = Price(IsMatch + (int)((st << 4) + posState), 0);
+            uint b = data[pos], sym = 1;
+            int i = 7;
+            if (st >= 7)
+            {
+                uint matchByte = data[pos - r0 - 1];
+                do
+                {
+                    uint mb = (matchByte >> 7) & 1;
+                    matchByte <<= 1;
+                    uint bit = (b >> i) & 1;
+                    i--;
+                    price += Price(lit + (int)(((1 + mb) << 8) + sym), bit);
+                    sym = (sym << 1) | bit;
+                    if (mb != bit) break;
+                } while (sym < 0x100);
+            }
+            while (sym < 0x100)
+            {
+                uint bit = (b >> i) & 1;
+                i--;
+                price += Price(lit + (int)sym, bit);
+                sym = (sym << 1) | bit;
+            }
+            return price;
+        }
+
+        /// <summary>All matches at pos with strictly rising length (nearest first for each length); the position is indexed.</summary>
+        int SearchAll(byte* data, long pos, long end, int limit)
+        {
+            int avail = (int)Math.Min(end - pos, MaxMatch);
+            if (avail < 4) return 0;
+            byte* cur = data + pos;
+            uint v = Unsafe.ReadUnaligned<uint>(cur);
+            int h4 = (int)((v * 2654435761u) >> hash4Shift);
+            int c4 = head4[h4];
+            int p = (int)pos;
+            head4[h4] = p;
+            chain[p & chainMask] = c4;
+            int h2 = (int)(v & 0xFFFF), h3 = (int)(((v & 0xFFFFFF) * 2654435761u) >> (32 - Hash3Bits));
+            int c2 = head2[h2], c3 = head3[h3];
+            head2[h2] = p; head3[h3] = p;
+            int count = 0, best = 1;
+            if (c2 >= 0 && p - c2 <= dictSize && *(ushort*)(data + c2) == (ushort)v)
+            {
+                best = MatchLen(data + c2, cur, avail);
+                pairLen[count] = best; pairDist[count++] = (uint)(p - c2 - 1);
+            }
+            if (c3 >= 0 && c3 != c2 && p - c3 <= dictSize && ((Unsafe.ReadUnaligned<uint>(data + c3) ^ v) & 0xFFFFFF) == 0)
+            {
+                int n = MatchLen(data + c3, cur, avail);
+                if (n > best) { best = n; pairLen[count] = n; pairDist[count++] = (uint)(p - c3 - 1); }
+            }
+            int nice = Math.Min(niceLen, avail);
+            for (int steps = depth; c4 >= 0 && p - c4 <= dictSize && best < nice && steps > 0; steps--)
+            {
+                byte* c = data + c4;
+                if (c[best] == cur[best] && Unsafe.ReadUnaligned<uint>(c) == v)
+                {
+                    int n = MatchLen(c, cur, avail);
+                    if (n > best) { best = n; pairLen[count] = n; pairDist[count++] = (uint)(p - c4 - 1); }
+                }
+                int next = chain[c4 & chainMask];
+                if (next >= c4) break;
+                c4 = next;
+            }
+            return count;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        void Relax(int index, uint price, int prev, int back)
+        {
+            if (price < opt[index].Price) { opt[index].Price = price; opt[index].Prev = prev; opt[index].Back = back; }
+        }
+
+        /// <summary>
+        /// Finds the cheapest way (by the model's current prices) through the next stretch of input, treating every
+        /// position as a node and every literal, repeat and match as an edge, then encodes that path. A long enough
+        /// match ends the stretch at once. Returns the position after it.
+        /// </summary>
+        long OptimalWindow(byte* data, long pos, long softEnd, long end)
+        {
+            if (pricesAge >= 1024) FillPrices();
+            int room = (int)Math.Min(softEnd - pos, OptSize);
+            uint pbMask = (1u << pb) - 1;
+            opt[0].Price = 0; opt[0].State = state; opt[0].R0 = rep0; opt[0].R1 = rep1; opt[0].R2 = rep2; opt[0].R3 = rep3;
+            for (int k = 1; k <= room; k++) opt[k].Price = uint.MaxValue;
+            int lenEnd = 0;
+            long indexed = pos - 1; // last position entered into the match finder
+            int i = 0;
+            for (; ; i++)
+            {
+                if (i > 0)
+                {
+                    // the node's coder state follows from the cheapest edge into it
+                    ref Node from = ref opt[opt[i].Prev];
+                    int back = opt[i].Back;
+                    uint st = from.State, r0 = from.R0, r1 = from.R1, r2 = from.R2, r3 = from.R3;
+                    if (back == -1) st = st < 4 ? 0 : st < 10 ? st - 3 : st - 6;
+                    else if (back == -2) st = st < 7 ? 9u : 11u;
+                    else if (back < 4)
+                    {
+                        if (back == 1) { uint d = r1; r1 = r0; r0 = d; }
+                        else if (back == 2) { uint d = r2; r2 = r1; r1 = r0; r0 = d; }
+                        else if (back == 3) { uint d = r3; r3 = r2; r2 = r1; r1 = r0; r0 = d; }
+                        st = st < 7 ? 8u : 11u;
+                    }
+                    else { r3 = r2; r2 = r1; r1 = r0; r0 = (uint)(back - 4); st = st < 7 ? 7u : 10u; }
+                    opt[i].State = st; opt[i].R0 = r0; opt[i].R1 = r1; opt[i].R2 = r2; opt[i].R3 = r3;
+                    if (i == lenEnd || i == room) break;
+                }
+                long p = pos + i;
+                ref Node node = ref opt[i];
+                uint here = node.Price, nst = node.State;
+                uint posState = (uint)p & pbMask;
+                int limit = (int)Math.Min(Math.Min(end - p, MaxMatch), room - i); // longest edge that stays inside
+                // literal
+                Relax(i + 1, here + (uint)LiteralPriceAt(data, p, nst, node.R0), i, -1);
+                uint matchBase = here + (uint)Price(IsMatch + (int)((nst << 4) + posState), 1);
+                uint repBase = matchBase + (uint)Price(IsRep + (int)nst, 1);
+                // one byte from the last distance
+                if (node.R0 < p && data[p] == data[p - node.R0 - 1])
+                    Relax(i + 1, repBase + (uint)(Price(IsRepG0 + (int)nst, 0) + Price(IsRep0Long + (int)((nst << 4) + posState), 0)), i, -2);
+                if (i + 1 > lenEnd) lenEnd = i + 1;
+                int cut = 0, cutBack = 0;
+                if (limit >= 2)
+                {
+                    for (int k = 0; k < 4; k++)
+                    {
+                        uint d = k == 0 ? node.R0 : k == 1 ? node.R1 : k == 2 ? node.R2 : node.R3;
+                        if (d >= p || *(ushort*)(data + p - d - 1) != *(ushort*)(data + p)) continue;
+                        int n = MatchLen(data + p - d - 1, data + p, limit);
+                        uint kPrice = repBase + (uint)(k == 0
+                            ? Price(IsRepG0 + (int)nst, 0) + Price(IsRep0Long + (int)((nst << 4) + posState), 1)
+                            : Price(IsRepG0 + (int)nst, 1) + Price(IsRepG1 + (int)nst, k == 1 ? 0u : 1u) + (k >= 2 ? Price(IsRepG2 + (int)nst, k == 2 ? 0u : 1u) : 0));
+                        int table = (16 + (int)posState) * 272;
+                        for (int l = n >= niceLen ? n : 2; l <= n; l++) Relax(i + l, kPrice + (uint)lenPrices[table + l - 2], i, k);
+                        if (i + n > lenEnd) lenEnd = i + n;
+                        if (n >= niceLen && n > cut) { cut = n; cutBack = k; }
+                    }
+                }
+                int pairs = SearchAll(data, p, end, limit);
+                indexed = p;
+                if (limit >= 2 && pairs > 0)
+                {
+                    uint normalBase = matchBase + (uint)Price(IsRep + (int)nst, 0);
+                    int table = (int)posState * 272;
+                    int done = 1;
+                    for (int k = 0; k < pairs; k++)
+                    {
+                        int n = Math.Min(pairLen[k], limit);
+                        uint d = pairDist[k];
+                        // the distance price depends on the length only below five
+                        int from = n >= niceLen ? n : Math.Max(done + 1, 2);
+                        int distLong = n >= 5 ? DistancePrice(d, 3) : 0;
+                        for (int l = from; l <= n; l++)
+                        {
+                            int dp = l >= 5 ? distLong : DistancePrice(d, l - 2);
+                            Relax(i + l, normalBase + (uint)(lenPrices[table + l - 2] + dp), i, (int)d + 4);
+                        }
+                        if (n > done) done = n;
+                        if (i + n > lenEnd) lenEnd = i + n;
+                        if (n >= niceLen && n > cut) { cut = n; cutBack = (int)d + 4; }
+                    }
+                }
+                if (cut != 0)
+                {
+                    // long enough: take it without looking for alternatives inside it
+                    opt[i + cut].Prev = i; opt[i + cut].Back = cutBack;
+                    lenEnd = i + cut;
+                    i = lenEnd;
+                    break;
+                }
+            }
+            // collect the path backwards, then encode it front to back
+            int steps = 0;
+            for (int at = i; at > 0; at = opt[at].Prev) { pathBack[steps] = opt[at].Back; pathLen[steps++] = at - opt[at].Prev; }
+            long q = pos;
+            for (int k = steps - 1; k >= 0; k--)
+            {
+                int back = pathBack[k], len = pathLen[k];
+                if (back == -1) PutLiteral(data, q);
+                else if (back == -2) PutRep(q, 0, 1);
+                else if (back < 4) PutRep(q, back, len);
+                else PutMatch(q, (uint)(back - 4), len);
+                q += len;
+            }
+            for (long z = indexed + 1; z < q; z++) Insert(data, z, end);
+            pricesAge += i;
+            return q;
         }
 
         void RcFlush() { for (int i = 0; i < 5; i++) ShiftLow(); }
