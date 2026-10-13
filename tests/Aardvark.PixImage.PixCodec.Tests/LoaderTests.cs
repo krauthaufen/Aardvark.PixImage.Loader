@@ -113,7 +113,7 @@ public class LoaderTests
         var img = Make(Col.Format.RGB, 8, 8, i => (byte)(i * 5));
         var back = RoundTrip<float>(img, new PixExrSaveParams());
         var exp = img.ToPixImage<float>().Volume.Data;
-        for (int i = 0; i < exp.Length; i++) Assert.Equal(exp[i], back.Volume.Data[i], 3);
+        for (int i = 0; i < exp.Length; i++) Assert.True(Math.Abs(exp[i] - back.Volume.Data[i]) < 1e-3f); // stored as half
     }
 
     [Fact]
