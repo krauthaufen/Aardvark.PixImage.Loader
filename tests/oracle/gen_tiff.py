@@ -505,7 +505,7 @@ def emit(name, pages, byteorder='<', bigtiff=False, check=None, subdir=None, var
             raw = p['arr']
         elif reason:
             raise AssertionError(f'{name}: marked unverified but {ok} read it')
-        exp = expected(p, raw)
+        exp = p['ref_from_raw'](raw) if 'ref_from_raw' in p else expected(p, raw)
         if check is not None and i == 0:
             ok += check(path, exp)
         write_ref(path + ('.ref' if i == 0 else f'.{i}.ref'), exp)
@@ -1063,6 +1063,161 @@ def gen_more_codecs():
             write_tol(path, 4)
 
 
+def gen_lab():
+    """CIELab / ICCLab / ITULab. PixCodec converts to sRGB with the textbook D50 Lab -> XYZ -> (Bradford) sRGB maths;
+    the reference is LittleCMS (through Pillow's ImageCms: Lab D50 profile -> sRGB profile) applied to the samples
+    tifffile read from the file. LittleCMS works on 8-bit Lab here, so 16-bit and ITULab samples are first rounded
+    to 8-bit Lab - hence the tolerances (8-bit CIELab/ICCLab: 2 levels; ITULab and 16-bit data: the rounding to 8-bit Lab
+    dominates), which are the measured distance between the two computations plus a margin."""
+    from PIL import ImageCms
+    srgb_p, lab_p = ImageCms.createProfile('sRGB'), ImageCms.createProfile('LAB')
+    # NOOPTIMIZE: evaluate the real pipeline. By default LittleCMS interpolates 8-bit transforms in a 3D table,
+    # which is off by up to 32 levels near the gamut boundary.
+    to_lab = ImageCms.buildTransform(srgb_p, lab_p, 'RGB', 'LAB', flags=ImageCms.Flags.NOOPTIMIZE)
+    to_rgb = ImageCms.buildTransform(lab_p, srgb_p, 'LAB', 'RGB', flags=ImageCms.Flags.NOOPTIMIZE)
+    rgb = test_pattern(31, 23, 3, np.uint8, 41)
+    rgb[0, :8] = [[0, 0, 0], [255, 255, 255], [255, 0, 0], [0, 255, 0], [0, 0, 255], [128, 128, 128], [255, 255, 0], [0, 255, 255]]
+    # Pillow's LAB mode is the TIFF CIELab encoding: L 0..255, a and b as two's complement bytes
+    pil = np.asarray(ImageCms.applyTransform(Image.fromarray(rgb), to_lab))
+    L, A, B = pil[:, :, 0].astype(np.int32), pil[:, :, 1].astype(np.int8).astype(np.int32), pil[:, :, 2].astype(np.int8).astype(np.int32)
+
+    def to_float(raw, pm):
+        """Stored samples -> L*, a*, b* (the encodings PixCodec documents)."""
+        r = raw[:, :, :3].astype(np.float64)
+        if raw.dtype == np.uint8:
+            l = r[:, :, 0] * 100 / 255
+            if pm == 8:
+                a, b = raw[:, :, 1].astype(np.int8).astype(np.float64), raw[:, :, 2].astype(np.int8).astype(np.float64)
+            elif pm == 9:
+                a, b = r[:, :, 1] - 128, r[:, :, 2] - 128
+            else:
+                a, b = (r[:, :, 1] - 128) * 170 / 255, (r[:, :, 2] - 96) * 200 / 255
+        else:
+            if pm == 8:
+                l = r[:, :, 0] * 100 / 65535
+                a, b = raw[:, :, 1].astype(np.int16) / 256.0, raw[:, :, 2].astype(np.int16) / 256.0
+            elif pm == 9:
+                l, a, b = r[:, :, 0] * 100 / 65280, r[:, :, 1] / 256 - 128, r[:, :, 2] / 256 - 128
+            else:
+                l, a, b = r[:, :, 0] * 100 / 65535, (r[:, :, 1] - 32768) * 170 / 65535, (r[:, :, 2] - 24576) * 200 / 65535
+        return l, a, b
+
+    def formula(raw, pm):
+        """The documented conversion, in float64 (only used to report how far LittleCMS is from it)."""
+        l, a, b = to_float(raw, pm)
+        fy = (l + 16) / 116
+        fx, fz = fy + a / 500, fy - b / 200
+        g = lambda t: np.where(t > 6 / 29, t ** 3, 3 * (6 / 29) ** 2 * (t - 4 / 29))
+        x, y, z = 0.96422 * g(fx), g(fy), 0.82521 * g(fz)
+        lin = np.stack([3.1338561 * x - 1.6168667 * y - 0.4906146 * z, -0.9787684 * x + 1.9161415 * y + 0.0334540 * z,
+                        0.0719453 * x - 0.2289914 * y + 1.4052427 * z], axis=-1).clip(0, 1)
+        return np.where(lin <= 0.0031308, 12.92 * lin, 1.055 * lin ** (1 / 2.4) - 0.055)
+
+    def make(name, raw_arr, pm, tol, **kw):
+        def ref_from_raw(raw):
+            l, a, b = to_float(raw, pm)
+            lab8 = np.stack([np.round(l * 255 / 100).clip(0, 255), np.round(a).clip(-128, 127).astype(np.int64) & 255,
+                             np.round(b).clip(-128, 127).astype(np.int64) & 255], axis=-1).astype(np.uint8)
+            out = np.asarray(ImageCms.applyTransform(Image.fromarray(lab8, 'LAB'), to_rgb))
+            scale = 255 if raw.dtype == np.uint8 else 65535
+            mine = np.round(formula(raw, pm) * scale)
+            ref = out.astype(raw.dtype) * (1 if raw.dtype == np.uint8 else 257)
+            dist = float(np.abs(mine - ref).max())
+            assert dist <= tol * 0.8, (name, dist, tol)
+            notes.append(f'LittleCMS vs. formula: max {dist:.0f}, tolerance {tol}')
+            return np.concatenate([ref, raw[:, :, 3:]], axis=2) if raw.shape[2] > 3 else ref
+        notes = []
+        p = dict(arr=raw_arr, photometric=pm, ref_from_raw=ref_from_raw, **kw)
+        byteorder = p.pop('byteorder', '<')
+        path = emit(name, p, subdir='lab', byteorder=byteorder, variants=('raw',))
+        write_tol(path, tol)
+        SUMMARY[-1] = (SUMMARY[-1][0], SUMMARY[-1][1] + ['LittleCMS'] + notes)
+
+    u8 = lambda *c: np.stack(c, axis=-1).astype(np.uint8)
+    u16 = lambda *c: np.stack(c, axis=-1).astype(np.uint16)
+    alpha8 = pat(1, 'uint8', 31, 23, seed=9)
+    make('cielab8', u8(L, A & 255, B & 255), 8, 2, rps=6)
+    make('cielab8_lzw_planar', u8(L, A & 255, B & 255), 8, 2, compression=LZW, planar=2)
+    make('cielab8_alpha', np.concatenate([u8(L, A & 255, B & 255), alpha8], axis=2), 8, 2, extrasamples=[2])
+    make('icclab8', u8(L, A + 128, B + 128), 9, 2, compression=DEFLATE, predictor=2)
+    make('itulab8', u8(L, np.round(A * 255 / 170 + 128).clip(0, 255), np.round(B * 255 / 200 + 96).clip(0, 255)), 10, 12, tile=(16, 16))
+    make('cielab16', u16(L * 257, (A * 256) & 0xFFFF, (B * 256) & 0xFFFF), 8, 400)
+    make('be_cielab16_deflate', u16(L * 257 + 100, (A * 256 + 77) & 0xFFFF, (B * 256 - 90) & 0xFFFF).clip(0, 65535).astype(np.uint16),
+         8, 3200, compression=DEFLATE, predictor=2, byteorder='>')
+    make('icclab16', u16(np.round(L * 65280 / 255), (A + 128) * 256, (B + 128) * 256), 9, 400)
+    make('itulab16', u16(L * 257, np.round(A * 65535 / 170 + 32768).clip(0, 65535), np.round(B * 65535 / 200 + 24576).clip(0, 65535)), 10, 400)
+
+
+def sgilog_rle(planes_rows):
+    """Run length codes one row of byte planes the way SGILOG stores it (runs of 3+ equal bytes, else literals)."""
+    out = bytearray()
+    for row in planes_rows:
+        i, n = 0, len(row)
+        while i < n:
+            run = 1
+            while i + run < n and run < 127 and row[i + run] == row[i]:
+                run += 1
+            if run >= 3:
+                out += bytes([126 + run, row[i]])
+                i += run
+                continue
+            start = i
+            i += 1
+            while i < n and i - start < 127 and not (i + 2 < n and row[i] == row[i + 1] == row[i + 2]):
+                i += 1
+            out.append(i - start)
+            out += row[start:i]
+    return bytes(out)
+
+
+def gen_logluv():
+    """SGI LogLuv (32-bit) files written by libtiff through OpenCV, and a hand-packed LogL (16-bit luminance) file.
+    Reference: libtiff's float decoding through OpenCV (which converts XYZ to linear RGB with its XYZ2BGR matrix)."""
+    d = os.path.join(OUT, 'logluv')
+    os.makedirs(d, exist_ok=True)
+    rgb = np.abs(test_pattern(47, 31, 3, np.float32, 51)).astype(np.float32) * 0.6 + 0.01
+    rgb[:4, :9] = 0            # black: coded as zero luminance
+    rgb[4:8, :9] = 1.0         # flat area: runs
+    rgb[10, 3] = [900.0, 0.5, 0.01]
+    for name, extra in [('logluv32_strip', []), ('logluv32_multistrip', [cv2.IMWRITE_TIFF_ROWSPERSTRIP, 7])]:
+        path = os.path.join(d, name + '.tif')
+        assert cv2.imwrite(path, np.ascontiguousarray(rgb[:, :, ::-1]), [cv2.IMWRITE_TIFF_COMPRESSION, 34676] + extra)
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            assert int(pg.photometric) == 32845 and int(pg.compression) == 34676, (pg.photometric, pg.compression)
+            desc = f'{len(pg.dataoffsets)} strip(s)'
+        ref = ref_cv2(path)
+        assert ref.dtype == np.float32 and float(np.abs(ref - rgb).max() / 900) < 0.05
+        write_ref(path + '.ref', ref)
+        write_tol(path, 2e-3)
+        SUMMARY.append(('logluv/' + name, [f'cv2 (libtiff SGILOG float + XYZ2BGR), written by cv2/libtiff, {desc}']))
+
+    # LogL: 16-bit log luminance per pixel, big endian byte planes, run length coded per row
+    y = np.abs(test_pattern(37, 21, 1, np.float32, 52))[:, :, 0] * 3 + 0.02
+    y[:3, :10] = 0
+    y[3:6, :10] = 0.25
+    le = np.where(y > 0, np.floor(256 * (np.log2(np.maximum(y, 1e-30)) + 64)), 0).astype(np.uint16)
+    chunks = []
+    for r in range(0, 21, 8):
+        rows = []
+        for row in le[r:r + 8]:
+            rows += [bytes((row >> 8).astype(np.uint8)), bytes((row & 255).astype(np.uint8))]
+        chunks.append(sgilog_rle(rows))
+    # No installed decoder returns LogL as floats (OpenCV only switches libtiff to float output for LogLuv, ImageMagick
+    # maps it to display values), so this one is listed as unverified: the reference is the defining formula
+    # Y = 2^((Le + 0.5) / 256 - 64). The run length decoding and that formula are the ones the LogLuv fixtures verify.
+    d = os.path.join(OUT, 'unverified')
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, 'logl16.tif')
+    write_tiff(path, [dict(arr=np.zeros((21, 37, 1), np.int16), photometric=32844, compression=34676, rps=8, raw_chunks=chunks)])
+    ref = np.where(le > 0, np.exp2((le.astype(np.float64) + 0.5) / 256 - 64), 0).astype(np.float32)
+    write_ref(path + '.ref', ref)
+    write_tol(path, 1e-6)
+    reason = 'LogL (16-bit log luminance, photometric 32844): no decoder here returns it as floats'
+    UNVERIFIED.append(('logl16', reason))
+    SUMMARY.append(('unverified/logl16', ['UNVERIFIED: ' + reason]))
+
+
 def gen_ccitt():
     """Bilevel fax compressions, written by libtiff (Pillow / ImageMagick), references decoded by libtiff (Pillow)."""
     rng = np.random.default_rng(5)
@@ -1152,6 +1307,8 @@ def main():
     gen_external()
     gen_depths()
     gen_more_codecs()
+    gen_lab()
+    gen_logluv()
     gen_ccitt()
     gen_ycbcr()
     gen_jpeg()
