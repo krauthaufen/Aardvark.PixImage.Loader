@@ -16,21 +16,17 @@ namespace PixCodec.JpegImpl
         /// <summary>Test hook: disables the vectorized paths.</summary>
         internal static bool ForceScalar;
 
-        enum Kind { Direct, Replicate, Fractional, H2V1, H2V2, H1V2 }
-
         sealed class Upsampler
         {
-            public Kind Kind;
             public JpegComponent C = null!;
-            public int HExp, VExp, HMax, VMax;
             public byte[] LineArr = null!;
             public ushort[] SumArr = null!;
             public int CachedRow = -1;
         }
 
-        public static void Assemble(JpegDecoder d, byte[] output) => Assemble(d, output, d.Width, d.Height, d.ColorSpace);
+        public static void Assemble(JpegDecoder d, byte[] output) => Assemble(d, output, d.OutWidth, d.OutHeight, d.ColorSpace);
 
-        /// <summary>Writes the top left w x h pixels (at most the frame size) in the given color handling.</summary>
+        /// <summary>Writes the top left w x h pixels (at most the output size of the frame) in the given color handling.</summary>
         public static void Assemble(JpegDecoder d, Span<byte> output, int w, int h, JpegColorSpace cs)
         {
             int nc = d.Comps.Length;
@@ -38,23 +34,11 @@ namespace PixCodec.JpegImpl
             for (int i = 0; i < nc; i++)
             {
                 var c = d.Comps[i];
-                var u = new Upsampler { C = c, HMax = d.HMax, VMax = d.VMax };
-                bool hInt = d.HMax % c.H == 0, vInt = d.VMax % c.V == 0;
-                u.HExp = d.HMax / c.H;
-                u.VExp = d.VMax / c.V;
-                if (!hInt || !vInt) u.Kind = Kind.Fractional;
-                else if (u.HExp == 1 && u.VExp == 1) u.Kind = Kind.Direct;
-                else if (u.HExp == 2 && u.VExp == 1 && c.SampledW > 2) u.Kind = Kind.H2V1;
-                else if (u.HExp == 2 && u.VExp == 2 && c.SampledW > 2) u.Kind = Kind.H2V2;
-                else if (u.HExp == 1 && u.VExp == 2) u.Kind = Kind.H1V2;
-                else u.Kind = Kind.Replicate;
                 // generous slack: vector loops store whole vectors
-                u.LineArr = new byte[Math.Max(w, c.SampledW * u.HExp) + 128];
-                u.SumArr = new ushort[c.SampledW + 2 + 64];
-                ups[i] = u;
+                ups[i] = new Upsampler { C = c, LineArr = new byte[Math.Max(d.OutWidth, c.SampledW * c.HExp) + 128], SumArr = new ushort[c.SampledW + 2 + 64] };
             }
 
-            byte[]? tmpRgb = cs == JpegColorSpace.Ycck ? new byte[w * 3 + 64] : null;
+            byte[]? tmpRgb = cs is JpegColorSpace.Ycck or JpegColorSpace.YcckToCmyk ? new byte[w * 3 + 64] : null;
             byte** lines = stackalloc byte*[4];
             fixed (byte* outp = output)
             fixed (byte* l0 = ups[0].LineArr, l1 = ups[nc > 1 ? 1 : 0].LineArr, l2 = ups[nc > 2 ? 2 : 0].LineArr, l3 = ups[nc > 3 ? 3 : 0].LineArr)
@@ -65,10 +49,10 @@ namespace PixCodec.JpegImpl
                 ushort** sumBuf = stackalloc ushort*[4];
                 lineBuf[0] = l0; lineBuf[1] = l1; lineBuf[2] = l2; lineBuf[3] = l3;
                 sumBuf[0] = s0; sumBuf[1] = s1; sumBuf[2] = s2; sumBuf[3] = s3;
-                int outChannels = cs == JpegColorSpace.Gray ? 1 : cs == JpegColorSpace.Raw ? nc : 3;
+                int outChannels = cs == JpegColorSpace.Gray ? 1 : cs is JpegColorSpace.Raw or JpegColorSpace.Rgb ? nc : cs == JpegColorSpace.YcckToCmyk ? 4 : 3;
                 for (int y = 0; y < h; y++)
                 {
-                    for (int i = 0; i < nc; i++) lines[i] = GetLine(ups[i], y, lineBuf[i], sumBuf[i] + 1);
+                    for (int i = 0; i < nc; i++) lines[i] = GetLine(ups[i], y, w, lineBuf[i], sumBuf[i] + 1);
                     byte* dst = outp + (nint)y * w * outChannels;
                     switch (cs)
                     {
@@ -79,11 +63,6 @@ namespace PixCodec.JpegImpl
                             YccToRgb(lines[0], lines[1], lines[2], dst, w);
                             break;
                         case JpegColorSpace.Rgb:
-                            for (int x = 0; x < w; x++)
-                            {
-                                dst[3 * x] = lines[0][x]; dst[3 * x + 1] = lines[1][x]; dst[3 * x + 2] = lines[2][x];
-                            }
-                            break;
                         case JpegColorSpace.Raw:
                             for (int i = 0; i < nc; i++)
                             {
@@ -99,6 +78,14 @@ namespace PixCodec.JpegImpl
                             YccToRgb(lines[0], lines[1], lines[2], tmp, w);
                             for (int x = 0; x < w * 3; x++) tmp[x] = (byte)(255 - tmp[x]);
                             CmykToRgb(tmp, tmp + 1, tmp + 2, lines[3], 3, dst, w);
+                            break;
+                        case JpegColorSpace.YcckToCmyk:
+                            YccToRgb(lines[0], lines[1], lines[2], tmp, w);
+                            for (int x = 0; x < w; x++, dst += 4)
+                            {
+                                dst[0] = (byte)(255 - tmp[3 * x]); dst[1] = (byte)(255 - tmp[3 * x + 1]); dst[2] = (byte)(255 - tmp[3 * x + 2]);
+                                dst[3] = lines[3][x];
+                            }
                             break;
                     }
                 }
@@ -122,51 +109,58 @@ namespace PixCodec.JpegImpl
 
         // ---------------------------------------------------------------- upsampling
 
-        static byte* GetLine(Upsampler u, int y, byte* line, ushort* sum)
+        static byte* GetLine(Upsampler u, int y, int w, byte* line, ushort* sum)
         {
             var c = u.C;
             byte* plane = c.Plane;
             nint stride = c.Stride;
             int n = c.SampledW;
-            switch (u.Kind)
+            switch (c.Upsample)
             {
-                case Kind.Direct:
+                case JpegUpsample.Direct:
                     return plane + y * stride;
 
-                case Kind.Replicate:
+                case JpegUpsample.Replicate:
                 {
-                    int sy = y / u.VExp;
+                    int sy = y / c.VExp;
                     byte* src = plane + sy * stride;
-                    if (u.HExp == 1) return src;
+                    if (c.HExp == 1) return src;
                     if (sy != u.CachedRow)
                     {
                         u.CachedRow = sy;
-                        int e = u.HExp;
+                        int e = c.HExp;
+                        byte* o = line;
                         if (e == 2)
-                            for (int x = 0; x < n; x++) { line[2 * x] = src[x]; line[2 * x + 1] = src[x]; }
+                            for (int x = 0; x < n; x++) { o[2 * x] = src[x]; o[2 * x + 1] = src[x]; }
                         else
-                            for (int x = 0; x < n; x++, line += e) new Span<byte>(line, e).Fill(src[x]);
-                        line -= e == 2 ? 0 : (nint)n * e;
+                            for (int x = 0; x < n; x++, o += e) new Span<byte>(o, e).Fill(src[x]);
                     }
                     return line;
                 }
 
-                case Kind.Fractional:
+                case JpegUpsample.Fractional:
                 {
-                    // non-integer ratios (never produced by common encoders): nearest sample
-                    int sy = Math.Min(c.SampledH - 1, y * c.V / u.VMax);
-                    byte* src = plane + sy * stride;
-                    int w = Math.Min(u.LineArr.Length, (n * u.HMax + c.H - 1) / c.H);
-                    for (int x = 0; x < w; x++) line[x] = src[Math.Min(n - 1, x * c.H / u.HMax)];
+                    // Ratios that are not whole numbers (libjpeg rejects such files): bilinear interpolation with
+                    // sample centers aligned, positions in 1/256 sample units.
+                    int py = Math.Clamp(((2 * y + 1) * c.VNum * 256 / c.VDen - 256) / 2, 0, (c.SampledH - 1) * 256);
+                    int y0 = py >> 8, fy = py & 255;
+                    byte* r0 = plane + y0 * stride, r1 = plane + Math.Min(y0 + 1, c.SampledH - 1) * stride;
+                    for (int x = 0; x < w; x++)
+                    {
+                        int px = Math.Clamp(((2 * x + 1) * c.HNum * 256 / c.HDen - 256) / 2, 0, (n - 1) * 256);
+                        int x0 = px >> 8, fx = px & 255, x1 = Math.Min(x0 + 1, n - 1);
+                        int top = r0[x0] * (256 - fx) + r0[x1] * fx, bottom = r1[x0] * (256 - fx) + r1[x1] * fx;
+                        line[x] = (byte)((top * (256 - fy) + bottom * fy + 32768) >> 16);
+                    }
                     return line;
                 }
 
-                case Kind.H2V1:
+                case JpegUpsample.H2V1:
                     Widen(plane + y * stride, sum, n);
                     Horizontal(sum, n, line, 1, 2, 2);
                     return line;
 
-                case Kind.H2V2:
+                case JpegUpsample.H2V2:
                 {
                     int sy = y >> 1;
                     // the nearer of the two neighbouring rows gets weight 1/4, clamped at the image edge

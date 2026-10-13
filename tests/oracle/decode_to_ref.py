@@ -17,6 +17,10 @@ def decode(path):
         return decode_tiff(path)
     if ext == '.exr':
         return decode_exr(path)
+    if ext in ('.jpg', '.jpeg') and jpeg_needs_turbo3(path):
+        import imagecodecs
+        with open(path, 'rb') as f:
+            return imagecodecs.jpeg8_decode(f.read())
     from PIL import Image
     im = Image.open(path)
     if ext == '.png':
@@ -26,6 +30,24 @@ def decode(path):
     if im.mode == 'CMYK':
         im = im.convert('RGB')
     return np.asarray(im)
+
+
+def jpeg_needs_turbo3(path):
+    """True for JPEG beyond Pillow's reach: more than 8 bit per sample or lossless (SOF3)."""
+    with open(path, 'rb') as f:
+        d = f.read()
+    i = 2
+    while i + 4 <= len(d):
+        if d[i] != 0xFF:
+            i += 1
+            continue
+        m = d[i + 1]
+        if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC9, 0xCA):
+            return m == 0xC3 or d[i + 4] > 8
+        if m == 0xDA:
+            break
+        i += 2 + ((d[i + 2] << 8) | d[i + 3]) if m not in (0xD8, 0x01, 0xFF) and not 0xD0 <= m <= 0xD7 else 2 if m != 0xFF else 1
+    return False
 
 
 def decode_png(im):
