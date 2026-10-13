@@ -188,6 +188,7 @@ namespace PixCodec
                 // the trailer on its own.
                 if (stream.Length < 2 || (stream[0] & 0x0F) != 8 || stream[0] >> 4 > 7 || (stream[0] << 8 | stream[1]) % 31 != 0 || (stream[1] & 0x20) != 0)
                     throw new ImageFormatException("corrupt PNG pixel data (invalid zlib header)");
+                if (stream.Length == 2) throw new ImageFormatException("PNG pixel data is truncated");
                 int got;
                 try
                 {

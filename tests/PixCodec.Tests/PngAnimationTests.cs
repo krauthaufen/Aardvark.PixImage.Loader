@@ -449,6 +449,301 @@ public class PngAnimationTests
         for (int i = 0; i < images.Count; i++) Assert.Equal(30.0 * (i + 1), meta.GetProperty("durations")[i].GetDouble(), 6);
     }
 
+    // ------------------------------------------------------------------ optimized frames, shared transforms
+
+    static void Fill(RawImage img, int x, int y, int w, int h, params long[] sample)
+    {
+        int ch = img.Channels;
+        for (int row = y; row < y + h; row++)
+            for (int col = x; col < x + w; col++)
+                for (int c = 0; c < ch; c++)
+                {
+                    int i = (row * img.Width + col) * ch + c;
+                    if (img.SampleType == SampleType.UInt8) img.GetData<byte>()[i] = (byte)sample[c];
+                    else img.GetData<ushort>()[i] = (ushort)sample[c];
+                }
+    }
+
+    static RawImage Clone(RawImage img)
+    {
+        var o = RawImage.Create(img.Width, img.Height, img.Color, img.SampleType);
+        img.GetBytes().CopyTo(o.GetBytes());
+        return o;
+    }
+
+    /// <summary>Three kinds of animation, each of which a different disposal suits best.</summary>
+    static List<RawImage> Scenario(string kind, ColorModel color, SampleType type)
+    {
+        const int W = 40, H = 30;
+        long max = type == SampleType.UInt8 ? 255 : 65535;
+        int ch = RawImage.ChannelCount(color);
+        bool alpha = color is ColorModel.GrayAlpha or ColorModel.Rgba;
+        long[] Sample(long v, long a = -1) => Enumerable.Range(0, ch).Select(c => alpha && c == ch - 1 ? (a < 0 ? max : a) : (v * (c + 3) / 3) % (max + 1)).ToArray();
+        var list = new List<RawImage>();
+        switch (kind)
+        {
+            case "sprite":
+            {
+                // a small sprite hopping over an otherwise empty (transparent, or black) canvas
+                for (int k = 0; k < 6; k++)
+                {
+                    var img = RawImage.Create(W, H, color, type);
+                    var sprite = MakeImage(7, 6, color, type, 40 + k, noise: true);
+                    int px = ch * RawImage.BytesPerSample(type);
+                    for (int y = 0; y < 6; y++)
+                        sprite.GetBytes().Slice(y * 7 * px, 7 * px).CopyTo(img.GetBytes().Slice(((2 + 4 * k + y) * W + 3 + 5 * k) * px));
+                    // opaque sprite pixels
+                    if (alpha) for (int y = 0; y < 6; y++) for (int x = 0; x < 7; x++)
+                        Fill(img, 3 + 5 * k + x, 2 + 4 * k + y, 1, 1, Enumerable.Range(0, ch).Select(c => c == ch - 1 ? max : (long)(x * 31 + y * 17 + c * 5 + k) * max / 255 % (max + 1)).ToArray());
+                    list.Add(img);
+                }
+                break;
+            }
+            case "flash":
+            {
+                // a busy picture over which a box flashes up in every other frame
+                var background = MakeImage(W, H, color, type, 50, noise: true);
+                if (alpha) for (int p = 0; p < W * H; p++) Fill(background, p % W, p / W, 1, 1, Sample(p * 37 % 251 * max / 255));
+                for (int k = 0; k < 6; k++)
+                {
+                    var img = Clone(background);
+                    if (k % 2 == 1) Fill(img, 8 + k, 6, 12, 10, Sample(k * 40 * max / 255));
+                    list.Add(img);
+                }
+                break;
+            }
+            default:
+            {
+                // two small changes far apart on a busy picture: their bounding box is mostly unchanged pixels
+                var img = MakeImage(W, H, color, type, 60, noise: true);
+                if (alpha) for (int p = 0; p < W * H; p++) Fill(img, p % W, p / W, 1, 1, Sample(p * 53 % 241 * max / 255));
+                for (int k = 0; k < 5; k++)
+                {
+                    img = Clone(img);
+                    Fill(img, 1 + k, 1, 2, 2, Sample((k + 1) * 30 * max / 255));
+                    Fill(img, W - 4 - k, H - 4, 2, 2, Sample((k + 1) * 45 * max / 255));
+                    list.Add(img);
+                }
+                break;
+            }
+        }
+        return list;
+    }
+
+    static RawImage StackVisible(IReadOnlyList<RawImage> frames)
+    {
+        // what the animation oracle returns: Rgba frames on top of each other, fully transparent pixels zeroed
+        var first = ToRgba(frames[0]);
+        var all = RawImage.Create(first.Width, first.Height * frames.Count, ColorModel.Rgba, first.SampleType);
+        int frameBytes = first.GetBytes().Length, px = frameBytes / (first.Width * first.Height);
+        for (int i = 0; i < frames.Count; i++)
+        {
+            var dst = all.GetBytes().Slice(i * frameBytes, frameBytes);
+            ToRgba(frames[i]).GetBytes().CopyTo(dst);
+            for (int p = 0; p < dst.Length; p += px)
+                if (dst.Slice(p + px * 3 / 4, px / 4).IndexOfAnyExcept((byte)0) < 0) dst.Slice(p, px).Clear();
+        }
+        return all;
+    }
+
+    public static IEnumerable<object[]> OptimizeCases()
+    {
+        foreach (var kind in new[] { "sprite", "flash", "spots" })
+            foreach (var row in PngTests.EncodeCases())
+                yield return new object[] { kind, row[0], row[1] };
+    }
+
+    [Theory]
+    [MemberData(nameof(OptimizeCases))]
+    public void OptimizedFramesDecodeToTheSameAnimation(string kind, ColorModel color, SampleType type)
+    {
+        var images = Scenario(kind, color, type);
+        var frames = images.Select((img, i) => new PngInputFrame(img, 1 + i, 20)).ToList();
+        bool alpha = color is ColorModel.GrayAlpha or ColorModel.Rgba;
+        byte[] plain = Png.EncodeAnimation(frames);
+        foreach (bool interlace in new[] { false, true })
+        {
+            var png = Png.EncodeAnimation(frames, new PngEncodeOptions { OptimizeFrames = true, Interlace = interlace, LoopCount = 2 });
+            var anim = Png.DecodeAnimation(png);
+            Assert.Equal((images.Count, 2), (anim.FrameCount, anim.LoopCount));
+            for (int i = 0; i < images.Count; i++)
+            {
+                TestUtil.AssertEqual(ToRgba(images[i]), anim.Frames[i].Image);
+                Assert.Equal((1 + i, 20), (anim.Frames[i].DelayNumerator, anim.Frames[i].DelayDenominator));
+            }
+            TestUtil.AssertEqual(images[0], Png.Decode(png));
+            if (interlace) continue;
+
+            Assert.True(png.Length <= plain.Length, $"{png.Length} > {plain.Length}");
+            var ops = anim.Frames.Select(f => (f.Disposal, f.Blend)).ToList();
+            Assert.Equal(PngDisposal.None, ops[^1].Disposal);
+            Assert.Equal(PngBlend.Source, ops[0].Blend);
+            switch (kind)
+            {
+                case "sprite" when alpha:
+                    // clearing the old sprite beats redrawing the union of old and new position
+                    Assert.Contains(ops, o => o.Disposal == PngDisposal.Background);
+                    Assert.True(png.Length < plain.Length, $"{png.Length} vs {plain.Length}");
+                    break;
+                case "flash":
+                    // the box goes away by restoring what was there: the following frame has nothing left to draw
+                    Assert.Contains(ops, o => o.Disposal == PngDisposal.Previous);
+                    Assert.Contains(anim.Frames, f => f.Index > 1 && (f.Width, f.Height) == (1, 1));
+                    Assert.True(png.Length < plain.Length, $"{png.Length} vs {plain.Length}");
+                    break;
+                case "spots" when alpha:
+                    // unchanged pixels inside the bounding box become transparent
+                    Assert.Contains(ops, o => o.Blend == PngBlend.Over);
+                    Assert.True(png.Length < plain.Length, $"{png.Length} vs {plain.Length}");
+                    break;
+            }
+            if (!alpha) Assert.DoesNotContain(ops, o => o.Blend == PngBlend.Over);
+
+            // third-party decoders show the same frames
+            var oracle = TestUtil.OracleDecode(png, ".anim.png");
+            if (oracle != null) TestUtil.AssertEqual(StackVisible(images), oracle);
+        }
+    }
+
+    [Fact]
+    public void OptimizedFramesHandleTranslucentPixels()
+    {
+        // translucent pixels can only be drawn by replacing, or by blending onto a fully transparent canvas
+        foreach (var type in new[] { SampleType.UInt8, SampleType.UInt16 })
+        {
+            var images = new List<RawImage>();
+            for (int k = 0; k < 6; k++)
+            {
+                var img = MakeImage(33, 21, ColorModel.Rgba, type, 70, noise: true);   // same translucent noise in every frame
+                var patch = MakeImage(6, 5, ColorModel.Rgba, type, 80 + k, noise: true);
+                int px = 4 * RawImage.BytesPerSample(type);
+                for (int y = 0; y < 5; y++) patch.GetBytes().Slice(y * 6 * px, 6 * px).CopyTo(img.GetBytes().Slice(((3 + 2 * k + y) * 33 + 4 * k) * px));
+                if (k == 3) img.GetBytes().Slice(0, 33 * 7 * px).Clear();               // a transparent band appears ...
+                images.Add(img);
+            }
+            var frames = images.Select(i => new PngInputFrame(i)).ToList();
+            var png = Png.EncodeAnimation(frames, new PngEncodeOptions { OptimizeFrames = true });
+            var anim = Png.DecodeAnimation(png);
+            for (int i = 0; i < images.Count; i++) TestUtil.AssertEqual(images[i], anim.Frames[i].Image);
+            Assert.True(png.Length <= Png.EncodeAnimation(frames).Length);
+        }
+    }
+
+    [Fact]
+    public void AnimationsShareLosslessTransforms()
+    {
+        // palette: 5 frames drawn from 40 colors in total
+        var rnd = new Random(9);
+        var colors = new byte[40 * 4];
+        rnd.NextBytes(colors);
+        for (int i = 0; i < 40; i++) colors[i * 4 + 3] = (byte)(i % 5 == 0 ? rnd.Next(256) : 255);
+        List<RawImage> Paletted(ColorModel color, int perFrame)
+        {
+            var list = new List<RawImage>();
+            int ch = RawImage.ChannelCount(color);
+            for (int k = 0; k < 5; k++)
+            {
+                var img = RawImage.Create(24, 18, color, SampleType.UInt8);
+                var d = img.GetData<byte>();
+                for (int p = 0; p < 24 * 18; p++)
+                    colors.AsSpan(((p / 24 < 9 ? p % 7 : k * 8 + rnd.Next(perFrame)) % 40) * 4, ch).CopyTo(d.AsSpan(p * ch));
+                list.Add(img);
+            }
+            return list;
+        }
+        foreach (var color in new[] { ColorModel.Rgb, ColorModel.Rgba })
+            foreach (bool optimize in new[] { false, true })
+            {
+                var images = Paletted(color, 8);
+                var frames = images.Select(i => new PngInputFrame(i)).ToList();
+                var opt = new PngEncodeOptions { AutoPalette = true, OptimizeFrames = optimize };
+                var png = Png.EncodeAnimation(frames, opt);
+                Assert.Equal((8, 3), (png[24], png[25]));   // 40 colors: 8 bit palette
+                var anim = Png.DecodeAnimation(png);
+                for (int i = 0; i < 5; i++) TestUtil.AssertEqual(ToRgba(images[i]), anim.Frames[i].Image);
+                Assert.Equal(color, Png.Decode(png).Color);
+                TestUtil.AssertEqual(images[0], Png.Decode(png));
+                Assert.True(png.Length < Png.EncodeAnimation(frames, new PngEncodeOptions { OptimizeFrames = optimize }).Length);
+                Assert.InRange(Png.ReadPalette(png)!.Length / 4, 30, 40);
+                var oracle = TestUtil.OracleDecode(png, ".anim.png");
+                if (oracle != null) TestUtil.AssertEqual(StackVisible(images), oracle);
+            }
+        // one frame with too many colors keeps the whole animation in true color
+        var many = Paletted(ColorModel.Rgb, 8);
+        new Random(1).NextBytes(many[3].GetData<byte>());
+        var truecolor = Png.EncodeAnimation(many.Select(i => new PngInputFrame(i)), new PngEncodeOptions { AutoPalette = true });
+        Assert.Equal(2, truecolor[25]);
+        for (int i = 0; i < 5; i++) TestUtil.AssertEqual(ToRgba(many[i]), Png.DecodeAnimation(truecolor).Frames[i].Image);
+
+        // gray depth: every frame has to fit
+        List<RawImage> Grays(int step, int lastStep)
+        {
+            var list = new List<RawImage>();
+            for (int k = 0; k < 4; k++)
+            {
+                var img = RawImage.Create(20, 10, ColorModel.Gray, SampleType.UInt8);
+                int s = k == 3 ? lastStep : step;
+                for (int p = 0; p < 200; p++) img.GetData<byte>()[p] = (byte)(rnd.Next(255 / s + 1) * s);
+                img.GetData<byte>()[0] = (byte)s;
+                list.Add(img);
+            }
+            return list;
+        }
+        foreach (var (step, last, depth) in new[] { (255, 255, 1), (255, 85, 2), (85, 17, 4), (17, 3, 8) })
+        {
+            var images = Grays(step, last);
+            var png = Png.EncodeAnimation(images.Select(i => new PngInputFrame(i)), new PngEncodeOptions { ReduceGrayDepth = true, OptimizeFrames = step == 85 });
+            Assert.Equal((depth, 0), (png[24], png[25]));
+            var anim = Png.DecodeAnimation(png);
+            for (int i = 0; i < 4; i++) TestUtil.AssertEqual(ToRgba(images[i]), anim.Frames[i].Image);
+            TestUtil.AssertEqual(images[0], Png.Decode(png));
+        }
+
+        // color key: one transparent color across all frames
+        foreach (var type in new[] { SampleType.UInt8, SampleType.UInt16 })
+            foreach (var color in new[] { ColorModel.GrayAlpha, ColorModel.Rgba })
+            {
+                long max = type == SampleType.UInt8 ? 255 : 65535;
+                int ch = RawImage.ChannelCount(color);
+                var images = new List<RawImage>();
+                for (int k = 0; k < 4; k++)
+                {
+                    var img = MakeImage(22, 14, color, type, 90 + k, noise: true);
+                    for (int p = 0; p < 22 * 14; p++)
+                    {
+                        bool hole = (p % 22 + k) % 6 == 0;
+                        var sample = new long[ch];
+                        for (int c = 0; c < ch - 1; c++) sample[c] = hole ? 7 + c : 100 + (p * 13 + c * 50 + k) % 100;
+                        sample[ch - 1] = hole ? 0 : max;
+                        Fill(img, p % 22, p / 22, 1, 1, sample);
+                    }
+                    images.Add(img);
+                }
+                var frames = images.Select(i => new PngInputFrame(i)).ToList();
+                var opt = new PngEncodeOptions { ColorKeyTransparency = true };
+                var png = Png.EncodeAnimation(frames, opt);
+                Assert.Equal(color == ColorModel.Rgba ? 2 : 0, png[25]);
+                var anim = Png.DecodeAnimation(png);
+                for (int i = 0; i < 4; i++) TestUtil.AssertEqual(images[i], anim.Frames[i].Image.Color == color ? anim.Frames[i].Image : FromRgba(anim.Frames[i].Image, color));
+                Assert.Equal(color, Png.Decode(png).Color);
+                // a second transparent color in a later frame: the alpha channel stays
+                Fill(images[2], 1, 1, 1, 1, Enumerable.Repeat(0L, ch).ToArray());
+                Assert.Equal(color == ColorModel.Rgba ? 6 : 4, Png.EncodeAnimation(frames, opt)[25]);
+            }
+    }
+
+    static RawImage FromRgba(RawImage rgba, ColorModel color)
+    {
+        if (color == ColorModel.Rgba) return rgba;
+        var o = RawImage.Create(rgba.Width, rgba.Height, color, rgba.SampleType);
+        int n = rgba.Width * rgba.Height;
+        if (rgba.SampleType == SampleType.UInt8)
+            for (int i = 0; i < n; i++) { o.GetData<byte>()[i * 2] = rgba.GetData<byte>()[i * 4]; o.GetData<byte>()[i * 2 + 1] = rgba.GetData<byte>()[i * 4 + 3]; }
+        else
+            for (int i = 0; i < n; i++) { o.GetData<ushort>()[i * 2] = rgba.GetData<ushort>()[i * 4]; o.GetData<ushort>()[i * 2 + 1] = rgba.GetData<ushort>()[i * 4 + 3]; }
+        return o;
+    }
+
     [Fact]
     public void EncodeAnimationValidatesInput()
     {
