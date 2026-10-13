@@ -68,7 +68,7 @@ namespace PixCodec.JpegImpl
         public int HMax, VMax;
         int _minS = 8;
         int _mcusX, _mcusY;
-        bool _geometry, _allocated;
+        bool _geometry, _allocated, _headerOnly;
         int _scans;
         int _restartInterval;
 
@@ -168,6 +168,7 @@ namespace PixCodec.JpegImpl
         /// <summary>Walks the marker segments. With <paramref name="headerOnly"/> it stops once the frame geometry is known.</summary>
         public void Parse(bool headerOnly)
         {
+            _headerOnly = headerOnly;
             if (_len < 4 || _d[0] != 0xFF || _d[1] != 0xD8) throw Bad("missing SOI marker");
             int pos = 2;
             while (true)
@@ -442,23 +443,34 @@ namespace PixCodec.JpegImpl
         void ReadApp2(int p, int n)
         {
             if (n < 14 || !new ReadOnlySpan<byte>(_d + p, 12).SequenceEqual("ICC_PROFILE\0"u8)) return;
-            (_icc ??= new()).Add((_d[p + 12], _d[p + 13], new ReadOnlySpan<byte>(_d + p + 14, n - 14).ToArray()));
+            // a header-only pass just needs to know which chunks exist
+            (_icc ??= new()).Add((_d[p + 12], _d[p + 13], _headerOnly ? Array.Empty<byte>() : new ReadOnlySpan<byte>(_d + p + 14, n - 14).ToArray()));
+        }
+
+        /// <summary>Whether the ICC chunks seen so far form a complete profile (what a header-only pass can tell).</summary>
+        public bool HasCompleteIcc => IccParts() != null;
+
+        byte[][]? IccParts()
+        {
+            if (_icc == null) return null;
+            // chunks are numbered 1..count; only accept a complete, consistent set
+            int count = _icc[0].count;
+            if (count != _icc.Count) return null;
+            var parts = new byte[count][];
+            foreach (var (seq, cnt, data) in _icc)
+            {
+                if (cnt != count || seq < 1 || seq > count || parts[seq - 1] != null) return null;
+                parts[seq - 1] = data;
+            }
+            return parts;
         }
 
         void FinishIcc()
         {
-            if (_icc == null) return;
-            // chunks are numbered 1..count; only accept a complete, consistent set
-            int count = _icc[0].count;
-            if (count != _icc.Count) return;
-            var parts = new byte[count][];
+            var parts = IccParts();
+            if (parts == null) return;
             int total = 0;
-            foreach (var (seq, cnt, data) in _icc)
-            {
-                if (cnt != count || seq < 1 || seq > count || parts[seq - 1] != null) return;
-                parts[seq - 1] = data;
-                total += data.Length;
-            }
+            foreach (var part in parts) total += part.Length;
             var icc = new byte[total];
             int o = 0;
             foreach (var part in parts) { part.CopyTo(icc, o); o += part.Length; }

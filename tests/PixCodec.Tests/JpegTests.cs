@@ -30,7 +30,13 @@ public class JpegTests
 
         Assert.True(Jpeg.IsMatch(data));
         var info = Jpeg.GetInfo(data);
-        Assert.Equal(new ImageInfo(ImageFormat.Jpeg, actual.Width, actual.Height, actual.Channels, actual.SampleType, actual.Color), info);
+        Assert.Equal((ImageFormat.Jpeg, actual.Width, actual.Height, actual.Channels, actual.SampleType, actual.Color),
+            (info.Format, info.Width, info.Height, info.Channels, info.SampleType, info.Color));
+        // the file-level properties are what Decode reports as metadata
+        var meta = actual.Metadata ?? new ImageMetadata();
+        Assert.Equal((meta.Orientation, meta.DpiX, meta.DpiY, meta.IccProfile != null), (info.Orientation, info.DpiX, info.DpiY, info.HasIccProfile));
+        Assert.InRange(info.BitsPerSample, actual.SampleType == SampleType.UInt8 ? 2 : 9, actual.SampleType == SampleType.UInt8 ? 8 : 16);
+        Assert.False(info.IsAnimated);
     }
 
     /// <summary>The scalar and the generic vector code paths give the same pixels as the AVX2 one.</summary>
