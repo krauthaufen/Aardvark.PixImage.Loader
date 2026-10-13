@@ -28,9 +28,12 @@ namespace PixCodec.JpegImpl
             public int CachedRow = -1;
         }
 
-        public static void Assemble(JpegDecoder d, byte[] output)
+        public static void Assemble(JpegDecoder d, byte[] output) => Assemble(d, output, d.Width, d.Height, d.ColorSpace);
+
+        /// <summary>Writes the top left w x h pixels (at most the frame size) in the given color handling.</summary>
+        public static void Assemble(JpegDecoder d, Span<byte> output, int w, int h, JpegColorSpace cs)
         {
-            int w = d.Width, h = d.Height, nc = d.Comps.Length;
+            int nc = d.Comps.Length;
             var ups = new Upsampler[nc];
             for (int i = 0; i < nc; i++)
             {
@@ -51,7 +54,6 @@ namespace PixCodec.JpegImpl
                 ups[i] = u;
             }
 
-            var cs = d.ColorSpace;
             byte[]? tmpRgb = cs == JpegColorSpace.Ycck ? new byte[w * 3 + 64] : null;
             byte** lines = stackalloc byte*[4];
             fixed (byte* outp = output)
@@ -63,7 +65,7 @@ namespace PixCodec.JpegImpl
                 ushort** sumBuf = stackalloc ushort*[4];
                 lineBuf[0] = l0; lineBuf[1] = l1; lineBuf[2] = l2; lineBuf[3] = l3;
                 sumBuf[0] = s0; sumBuf[1] = s1; sumBuf[2] = s2; sumBuf[3] = s3;
-                int outChannels = nc == 1 ? 1 : 3;
+                int outChannels = cs == JpegColorSpace.Gray ? 1 : cs == JpegColorSpace.Raw ? nc : 3;
                 for (int y = 0; y < h; y++)
                 {
                     for (int i = 0; i < nc; i++) lines[i] = GetLine(ups[i], y, lineBuf[i], sumBuf[i] + 1);
@@ -80,6 +82,13 @@ namespace PixCodec.JpegImpl
                             for (int x = 0; x < w; x++)
                             {
                                 dst[3 * x] = lines[0][x]; dst[3 * x + 1] = lines[1][x]; dst[3 * x + 2] = lines[2][x];
+                            }
+                            break;
+                        case JpegColorSpace.Raw:
+                            for (int i = 0; i < nc; i++)
+                            {
+                                byte* src = lines[i];
+                                for (int x = 0; x < w; x++) dst[x * nc + i] = src[x];
                             }
                             break;
                         case JpegColorSpace.Cmyk:

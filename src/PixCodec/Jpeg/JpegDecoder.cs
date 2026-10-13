@@ -24,7 +24,8 @@ namespace PixCodec.JpegImpl
         public HuffDecodeTable? Dc, Ac;
     }
 
-    internal enum JpegColorSpace { Gray, YCbCr, Rgb, Cmyk, Ycck }
+    internal enum JpegColorSpace { Gray, YCbCr, Rgb, Cmyk, Ycck, /// <summary>All components as stored, interleaved.</summary>
+        Raw }
 
     internal sealed unsafe class JpegDecoder
     {
@@ -58,6 +59,21 @@ namespace PixCodec.JpegImpl
         }
 
         public bool HasMetadata => _hasMetadata;
+
+        /// <summary>Set for a tables-only stream (TIFF JPEGTables): no frame or scan is expected.</summary>
+        public bool TablesOnly;
+
+        /// <summary>Starts out with the tables defined by another (tables-only) stream. Tables are immutable, so sharing is safe.</summary>
+        public void ImportTables(JpegDecoder other)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                _quant[i] = other._quant[i];
+                _dc[i] = other._dc[i];
+                _ac[i] = other._ac[i];
+            }
+            _restartInterval = other._restartInterval;
+        }
 
         public JpegColorSpace ColorSpace
         {
@@ -139,6 +155,7 @@ namespace PixCodec.JpegImpl
                     case 0xEE: ReadApp14(p, n); break;
                 }
             }
+            if (TablesOnly) return;
             if (Comps.Length == 0) throw Bad("no frame header");
             if (headerOnly) return;
             if (_scans == 0) throw Bad("no image data");

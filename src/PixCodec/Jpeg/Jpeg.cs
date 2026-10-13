@@ -85,6 +85,37 @@ namespace PixCodec
             }
         }
 
+        /// <summary>
+        /// Decodes one JPEG compressed TIFF strip or tile. <paramref name="jpegTables"/> is the content of the JPEGTables
+        /// tag (a tables-only stream, empty when absent), <paramref name="data"/> an abbreviated or complete stream whose
+        /// frame may be larger than width x height; the top left width x height pixels are written interleaved with
+        /// <paramref name="components"/> samples each. No color space guessing: YCbCr is converted to RGB only when asked
+        /// (and the stream has 3 components), otherwise the components come out as stored. Thread safe.
+        /// </summary>
+        internal static void DecodeForTiff(ReadOnlySpan<byte> jpegTables, ReadOnlySpan<byte> data, int width, int height, int components, bool convertYCbCrToRgb, Span<byte> destination)
+        {
+            if (width <= 0 || height <= 0 || components <= 0 || destination.Length != (long)width * height * components)
+                throw new ArgumentException("destination does not match width x height x components");
+            fixed (byte* t = jpegTables)
+            fixed (byte* p = data)
+            {
+                var d = new JpegDecoder(p, data.Length);
+                if (jpegTables.Length > 0)
+                {
+                    var tables = new JpegDecoder(t, jpegTables.Length) { TablesOnly = true };
+                    tables.Parse(headerOnly: false);
+                    d.ImportTables(tables);
+                }
+                d.Parse(headerOnly: false);
+                if (d.Comps.Length != components)
+                    throw new ImageFormatException($"JPEG data in TIFF has {d.Comps.Length} components, expected {components}");
+                if (d.Width < width || d.Height < height)
+                    throw new ImageFormatException($"JPEG data in TIFF is {d.Width}x{d.Height}, smaller than the {width}x{height} strip or tile");
+                var cs = components == 3 && convertYCbCrToRgb ? JpegColorSpace.YCbCr : components == 1 ? JpegColorSpace.Gray : JpegColorSpace.Raw;
+                JpegPost.Assemble(d, destination, width, height, cs);
+            }
+        }
+
         /// <summary>Encodes an image as JPEG to the stream (which only needs to be writable, not seekable).</summary>
         public static void Encode(RawImage image, Stream output, JpegEncodeOptions? options = null)
             => JpegEncoder.Encode(image, output, options ?? new JpegEncodeOptions());
