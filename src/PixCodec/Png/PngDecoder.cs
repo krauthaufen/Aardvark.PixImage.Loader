@@ -4,8 +4,6 @@ using System.Buffers.Binary;
 using System.IO;
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 using PixCodec.Compression;
 
 namespace PixCodec
@@ -34,20 +32,28 @@ namespace PixCodec
         public static ImageInfo GetInfo(ReadOnlySpan<byte> data)
         {
             var h = PngChunks.ReadHeader(data, verifyCrc: false);
-            PngChunks.ScanHead(data, h, out _, out var trns, out int frames);
-            OutputFormat(h, !trns.IsEmpty, false, out var color, out var type);
-            return new ImageInfo(ImageFormat.Png, h.Width, h.Height, RawImage.ChannelCount(color), type, color, frames);
+            var head = PngChunks.ScanHead(data, h);
+            OutputFormat(h, !head.Trns.IsEmpty, false, out var color, out var type);
+            return new ImageInfo(ImageFormat.Png, h.Width, h.Height, RawImage.ChannelCount(color), type, color, head.Frames)
+            {
+                BitsPerSample = h.IsPalette ? 8 : h.BitDepth,
+                Orientation = head.Orientation,
+                DpiX = head.DpiX,
+                DpiY = head.DpiY,
+                HasIccProfile = head.HasIccProfile,
+                IsAnimated = head.Animated,
+            };
         }
 
         public static byte[]? ReadPalette(ReadOnlySpan<byte> data)
         {
             var h = PngChunks.ReadHeader(data, verifyCrc: false);
             if (!h.IsPalette) return null;
-            PngChunks.ScanHead(data, h, out var plte, out var trns, out _);
-            int count = Math.Min(plte.Length / 3, 256);
+            var head = PngChunks.ScanHead(data, h);
+            int count = Math.Min(head.Plte.Length / 3, 256);
             if (count == 0) return null;
             var table = new byte[count * 4];
-            FillPalette(table, plte, trns);
+            FillPalette(table, head.Plte, head.Trns);
             return table;
         }
 
@@ -98,9 +104,52 @@ namespace PixCodec
             if (outSamples * (h.BitDepth == 16 ? 2 : 1) > int.MaxValue || outSamples > Array.MaxLength || rawSize >= Array.MaxLength)
                 throw new ImageNotSupportedException("PNG image is too large (more than 2 GB of pixel data)");
 
+            var conv = new RowConverter(h, trns, plte, keepIndexed, outChannels, options.AllowInvalidPaletteIndices);
+            return Zlib.Backend == ZlibBackend.Managed
+                ? DecodeStreaming(data, s, frame, h, color, sampleType, conv, options.VerifyChecksums)
+                : DecodeBuffered(data, s, frame, h, color, sampleType, conv, options.VerifyChecksums, (int)rawSize);
+        }
+
+        /// <summary>
+        /// Managed backend: the stream is inflated one scanline at a time straight from the IDAT / fdAT chunks and
+        /// each row is reconstructed while it is still in the cache; neither the compressed chunks nor the inflated
+        /// image are ever assembled in a buffer of their own.
+        /// </summary>
+        static RawImage DecodeStreaming(ReadOnlySpan<byte> data, PngStructure s, PngFrameEntry? frame, scoped in PngHeader h,
+            ColorModel color, SampleType sampleType, RowConverter conv, bool verify)
+        {
+            int rowBytes = (int)(((long)h.Width * h.BitsPerPixel + 7) >> 3);
+            var image = RawImage.Create(h.Width, h.Height, color, sampleType);
+            byte[] row = ArrayPool<byte>.Shared.Rent(rowBytes + 1);
+            try
+            {
+                fixed (byte* rowP = row)
+                {
+                    var reader = new RowReader(data, s, frame, rowP, verify);
+                    Reconstruct(h, ref reader, image, conv);
+                    reader.Finish();
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(row);
+            }
+            return image;
+        }
+
+        /// <summary>
+        /// BCL backend, which has no incremental interface here: the chunks are joined, inflated in one go into a
+        /// buffer of the full raw size and reconstructed from there.
+        /// </summary>
+        static RawImage DecodeBuffered(ReadOnlySpan<byte> data, PngStructure s, PngFrameEntry? frame, scoped in PngHeader h,
+            ColorModel color, SampleType sampleType, RowConverter conv, bool verify, int rawSize)
+        {
+            bool fromIdat = frame == null || frame.UsesIdat;
+            long streamTotal = fromIdat ? s.IdatTotal : frame!.Total;
+            int streamCount = fromIdat ? s.IdatCount : frame!.Data.Count;
             RawImage image;
             byte[]? joined = null;
-            byte[] raw = ArrayPool<byte>.Shared.Rent((int)rawSize + 1);
+            byte[] raw = ArrayPool<byte>.Shared.Rent(rawSize + 1);
             try
             {
                 ReadOnlySpan<byte> stream;
@@ -135,15 +184,15 @@ namespace PixCodec
                 }
 
                 // The zlib wrapper is handled here and the payload inflated as raw deflate: that way the Adler-32 is
-                // checked (or deliberately not checked) by this code, with a vectorized sum, whether or not the
-                // inflater would have reached the trailer on its own.
+                // checked (or deliberately not checked) by this code, whether or not the inflater would have reached
+                // the trailer on its own.
                 if (stream.Length < 2 || (stream[0] & 0x0F) != 8 || stream[0] >> 4 > 7 || (stream[0] << 8 | stream[1]) % 31 != 0 || (stream[1] & 0x20) != 0)
                     throw new ImageFormatException("corrupt PNG pixel data (invalid zlib header)");
                 int got;
                 try
                 {
                     // one byte more than needed: a stream that fills it holds surplus data
-                    got = Zlib.DecompressRaw(stream.Slice(2), raw.AsSpan(0, (int)rawSize + 1));
+                    got = Zlib.DecompressRaw(stream.Slice(2), raw.AsSpan(0, rawSize + 1));
                 }
                 catch (Exception e) when (e is InvalidDataException or IOException)
                 {
@@ -151,14 +200,17 @@ namespace PixCodec
                 }
                 if (got < rawSize) throw new ImageFormatException("PNG pixel data is truncated");
                 // Surplus pixel data (got > rawSize) is tolerated and cannot be checked: the sum covers all of it.
-                if (options.VerifyChecksums && got == rawSize
-                    && (stream.Length < 6 || Adler32(raw.AsSpan(0, (int)rawSize)) != BinaryPrimitives.ReadUInt32BigEndian(stream.Slice(stream.Length - 4))))
+                if (verify && got == rawSize
+                    && (stream.Length < 6 || Zlib.Adler32(raw.AsSpan(0, rawSize)) != BinaryPrimitives.ReadUInt32BigEndian(stream.Slice(stream.Length - 4))))
                     throw new ImageFormatException("PNG pixel data checksum (Adler-32) mismatch");
 
                 // The output is only allocated once the stream has proven to really hold that many pixels.
                 image = RawImage.Create(h.Width, h.Height, color, sampleType);
-                var conv = new RowConverter(h, trns, plte, keepIndexed, outChannels, options.AllowInvalidPaletteIndices);
-                Reconstruct(h, raw, image, conv);
+                fixed (byte* rawP = raw)
+                {
+                    var reader = new RowReader(rawP);
+                    Reconstruct(h, ref reader, image, conv);
+                }
             }
             finally
             {
@@ -166,6 +218,102 @@ namespace PixCodec
                 if (joined != null) ArrayPool<byte>.Shared.Return(joined);
             }
             return image;
+        }
+
+        /// <summary>
+        /// Hands out the filtered scanlines (filter type byte + row bytes) one after the other, either from a
+        /// completely inflated buffer or by inflating them on demand from the chunks of the file.
+        /// </summary>
+        ref struct RowReader
+        {
+            byte* _next;                         // buffered: the next row in the inflated image
+            readonly byte* _row;                 // streaming: where each row is inflated to
+            readonly ReadOnlySpan<byte> _data;
+            readonly PngStructure? _s;
+            readonly PngFrameEntry? _frame;      // null: the IDAT run
+            readonly Inflater? _inflater;
+            readonly bool _verify;
+            ReadOnlySpan<byte> _chunk;           // unread rest of the current chunk
+            int _chunkIndex, _chunkOffset;
+
+            public RowReader(byte* inflated)
+            {
+                this = default;
+                _next = inflated;
+            }
+
+            public RowReader(ReadOnlySpan<byte> data, PngStructure s, PngFrameEntry? frame, byte* row, bool verify)
+            {
+                this = default;
+                _data = data; _s = s; _row = row; _verify = verify;
+                _frame = frame == null || frame.UsesIdat ? null : frame;
+                _chunkOffset = s.FirstIdat;
+                // The inflater checks the Adler-32 itself once it reaches the trailer (see Finish).
+                _inflater = Zlib.CreateInflater(zlibWrapper: true, verifyChecksum: verify);
+            }
+
+            bool NextChunk()
+            {
+                if (_frame != null)
+                {
+                    if (_chunkIndex >= _frame.Data.Count) return false;
+                    var (offset, length) = _frame.Data[_chunkIndex++];
+                    _chunk = _data.Slice(offset, length);
+                    return true;
+                }
+                if (_chunkIndex >= _s!.IdatCount) return false;
+                PngChunks.ReadChunk(_data, _chunkOffset, out _, out _chunk);
+                _chunkOffset += 12 + _chunk.Length;
+                _chunkIndex++;
+                return true;
+            }
+
+            /// <summary>The next filter type byte followed by <paramref name="n"/> row bytes.</summary>
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public byte* Next(int n)
+            {
+                if (_inflater == null)
+                {
+                    byte* p = _next;
+                    _next += n + 1;
+                    return p;
+                }
+                Fill(n + 1);
+                return _row;
+            }
+
+            void Fill(int need)
+            {
+                var target = new Span<byte>(_row, need);
+                while (true)
+                {
+                    var status = _inflater!.Inflate(_chunk, target, out int consumed, out int written);
+                    _chunk = _chunk.Slice(consumed);
+                    target = target.Slice(written);
+                    if (target.IsEmpty) return;
+                    if (status == InflateStatus.Done || (status == InflateStatus.NeedInput && !NextChunk()))
+                        throw new ImageFormatException("PNG pixel data is truncated");
+                }
+            }
+
+            /// <summary>
+            /// After the last row: runs the inflater into the end of the stream, where it compares the Adler-32.
+            /// A missing trailer is an error; pixel data beyond the image is tolerated and leaves the sum unchecked.
+            /// Without verification nothing behind the last row is looked at.
+            /// </summary>
+            public void Finish()
+            {
+                if (_inflater == null || !_verify) return;
+                byte surplus = 0;
+                while (true)
+                {
+                    var status = _inflater.Inflate(_chunk, new Span<byte>(ref surplus), out int consumed, out int written);
+                    _chunk = _chunk.Slice(consumed);
+                    if (written > 0 || status == InflateStatus.Done) return;
+                    if (status == InflateStatus.NeedInput && !NextChunk())
+                        throw new ImageFormatException("PNG pixel data checksum (Adler-32) is missing");
+                }
+            }
         }
 
         /// <summary>
@@ -190,52 +338,13 @@ namespace PixCodec
             return rawSize;
         }
 
-        /// <summary>Adler-32 of the inflated data, 16 bytes per step where SSSE3 is available.</summary>
-        internal static uint Adler32(ReadOnlySpan<byte> data)
-        {
-            if (!Ssse3.IsSupported || data.Length < 64) return Zlib.Adler32(data);
-            const uint Mod = 65521;
-            uint a = 1, b = 0;
-            int done = 0;
-            fixed (byte* start = data)
-            {
-                byte* p = start;
-                var weights = Vector128.Create((sbyte)16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1);
-                var ones = Vector128.Create((short)1);
-                int blocks = data.Length / 16;
-                while (blocks > 0)
-                {
-                    // b grows by a for every byte: after n bytes b += n * a0 + sum((n - i) * d[i]). Per 16 byte step
-                    // that splits into 16 * (sum of all earlier steps) + the weighted sum of the step itself.
-                    // 346 steps (5536 bytes) keep every 32 bit lane from overflowing.
-                    int n = Math.Min(blocks, 346);
-                    var sum = Vector128<uint>.Zero;
-                    var earlier = Vector128<uint>.Zero;
-                    var weighted = Vector128<uint>.Zero;
-                    for (int k = 0; k < n; k++, p += 16)
-                    {
-                        var v = Sse2.LoadVector128(p);
-                        earlier += sum;
-                        sum += Sse2.SumAbsoluteDifferences(v, Vector128<byte>.Zero).AsUInt32();
-                        weighted += Sse2.MultiplyAddAdjacent(Ssse3.MultiplyAddAdjacent(v, weights), ones).AsUInt32();
-                    }
-                    ulong nb = b + (ulong)(n * 16) * a + 16UL * Vector128.Sum(earlier) + Vector128.Sum(weighted);
-                    a = (a + Vector128.Sum(sum)) % Mod;
-                    b = (uint)(nb % Mod);
-                    blocks -= n;
-                    done += n * 16;
-                }
-            }
-            return Zlib.Adler32(data.Slice(done), b << 16 | a);
-        }
-
         public static void PassSize(scoped in PngHeader h, int pass, out int width, out int height)
         {
             width = (h.Width - PassX0[pass] + PassDx[pass] - 1) / PassDx[pass];
             height = (h.Height - PassY0[pass] + PassDy[pass] - 1) / PassDy[pass];
         }
 
-        static void Reconstruct(scoped in PngHeader h, byte[] rawArray, RawImage image, RowConverter conv)
+        static void Reconstruct(scoped in PngHeader h, ref RowReader rows, RawImage image, RowConverter conv)
         {
             int width = h.Width, height = h.Height;
             int bitsPerPixel = h.BitsPerPixel;
@@ -256,9 +365,8 @@ namespace PixCodec
 
             try
             {
-                fixed (byte* raw = rawArray, output = image.GetBytes(), scratchA = rowA, scratchB = rowB, exp = expanded)
+                fixed (byte* output = image.GetBytes(), scratchA = rowA, scratchB = rowB, exp = expanded)
                 {
-                    byte* src = raw;
                     if (!h.Interlaced)
                     {
                         if (direct)
@@ -266,10 +374,10 @@ namespace PixCodec
                             byte* prev = null, dst = output;
                             for (int y = 0; y < height; y++)
                             {
+                                byte* src = rows.Next(rowBytes);
                                 if (!PngFilters.Unfilter(*src, src + 1, prev, dst, rowBytes, filterBpp)) throw BadFilter();
                                 prev = dst;
                                 dst += rowBytes;
-                                src += rowBytes + 1;
                             }
                         }
                         else
@@ -278,11 +386,11 @@ namespace PixCodec
                             nint outRowBytes = (nint)width * outPixelBytes;
                             for (int y = 0; y < height; y++)
                             {
+                                byte* src = rows.Next(rowBytes);
                                 if (!PngFilters.Unfilter(*src, src + 1, prev, cur, rowBytes, filterBpp)) throw BadFilter();
                                 conv.Convert(cur, dst, width);
                                 prev = cur; cur = other; other = prev;
                                 dst += outRowBytes;
-                                src += rowBytes + 1;
                             }
                         }
                         return;
@@ -297,13 +405,13 @@ namespace PixCodec
                         byte* prev = null, cur = scratchA, other = scratchB;
                         for (int r = 0; r < ph; r++)
                         {
+                            byte* src = rows.Next(passRowBytes);
                             if (!PngFilters.Unfilter(*src, src + 1, prev, cur, passRowBytes, filterBpp)) throw BadFilter();
                             byte* pixels = cur;
                             if (!direct) { conv.Convert(cur, exp, pw); pixels = exp; }
                             int y = PassY0[pass] + r * dy;
                             Scatter(pixels, output + ((nint)y * width + x0) * outPixelBytes, pw, outPixelBytes, dx * outPixelBytes);
                             prev = cur; cur = other; other = prev;
-                            src += passRowBytes + 1;
                         }
                     }
                 }

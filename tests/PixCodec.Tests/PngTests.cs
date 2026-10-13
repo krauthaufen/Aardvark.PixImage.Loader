@@ -104,7 +104,17 @@ public class PngTests
         Assert.Equal(RawImage.DefaultColorModel(expected.Channels), img.Color);
 
         var info = Png.GetInfo(bytes);
-        Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, img.SampleType, img.Color, info.FrameCount), info);
+        // header level fields: bit depth as stored (8 for palette entries), and exactly what Decode reports as metadata
+        var meta = img.Metadata;
+        Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, img.SampleType, img.Color, info.FrameCount)
+        {
+            BitsPerSample = bytes[25] == 3 ? 8 : bytes[24],
+            Orientation = meta?.Orientation ?? 0,
+            DpiX = meta?.DpiX ?? 0,
+            DpiY = meta?.DpiY ?? 0,
+            HasIccProfile = meta?.IccProfile != null,
+            IsAnimated = rel.Contains("apng"),
+        }, info);
         Assert.Equal(rel.Contains("apng") && !rel.Contains("single_frame"), info.FrameCount > 1);
 
         // same result through the generic entry point and without CRC checks
@@ -229,17 +239,6 @@ public class PngTests
         png = Assemble(new[] { ihdr, Chunk("IDAT", stream[..^3]), iend });
         Assert.Throws<ImageFormatException>(() => Png.Decode(png));
         TestUtil.AssertEqual(Png.Decode(good), Png.Decode(png, noVerify));
-
-        // the vectorized Adler-32 against the plain one, across block boundaries
-        var rnd = new Random(5);
-        foreach (int n in new[] { 0, 1, 15, 16, 63, 64, 65, 5535, 5536, 5537, 5552, 11072, 100_003 })
-        {
-            var data = new byte[n];
-            rnd.NextBytes(data);
-            Assert.Equal(Zlib.Adler32(data), PngDecoder.Adler32(data));
-            Array.Fill(data, (byte)255);
-            Assert.Equal(Zlib.Adler32(data), PngDecoder.Adler32(data));
-        }
     }
 
     [Fact]
@@ -487,7 +486,7 @@ public class PngTests
                     var back = Png.Decode(png);
                     Assert.Equal(img.Color, back.Color);
                     TestUtil.AssertEqual(img, back);
-                    Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, type, color), Png.GetInfo(png));
+                    Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, type, color) { BitsPerSample = type == SampleType.UInt8 ? 8 : 16 }, Png.GetInfo(png));
                 }
         }
     }

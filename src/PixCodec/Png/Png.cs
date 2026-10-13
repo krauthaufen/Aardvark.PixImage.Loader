@@ -262,8 +262,12 @@ namespace PixCodec
             => header.Length >= 8 && header.Slice(0, 8).SequenceEqual(PngChunks.Signature);
 
         /// <summary>
-        /// Reads header level information without decoding pixel data. FrameCount is the frame count announced by
-        /// an APNG's acTL chunk, 1 for a plain PNG.
+        /// Reads header level information without decoding pixel data: IHDR plus the chunks in front of the first
+        /// IDAT, so a prefix of the file reaching that far is enough. FrameCount / IsAnimated come from an APNG's
+        /// acTL chunk (1 / false for a plain PNG), DpiX / DpiY from pHYs, HasIccProfile from iCCP, Orientation
+        /// from eXIf. They equal what <see cref="Decode"/> puts into the metadata, with two exceptions: an eXIf
+        /// chunk stored behind the pixel data (which the format allows) is found by Decode only, and
+        /// HasIccProfile is set without inflating the profile, which Decode drops if its compressed data is corrupt.
         /// </summary>
         public static ImageInfo GetInfo(ReadOnlySpan<byte> data) => PngDecoder.GetInfo(data);
 

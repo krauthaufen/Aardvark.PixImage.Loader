@@ -135,32 +135,71 @@ namespace PixCodec
             _ => false,
         };
 
-        /// <summary>
-        /// Walks the chunks in front of the pixel data and picks up PLTE, tRNS and the announced frame count.
-        /// Only tRNS and acTL are CRC checked (they change what GetInfo reports, and a default decode drops them when
-        /// damaged). Stops quietly at IDAT, IEND or where the data ends.
-        /// </summary>
-        public static void ScanHead(ReadOnlySpan<byte> data, scoped in PngHeader h, out ReadOnlySpan<byte> plte, out ReadOnlySpan<byte> trns, out int frames)
+        /// <summary>What the chunks in front of the pixel data say (see <see cref="ScanHead"/>).</summary>
+        public ref struct HeadInfo
         {
-            plte = default; trns = default; frames = 1;
-            bool sawActl = false;
+            public ReadOnlySpan<byte> Plte, Trns;
+            /// <summary>An acTL chunk makes the file an APNG; Frames is the frame count it announces (else 1).</summary>
+            public bool Animated;
+            public int Frames;
+            public double DpiX, DpiY;
+            public int Orientation;
+            public bool HasIccProfile;
+        }
+
+        /// <summary>
+        /// Walks the chunks in front of the first IDAT and picks up what header level information needs: PLTE, tRNS,
+        /// acTL, pHYs, iCCP and eXIf. Ancillary chunks are CRC checked, because a default decode drops them when
+        /// damaged and the two must agree. Stops quietly at IDAT, IEND or where the data ends, so chunks behind the
+        /// pixel data (where eXIf is allowed too) are not seen.
+        /// </summary>
+        public static HeadInfo ScanHead(ReadOnlySpan<byte> data, scoped in PngHeader h)
+        {
+            var info = new HeadInfo { Frames = 1 };
             int pos = FirstChunkAfterHeader;
             while (data.Length - pos >= 12)
             {
                 uint len = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(pos));
                 uint type = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(pos + 4));
-                if (type == IDAT || type == IEND || len > (uint)(data.Length - pos - 12)) return;
+                if (type == IDAT || type == IEND || len > (uint)(data.Length - pos - 12)) break;
                 var body = data.Slice(pos + 8, (int)len);
-                if (type == PLTE && plte.IsEmpty) plte = body;
-                else if (type == tRNS && trns.IsEmpty && IsUsableTransparency(h, body.Length) && CrcOk(data, pos, body.Length)) trns = body;
-                else if (type == acTL && !sawActl && body.Length == 8 && CrcOk(data, pos, 8))
+                switch (type)
                 {
-                    sawActl = true;
-                    uint n = BinaryPrimitives.ReadUInt32BigEndian(body);
-                    if (n is > 0 and <= int.MaxValue) frames = (int)n;
+                    case PLTE:
+                        if (info.Plte.IsEmpty) info.Plte = body;
+                        break;
+                    case tRNS:
+                        if (info.Trns.IsEmpty && IsUsableTransparency(h, body.Length) && CrcOk(data, pos, body.Length)) info.Trns = body;
+                        break;
+                    case acTL:
+                        if (!info.Animated && body.Length == 8 && CrcOk(data, pos, 8)
+                            && BinaryPrimitives.ReadUInt32BigEndian(body) is > 0 and <= int.MaxValue and var n
+                            && BinaryPrimitives.ReadUInt32BigEndian(body.Slice(4)) <= int.MaxValue)
+                        {
+                            info.Animated = true;
+                            info.Frames = (int)n;
+                        }
+                        break;
+                    case pHYs:
+                        if (body.Length == 9 && body[8] == 1 && CrcOk(data, pos, 9))
+                        {
+                            double x = PixelsPerMeterToDpi(BinaryPrimitives.ReadUInt32BigEndian(body));
+                            double y = PixelsPerMeterToDpi(BinaryPrimitives.ReadUInt32BigEndian(body.Slice(4)));
+                            if (x > 0 && y > 0) { info.DpiX = x; info.DpiY = y; }
+                        }
+                        break;
+                    case eXIf:
+                        if (body.Length >= 8 && CrcOk(data, pos, body.Length)) info.Orientation = ExifOrientation(body);
+                        break;
+                    case iCCP:
+                        // structure only - the profile is not inflated here
+                        int nameEnd = body.Slice(0, Math.Min(body.Length, 80)).IndexOf((byte)0);
+                        if (nameEnd >= 1 && body.Length >= nameEnd + 3 && body[nameEnd + 1] == 0 && CrcOk(data, pos, body.Length)) info.HasIccProfile = true;
+                        break;
                 }
                 pos += 12 + (int)len;
             }
+            return info;
         }
 
         /// <summary>
