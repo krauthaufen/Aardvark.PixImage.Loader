@@ -1148,12 +1148,29 @@ def gen_depths():
     emit('f24_gray_deflate_tiled', dict(arr=np.tile(f24[:, :, :1], (3, 2, 1))[:37, :41], float24=True, sampleformat=3,
                                        compression=DEFLATE, tile=(16, 16)))
 
-    # no installed decoder reads these: listed, kept apart
-    emit('i12_gray', dict(arr=rnd(12, signed=True), bits=12, unverified='signed 12-bit packed samples (tifffile returns nothing, libtiff readers refuse)'))
-    emit('i5_rgb_lzw', dict(arr=rnd(5, 3, signed=True), bits=5, compression=LZW, unverified='signed 5-bit packed samples'))
-    emit('i20_gray_be', dict(arr=rnd(20, signed=True), bits=20, unverified='signed 20-bit packed samples'), byteorder='>')
-    emit('f24_gray_deflate_pred3', dict(arr=f24[:, :, :1], float24=True, sampleformat=3, compression=DEFLATE, predictor=3,
-                                       unverified='floating point predictor on 24-bit floats (tifffile: "unpredicting float24 not supported")'))
+    # Signed samples of odd depths and the float predictor on 24-bit floats: tifffile and the libtiff front ends refuse
+    # them, GDAL (rasterio) reads them. GDAL unpacks the bits without looking at the sign (it reports unsigned data),
+    # so the sign extension PixCodec documents is applied to what it returns.
+    def gdal(bits=None):
+        def read(path):
+            import rasterio
+            with rasterio.open(path) as ds:
+                a = np.moveaxis(ds.read(), 0, -1)
+            if bits:
+                assert a.dtype.kind == 'u', a.dtype
+                v = a.astype(np.int64)
+                a = np.where(v >= 1 << (bits - 1), v - (1 << bits), v).astype(a.dtype.name[1:])
+            return 'GDAL (rasterio)' + (', sign extended' if bits else ''), a
+        return read
+
+    emit('i12_gray', dict(arr=rnd(12, signed=True), bits=12, raw_decode=gdal(12)))
+    emit('i5_rgb_lzw', dict(arr=rnd(5, 3, signed=True), bits=5, compression=LZW, raw_decode=gdal(5)))
+    emit('be_i20_gray', dict(arr=rnd(20, signed=True), bits=20, raw_decode=gdal(20)), byteorder='>')
+    emit('i12_rgb_planar_deflate_tiled', dict(arr=rnd(12, 3, 41, 37, signed=True), bits=12, compression=DEFLATE, planar=2, tile=(16, 16),
+                                             raw_decode=gdal(12)))
+    emit('f24_gray_deflate_pred3', dict(arr=f24[:, :, :1], float24=True, sampleformat=3, compression=DEFLATE, predictor=3, raw_decode=gdal()))
+    emit('be_f24_rgb_lzw_pred3', dict(arr=f24, float24=True, sampleformat=3, compression=LZW, predictor=3, rps=5, raw_decode=gdal()),
+         byteorder='>')
 
 
 def gen_more_codecs():
