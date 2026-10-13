@@ -105,22 +105,30 @@ namespace PixCodec.Compression
                 head = new int[1 << hashBits];
                 prev = new ushort[WindowSize];
                 syms = new uint[SymCapacity];
-                ResetTables();
+            }
+            Reset(0);
+        }
+
+        /// <summary>Makes the instance ready for a new stream.</summary>
+        void Reset(int capacityHint)
+        {
+            if (outBuf.Length < capacityHint) outBuf = new byte[capacityHint];
+            symCount = pos = blockStart = checkSym = checkPos = misses = 0;
+            acc = 0; accBits = 0; outPos = 0;
+            if (level > 0)
+            {
+                head.AsSpan().Fill(NoPos);
+                litFreq.AsSpan().Clear(); distFreq.AsSpan().Clear(); classPrev.AsSpan().Clear();
                 // before the first block: the fixed code
                 for (int i = 0; i < 256; i++) { litCost[i] = 8; lenCost[i] = (byte)(7 + LenExtra[LenCode[i]]); }
                 for (int i = 0; i < 30; i++) distCost[i] = (byte)(5 + (i < 4 ? 0 : (i >> 1) - 1));
             }
-            if (zlibWrapper)
+            if (zlib)
             {
                 outBuf[0] = 0x78;
                 outBuf[1] = level < 2 ? (byte)0x01 : level < 6 ? (byte)0x5E : level == 6 ? (byte)0x9C : (byte)0xDA;
                 outPos = 2;
             }
-        }
-
-        void ResetTables()
-        {
-            head.AsSpan().Fill(NoPos);
         }
 
         public byte[] OutputBuffer => outBuf;
@@ -697,16 +705,25 @@ namespace PixCodec.Compression
             foreach (ref int x in head.AsSpan()) x = Math.Max(x - shift, NoPos);
         }
 
+        [ThreadStatic] static Deflater? cached;
+
         public static byte[] Compress(ReadOnlySpan<byte> source, int level, bool zlibWrapper)
         {
-            var d = new Deflater(level, zlibWrapper, level == 0 ? source.Length + source.Length / 65535 * 5 + 32 : source.Length / 2 + 64);
+            // The tables are a few hundred kilobytes: codecs that compress many strips or chunks reuse them.
+            level = Math.Clamp(level, 0, 9);
+            int hint = (int)Math.Min(level == 0 ? (long)source.Length + source.Length / 65535 * 5 + 32 : source.Length / 2 + 64, Array.MaxLength);
+            var d = cached;
+            if (d != null && d.level == level && d.zlib == zlibWrapper) d.Reset(hint);
+            else cached = d = new Deflater(level, zlibWrapper, hint);
             fixed (byte* s = source)
             {
                 d.Parse(s, source.Length, true);
                 d.EndBlock(s, true);
             }
             d.Finish(zlibWrapper ? Checksums.Adler32(source, 1) : 0);
-            return d.outBuf.AsSpan(0, d.outPos).ToArray();
+            var result = d.outBuf.AsSpan(0, d.outPos).ToArray();
+            if (d.outBuf.Length > 4 << 20) d.outBuf = new byte[256]; // do not keep a large buffer alive in the cache
+            return result;
         }
     }
 
