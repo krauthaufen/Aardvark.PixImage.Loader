@@ -14,8 +14,38 @@ namespace PixCodec
         /// <summary>Upper bound for the number of decoding threads, 0 or less = no limit.</summary>
         public int MaxDegreeOfParallelism { get; set; }
 
+        /// <summary>How samples whose bit depth is not 8, 16, 32 or 64 are mapped into the next larger sample type.</summary>
+        public TiffBitScaling BitScaling { get; set; } = TiffBitScaling.Default;
+
+        /// <summary>
+        /// true (default): CMYK, CIELab / ICCLab / ITULab and LogLuv images are converted to RGB.
+        /// false: these come back as stored with <see cref="ColorModel.Other"/> - CMYK as its 4 (or more) samples,
+        /// Lab as its encoded samples (CIELab keeps a* and b* as two's complement values in the unsigned array),
+        /// LogLuv as Float32 CIE XYZ. GetInfo always describes the converted layout.
+        /// </summary>
+        public bool ConvertToRgb { get; set; } = true;
+
         /// <summary>Decoded size in bytes from which <see cref="Parallel"/> kicks in.</summary>
         internal long ParallelThreshold = 512 * 1024;
+
+        internal static readonly TiffDecodeOptions Default = new TiffDecodeOptions();
+    }
+
+    /// <summary>
+    /// Treatment of unsigned samples with an odd bit depth (1..7, 9..15, 17..31 bits). Signed samples are always
+    /// sign extended and palette indices always kept, whatever the mode.
+    /// </summary>
+    public enum TiffBitScaling
+    {
+        /// <summary>
+        /// 1, 2 and 4 bit samples are stretched to 0..255 (so bilevel and 16-level images display as intended);
+        /// every other depth keeps its stored values (a 12-bit sample 0..4095 arrives as UInt16 0..4095).
+        /// </summary>
+        Default,
+        /// <summary>All depths keep their stored values (a bilevel image decodes to 0 and 1).</summary>
+        None,
+        /// <summary>All odd depths are stretched to the full range of the output type: round(v * typeMax / (2^bits - 1)).</summary>
+        FullRange,
     }
 
     public enum TiffPredictor
@@ -72,10 +102,10 @@ namespace PixCodec
     public static unsafe class Tiff
     {
         /// <summary>
-        /// Decoder for JPEG-in-TIFF (compression 7) strips and tiles, see <see cref="TiffJpegDecoder"/>.
-        /// A field so tests can substitute it.
+        /// Test hook: when set, replaces the built-in JPEG codec for 8-bit JPEG-in-TIFF strips and tiles
+        /// (see <see cref="TiffJpegDecoder"/>). Null in normal operation.
         /// </summary>
-        internal static TiffJpegDecoder? JpegDecoder = Jpeg.DecodeForTiff;
+        internal static TiffJpegDecoder? JpegDecoder;
 
         /// <summary>Returns whether the data starts with a TIFF signature (needs at most 16 bytes).</summary>
         public static bool IsMatch(ReadOnlySpan<byte> header) => TiffFile.IsMatch(header);
@@ -222,7 +252,7 @@ namespace PixCodec
         {
             options ??= new TiffDecodeOptions();
             var file = new TiffFile(src);
-            var img = new TiffImage(file, Locate(file, options.ImageIndex));
+            var img = new TiffImage(file, Locate(file, options.ImageIndex), options);
             return region is var (x, y, w, h)
                 ? img.Decode(x, y, w, h, options)
                 : img.Decode(0, 0, img.Width, img.Height, options);

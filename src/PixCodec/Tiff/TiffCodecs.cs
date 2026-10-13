@@ -12,21 +12,24 @@ namespace PixCodec
         const int Clear = 256, Eoi = 257, First = 258, MaxCodes = 4096;
 
         /// <summary>
-        /// Decodes into <paramref name="dst"/> and returns the number of bytes produced (at most <paramref name="dstLen"/>).
-        /// The string table stores, per code, where in the output that string was last written, so emitting a code is a
-        /// plain forward copy inside the output buffer - no prefix chain walking and no per-code allocations.
+        /// Decodes into <paramref name="dst"/> and returns the number of bytes produced (at most <paramref name="dstLen"/>,
+        /// which may exceed 2 GB). The string table stores, per code, where in the output that string was last written,
+        /// so emitting a code is a plain forward copy inside the output buffer - no prefix chain walking and no
+        /// per-code allocations.
         /// </summary>
-        public static int Decode(ReadOnlySpan<byte> src, byte* dst, int dstLen)
+        public static long Decode(ReadOnlySpan<byte> src, byte* dst, long dstLen)
         {
             // Old-style LZW (libtiff's "compat" mode) packs codes LSB first, so its 9-bit Clear code reads 00 01.
             if (src.Length >= 2 && src[0] == 0 && (src[1] & 1) != 0) return DecodeOldStyle(src, dst, dstLen);
 
-            // per code: output offset of its string << 32 | length
+            // per code: output offset of its string << 16 | length (a string is never longer than the table)
             ulong* tab = stackalloc ulong[MaxCodes];
-            int n = src.Length, sp = 0, op = 0;
+            int n = src.Length, sp = 0;
+            long op = 0;
             ulong buf = 0;
             int bits = 0, width = 9, next = First;
-            int prevPos = 0, prevLen = 0;
+            long prevPos = 0;
+            int prevLen = 0;
             fixed (byte* s = src)
             {
                 while (op < dstLen)
@@ -35,8 +38,7 @@ namespace PixCodec
                     {
                         if (sp + 8 <= n)
                         {
-                            ulong v = Unsafe.ReadUnaligned<ulong>(s + sp);
-                            if (BitConverter.IsLittleEndian) v = BinaryPrimitives.ReverseEndianness(v);
+                            ulong v = BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<ulong>(s + sp));
                             buf |= v >> bits;
                             int adv = (63 - bits) >> 3;
                             sp += adv; bits += adv << 3;
@@ -58,8 +60,8 @@ namespace PixCodec
                     }
                     else if (code > Eoi)
                     {
-                        int so;
-                        if (code < next) { ulong e = tab[code]; so = (int)(e >> 32); len = (int)e; }
+                        long so;
+                        if (code < next) { ulong e = tab[code]; so = (long)(e >> 16); len = (int)(e & 0xFFFF); }
                         else if (code == next && prevLen > 0) { so = prevPos; len = prevLen + 1; } // KwKwK: overlaps its own output
                         else throw new ImageFormatException("TIFF: corrupt LZW data");
                         byte* d = dst + op, f = dst + so;
@@ -75,7 +77,7 @@ namespace PixCodec
                         }
                         else
                         {
-                            if (len > dstLen - op) len = dstLen - op;
+                            if (len > dstLen - op) len = (int)(dstLen - op);
                             for (int i = 0; i < len; i++) d[i] = f[i];
                         }
                     }
@@ -88,7 +90,7 @@ namespace PixCodec
 
                     if (prevLen > 0 && next < MaxCodes)
                     {
-                        tab[next] = (ulong)prevPos << 32 | (uint)(prevLen + 1);
+                        tab[next] = (ulong)prevPos << 16 | (uint)(prevLen + 1);
                         next++;
                         // early change: the width grows one code before the table would actually need it
                         if (next == (1 << width) - 1 && width < 12) width++;
@@ -100,14 +102,15 @@ namespace PixCodec
             return op;
         }
 
-        static int DecodeOldStyle(ReadOnlySpan<byte> src, byte* dst, int dstLen)
+        static long DecodeOldStyle(ReadOnlySpan<byte> src, byte* dst, long dstLen)
         {
-            int* offs = stackalloc int[MaxCodes];
-            int* lens = stackalloc int[MaxCodes];
-            int n = src.Length, sp = 0, op = 0;
+            ulong* tab = stackalloc ulong[MaxCodes];
+            int n = src.Length, sp = 0;
+            long op = 0;
             uint buf = 0;
             int bits = 0, width = 9, next = First;
-            int prevPos = 0, prevLen = 0;
+            long prevPos = 0;
+            int prevLen = 0;
             while (op < dstLen)
             {
                 while (bits < width && sp < n) { buf |= (uint)src[sp++] << bits; bits += 8; }
@@ -121,17 +124,17 @@ namespace PixCodec
                 else if (code == Eoi) break;
                 else
                 {
-                    int so;
-                    if (code < next) { so = offs[code]; len = lens[code]; }
+                    long so;
+                    if (code < next) { ulong e = tab[code]; so = (long)(e >> 16); len = (int)(e & 0xFFFF); }
                     else if (code == next && prevLen > 0) { so = prevPos; len = prevLen + 1; }
                     else throw new ImageFormatException("TIFF: corrupt LZW data");
-                    if (len > dstLen - op) len = dstLen - op;
+                    if (len > dstLen - op) len = (int)(dstLen - op);
                     byte* d = dst + op, f = dst + so;
                     for (int i = 0; i < len; i++) d[i] = f[i];
                 }
                 if (prevLen > 0 && next < MaxCodes)
                 {
-                    offs[next] = prevPos; lens[next] = prevLen + 1;
+                    tab[next] = (ulong)prevPos << 16 | (uint)(prevLen + 1);
                     next++;
                     if (next == 1 << width && width < 12) width++;
                 }
@@ -205,9 +208,10 @@ namespace PixCodec
     /// <summary>Apple PackBits (compression 32773).</summary>
     internal static unsafe class TiffPackBits
     {
-        public static int Decode(ReadOnlySpan<byte> src, byte* dst, int dstLen)
+        public static long Decode(ReadOnlySpan<byte> src, byte* dst, long dstLen)
         {
-            int sp = 0, op = 0, n = src.Length;
+            int sp = 0, n = src.Length;
+            long op = 0;
             while (sp < n && op < dstLen)
             {
                 int c = (sbyte)src[sp++];
@@ -215,7 +219,7 @@ namespace PixCodec
                 {
                     int len = c + 1;
                     if (len > n - sp) len = n - sp;
-                    if (len > dstLen - op) len = dstLen - op;
+                    if (len > dstLen - op) len = (int)(dstLen - op);
                     src.Slice(sp, len).CopyTo(new Span<byte>(dst + op, len));
                     sp += c + 1; op += len;
                 }
@@ -223,7 +227,7 @@ namespace PixCodec
                 {
                     if (sp >= n) break;
                     int len = 1 - c;
-                    if (len > dstLen - op) len = dstLen - op;
+                    if (len > dstLen - op) len = (int)(dstLen - op);
                     new Span<byte>(dst + op, len).Fill(src[sp++]);
                     op += len;
                 }
@@ -367,20 +371,20 @@ namespace PixCodec
         /// <summary>
         /// Undoes the floating point predictor on one row: byte-wise differencing over the whole row, with the bytes of
         /// all samples stored as planes (most significant byte plane first, independent of the file byte order).
-        /// The result is in machine byte order. <paramref name="tmp"/> needs count * bps bytes.
+        /// The result is little endian (machine order). <paramref name="tmp"/> needs count * bps bytes.
         /// </summary>
         public static void UndoFloat(byte* row, int count, int stride, int bps, byte* tmp)
         {
-            int n = count * bps;
+            long n = (long)count * bps;
             if (stride == 1)
             {
                 byte v = row[0];
-                for (int i = 1; i < n; i++) row[i] = v = (byte)(v + row[i]);
+                for (long i = 1; i < n; i++) row[i] = v = (byte)(v + row[i]);
             }
             else
-                for (int i = stride; i < n; i++) row[i] = (byte)(row[i] + row[i - stride]);
+                for (long i = stride; i < n; i++) row[i] = (byte)(row[i] + row[i - stride]);
             Buffer.MemoryCopy(row, tmp, n, n);
-            if (bps == 4 && BitConverter.IsLittleEndian)
+            if (bps == 4)
             {
                 byte* p0 = tmp, p1 = tmp + count, p2 = p1 + count, p3 = p2 + count;
                 uint* o = (uint*)row;
@@ -390,22 +394,22 @@ namespace PixCodec
             for (int b = 0; b < bps; b++)
             {
                 byte* plane = tmp + (long)b * count;
-                byte* o = row + (BitConverter.IsLittleEndian ? bps - 1 - b : b);
+                byte* o = row + (bps - 1 - b);
                 for (int i = 0; i < count; i++) o[(long)i * bps] = plane[i];
             }
         }
 
         public static void ApplyFloat(byte* row, int count, int stride, int bps, byte* tmp)
         {
-            int n = count * bps;
+            long n = (long)count * bps;
             for (int b = 0; b < bps; b++)
             {
                 byte* plane = tmp + (long)b * count;
-                byte* o = row + (BitConverter.IsLittleEndian ? bps - 1 - b : b);
+                byte* o = row + (bps - 1 - b);
                 for (int i = 0; i < count; i++) plane[i] = o[(long)i * bps];
             }
-            for (int i = n - 1; i >= stride; i--) row[i] = (byte)(tmp[i] - tmp[i - stride]);
-            for (int i = Math.Min(stride, n) - 1; i >= 0; i--) row[i] = tmp[i];
+            for (long i = n - 1; i >= stride; i--) row[i] = (byte)(tmp[i] - tmp[i - stride]);
+            for (long i = Math.Min(stride, n) - 1; i >= 0; i--) row[i] = tmp[i];
         }
 
         public static void SwapBytes(byte* p, long bytes, int bps)
@@ -442,6 +446,65 @@ namespace PixCodec
         {
             var t = Reversed;
             for (int i = 0; i < src.Length; i++) dst[i] = t[src[i]];
+        }
+    }
+
+    /// <summary>
+    /// SGI LogLuv / LogL (compression 34676): each row stores the bytes of its pixels as planes, most significant
+    /// first, and every plane is run length coded (count >= 128: repeat the next byte count - 126 times, otherwise
+    /// count literal bytes follow).
+    /// </summary>
+    internal static unsafe class TiffSgiLog
+    {
+        /// <summary>Decodes rows of <paramref name="width"/> pixels of <paramref name="bytesPerPixel"/> (2: LogL16, 4: LogLuv32) bytes each, big endian per pixel.</summary>
+        public static void Decode(ReadOnlySpan<byte> src, byte* dst, int width, int rows, int bytesPerPixel)
+        {
+            int sp = 0, n = src.Length;
+            for (int y = 0; y < rows; y++)
+            {
+                byte* row = dst + (long)y * width * bytesPerPixel;
+                for (int plane = 0; plane < bytesPerPixel; plane++)
+                {
+                    int i = 0;
+                    while (i < width)
+                    {
+                        if (sp >= n) throw new ImageFormatException("TIFF: LogLuv data is truncated");
+                        int c = src[sp++];
+                        if (c >= 128)
+                        {
+                            int rc = c - 126;
+                            if (sp >= n || rc > width - i) throw new ImageFormatException("TIFF: corrupt LogLuv data");
+                            byte b = src[sp++];
+                            for (int k = 0; k < rc; k++, i++) row[(long)i * bytesPerPixel + plane] = b;
+                        }
+                        else
+                        {
+                            if (c == 0 || c > n - sp || c > width - i) throw new ImageFormatException("TIFF: corrupt LogLuv data");
+                            for (int k = 0; k < c; k++, i++) row[(long)i * bytesPerPixel + plane] = src[sp++];
+                        }
+                    }
+                }
+            }
+        }
+
+        /// <summary>Luminance of a 16-bit log encoded value: sign bit, then a 15-bit log2 scaled by 256 and offset by 64 stops.</summary>
+        public static float LogL16ToY(int p)
+        {
+            int le = p & 0x7FFF;
+            if (le == 0) return 0;
+            double y = Math.Exp(Math.Log(2) / 256 * (le + 0.5) - Math.Log(2) * 64);
+            return (float)((p & 0x8000) != 0 ? -y : y);
+        }
+
+        /// <summary>CIE XYZ of a 32-bit LogLuv pixel (16-bit log luminance, 8 bits each for u' and v' scaled by 410).</summary>
+        public static void LogLuv32ToXyz(uint p, out float x, out float y, out float z)
+        {
+            double l = LogL16ToY((int)(p >> 16));
+            if (l <= 0) { x = y = z = 0; return; }
+            double u = (((p >> 8) & 0xFF) + 0.5) / 410, v = ((p & 0xFF) + 0.5) / 410;
+            double s = 1 / (6 * u - 16 * v + 12);
+            double cx = 9 * u * s, cy = 4 * v * s;
+            x = (float)(cx / cy * l); y = (float)l; z = (float)((1 - cx - cy) / cy * l);
         }
     }
 }

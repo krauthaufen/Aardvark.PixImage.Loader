@@ -167,8 +167,6 @@ namespace PixCodec
         public readonly TiffSource Src;
         public readonly bool BigEndian, Big;
         public readonly long FirstIfd;
-        /// <summary>True when multi-byte values in the file need swapping on this machine.</summary>
-        public readonly bool Swap;
 
         public static bool IsMatch(ReadOnlySpan<byte> h)
         {
@@ -186,7 +184,6 @@ namespace PixCodec
             src.Read(0, h.Slice(0, 8));
             if (!IsMatch(h)) throw new ImageFormatException("not a TIFF file");
             BigEndian = h[0] == (byte)'M';
-            Swap = BigEndian == BitConverter.IsLittleEndian;
             Big = U16(h.Slice(2)) == 43;
             if (Big)
             {
@@ -316,7 +313,7 @@ namespace PixCodec
         {
             var raw = ReadRaw(e, out int n);
             int size = TypeSize(e.Type);
-            if (Swap && size > 1)
+            if (BigEndian && size > 1)
             {
                 int unit = e.Type is 5 or 10 ? 4 : size;
                 for (int i = 0; i + unit <= raw.Length; i += unit) raw.AsSpan(i, unit).Reverse();
