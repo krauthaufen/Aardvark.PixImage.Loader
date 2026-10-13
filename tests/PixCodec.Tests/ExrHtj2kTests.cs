@@ -62,7 +62,7 @@ public class ExrHtj2kTests
             Assert.Equal(ids, Exr.DecodeChannels(data, new[] { "id" }).GetData<uint>());
             Assert.Equal(Enumerable.Range(0, w * h).Select(i => f[i * 4]), Exr.DecodeChannels(data, new[] { "Z" }).GetData<float>());
             Assert.True(halves.AsSpan().SequenceEqual(Exr.Decode(data, new ExrDecodeOptions { HalfAsFloat = false }).GetData<Half>()));
-            var oracle = TestUtil.OracleDecode(data, ".all.exr");
+            var oracle = ExrOracle.Decode(data, ".all.exr");
             if (oracle != null) TestUtil.AssertEqual(oracle, Exr.DecodeChannels(data, hd.Channels.Select(c => c.Name).ToArray()));
         }
     }

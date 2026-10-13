@@ -376,7 +376,7 @@ public class ExrStreamRegionTests
         o2.Attributes.Add(ExrAttribute.IdManifest("idmanifest", refManifest));
         var ms2 = new MemoryStream();
         Exr.Encode(img, ms2, o2);
-        var oracle = TestUtil.OracleDecode(ms2.ToArray(), ".exr");
+        var oracle = ExrOracle.Decode(ms2.ToArray(), ".exr");
         if (oracle != null) TestUtil.AssertEqual(oracle, Exr.Decode(ms2.ToArray()));
     }
 

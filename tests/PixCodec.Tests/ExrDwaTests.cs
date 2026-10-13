@@ -71,7 +71,7 @@ public class ExrDwaTests
         Assert.True(rms < 0.002 + level * 2e-4, $"rms {rms}");
         if (level >= 45) Assert.True(data.Length < w * h * 8 * 0.45, $"size {data.Length}");
 
-        var oracle = TestUtil.OracleDecode(data, ".exr");
+        var oracle = ExrOracle.Decode(data, ".exr");
         if (oracle != null) TestUtil.AssertEqual(oracle, back);     // the reference decodes our file to the same bits
     }
 
@@ -115,7 +115,7 @@ public class ExrDwaTests
             var data = ms.ToArray();
             var names = Exr.ReadHeaders(data)[0].Channels.Select(c => c.Name).ToArray();
             var back = Exr.DecodeChannels(data, names);
-            var oracle = TestUtil.OracleDecode(data, ".all.exr");
+            var oracle = ExrOracle.Decode(data, ".all.exr");
             if (oracle != null) TestUtil.AssertEqual(oracle, back);
             Assert.Equal(ids, Exr.DecodeChannels(data, new[] { "id" }).GetData<uint>());
             Assert.Equal(Enumerable.Range(0, w * h).Select(i => f[i * 4]), Exr.DecodeChannels(data, new[] { "Z" }).GetData<float>());
@@ -157,7 +157,7 @@ public class ExrDwaTests
         BinaryPrimitives.WriteInt64LittleEndian(legacy.AsSpan(chunk + 8), version);
 
         TestUtil.AssertEqual(expected, Exr.Decode(legacy));
-        var oracle = TestUtil.OracleDecode(legacy, ".exr");
+        var oracle = ExrOracle.Decode(legacy, ".exr");
         if (oracle != null) TestUtil.AssertEqual(oracle, expected);
     }
 }

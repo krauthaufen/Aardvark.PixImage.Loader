@@ -324,14 +324,17 @@ namespace PixCodec
     /// <para>
     /// Decoding: version 2 scan line and tiled files with all mip / rip levels, multi-part files, deep scan line and
     /// deep tiled parts (as samples, or flattened), HALF / FLOAT / UINT channels, subsampled channels and
-    /// luminance/chroma images, and all compressions: None, RLE, ZIPS, ZIP, PIZ, PXR24, B44, B44A, DWAA and DWAB.
-    /// The decoded image always covers the data window (of the selected level). Every scheme decodes bit exactly
-    /// like the reference library; for DWAA / DWAB that means the reference library's AVX code path (its other
-    /// SIMD variants round a few samples per million differently).
+    /// luminance/chroma images. Compressions: None, RLE, ZIPS, ZIP, PIZ, PXR24, B44, B44A, DWAA, DWAB, ZSTD and - with
+    /// the JPEG 2000 codec - HTJ2K256 / HTJ2K32; the lossy LJ2K is recognised but not decoded. Input is a span or a
+    /// seekable stream (only the chunks that are needed are read, so files above 2 GB work); the result covers the
+    /// data window, the display window or any rectangle (<see cref="ExrDecodeOptions.Region"/>). Every scheme
+    /// decodes bit exactly like the reference library; for DWAA / DWAB that means the reference library's AVX code
+    /// path (its other SIMD variants round a few samples per million differently).
     /// </para>
     /// <para>
-    /// Encoding: scan line and tiled parts (optionally with generated mip / rip levels), multi-part files, every
-    /// compression, subsampled channels and luminance/chroma. Deep data cannot be written.
+    /// Encoding: scan line and tiled parts (optionally with generated mip / rip levels), multi-part files, deep parts
+    /// (levels supplied by the caller), every compression that can be decoded, subsampled channels and
+    /// luminance/chroma. A seekable output is written chunk by chunk; any other stream gets the finished file.
     /// </para>
     /// <para>
     /// Like the rest of the library this codec runs on little-endian hosts only: sample data is copied between the

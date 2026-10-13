@@ -156,7 +156,7 @@ public class ExrEncodeTests
         {
             var img = MakeImage(w, h, ColorModel.Rgba, 4, kind, 3);
             var data = Encode(img, new ExrEncodeOptions { Compression = comp, PixelType = kind == 1 ? ExrPixelType.Float : null });
-            var oracle = TestUtil.OracleDecode(data, ".exr");
+            var oracle = ExrOracle.Decode(data, ".exr");
             if (oracle == null) return;
             TestUtil.AssertEqual(oracle, Exr.Decode(data));
         }
@@ -178,7 +178,7 @@ public class ExrEncodeTests
         var bytes = ms.ToArray();
         var hdr = Exr.ReadHeaders(bytes)[0];
         Assert.Equal(new ExrBox2i(-5, 100, w - 6, h + 99), hdr.DataWindow);
-        var all = TestUtil.OracleDecode(bytes, ".all.exr");
+        var all = ExrOracle.Decode(bytes, ".all.exr");
         if (all == null) return;
         TestUtil.AssertEqual(all, Exr.DecodeChannels(bytes, hdr.Channels.Select(c => c.Name).ToArray()));
         // lossless types really are lossless
@@ -190,7 +190,7 @@ public class ExrEncodeTests
         var u = MakeImage(w, h, ColorModel.Other, 2, 3, 9);
         var ub = Encode(u, new ExrEncodeOptions { Compression = comp, ChannelNames = new[] { "idA", "idB" }, LineOrder = ExrLineOrder.DecreasingY });
         Assert.Equal(ExrLineOrder.DecreasingY, Exr.ReadHeaders(ub)[0].LineOrder);
-        var uo = TestUtil.OracleDecode(ub, ".all.exr");
+        var uo = ExrOracle.Decode(ub, ".all.exr");
         Assert.Equal(SampleType.UInt32, uo!.SampleType);
         TestUtil.AssertEqual(uo, Exr.Decode(ub));
         TestUtil.AssertEqual(u, Exr.Decode(ub));
@@ -204,7 +204,7 @@ public class ExrEncodeTests
             var img = MakeImage(21, 19, color, RawImage.ChannelCount(color), 0, 4);
             var data = Encode(img, new ExrEncodeOptions());
             Assert.Equal(ExrCompression.Zip, Exr.ReadHeaders(data)[0].Compression);
-            var oracle = TestUtil.OracleDecode(data, ".exr");
+            var oracle = ExrOracle.Decode(data, ".exr");
             if (oracle == null) return;
             var back = Exr.Decode(data);
             Assert.Equal(color, back.Color);
@@ -320,7 +320,7 @@ public class ExrEncodeTests
         Assert.Throws<ImageFormatException>(() => h.FindAttribute("myInt")!.AsDouble());
         TestUtil.AssertEqual(img, Exr.Decode(data, new ExrDecodeOptions { HalfAsFloat = false }));
         // the reference library accepts the file including the custom attributes
-        var oracle = TestUtil.OracleDecode(data, ".exr");
+        var oracle = ExrOracle.Decode(data, ".exr");
         if (oracle != null) TestUtil.AssertEqual(oracle, Exr.Decode(data));
 
         opt.Attributes.Add(ExrAttribute.Int("chunkCount", 1));

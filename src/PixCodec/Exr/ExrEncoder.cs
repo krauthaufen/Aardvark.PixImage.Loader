@@ -457,8 +457,8 @@ namespace PixCodec
             var opt = src.Options;
             var deep = src.Deep!;
             var comp = opt.Compression == ExrCompression.Zip ? ExrCompression.Zips : opt.Compression;
-            if (comp != ExrCompression.None && comp != ExrCompression.Rle && comp != ExrCompression.Zips)
-                throw new ImageNotSupportedException($"deep EXR data can only be stored with None, Rle or Zips compression, not {opt.Compression}");
+            if (comp != ExrCompression.None && comp != ExrCompression.Rle && comp != ExrCompression.Zips && comp != ExrCompression.Zstd)
+                throw new ImageNotSupportedException($"deep EXR data can only be stored with None, Rle, Zips or Zstd compression, not {opt.Compression}");
             const int lim = 1 << 30;
             if (opt.DataWindowX <= -lim || opt.DataWindowY <= -lim || (long)opt.DataWindowX + deep.Width >= lim || (long)opt.DataWindowY + deep.Height >= lim)
                 throw new ArgumentException("data window is out of range");
@@ -570,10 +570,12 @@ namespace PixCodec
             }
             if (bytes > int.MaxValue) throw new ImageNotSupportedException("EXR deep chunk is too large");
             var data = new byte[bytes];
+            var rowSamples = new int[ch];
             int o = 0;
             for (int y = 0; y < ch; y++)
             {
                 int firstPixel = (y0 + y) * w + x0, first = deep.SampleOffsets[firstPixel], n = deep.SampleOffsets[firstPixel + cw] - first;
+                rowSamples[y] = n;
                 for (int ci = 0; ci < p.Chans.Length; ci++)
                 {
                     var arr = deep.ChannelData[p.DeepOrder[ci]];
@@ -591,13 +593,27 @@ namespace PixCodec
             }
 
             byte[] packedTable = table, packedData = data;
-            if (p.DeepCompression != ExrCompression.None)
+            if (p.DeepCompression == ExrCompression.Zstd)
+            {
+                packedTable = ExrZstd.EncodeTable(table);
+                if (data.Length > 0)
+                {
+                    ExrZstd.DeepData(default, data, p.Chans, rowSamples, ch, s, false, out var z);
+                    if (z!.Length < data.Length) packedData = z;
+                }
+            }
+            else if (p.DeepCompression != ExrCompression.None)
             {
                 packedTable = ExrCodecs.Encode(p.DeepCompression, table, default, s, p.Options.ZipLevel, 0);
                 if (data.Length > 0) packedData = ExrCodecs.Encode(p.DeepCompression, data, default, s, p.Options.ZipLevel, 0);
             }
             // not smaller (Encode then returns the input), or by coincidence as long as a raw table: store raw
-            if (packedTable.Length >= table.Length || packedTable.Length == nominal)
+            if (p.DeepCompression == ExrCompression.Zstd)
+            {
+                // ZSTD readers take a table of exactly the (clipped) table size as raw
+                if (packedTable.Length >= table.Length) packedTable = table;
+            }
+            else if (packedTable.Length >= table.Length || packedTable.Length == nominal)
             {
                 packedTable = new byte[nominal];
                 table.CopyTo(packedTable, 0);

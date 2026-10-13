@@ -370,6 +370,42 @@ def gen_deep():
             write_ref('%s.part%d.flat.ref' % (path, i), flat)
             if len(parts) == 1 and 'A' in names:
                 check_with_oiio(path, names, file_order, flat)
+    # ZSTD deep data (OpenEXR 3.5): written and read back with the python bindings, which handle deep images since 3.5
+    for name, kind, w, h, seed in (('py_scan_zstd', 'scan', 23, 9, 31), ('py_tile_zstd', 'tile', 21, 13, 32), ('py_scan_zstd_tiny', 'scan', 3, 2, 33)):
+        path = os.path.join(d, name + '.exr')
+        rng = np.random.default_rng(seed)
+        counts = np.where(rng.random((h, w)) < 0.2, 0, rng.integers(1, 6, (h, w)))
+        if 'tiny' in name:
+            counts[:] = 1
+        chans = {n: np.empty((h, w), dtype=object) for n in ('A', 'Z', 'R', 'G', 'B', 'id')}
+        for i in range(h):
+            for j in range(w):
+                n = int(counts[i, j])
+                a = np.where(rng.random(n) < 0.15, 1.0, rng.random(n)).astype(np.float16)
+                chans['A'][i, j] = a
+                chans['Z'][i, j] = (1 + np.cumsum(rng.random(n)) * (1 if rng.random() < 0.7 else -1)).astype(np.float32)
+                for c in 'RGB':
+                    chans[c][i, j] = (rng.random(n) * a.astype(np.float32)).astype(np.float16)
+                chans['id'][i, j] = rng.integers(0, 2**32, n, dtype=np.uint64).astype(np.uint32)
+        hdr = {'compression': X.ZSTD_COMPRESSION, 'type': X.deepscanline if kind == 'scan' else X.deeptile}
+        if kind == 'tile':
+            hdr['tiles'] = tiles(8, 5)
+        X.File(hdr, chans).write(path)
+        got = X.File(path, separate_channels=True).parts[0].channels
+        names = sorted(got.keys(), key=lambda n: n.encode())
+        px = {n: [[got[n].pixels[i, j] if got[n].pixels[i, j] is not None else np.zeros(0, np.float32) for j in range(w)] for i in range(h)]
+              for n in names}       # pixels without samples come back as None
+        dump = path + '.part0.deep'
+        with open(dump, 'wb') as f:
+            cnt = np.array([[len(px['Z'][i][j]) for j in range(w)] for i in range(h)], np.uint32)
+            assert np.array_equal(cnt, counts)
+            f.write(b'PXDP' + struct.pack('<4i', w, h, len(names), int(cnt.sum())) + cnt.tobytes())
+            for n in names:
+                is_uint = n == 'id'
+                flat = np.concatenate([px[n][i][j].astype(np.uint32 if is_uint else np.float32) for i in range(h) for j in range(w)])
+                f.write(n.encode() + b'\0' + bytes([0 if is_uint else 2]) + flat.astype(np.uint32 if is_uint else np.float32).tobytes())
+        write_ref(path + '.part0.fileorder.ref', flatten(dump, names, False, False))
+        write_ref(path + '.part0.flat.ref', flatten(dump, names, True, True))
     # deep tiled parts with all mip / rip levels: the samples of every level
     for name, args in (('tilemip_plain_zips', ('tilemip', 21, 13, 'zips', 'plain', 11)), ('tilerip_zback_rle', ('tilerip', 11, 6, 'rle', 'zback', 12)),
                        ('tilemip_overlap_none', ('tilemip', 9, 16, 'none', 'overlap', 13))):

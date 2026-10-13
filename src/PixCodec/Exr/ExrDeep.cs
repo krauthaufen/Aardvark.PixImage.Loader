@@ -337,7 +337,8 @@ namespace PixCodec
                 var table = input.Read(c.pos, (int)c.packedTable, s, 4);
                 if (c.rawTable) return table.Slice(0, tableSize);
                 var buf = s.Bytes(2, tableSize).AsSpan(0, tableSize);
-                ExrCodecs.DecodeBytes(comp, table, buf, s);
+                if (comp == ExrCompression.Zstd) ExrZstd.DecodeTable(table, buf, s);
+                else ExrCodecs.DecodeBytes(comp, table, buf, s);
                 return buf;
             }
 
@@ -375,9 +376,10 @@ namespace PixCodec
                 long unpackedData = BinaryPrimitives.ReadInt64LittleEndian(hd.Slice(16));
                 pos += hdrSize;
                 // The table has one entry per pixel of the chunk. It is stored raw when its packed size is that of a full
-                // (not clipped) tile, which is what the reference writer does even for the narrower tiles at the edges.
+                // (not clipped) tile, which is what the reference writer does even for the narrower tiles at the edges;
+                // with ZSTD (a newer writer) a raw table has the size of the clipped tile.
                 long tableSize = (long)cw * ch * 4, nominal = tiled ? (long)part.TileWidth * part.TileHeight * 4 : tableSize;
-                bool rawTable = packedTable == nominal || (comp == ExrCompression.None && packedTable == tableSize);
+                bool rawTable = packedTable == nominal || ((comp == ExrCompression.None || comp == ExrCompression.Zstd) && packedTable == tableSize);
                 if (packedTable < 0 || packedData < 0 || unpackedData < 0 || packedTable > input.Length - pos || packedData > input.Length - pos - packedTable
                     || packedTable > nominal || packedData > unpackedData || tableSize > int.MaxValue || unpackedData > int.MaxValue
                     || (comp == ExrCompression.None && (!rawTable || packedData != unpackedData))
@@ -442,7 +444,8 @@ namespace PixCodec
                 if (c.packedData != c.unpackedData)
                 {
                     var buf = s.Bytes(1, (int)c.unpackedData).AsSpan(0, (int)c.unpackedData);
-                    ExrCodecs.DecodeBytes(comp, raw, buf, s);
+                    if (comp == ExrCompression.Zstd) ExrZstd.DeepData(raw, buf, chans, rowTotal, c.ch, s, true, out _);
+                    else ExrCodecs.DecodeBytes(comp, raw, buf, s);
                     raw = buf;
                 }
                 int p = 0;

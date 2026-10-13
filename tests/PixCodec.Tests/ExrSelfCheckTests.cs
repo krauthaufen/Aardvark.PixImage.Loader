@@ -160,6 +160,9 @@ public class ExrSelfCheckTests
         new object[] { "deep_tile_rle.exr", ExrCompression.Rle, 8, 5, 21, 13, true },
         new object[] { "deep_tile_none.exr", ExrCompression.None, 8, 5, 13, 9, false },     // raw tables of clipped edge tiles
         new object[] { "deep_tile_zips.exr", ExrCompression.Zips, 16, 16, 10, 12, false },   // one tile larger than the image
+        // ZSTD (OpenEXR 3.5): beyond the C++ helper's library; verified through the python bindings instead
+        new object[] { "", ExrCompression.Zstd, 0, 0, 23, 9, true },
+        new object[] { "", ExrCompression.Zstd, 8, 5, 21, 13, false },
     };
 
     [Theory]
@@ -170,6 +173,36 @@ public class ExrSelfCheckTests
         var ms = new MemoryStream();
         Exr.EncodeDeep(deep, ms, new ExrEncodeOptions { Compression = comp, TileWidth = tileW, TileHeight = tileH, DataWindowX = -3, DataWindowY = 2, DisplayWindow = new ExrBox2i(0, 0, 30, 20) });
         var fresh = ms.ToArray();
+        if (name.Length == 0)
+        {
+            if (Writing) return;
+            // no committed file: our reader gets everything back, and the reference bindings read the same samples
+            var mine = Exr.DecodeDeep(fresh);
+            Assert.Equal(deep.SampleCounts, mine.SampleCounts);
+            foreach (var n in deep.ChannelNames)
+            {
+                int k = deep.ChannelNames.ToList().IndexOf(n);
+                if (deep.ChannelData[k] is uint[] u) Assert.Equal(u, mine.GetUIntChannel(n));
+                else Assert.Equal((float[])deep.ChannelData[k], mine.GetFloatChannel(n));
+            }
+            var summary = ExrOracle.Decode(fresh, ".deep.exr");
+            if (summary == null) return;
+            var sd = summary.GetData<double>();
+            var names = mine.ChannelNames;        // file order, as in the summary
+            Assert.Equal((w, h, 1 + names.Count), (summary.Width, summary.Height, summary.Channels));
+            for (int p = 0; p < w * h; p++)
+            {
+                Assert.Equal(mine.SampleCounts[p], (int)sd[p * summary.Channels]);
+                for (int k = 0; k < names.Count; k++)
+                {
+                    double sum = 0;
+                    for (int j = 0; j < mine.SampleCounts[p]; j++)
+                        sum += (mine.ChannelData[k] is uint[] u ? u[mine.SampleOffsets[p] + j] : (double)((float[])mine.ChannelData[k])[mine.SampleOffsets[p] + j]) * (j + 1);
+                    Assert.Equal(sum, sd[p * summary.Channels + 1 + k], 6);
+                }
+            }
+            return;
+        }
         var committed = Check(name, fresh, comp);
         if (Writing) return;
 
