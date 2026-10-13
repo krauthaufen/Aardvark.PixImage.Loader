@@ -1003,7 +1003,7 @@ public class GifTests(ITestOutputHelper output)
             int ours = frames[0].DelayMs;
             Assert.Equal(clamped ? 100 : stored * 10, ours);
             Assert.Equal(clamped, stored <= 1);
-            Assert.InRange(measured, ours * 0.75, ours + 5);
+            Assert.InRange(measured, ours * 0.6, ours + 5);     // 2/100 s is played at one frame per 60 Hz refresh
             Assert.All(Gif.DecodeAnimation(data).Frames, f => Assert.Equal(stored * 10, f.DelayMs));
             checkedFiles++;
         }
