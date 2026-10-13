@@ -39,7 +39,7 @@ namespace PixCodec.Compression
             8, 16, 96, 40,
             8, 16, 128, 80,
             16, 64, 258, 256,
-            32, 258, 258, 1500,
+            32, 258, 258, 600,
         };
 
         static readonly ushort[] LenBase = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
@@ -546,6 +546,61 @@ namespace PixCodec.Compression
         }
 
         /// <summary>
+        /// Level 1: one probe per position, no chains, no lazy evaluation; only the start of a match is indexed.
+        /// </summary>
+        void ParseFast(byte* window, int end, bool flush)
+        {
+            int limit = flush ? end : end - MinLookahead;
+            int p = pos;
+            int hashShift = 32 - hashBits;
+            int count = symCount;
+            int hashEnd = end - 7;
+            int anchor = p; // end of the last match: the further away, the bigger the steps
+            fixed (int* hd = head)
+            fixed (uint* sy = syms, lf = litFreq, df = distFreq)
+            fixed (byte* lenCode = LenCode, lc = litCost, nc = lenCost, dc = distCost)
+            {
+                while (p < limit)
+                {
+                    if (count >= SymLimit || count - checkSym >= SplitCheck)
+                    {
+                        symCount = count;
+                        if (count >= SymLimit) EmitBlock(window, count, p, false);
+                        else CheckSplit(window, p);
+                        count = symCount;
+                    }
+                    if (p >= hashEnd)
+                    {
+                        sy[count++] = window[p]; lf[window[p]]++; p++;
+                        continue;
+                    }
+                    uint h = Hash(window + p, hashShift);
+                    int cand = hd[h];
+                    hd[h] = p;
+                    if ((uint)(p - cand) < WindowSize && Unsafe.ReadUnaligned<uint>(window + cand) == Unsafe.ReadUnaligned<uint>(window + p))
+                    {
+                        int len = Extend(window + cand, window + p, 4, Math.Min(258, end - p));
+                        int dist = p - cand;
+                        if (len > CostMaxLen || Worth(window + p, len, dist, lc, nc, dc))
+                        {
+                            sy[count++] = 0x80000000u | (uint)dist << 8 | (uint)(len - 3);
+                            lf[257 + lenCode[len - 3]]++; df[DistCode(dist)]++;
+                            p += len;
+                            anchor = p;
+                            if (p - 1 < hashEnd) hd[Hash(window + p - 1, hashShift)] = p - 1;
+                            continue;
+                        }
+                    }
+                    int step = Math.Min(1 + ((p - anchor) >> 5), 16);
+                    int stop = Math.Min(p + step, limit);
+                    do { sy[count++] = window[p]; lf[window[p]]++; p++; } while (p < stop);
+                }
+            }
+            symCount = count;
+            pos = p;
+        }
+
+        /// <summary>
         /// Parses window[pos, end) into symbols, writing blocks as they fill up. Positions before pos back to
         /// 32 KiB are the history. Unless <paramref name="flush"/> is set, the last few hundred bytes are left for
         /// the next call so that matches can run into data that has not arrived yet.
@@ -553,6 +608,7 @@ namespace PixCodec.Compression
         public void Parse(byte* window, int end, bool flush)
         {
             if (level == 0) { pos = end; return; }
+            if (level == 1) { ParseFast(window, end, flush); return; }
             int limit = flush ? end : end - MinLookahead;
             int p = pos;
             int hashShift = 32 - hashBits;
