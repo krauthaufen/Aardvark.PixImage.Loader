@@ -225,12 +225,30 @@ namespace PixCodec
     internal static class TiffForeignCodecs
     {
         /// <summary>
+        /// Decodes one LERC blob of width x height pixels into interleaved native samples (channels per pixel in
+        /// <paramref name="destination"/>; the blob may hold fewer). Blob channel = band * depth + index.
+        /// <paramref name="masks"/> (channels * width * height bytes) receives 1 = valid, band after band, for as many
+        /// bands as the blob has masks: one (shared by all bands) or one per band.
+        /// </summary>
+        public static void LercDecode(ReadOnlySpan<byte> blob, SampleType type, int width, int height, Span<byte> destination, int channels,
+            Span<byte> masks, out int bands, out int depth, out int maskCount)
+            => throw new ImageNotSupportedException("TIFF: LERC decoding is not available yet");
+
+        /// <summary>
+        /// Encodes interleaved native samples (channel = band * depth + index) as one LERC2 blob. <paramref name="masks"/>:
+        /// empty (all valid), width * height bytes (one mask for all bands) or bands * width * height, 1 = valid.
+        /// </summary>
+        public static void LercEncode(ReadOnlySpan<byte> samples, SampleType type, int width, int height, int depth, int bands,
+            ReadOnlySpan<byte> masks, double maxError, Stream output)
+            => throw new ImageNotSupportedException("TIFF: LERC encoding is not available yet");
+
+        /// <summary>
         /// Encodes width x height pixels of <paramref name="samples"/> interleaved native samples as one strip / tile.
         /// <paramref name="rgb"/>: the first three samples are RGB (JPEG 2000 then uses its reversible colour transform).
         /// </summary>
         public static void Encode(int compression, byte[] pixels, int width, int height, int samples, SampleType type, bool rgb, TiffEncodeOptions options, Stream output)
         {
-            if (compression != 34712) throw new ImageNotSupportedException("TIFF: LERC encoding is not available yet");
+            if (compression != 34712) throw new ArgumentException("unknown compression");
             int bps = RawImage.BytesPerSample(type);
             bool signed = type is SampleType.Int8 or SampleType.Int16;
             var planes = new J2kPlanes { Width = width, Height = height, Planes = new J2kPlane[samples] };

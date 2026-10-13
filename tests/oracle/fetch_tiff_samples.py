@@ -15,6 +15,12 @@ log encodings. `.tol` = allowed difference per sample, `.mean` = allowed mean di
 With --aperio it also fetches JP2K-33003-1.svs (64 MB, CC0) from the OpenSlide test data: an Aperio slide whose tiles
 are JPEG 2000 codestreams with YCbCr 4:2:2 components (compression 33003), for TiffTests.AperioJpeg2000Sample.
 References: tifffile + OpenJPEG (which converts the subsampled YCbCr to RGB), for directory 3 and a region of directory 2.
+
+With --gdal it fetches the GDAL 3.11.0 autotest archive (18 MB, download.osgeo.org) and unpacks the 363 TIFF files of
+gcore/data into tests/fixtures/_tmp/gdal-samples, for TiffTests.GdalAutotestSamples: files GDAL itself writes (LERC
+with all its variants and masks, ZSTD, LZMA, WebP, JPEG, sparse and cloud optimized layouts, complex and odd sample
+types) and its collection of broken files. References: the installed GDAL (rasterio), stored samples band by band.
+Files where GDAL interprets the samples differently from PixCodec's raw decoding get no reference (see GDAL_SKIP).
 """
 import hashlib
 import io
@@ -40,6 +46,23 @@ SHA256 = 'e0e34732b61e1ce49eff2c7a079994c856d2a5f772f5228c84678272bc6829a9'
 SVS_URL = 'https://openslide.cs.cmu.edu/download/openslide-testdata/Aperio/JP2K-33003-1.svs'
 SVS_SHA256 = '6205ccf75a8fa6c32df7c5c04b7377398971a490fb6b320d50d91f7ba6a0e6fd'
 SVS_REGION = (1024, 768, 700, 500)   # x, y, width, height in directory 2
+GDAL_URL = 'https://download.osgeo.org/gdal/3.11.0/gdalautotest-3.11.0.tar.gz'
+GDAL_SHA256 = '121cc8c0e4b1223f511b0e0ed0fd9706d55656e5b15e75cdf5d5d36913f26c45'
+# files GDAL reads, but not as the samples PixCodec returns with ConvertToRgb = false and BitScaling = None
+GDAL_SKIP = {
+    'bug4468.tif': 'associated alpha: PixCodec un-premultiplies',
+    'cielab.tif': 'GDAL converts Lab to RGBA',
+    'rgbsmall_cmyk.tif': 'GDAL converts CMYK to RGBA',
+    'slim_g4.tif': 'palette: GDAL returns indices',
+    'test_average_palette.tif': 'palette: GDAL returns indices',
+    'vrtmisc16_tile1.tif': 'palette: GDAL returns indices',
+    'vrtmisc16_tile2.tif': 'palette: GDAL returns indices',
+    'uint16_sgilog.tif': 'GDAL returns the 16-bit log values, PixCodec linear floats',
+    'int24.tif': 'signed 24-bit samples: GDAL returns them as UInt32 without sign extension',
+    'zackthecat.tif': 'old-style JPEG: libtiff upsamples the chroma differently (see the libtiff samples)',
+    'size_of_stripbytecount_at_1_and_lower_than_stripcount.tif': 'too few StripByteCounts: GDAL reads the strips without one as empty, PixCodec recovers them',
+    'size_of_stripbytecount_lower_than_stripcount.tif': 'too few StripByteCounts: GDAL reads the strips without one as empty, PixCodec recovers them',
+}
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fixtures', '_tmp', 'tiff-samples')
 
 
@@ -70,10 +93,66 @@ def aperio():
     print('JP2K-33003-1.svs   tifffile (OpenJPEG)')
 
 
+def gdal():
+    import logging
+    import rasterio
+    import tifffile
+    logging.disable(logging.CRITICAL)
+    out = os.path.join(OUT, '..', 'gdal-samples')
+    os.makedirs(out, exist_ok=True)
+    data = urllib.request.urlopen(GDAL_URL, timeout=600).read()
+    assert hashlib.sha256(data).hexdigest() == GDAL_SHA256, 'unexpected archive content'
+    names = []
+    with tarfile.open(fileobj=io.BytesIO(data)) as t:
+        for m in t.getmembers():
+            parts = m.name.split('/')
+            if m.isfile() and m.name.endswith('.tif') and parts[1:3] == ['gcore', 'data'] and (len(parts) == 4 or parts[3] == 'gtiff'):
+                name = '_'.join(parts[3:])
+                with open(os.path.join(out, name), 'wb') as f:
+                    f.write(t.extractfile(m).read())
+                names.append(name)
+    written = 0
+    for name in sorted(names):
+        path = os.path.join(out, name)
+        if os.path.exists(path + '.ref'):
+            os.remove(path + '.ref')
+        if name in GDAL_SKIP:
+            continue
+        try:
+            with tifffile.TiffFile(path) as t:
+                pg = t.pages[0]
+                pm, bits, fmt = int(pg.photometric) if 262 in pg.tags else 1, pg.bitspersample, int(pg.sampleformat)
+            with rasterio.open(path) as ds:
+                a = ds.read()
+        except Exception:
+            continue    # GDAL does not read it (most of these are its broken-file tests)
+        if a.dtype.kind == 'c':
+            # complex samples: real and imaginary part as two channels
+            # (numpy has no complex integers; the TIFF tags say what the parts are)
+            part = (np.int16 if bits == 32 else np.int32) if fmt == 5 else (np.float32 if bits == 64 else np.float64)
+            a = np.stack([a.real, a.imag], -1)
+            a = np.moveaxis(a, 0, 2).reshape(a.shape[1], a.shape[2], -1).astype(part)
+        else:
+            a = np.moveaxis(a, 0, -1)
+        if a.size == 0 or a.size > 50_000_000:
+            continue
+        if pm == 0 and a.dtype.kind == 'u':
+            # MinIsWhite: PixCodec inverts the colour sample of unsigned data, GDAL returns it as stored
+            a = a.copy()
+            a[..., 0] = ((1 << bits) - 1) - a[..., 0]
+        write_ref(path + '.ref', np.ascontiguousarray(a))
+        written += 1
+    print(f'{len(names)} GDAL autotest files, {written} with a reference from GDAL {rasterio.__gdal_version__}')
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     if '--aperio' in sys.argv:
         aperio()
+    if '--gdal' in sys.argv:
+        gdal()
+    if '--aperio' in sys.argv or '--gdal' in sys.argv:
+        return
     data = urllib.request.urlopen(URL, timeout=120).read()
     assert hashlib.sha256(data).hexdigest() == SHA256, 'unexpected archive content'
     with tarfile.open(fileobj=io.BytesIO(data)) as t:
