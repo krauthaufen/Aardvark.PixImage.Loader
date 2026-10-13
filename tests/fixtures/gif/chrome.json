@@ -1,0 +1,1766 @@
+{
+ "_chromium": "Chrome/151.0.7922.173",
+ "ff_mandelbrot_palette.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   40,
+   30
+  ],
+  "durationsMs": [
+   250,
+   250,
+   250,
+   250
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "ff_still.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   45,
+   34
+  ],
+  "durationsMs": [
+   40
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "ff_testsrc.gif": {
+  "source": "chromium",
+  "frames": 6,
+  "size": [
+   48,
+   36
+  ],
+  "durationsMs": [
+   200,
+   200,
+   200,
+   200,
+   200,
+   200
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_1x1.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   1,
+   1
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_1x1_gif87a.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   1,
+   1
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_all_transparent.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   5,
+   4
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_40_frames.gif": {
+  "source": "chromium",
+  "frames": 40,
+  "size": [
+   12,
+   10
+  ],
+  "durationsMs": [
+   10,
+   0,
+   10,
+   20,
+   30,
+   40,
+   50,
+   60,
+   70,
+   80,
+   90,
+   100,
+   110,
+   120,
+   130,
+   140,
+   150,
+   160,
+   170,
+   180,
+   190,
+   200,
+   210,
+   220,
+   230,
+   240,
+   250,
+   260,
+   270,
+   280,
+   290,
+   300,
+   310,
+   320,
+   330,
+   340,
+   350,
+   360,
+   370,
+   380
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal0.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120,
+   130
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal0_transparent.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120,
+   130
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal1.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120,
+   130
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal1_transparent.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120,
+   130
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal2.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120,
+   130
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal2_transparent.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120,
+   130
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal3.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120,
+   130
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal3_transparent.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120,
+   130
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal4.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120
+  ],
+  "repetitions": 0,
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal7.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120
+  ],
+  "repetitions": 0,
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal_mixed.gif": {
+  "source": "chromium",
+  "frames": 8,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120,
+   130,
+   140,
+   150,
+   160
+  ],
+  "repetitions": 1,
+  "previousReference": "identical"
+ },
+ "hand_anim_disposal_mixed_interlaced.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   100,
+   100,
+   110,
+   120,
+   130
+  ],
+  "repetitions": 0,
+  "previousReference": "identical"
+ },
+ "hand_anim_first_beyond_screen.gif": {
+  "source": "chromium",
+  "frames": 3,
+  "size": [
+   15,
+   11
+  ],
+  "durationsMs": [
+   30,
+   30,
+   30
+  ],
+  "repetitions": 0,
+  "previousReference": "differed: size 10x8 -> 15x11"
+ },
+ "hand_anim_gif87a.gif": {
+  "source": "chromium",
+  "frames": 3,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   0,
+   0,
+   0
+  ],
+  "repetitions": 0,
+  "previousReference": "identical"
+ },
+ "hand_anim_local_palettes_clipped.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   20,
+   20,
+   20,
+   20
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_anim_small_first.gif": {
+  "source": "chromium",
+  "frames": 3,
+  "size": [
+   24,
+   16
+  ],
+  "durationsMs": [
+   50,
+   50,
+   50
+  ],
+  "repetitions": 0,
+  "previousReference": "identical"
+ },
+ "hand_background_index.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   9,
+   9
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_block_size_1.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   20,
+   11
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_block_size_7.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   20,
+   11
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_clear_when_full.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   100,
+   80
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_comment_after_image.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   10
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_deferred_clear.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   100,
+   80
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_extension_between_gce_and_image.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   10
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_extensions.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   10
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_frame_beyond_interlaced.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   15,
+   13
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "differed: size 10x8 -> 15x13"
+ },
+ "hand_frame_beyond_screen.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   15,
+   11
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "differed: size 10x8 -> 15x11"
+ },
+ "hand_frame_larger_than_screen.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   11,
+   9
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "differed: size 6x5 -> 11x9"
+ },
+ "hand_frame_outside_screen.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   23,
+   33
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "differed: size 10x8 -> 23x33"
+ },
+ "hand_gce_no_transparency.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   10
+  ],
+  "durationsMs": [
+   90
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_gif87a.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   13,
+   7
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_icc_profile.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   10
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_index_beyond_palette.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   11,
+   6
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_junk_after_trailer.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_local_overrides_global.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   11,
+   6
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_local_palette_only.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   11,
+   6
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_long_runs.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   60,
+   40
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_loop_65535.gif": {
+  "source": "chromium",
+  "frames": 2,
+  "size": [
+   14,
+   10
+  ],
+  "durationsMs": [
+   30,
+   40
+  ],
+  "repetitions": 65535,
+  "previousReference": "identical"
+ },
+ "hand_loop_animexts.gif": {
+  "source": "chromium",
+  "frames": 2,
+  "size": [
+   14,
+   10
+  ],
+  "durationsMs": [
+   30,
+   40
+  ],
+  "repetitions": 7,
+  "previousReference": "identical"
+ },
+ "hand_mincode1.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   9
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_mincode2.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   37,
+   29
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_mincode2_2colors.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   9
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_mincode3.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   37,
+   29
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_mincode3_4colors.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   9
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_mincode4.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   37,
+   29
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_mincode5.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   37,
+   29
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_mincode6.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   37,
+   29
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_mincode7.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   37,
+   29
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_mincode8.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   37,
+   29
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_mincode8_2colors.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   9
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_no_end_code.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_no_initial_clear.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   20,
+   11
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_no_palette.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   11,
+   6
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_no_trailer.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_palette_256_local.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   32,
+   16
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_palette_3_entries.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   9,
+   9
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_partial_frame.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   10
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_partial_interlaced.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   12
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_repeated_clears.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   20,
+   11
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_screen_0x0.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   7,
+   5
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_short_frame.gif": {
+  "source": "gen_gif.py",
+  "chromium": "cannot decode: EncodingError: Failed to decode frame at index 0 (frame 0 of 1)"
+ },
+ "hand_short_frame_interlaced.gif": {
+  "source": "gen_gif.py",
+  "chromium": "cannot decode: EncodingError: Failed to decode frame at index 0 (frame 0 of 1)"
+ },
+ "hand_solid_big.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   200,
+   150
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_surplus_pixels.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_transparent.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   14,
+   10
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_transparent_beyond_palette.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   11,
+   6
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_truncated_data.gif": {
+  "source": "chromium, as an unfinished download",
+  "frames": 1,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_truncated_interlaced.gif": {
+  "source": "chromium, as an unfinished download",
+  "frames": 1,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_truncated_interlaced_second_150.gif": {
+  "source": "chromium, as an unfinished download",
+  "frames": 2,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   20,
+   20
+  ],
+  "repetitions": 0,
+  "previousReference": "identical"
+ },
+ "hand_truncated_interlaced_second_40.gif": {
+  "source": "chromium, as an unfinished download",
+  "frames": 2,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   20,
+   20
+  ],
+  "repetitions": 0,
+  "previousReference": "differed: frames 1"
+ },
+ "hand_truncated_interlaced_second_90.gif": {
+  "source": "chromium, as an unfinished download",
+  "frames": 2,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   20,
+   20
+  ],
+  "repetitions": 0,
+  "previousReference": "identical"
+ },
+ "hand_truncated_interlaced_transparent.gif": {
+  "source": "chromium, as an unfinished download",
+  "frames": 1,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_truncated_second_header.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   50
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_truncated_subblock.gif": {
+  "source": "chromium, as an unfinished download",
+  "frames": 1,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_truncated_transparent.gif": {
+  "source": "chromium, as an unfinished download",
+  "frames": 1,
+  "size": [
+   16,
+   12
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "im_256.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   45,
+   34
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "im_7colors.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   45,
+   34
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "im_anim.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   36,
+   26
+  ],
+  "durationsMs": [
+   70,
+   70,
+   70,
+   70,
+   70
+  ],
+  "repetitions": 1,
+  "previousReference": "identical"
+ },
+ "im_anim_dispose_bg.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   36,
+   26
+  ],
+  "durationsMs": [
+   50,
+   50,
+   50,
+   50,
+   50
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "im_anim_dispose_prev.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   36,
+   26
+  ],
+  "durationsMs": [
+   50,
+   50,
+   50,
+   50,
+   50
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "im_anim_optframe.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   36,
+   26
+  ],
+  "durationsMs": [
+   70,
+   70,
+   70,
+   70,
+   70
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "im_anim_opttrans.gif": {
+  "source": "chromium",
+  "frames": 5,
+  "size": [
+   36,
+   26
+  ],
+  "durationsMs": [
+   120,
+   120,
+   120,
+   120,
+   120
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "im_gray5.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   45,
+   34
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "im_interlaced.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   45,
+   34
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "im_transparent.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   37,
+   25
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_1x1.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   1,
+   1
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_anim_disposal0.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   32,
+   24
+  ],
+  "durationsMs": [
+   30,
+   70,
+   110,
+   200
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_anim_disposal1.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   32,
+   24
+  ],
+  "durationsMs": [
+   30,
+   70,
+   110,
+   200
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_anim_disposal2.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   32,
+   24
+  ],
+  "durationsMs": [
+   30,
+   70,
+   110,
+   200
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_anim_disposal3.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   32,
+   24
+  ],
+  "durationsMs": [
+   30,
+   70,
+   110,
+   200
+  ],
+  "repetitions": "infinite",
+  "previousReference": "differed: frames 2,3"
+ },
+ "pil_anim_local_palettes.gif": {
+  "source": "chromium",
+  "frames": 3,
+  "size": [
+   27,
+   18
+  ],
+  "durationsMs": [
+   40,
+   40,
+   40
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_anim_loop3.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   32,
+   24
+  ],
+  "durationsMs": [
+   50,
+   50,
+   50,
+   50
+  ],
+  "repetitions": 3,
+  "previousReference": "identical"
+ },
+ "pil_anim_noloop.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   32,
+   24
+  ],
+  "durationsMs": [
+   50,
+   50,
+   50,
+   50
+  ],
+  "repetitions": 0,
+  "previousReference": "identical"
+ },
+ "pil_anim_transparent_d1.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   30,
+   20
+  ],
+  "durationsMs": [
+   60,
+   60,
+   60,
+   60
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_anim_transparent_d2.gif": {
+  "source": "chromium",
+  "frames": 4,
+  "size": [
+   30,
+   20
+  ],
+  "durationsMs": [
+   60,
+   60,
+   60,
+   60
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_bilevel.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   9,
+   5
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_comment.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   31,
+   23
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_gray.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   23,
+   19
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_interlaced_h1.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   6,
+   1
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_interlaced_h2.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   6,
+   2
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_interlaced_h3.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   6,
+   3
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_interlaced_h4.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   6,
+   4
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_interlaced_h5.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   6,
+   5
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_interlaced_h7.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   6,
+   7
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_interlaced_h8.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   6,
+   8
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_interlaced_h9.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   6,
+   9
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_pal16.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   40,
+   31
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_pal16_interlaced.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   40,
+   31
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_pal2.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   33,
+   21
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_pal256.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   61,
+   47
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_pal256_interlaced.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   61,
+   47
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_pal2_interlaced.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   33,
+   21
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_pal4.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   17,
+   9
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_pal4_interlaced.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   17,
+   9
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_rgba.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   29,
+   22
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_tall.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   3,
+   300
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_transparent.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   31,
+   23
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_transparent_interlaced.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   31,
+   23
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "pil_wide.gif": {
+  "source": "chromium",
+  "frames": 1,
+  "size": [
+   300,
+   3
+  ],
+  "durationsMs": [
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ }
+}
