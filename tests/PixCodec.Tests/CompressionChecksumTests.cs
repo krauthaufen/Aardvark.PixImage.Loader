@@ -92,6 +92,35 @@ public class CompressionChecksumTests
             }
     }
 
+    /// <summary>
+    /// Whatever hardware path this machine selects (PCLMULQDQ, ARMv8 CRC32, AVX2, NEON / SSE2 through Vector128):
+    /// it must agree with the scalar code on random data of many lengths, alignments and starting values.
+    /// </summary>
+    [Fact]
+    public void HardwarePathsAgreeWithScalar()
+    {
+        var rnd = new Random(2026);
+        var buffer = new byte[70_000];
+        for (int it = 0; it < 3000; it++)
+        {
+            rnd.NextBytes(buffer.AsSpan(0, 512));
+            if (it % 50 == 0) rnd.NextBytes(buffer);
+            if (it % 97 == 0) buffer.AsSpan().Fill(0xFF);
+            int offset = rnd.Next(0, 64);
+            int length = it % 50 == 0 ? rnd.Next(0, buffer.Length - offset) : rnd.Next(0, 400);
+            var d = buffer.AsSpan(offset, length);
+            uint seed = (uint)rnd.NextInt64();
+            uint aseed = (uint)(rnd.Next(65521) << 16 | rnd.Next(65521));
+            uint crc = Checksums.Crc32Scalar(d, seed), adler = Checksums.Adler32Scalar(d, aseed);
+            Assert.Equal(crc, Checksums.Crc32(d, seed));
+            Assert.Equal(adler, Checksums.Adler32(d, aseed));
+            if (System.Runtime.Intrinsics.Arm.Crc32.Arm64.IsSupported) Assert.Equal(crc, Checksums.Crc32Arm(d, seed));
+            if (Pclmulqdq.IsSupported && Sse41.IsSupported) Assert.Equal(crc, Checksums.Crc32Pclmul(d, seed));
+            if (Vector128.IsHardwareAccelerated) Assert.Equal(adler, Checksums.Adler32Vector128(d, aseed));
+            if (Avx2.IsSupported) Assert.Equal(adler, Checksums.Adler32Avx2(d, aseed));
+        }
+    }
+
     [Fact]
     public void ChecksumsAreIncremental()
     {

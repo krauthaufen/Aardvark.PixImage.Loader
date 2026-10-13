@@ -144,7 +144,12 @@ namespace PixCodec.Compression
 
         static void Put(ref byte[] output, ref int length, ReadOnlySpan<byte> bytes)
         {
-            if (length + bytes.Length > output.Length) Array.Resize(ref output, Math.Max(output.Length * 2, length + bytes.Length));
+            if ((long)length + bytes.Length > output.Length)
+            {
+                long want = Math.Min(Math.Max((long)output.Length * 2, (long)length + bytes.Length), Array.MaxLength);
+                if (want < (long)length + bytes.Length) throw new System.IO.IOException("compressed output too large");
+                Array.Resize(ref output, (int)want);
+            }
             bytes.CopyTo(output.AsSpan(length));
             length += bytes.Length;
         }

@@ -269,6 +269,24 @@ public class CompressionDecodeTests
         Assert.Throws<ImageNotSupportedException>(() => Xz.Decompress(z));
     }
 
+    /// <summary>Check ids nobody has defined yet have a fixed size by the format; such a check is skipped, not an error.</summary>
+    [Fact]
+    public void XzUnknownCheckIdIsSkipped()
+    {
+        foreach (var (file, newId) in new[] { ("text__crc32.xz", 2), ("text__crc32.xz", 3), ("text__p6.xz", 5), ("text__p6.xz", 6), ("text__sha256.xz", 11), ("text__sha256.xz", 12) })
+        {
+            var z = Load(file);
+            // stream flags sit in the header (bytes 6..7, CRC at 8) and in the footer (bytes -4..-3, CRC over the 6 bytes before the magic)
+            z[7] = (byte)newId;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(z.AsSpan(8), Zlib.Crc32(z.AsSpan(6, 2)));
+            z[^3] = (byte)newId;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(z.AsSpan(z.Length - 12), Zlib.Crc32(z.AsSpan(z.Length - 8, 6)));
+            Assert.True(Expected(file).AsSpan().SequenceEqual(Xz.Decompress(z)), $"{file} with check id {newId}");
+            // the bytes of an unknown check cannot be verified
+            z[^30] ^= 0xFF;
+        }
+    }
+
     /// <summary>The BCJ fixtures only prove something if every filter really converts instructions in that data.</summary>
     [Fact]
     public void BcjFiltersAllChangeTheTestData()

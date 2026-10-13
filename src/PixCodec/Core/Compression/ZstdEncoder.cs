@@ -866,9 +866,9 @@ namespace PixCodec.Compression
 
         byte[] Run(ReadOnlySpan<byte> source, int level, bool checksum)
         {
+            // the output grows as needed: compressible input near 2 GB must not need a 2 GB buffer up front
             long bound = 18L + source.Length + 3L * (source.Length / BlockSize + 1) + 4;
-            if (bound > Array.MaxLength) throw new ArgumentException("input too large", nameof(source));
-            var output = new byte[bound];
+            var output = new byte[Math.Min(bound, Math.Max(source.Length / 2 + 4096, 4 * BlockSize))];
             int o = 0;
             BinaryPrimitives.WriteUInt32LittleEndian(output, 0xFD2FB528);
             o = 4;
@@ -912,12 +912,20 @@ namespace PixCodec.Compression
             }
             litCost.AsSpan().Fill(8);
             rep = 1; rep0 = 1; rep1 = 4; rep2 = 8;
-            fixed (byte* src = source, wk = work, dst = output)
+            fixed (byte* src = source, wk = work)
             {
                 int pos = 0;
                 do
                 {
                     int n = Math.Min(BlockSize, source.Length - pos);
+                    if (output.Length - o < n + 16)
+                    {
+                        long want = Math.Min(Math.Max((long)output.Length * 2, (long)o + n + 16), Array.MaxLength);
+                        if (want - o < n + 16) throw new System.IO.IOException("compressed output too large");
+                        Array.Resize(ref output, (int)want);
+                    }
+                    fixed (byte* dst = output)
+                    {
                     bool last = pos + n == source.Length;
                     int type, size, payload;
                     bool same = n > 0;
@@ -946,10 +954,12 @@ namespace PixCodec.Compression
                     dst[o] = (byte)header; dst[o + 1] = (byte)(header >> 8); dst[o + 2] = (byte)(header >> 16);
                     o += 3 + payload;
                     pos += n;
+                    }
                 } while (pos < source.Length);
             }
             if (checksum)
             {
+                if (output.Length - o < 4) Array.Resize(ref output, o + 4);
                 BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(o), (uint)Checksums.XxHash64(source));
                 o += 4;
             }

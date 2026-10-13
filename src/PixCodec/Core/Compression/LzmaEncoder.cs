@@ -24,7 +24,7 @@ namespace PixCodec.Compression
         const int PriceCheckLen = 16; // matches up to this length are compared with the price of literals
 
         readonly int lc, lp, pb, depth, niceLen;
-        readonly bool lazy;
+        readonly bool lazy, useShort, useChain;
         readonly ushort[] probs;
         uint state, rep0, rep1, rep2, rep3;
 
@@ -48,16 +48,19 @@ namespace PixCodec.Compression
         {
             level = Math.Clamp(level, 0, 9);
             this.lc = lc; this.lp = lp; this.pb = pb;
-            depth = level switch { <= 1 => 4, 2 => 8, 3 => 16, 4 => 16, 5 => 24, 6 => 48, 7 => 64, 8 => 128, _ => 256 };
+            depth = level switch { <= 1 => 1, 2 => 4, 3 => 12, 4 => 16, 5 => 24, 6 => 48, 7 => 64, 8 => 128, _ => 256 };
+            // the fast levels keep to one table (every extra table is a cache miss per position)
+            useShort = level >= 5;
+            useChain = depth > 1;
             niceLen = level switch { <= 3 => 32, <= 5 => 64, <= 7 => 128, _ => MaxMatch };
             lazy = level >= 4;
             int maxDict = level <= 3 ? 1 << 20 : level <= 6 ? 1 << 23 : 1 << 25;
             int d = 1 << 12;
             while (d < maxDict && d < inputLength) d <<= 1;
             dictSize = d;
-            chain = new int[d];
+            chain = new int[level <= 1 ? 1 : d];
             // the main hash table is sized to the input (small strips should not pay for megabytes of tables)
-            int hashBits = Math.Clamp(BitOperations.Log2((uint)Math.Max(inputLength, 1)) + 1, 12, 20);
+            int hashBits = Math.Clamp(BitOperations.Log2((uint)Math.Max(inputLength, 1)) + 1, 12, level <= 2 ? 16 : level <= 4 ? 18 : 20);
             head4 = new int[1 << hashBits];
             hash4Shift = 32 - hashBits;
             chainMask = d - 1;
@@ -339,25 +342,33 @@ namespace PixCodec.Compression
             }
             byte* cur = data + pos;
             uint v = Unsafe.ReadUnaligned<uint>(cur);
-            int h2 = (int)(v & 0xFFFF), h3 = (int)(((v & 0xFFFFFF) * 2654435761u) >> (32 - Hash3Bits)), h4 = (int)((v * 2654435761u) >> hash4Shift);
-            int c2 = head2[h2], c3 = head3[h3], c4 = head4[h4];
+            int h4 = (int)((v * 2654435761u) >> hash4Shift);
+            int c4 = head4[h4];
             int p = (int)pos;
-            head2[h2] = p; head3[h3] = p; head4[h4] = p;
-            chain[p & chainMask] = c4;
+            head4[h4] = p;
+            if (useChain) chain[p & chainMask] = c4;
 
             int best = 1;
-            if (c2 >= 0 && p - c2 <= dictSize && *(ushort*)(data + c2) == (ushort)v)
+            if (useShort)
             {
-                best = MatchLen(data + c2, cur, avail);
-                dist = (uint)(p - c2 - 1);
-            }
-            if (c3 >= 0 && c3 != c2 && p - c3 <= dictSize && ((Unsafe.ReadUnaligned<uint>(data + c3) ^ v) & 0xFFFFFF) == 0)
-            {
-                int n = MatchLen(data + c3, cur, avail);
-                if (n > best) { best = n; dist = (uint)(p - c3 - 1); }
+                // two and three byte matches are only worth coding when they are close
+                int h2 = (int)(v & 0xFFFF), h3 = (int)(((v & 0xFFFFFF) * 2654435761u) >> (32 - Hash3Bits));
+                int c2 = head2[h2], c3 = head3[h3];
+                head2[h2] = p; head3[h3] = p;
+                if (c2 >= 0 && p - c2 <= 0x80 && *(ushort*)(data + c2) == (ushort)v)
+                {
+                    best = MatchLen(data + c2, cur, avail);
+                    dist = (uint)(p - c2 - 1);
+                }
+                if (c3 >= 0 && c3 != c2 && p - c3 <= 0x4000 && ((Unsafe.ReadUnaligned<uint>(data + c3) ^ v) & 0xFFFFFF) == 0)
+                {
+                    int n = MatchLen(data + c3, cur, avail);
+                    if (n > best) { best = n; dist = (uint)(p - c3 - 1); }
+                }
             }
             int nice = Math.Min(niceLen, avail);
-            for (int steps = depth; c4 >= 0 && p - c4 <= dictSize && best < nice && steps > 0; steps--)
+            // the chain budget shrinks while positions keep ending up as literals (noisy data)
+            for (int steps = Math.Max(depth >> Math.Min(misses >> 4, 5), 1); c4 >= 0 && p - c4 <= dictSize && best < nice && steps > 0; steps--)
             {
                 byte* c = data + c4;
                 if (c[best] == cur[best] && Unsafe.ReadUnaligned<uint>(c) == v)
@@ -365,6 +376,7 @@ namespace PixCodec.Compression
                     int n = MatchLen(c, cur, avail);
                     if (n > best) { best = n; dist = (uint)(p - c4 - 1); }
                 }
+                if (!useChain) break;
                 int next = chain[c4 & chainMask];
                 if (next >= c4) break; // slot was reused by a newer position
                 c4 = next;
@@ -378,9 +390,12 @@ namespace PixCodec.Compression
             uint v = Unsafe.ReadUnaligned<uint>(data + pos);
             int p = (int)pos;
             int h4 = (int)((v * 2654435761u) >> hash4Shift);
-            head2[v & 0xFFFF] = p;
-            head3[((v & 0xFFFFFF) * 2654435761u) >> (32 - Hash3Bits)] = p;
-            chain[p & chainMask] = head4[h4];
+            if (useShort)
+            {
+                head2[v & 0xFFFF] = p;
+                head3[((v & 0xFFFFFF) * 2654435761u) >> (32 - Hash3Bits)] = p;
+            }
+            if (useChain) chain[p & chainMask] = head4[h4];
             head4[h4] = p;
         }
 
@@ -403,6 +418,8 @@ namespace PixCodec.Compression
         }
 
         // --------------------------------------------------------------------------------------- parsing
+
+        int misses; // literals in a row
 
         // pending look-ahead result of the lazy parser
         long nextPos = -1;
@@ -436,11 +453,12 @@ namespace PixCodec.Compression
                 if (repLen >= 2 && (repLen + 1 >= mainLen || repLen + 2 >= mainLen && mainDist >= 1 << 9 || repLen + 3 >= mainLen && mainDist >= 1 << 15))
                 {
                     PutRep(pos, repIndex, repLen);
+                    misses = 0;
                     for (long q = pos + 1; q < pos + repLen; q++) Insert(data, q, end);
                     pos += repLen;
                     continue;
                 }
-                if (mainLen >= 2 && lazy && pos + 1 < softEnd)
+                if (mainLen >= 2 && lazy && misses < 64 && pos + 1 < softEnd)
                 {
                     // would waiting one byte give something clearly better?
                     nextLen = Search(data, pos + 1, end, out nextDist);
@@ -454,6 +472,7 @@ namespace PixCodec.Compression
                 if (mainLen >= 2)
                 {
                     PutMatch(pos, mainDist, mainLen);
+                    misses = 0;
                     for (long q = (nextPos == pos + 1 ? pos + 2 : pos + 1); q < pos + mainLen; q++) Insert(data, q, end);
                     nextPos = -1;
                     pos += mainLen;
@@ -462,6 +481,7 @@ namespace PixCodec.Compression
                 // literal, or a one byte repeat of the last distance when that byte is the same
                 if (rep0 < pos && state >= 7 && data[pos] == data[pos - rep0 - 1]) PutRep(pos, 0, 1);
                 else PutLiteral(data, pos);
+                misses++;
                 pos++;
             }
             return pos;
