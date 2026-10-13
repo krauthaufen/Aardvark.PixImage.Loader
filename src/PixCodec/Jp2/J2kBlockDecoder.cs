@@ -14,7 +14,7 @@ namespace PixCodec
     /// Flags: one ushort per sample, grouped so that the four samples of a stripe column are adjacent (a column is
     /// one 64 bit load). A stripe row of flags is 4 * (w + 2) entries, with one unused stripe above and below.
     /// </summary>
-    internal sealed unsafe class J2kBlockCoder
+    internal sealed unsafe partial class J2kBlockCoder
     {
         public uint[] Data32 = new uint[4096];
         public ulong[]? Data64;
@@ -23,8 +23,6 @@ namespace PixCodec
         readonly byte[] _cx = new byte[J2kT1.NumCtx];
         // HT scratch lives here too (see J2kHtDecoder)
         public J2kHtScratch? Ht;
-        // per-thread scratch for the wavelet rows
-        public int[]? Line;
 
         const ulong Sig4 = 0x1000100010001000, Visit4 = 0x2000200020002000, Nb4 = 0x00FF00FF00FF00FF;
 

@@ -196,7 +196,7 @@ namespace PixCodec
                 byte* rhoAbove = rhoRow + 1;   // rhoAbove[q] for q = -1 .. qw
                 byte* expAbove = expRow + 1;   // expAbove[x] for x = -1 .. 2 qw
 
-                Span<int> rho = stackalloc int[2], uoff = stackalloc int[2], ek = stackalloc int[2], e1 = stackalloc int[2], u = stackalloc int[2];
+                int* rho = stackalloc int[2], uoff = stackalloc int[2], ek = stackalloc int[2], e1 = stackalloc int[2], u = stackalloc int[2];
                 for (int qy = 0; qy < qh; qy++)
                 {
                     bool firstRow = qy == 0;

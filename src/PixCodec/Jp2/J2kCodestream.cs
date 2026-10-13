@@ -79,7 +79,6 @@ namespace PixCodec
         public J2kParams? Params;
         public List<J2kTilePart> Parts = new List<J2kTilePart>();
         public List<(int z, int start, int length, int part)>? Ppt;
-        public int NextPart;
     }
 
     /// <summary>Marker level structure of a codestream: main header, tile-part index.</summary>
@@ -99,6 +98,8 @@ namespace PixCodec
         public int MainHeaderEnd;
         /// <summary>Set when the tile-part chain ends early or a tile-part claims more data than there is.</summary>
         public bool Truncated;
+        /// <summary>The codestream is closed by an EOC marker (tiles that are absent then were simply not coded).</summary>
+        public bool SawEoc;
         public int TilePartCount;
 
         public J2kCodestream(byte* data, int length) { Data = data; Length = length; }
@@ -182,7 +183,7 @@ namespace PixCodec
             while (pos + 2 <= Length)
             {
                 int marker = Data[pos] << 8 | Data[pos + 1];
-                if (marker == EOC) break;
+                if (marker == EOC) { SawEoc = true; break; }
                 if (marker != SOT)
                 {
                     // garbage between tile-parts: stop here, what was indexed so far is used
@@ -194,14 +195,12 @@ namespace PixCodec
                 if (U16(pos + 2) != 10) throw Bad("bad SOT length");
                 int tile = U16(pos + 4);
                 long psot = U32(pos + 6);
-                int tpsot = Data[pos + 10];
                 if (tile >= Tiles.Length) throw Bad("tile index out of range");
                 long end = psot == 0 ? Length : pos + psot;
                 if (psot != 0 && psot < 14) throw Bad("bad tile-part length");
                 if (end > Length) { end = Length; Truncated = true; }
                 var th = Tiles[tile] ??= new J2kTileHeader();
                 int p = pos + 12;
-                bool first = th.Parts.Count == 0;
                 bool sod = false;
                 while (p + 2 <= end)
                 {
@@ -220,11 +219,10 @@ namespace PixCodec
                     ReadSegment(marker, p + 4, len - 2, th.Params!, th, th.Parts.Count);
                     p += 2 + len;
                 }
-                _ = first; _ = tpsot;
                 if (!sod) { Truncated = true; break; }
                 // a tile-part running to the end of the data may be followed by EOC
                 int dataEnd = (int)end;
-                if (psot == 0 && dataEnd - p >= 2 && Data[dataEnd - 2] == 0xFF && Data[dataEnd - 1] == 0xD9) dataEnd -= 2;
+                if (psot == 0 && dataEnd - p >= 2 && Data[dataEnd - 2] == 0xFF && Data[dataEnd - 1] == 0xD9) { dataEnd -= 2; SawEoc = true; }
                 th.Parts.Add(new J2kTilePart { Start = p, End = dataEnd, PpmIndex = index });
                 index++;
                 pos = (int)end;

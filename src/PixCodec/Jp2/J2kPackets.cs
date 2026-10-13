@@ -4,6 +4,135 @@ using System.Numerics;
 
 namespace PixCodec
 {
+    internal delegate bool J2kPacketVisitor(int layer, int res, int comp, int precinct);
+
+    /// <summary>The five progression orders of B.12.</summary>
+    internal static class J2kProgression
+    {
+        /// <summary>Calls <paramref name="packet"/> for every packet of a progression volume in order; stops when it returns false.</summary>
+        public static bool Run(J2kTile tile, J2kSiz siz, J2kPoc v, J2kPacketVisitor packet, ref int spin, int maxLayers)
+        {
+            int ncomp = tile.Comps.Length;
+            int c0 = Math.Min(v.CompStart, ncomp), c1 = Math.Min(v.CompEnd, ncomp);
+            int maxRes = 0;
+            for (int c = c0; c < c1; c++) maxRes = Math.Max(maxRes, tile.Comps[c].Cod.Levels);
+            int r0 = v.ResStart, r1 = Math.Min(v.ResEnd, maxRes + 1);
+            int layers = Math.Min(v.LayerEnd, tile.Layers);
+            switch (v.Order)
+            {
+                case 0: // LRCP
+                    for (int l = 0; l < layers; l++)
+                    {
+                        // nothing after the wanted layers is needed when this is the only progression
+                        if (l >= maxLayers) return true;
+                        for (int r = r0; r < r1; r++)
+                            for (int c = c0; c < c1; c++)
+                            {
+                                var tc = tile.Comps[c];
+                                if (r > tc.Cod.Levels) continue;
+                                int n = tc.Res[r].Pw * tc.Res[r].Ph;
+                                for (int k = 0; k < n; k++)
+                                    if (!packet(l, r, c, k)) return false;
+                            }
+                    }
+                    return true;
+                case 1: // RLCP
+                    for (int r = r0; r < r1; r++)
+                        for (int l = 0; l < layers; l++)
+                            for (int c = c0; c < c1; c++)
+                            {
+                                var tc = tile.Comps[c];
+                                if (r > tc.Cod.Levels) continue;
+                                int n = tc.Res[r].Pw * tc.Res[r].Ph;
+                                for (int k = 0; k < n; k++)
+                                    if (!packet(l, r, c, k)) return false;
+                            }
+                    return true;
+                case 2: // RPCL
+                    for (int r = r0; r < r1; r++)
+                    {
+                        if (!Steps(tile, siz, c0, c1, r, r + 1, out long sx, out long sy)) continue;
+                        for (long y = tile.Rect.Y0; y < tile.Rect.Y1; y = y - y % sy + sy)
+                            for (long x = tile.Rect.X0; x < tile.Rect.X1; x = x - x % sx + sx)
+                            {
+                                if (++spin > 1 << 24) throw J2kCodestream.Bad("implausible precinct structure");
+                                for (int c = c0; c < c1; c++)
+                                    if (PrecinctAt(tile, siz, c, r, x, y, out int k, ref spin))
+                                        for (int l = 0; l < layers; l++)
+                                            if (!packet(l, r, c, k)) return false;
+                            }
+                    }
+                    return true;
+                case 3: // PCRL
+                {
+                    if (!Steps(tile, siz, c0, c1, r0, r1, out long sx, out long sy)) return true;
+                    for (long y = tile.Rect.Y0; y < tile.Rect.Y1; y = y - y % sy + sy)
+                        for (long x = tile.Rect.X0; x < tile.Rect.X1; x = x - x % sx + sx)
+                        {
+                            if (++spin > 1 << 24) throw J2kCodestream.Bad("implausible precinct structure");
+                            for (int c = c0; c < c1; c++)
+                                for (int r = r0; r < r1; r++)
+                                    if (PrecinctAt(tile, siz, c, r, x, y, out int k, ref spin))
+                                        for (int l = 0; l < layers; l++)
+                                            if (!packet(l, r, c, k)) return false;
+                        }
+                    return true;
+                }
+                default: // CPRL
+                    for (int c = c0; c < c1; c++)
+                    {
+                        if (!Steps(tile, siz, c, c + 1, r0, r1, out long sx, out long sy)) continue;
+                        for (long y = tile.Rect.Y0; y < tile.Rect.Y1; y = y - y % sy + sy)
+                            for (long x = tile.Rect.X0; x < tile.Rect.X1; x = x - x % sx + sx)
+                            {
+                                if (++spin > 1 << 24) throw J2kCodestream.Bad("implausible precinct structure");
+                                for (int r = r0; r < r1; r++)
+                                    if (PrecinctAt(tile, siz, c, r, x, y, out int k, ref spin))
+                                        for (int l = 0; l < layers; l++)
+                                            if (!packet(l, r, c, k)) return false;
+                            }
+                    }
+                    return true;
+            }
+        }
+
+        /// <summary>Smallest precinct spacing on the reference grid over the given components and resolution levels.</summary>
+        static bool Steps(J2kTile tile, J2kSiz siz, int c0, int c1, int r0, int r1, out long sx, out long sy)
+        {
+            sx = sy = long.MaxValue;
+            for (int c = c0; c < c1; c++)
+            {
+                var tc = tile.Comps[c];
+                for (int r = r0; r < r1 && r <= tc.Cod.Levels; r++)
+                {
+                    int n = tc.Cod.Levels - r;
+                    sx = Math.Min(sx, (long)siz.Dx[c] << (tc.Res[r].PPx + n));
+                    sy = Math.Min(sy, (long)siz.Dy[c] << (tc.Res[r].PPy + n));
+                }
+            }
+            return sx != long.MaxValue;
+        }
+
+        static bool PrecinctAt(J2kTile tile, J2kSiz siz, int c, int r, long x, long y, out int k, ref int spin)
+        {
+            k = 0;
+            var tc = tile.Comps[c];
+            if (r > tc.Cod.Levels) return false;
+            var res = tc.Res[r];
+            if (res.Pw == 0 || res.Ph == 0) return false;
+            int n = tc.Cod.Levels - r;
+            long dx = siz.Dx[c], dy = siz.Dy[c];
+            if (!(y % (dy << (res.PPy + n)) == 0 || (y == tile.Rect.Y0 && ((res.Rect.Y0 << n) & ((1L << (res.PPy + n)) - 1)) != 0))) return false;
+            if (!(x % (dx << (res.PPx + n)) == 0 || (x == tile.Rect.X0 && ((res.Rect.X0 << n) & ((1L << (res.PPx + n)) - 1)) != 0))) return false;
+            long px = (J2kGeometry.CeilDiv(x, dx << n) >> res.PPx) - (res.Rect.X0 >> res.PPx);
+            long py = (J2kGeometry.CeilDiv(y, dy << n) >> res.PPy) - (res.Rect.Y0 >> res.PPy);
+            if (px < 0 || px >= res.Pw || py < 0 || py >= res.Ph) return false;
+            k = (int)(px + py * res.Pw);
+            spin = 0;
+            return true;
+        }
+    }
+
     /// <summary>Tier-2: walks the packets of one tile in progression order and collects the code-block contributions.</summary>
     internal sealed unsafe class J2kPacketReader
     {
@@ -17,7 +146,7 @@ namespace PixCodec
         readonly byte[]? _packed;            // packet headers from PPM / PPT, null if they are in the tile-parts
         int _packedPos;
         long _nodeBudget, _visitBudget, _precinctBudget;
-        int _spin;
+        int _spin, _skipped;
 
         struct Pending { public J2kPrecinctBand Band; public int Block, Passes, Len; }
         Pending[] _pending = new Pending[64];
@@ -73,7 +202,9 @@ namespace PixCodec
                     foreach (var tc in _tile.Comps) maxRes = Math.Max(maxRes, tc.Cod.Levels);
                     complete = RunVolume(new J2kPoc { ResStart = 0, CompStart = 0, LayerEnd = _tile.Layers, ResEnd = maxRes + 1, CompEnd = _tile.Comps.Length, Order = _tile.Order });
                 }
-                if (!complete) _tile.Truncated = true;
+                // Fewer packets than the progression calls for, ending on a packet boundary, is how some writers
+                // drop layers; only data that stops inside a packet counts as truncated.
+                _ = complete;
             }
             catch (J2kEndOfData)
             {
@@ -93,157 +224,21 @@ namespace PixCodec
             return false;
         }
 
-        // ---- progression orders (B.12) ----
-
         bool RunVolume(J2kPoc v)
-        {
-            int ncomp = _tile.Comps.Length;
-            int c0 = Math.Min(v.CompStart, ncomp), c1 = Math.Min(v.CompEnd, ncomp);
-            int maxRes = 0;
-            for (int c = c0; c < c1; c++) maxRes = Math.Max(maxRes, _tile.Comps[c].Cod.Levels);
-            int r0 = v.ResStart, r1 = Math.Min(v.ResEnd, maxRes + 1);
-            int layers = Math.Min(v.LayerEnd, _tile.Layers);
-            switch (v.Order)
-            {
-                case 0: // LRCP
-                    for (int l = 0; l < layers; l++)
-                    {
-                        // nothing after the wanted layers is needed when this is the only progression
-                        if (l >= _maxLayers && _tile.Poc == null) return true;
-                        for (int r = r0; r < r1; r++)
-                            for (int c = c0; c < c1; c++)
-                            {
-                                var tc = _tile.Comps[c];
-                                if (r > tc.Cod.Levels) continue;
-                                int n = tc.Res[r].Pw * tc.Res[r].Ph;
-                                for (int k = 0; k < n; k++)
-                                    if (!Packet(l, r, c, k)) return false;
-                            }
-                    }
-                    return true;
-                case 1: // RLCP
-                    for (int r = r0; r < r1; r++)
-                        for (int l = 0; l < layers; l++)
-                            for (int c = c0; c < c1; c++)
-                            {
-                                var tc = _tile.Comps[c];
-                                if (r > tc.Cod.Levels) continue;
-                                int n = tc.Res[r].Pw * tc.Res[r].Ph;
-                                for (int k = 0; k < n; k++)
-                                    if (!Packet(l, r, c, k)) return false;
-                            }
-                    return true;
-                case 2: // RPCL
-                    for (int r = r0; r < r1; r++)
-                    {
-                        if (!Steps(c0, c1, r, r + 1, out long sx, out long sy)) continue;
-                        for (long y = _tile.Rect.Y0; y < _tile.Rect.Y1; y = y - y % sy + sy)
-                            for (long x = _tile.Rect.X0; x < _tile.Rect.X1; x = x - x % sx + sx)
-                            {
-                                Spin();
-                                for (int c = c0; c < c1; c++)
-                                    if (PrecinctAt(c, r, x, y, out int k))
-                                        for (int l = 0; l < layers; l++)
-                                            if (!Packet(l, r, c, k)) return false;
-                            }
-                    }
-                    return true;
-                case 3: // PCRL
-                {
-                    if (!Steps(c0, c1, r0, r1, out long sx, out long sy)) return true;
-                    for (long y = _tile.Rect.Y0; y < _tile.Rect.Y1; y = y - y % sy + sy)
-                        for (long x = _tile.Rect.X0; x < _tile.Rect.X1; x = x - x % sx + sx)
-                        {
-                            Spin();
-                            for (int c = c0; c < c1; c++)
-                                for (int r = r0; r < r1; r++)
-                                    if (PrecinctAt(c, r, x, y, out int k))
-                                        for (int l = 0; l < layers; l++)
-                                            if (!Packet(l, r, c, k)) return false;
-                        }
-                    return true;
-                }
-                default: // CPRL
-                    for (int c = c0; c < c1; c++)
-                    {
-                        if (!Steps(c, c + 1, r0, r1, out long sx, out long sy)) continue;
-                        for (long y = _tile.Rect.Y0; y < _tile.Rect.Y1; y = y - y % sy + sy)
-                            for (long x = _tile.Rect.X0; x < _tile.Rect.X1; x = x - x % sx + sx)
-                            {
-                                Spin();
-                                for (int r = r0; r < r1; r++)
-                                    if (PrecinctAt(c, r, x, y, out int k))
-                                        for (int l = 0; l < layers; l++)
-                                            if (!Packet(l, r, c, k)) return false;
-                            }
-                    }
-                    return true;
-            }
-        }
-
-        void Spin()
-        {
-            // positions that hold no precinct cost no data; a header must not make us walk billions of them
-            if (++_spin > 1 << 24) throw Bad("implausible precinct structure");
-        }
-
-        /// <summary>Smallest precinct spacing on the reference grid over the given components and resolution levels.</summary>
-        bool Steps(int c0, int c1, int r0, int r1, out long sx, out long sy)
-        {
-            sx = sy = long.MaxValue;
-            for (int c = c0; c < c1; c++)
-            {
-                var tc = _tile.Comps[c];
-                for (int r = r0; r < r1 && r <= tc.Cod.Levels; r++)
-                {
-                    int n = tc.Cod.Levels - r;
-                    sx = Math.Min(sx, (long)_cs.Siz.Dx[c] << (tc.Res[r].PPx + n));
-                    sy = Math.Min(sy, (long)_cs.Siz.Dy[c] << (tc.Res[r].PPy + n));
-                }
-            }
-            return sx != long.MaxValue;
-        }
-
-        bool PrecinctAt(int c, int r, long x, long y, out int k)
-        {
-            k = 0;
-            var tc = _tile.Comps[c];
-            if (r > tc.Cod.Levels) return false;
-            var res = tc.Res[r];
-            if (res.Pw == 0 || res.Ph == 0) return false;
-            int n = tc.Cod.Levels - r;
-            long dx = _cs.Siz.Dx[c], dy = _cs.Siz.Dy[c];
-            if (!(y % (dy << (res.PPy + n)) == 0 || (y == _tile.Rect.Y0 && ((res.Rect.Y0 << n) & ((1L << (res.PPy + n)) - 1)) != 0))) return false;
-            if (!(x % (dx << (res.PPx + n)) == 0 || (x == _tile.Rect.X0 && ((res.Rect.X0 << n) & ((1L << (res.PPx + n)) - 1)) != 0))) return false;
-            long px = (J2kGeometry.CeilDiv(x, dx << n) >> res.PPx) - (res.Rect.X0 >> res.PPx);
-            long py = (J2kGeometry.CeilDiv(y, dy << n) >> res.PPy) - (res.Rect.Y0 >> res.PPy);
-            if (px < 0 || px >= res.Pw || py < 0 || py >= res.Ph) return false;
-            k = (int)(px + py * res.Pw);
-            _spin = 0;
-            return true;
-        }
+            => J2kProgression.Run(_tile, _cs.Siz, v, Packet, ref _spin, _tile.Poc == null ? _maxLayers : int.MaxValue);
 
         // ---- packets (B.9, B.10) ----
 
-        J2kPrecinct CreatePrecinct(J2kTileComp tc, J2kResolution res, int rIndex, int k)
+        J2kPrecinct CreatePrecinct(J2kResolution res, int rIndex, int k)
         {
-            long px = (res.Rect.X0 >> res.PPx) + k % res.Pw, py = (res.Rect.Y0 >> res.PPy) + k / res.Pw;
-            var prec = new J2kPrecinct { Bands = new J2kPrecinctBand[res.Bands.Length] };
-            for (int b = 0; b < res.Bands.Length; b++)
+            var prec = J2kGeometry.CreatePrecinct(res, rIndex, k);
+            foreach (var pb in prec.Bands)
             {
-                var band = res.Bands[b];
-                int sh = rIndex == 0 ? 0 : 1;
-                var region = new J2kRect((px << res.PPx) >> sh, (py << res.PPy) >> sh, ((px + 1) << res.PPx) >> sh, ((py + 1) << res.PPy) >> sh)
-                    .Intersect(band.Rect);
-                var pb = new J2kPrecinctBand { Region = region };
-                prec.Bands[b] = pb;
-                if (region.Empty) continue;
-                pb.Cbx0 = region.X0 >> res.CbW; pb.Cby0 = region.Y0 >> res.CbH;
-                long cw = J2kGeometry.CeilShift(region.X1, res.CbW) - pb.Cbx0, ch = J2kGeometry.CeilShift(region.Y1, res.CbH) - pb.Cby0;
-                long nodes = 2 * J2kTagTree.NodeCount((int)Math.Min(cw, 1 << 20), (int)Math.Min(ch, 1 << 20));
-                _nodeBudget -= nodes + cw * ch;
-                if (_nodeBudget < 0 || cw * ch > int.MaxValue) throw Bad("implausible code-block structure");
-                pb.Cw = (int)cw; pb.Ch = (int)ch;
+                if (pb.Region.Empty) continue;
+                long nodes = 2 * J2kTagTree.NodeCount((int)Math.Min(pb.CwLong, 1 << 20), (int)Math.Min(pb.ChLong, 1 << 20));
+                _nodeBudget -= nodes + pb.CwLong * pb.ChLong;
+                if (_nodeBudget < 0 || pb.CwLong * pb.ChLong > int.MaxValue) throw Bad("implausible code-block structure");
+                pb.Cw = (int)pb.CwLong; pb.Ch = (int)pb.ChLong;
                 pb.Incl = new J2kTagTree(pb.Cw, pb.Ch);
                 pb.Zbp = new J2kTagTree(pb.Cw, pb.Ch);
                 pb.Blocks = new J2kBlock[pb.Cw * pb.Ch];
@@ -287,7 +282,12 @@ namespace PixCodec
                 res.LayersDone = new int[res.Pw * res.Ph];
                 res.Precincts = new J2kPrecinct?[res.Pw * res.Ph];
             }
-            if (layer < res.LayersDone[k]) return true;   // seen in an earlier progression volume
+            if (layer < res.LayersDone[k])
+            {
+                // seen in an earlier progression volume; a header must not make us skip forever
+                if (++_skipped > 1 << 26) throw Bad("implausible progression order changes");
+                return true;
+            }
             res.LayersDone[k] = layer + 1;
 
             if (_part < 0 || _body >= _bodyEnd)
@@ -304,7 +304,7 @@ namespace PixCodec
                 var br = _packed != null ? new J2kBitReader(packed + _packedPos, packed + _packed.Length) : new J2kBitReader(_body, _bodyEnd);
                 if (br.Bit() != 0)
                 {
-                    var prec = res.Precincts![k] ??= CreatePrecinct(tc, res, r, k);
+                    var prec = res.Precincts![k] ??= CreatePrecinct(res, r, k);
                     int style = tc.Cod.Style;
                     foreach (var pb in prec.Bands)
                     {
@@ -334,27 +334,41 @@ namespace PixCodec
                                     if (++b->Lblock > 32) throw Bad("bad code-block length indicator");
                                 int pass = b->Passes;
                                 b->Passes += passes;
-                                bool ht = (style & J2kCod.Ht) != 0;
-                                int lead = -1;
-                                if (ht && (style & J2kCod.HtMixed) != 0)
+                                bool ht = (style & J2kCod.Ht) != 0 && b->Phld != 255;
+                                if (ht && !b->HtStarted)
                                 {
-                                    // T.814 A.4: an HT block is announced by Lblock > 3 and a 0 as first bit of its first length
-                                    if (pass == 0)
+                                    // T.814 Annex B. Until its first HT cleanup segment arrives a block contributes
+                                    // placeholder passes only: one empty codeword segment per packet. A contribution
+                                    // read that way comes out non-zero exactly if it does hold the cleanup pass (whose
+                                    // length field lies inside the bits read and is at least 2); then the passes are
+                                    // split after the last cleanup position, which fixes the number of placeholders.
+                                    int bits = b->Lblock + BitOperations.Log2((uint)passes);
+                                    if (bits > 31) throw Bad("bad code-block length");
+                                    var saved = br;
+                                    int len = br.Bits(bits);
+                                    if (len == 0)
                                     {
-                                        if (b->Lblock > 3) { lead = br.Bit(); b->Phld = (byte)(lead == 0 ? 0 : 255); }
-                                        else b->Phld = 255;
+                                        AddPending(pb, i, passes, 0);
+                                        continue;
                                     }
-                                    ht = b->Phld != 255;
+                                    if ((style & J2kCod.HtMixed) != 0 && !(b->Lblock > 3 && len >> (bits - 1) == 0))
+                                    {
+                                        // mixed mode (A.4): an HT block announces itself by Lblock > 3 and a leading
+                                        // 0 in its first length; this one is a Part 1 block with a single segment
+                                        b->Phld = 255;
+                                        AddPending(pb, i, passes, len);
+                                        continue;
+                                    }
+                                    br = saved;
+                                    b->Phld = (byte)Math.Min((pass + passes - 1) / 3, 250);
+                                    b->HtStarted = true;
                                 }
-                                if (ht && pass == 0) b->Phld = (byte)Math.Min((passes - 1) / 3, 100);
                                 while (passes > 0)
                                 {
                                     int m = Math.Min(passes, ht ? HtSegmentPasses(b->Phld, pass) : J2kBlockCoder.SegmentPasses(style & 63, pass));
                                     int bits = b->Lblock + BitOperations.Log2((uint)m);
                                     if (bits > 31) throw Bad("bad code-block length");
-                                    int len;
-                                    if (lead >= 0) { len = lead << (bits - 1) | br.Bits(bits - 1); lead = -1; }
-                                    else len = br.Bits(bits);
+                                    int len = br.Bits(bits);
                                     AddPending(pb, i, m, len);
                                     passes -= m; pass += m;
                                 }

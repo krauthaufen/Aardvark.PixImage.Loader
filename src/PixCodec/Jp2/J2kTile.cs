@@ -20,8 +20,9 @@ namespace PixCodec
         public int FirstChunk, LastChunk;    // list of codeword pieces in J2kTile.Chunks, 0 = none (index + 1)
         public int Passes;                   // coding passes signalled so far
         public byte Lblock, Zbp;
-        public byte Phld;                    // HT: placeholder pass sets
+        public byte Phld;                    // HT: placeholder pass sets P0 (255: not an HT block, mixed mode)
         public bool Included;
+        public bool HtStarted;               // HT: a non-empty cleanup segment was seen, P0 is final
     }
 
     /// <summary>The part of a codeword segment that one packet contributes.</summary>
@@ -120,6 +121,9 @@ namespace PixCodec
     {
         public J2kRect Region;               // precinct area in band coordinates
         public int Cw, Ch;                   // code-block grid
+        public long CwLong, ChLong;
+        public J2kEncBlock[]? Enc;          // encoder side
+        public J2kTagTreeEncoder? InclEnc, ZbpEnc;
         public long Cbx0, Cby0;              // grid index of the first code-block
         public J2kTagTree? Incl, Zbp;
         public J2kBlock[] Blocks = Array.Empty<J2kBlock>();
@@ -226,7 +230,6 @@ namespace PixCodec
                 };
                 tile.Comps[c] = tc;
                 int nl = cod.Levels;
-                if (qcd.Style != 1 && qcd.Exp.Length < 3 * nl + 1) throw J2kCodestream.Bad("too few quantization values");
                 tc.Res = new J2kResolution[nl + 1];
                 for (int r = 0; r <= nl; r++)
                 {
@@ -262,7 +265,8 @@ namespace PixCodec
                         int qi = r == 0 ? 0 : 3 * (r - 1) + orient;
                         int exp, mant;
                         if (qcd.Style == 1) { exp = Math.Max(qcd.Exp[0] - (r == 0 ? 0 : r - 1), 0); mant = qcd.Mant[0]; }
-                        else { exp = qcd.Exp[qi]; mant = qcd.Mant[qi]; }
+                        else if (qi < qcd.Exp.Length) { exp = qcd.Exp[qi]; mant = qcd.Mant[qi]; }
+                        else { exp = 0; mant = 0; }   // not signalled: as OpenJPEG, which decodes such files
                         band.Mb = qcd.Guard + exp - 1;
                         int gain = orient == 0 ? 0 : orient == 3 ? 2 : 1;
                         band.Step = (float)((1.0 + mant / 2048.0) * Math.Pow(2, tc.Prec + gain - exp));
@@ -273,6 +277,27 @@ namespace PixCodec
                 }
             }
             return tile;
+        }
+
+        /// <summary>Geometry of precinct k of a resolution level: its area and code-block grid in every subband (B.6, B.7).</summary>
+        public static J2kPrecinct CreatePrecinct(J2kResolution res, int rIndex, int k)
+        {
+            long px = (res.Rect.X0 >> res.PPx) + k % res.Pw, py = (res.Rect.Y0 >> res.PPy) + k / res.Pw;
+            var prec = new J2kPrecinct { Bands = new J2kPrecinctBand[res.Bands.Length] };
+            for (int b = 0; b < res.Bands.Length; b++)
+            {
+                var band = res.Bands[b];
+                int sh = rIndex == 0 ? 0 : 1;
+                var region = new J2kRect((px << res.PPx) >> sh, (py << res.PPy) >> sh, ((px + 1) << res.PPx) >> sh, ((py + 1) << res.PPy) >> sh)
+                    .Intersect(band.Rect);
+                var pb = new J2kPrecinctBand { Region = region };
+                prec.Bands[b] = pb;
+                if (region.Empty) continue;
+                pb.Cbx0 = region.X0 >> res.CbW; pb.Cby0 = region.Y0 >> res.CbH;
+                pb.CwLong = CeilShift(region.X1, res.CbW) - pb.Cbx0;
+                pb.ChLong = CeilShift(region.Y1, res.CbH) - pb.Cby0;
+            }
+            return prec;
         }
 
         /// <summary>

@@ -7,9 +7,22 @@ using System.Threading.Tasks;
 
 namespace PixCodec
 {
+    /// <summary>
+    /// Destination for the common case that the components are the channels of the result: the tiles are written
+    /// straight into the interleaved 8 or 16 bit image instead of into component planes.
+    /// </summary>
+    internal sealed class J2kSink
+    {
+        public SampleType Type;              // UInt8 or UInt16
+        public int Channels;
+        public int[] ChannelOf = Array.Empty<int>();   // component -> channel
+        public Array? Data;                  // allocated by the decoder once the size is accepted
+    }
+
     /// <summary>Decodes a codestream into component planes: tile by tile packets, code-blocks, wavelet, colour transform.</summary>
     internal sealed unsafe class J2kDecoder
     {
+        readonly J2kSink? _sink;
         readonly J2kCodestream _cs;
         readonly int _reduce, _maxLayers;
         readonly bool _parallel, _strict;
@@ -23,9 +36,9 @@ namespace PixCodec
 
         struct Job { public J2kTileComp Tc; public J2kBand Band; public J2kResolution Res; public J2kPrecinctBand Pb; public int Block; }
 
-        J2kDecoder(J2kCodestream cs, Jp2DecodeOptions o, int[]? components)
+        J2kDecoder(J2kCodestream cs, Jp2DecodeOptions o, int[]? components, J2kSink? sink)
         {
-            _cs = cs;
+            _cs = cs; _sink = sink;
             _reduce = o.Reduce; _maxLayers = o.MaxLayers > 0 ? o.MaxLayers : int.MaxValue;
             _parallel = o.Parallel; _strict = !o.AllowTruncated;
             var siz = cs.Siz;
@@ -72,11 +85,9 @@ namespace PixCodec
             }
         }
 
-        public static J2kPlanes Decode(J2kCodestream cs, Jp2DecodeOptions o, int[]? components = null)
-        {
-            cs.Parse();
-            return new J2kDecoder(cs, o, components).Run(o);
-        }
+        /// <summary>Decodes a parsed codestream; with a sink the planes come back without data.</summary>
+        public static J2kPlanes Decode(J2kCodestream cs, Jp2DecodeOptions o, int[]? components = null, J2kSink? sink = null)
+            => new J2kDecoder(cs, o, components, sink).Run(o);
 
         J2kPlanes Run(Jp2DecodeOptions o)
         {
@@ -99,8 +110,12 @@ namespace PixCodec
                     int t = ty * siz.TilesX + tx;
                     if (_cs.Tiles[t] == null || _cs.Tiles[t]!.Parts.Count == 0)
                     {
-                        if (_strict) throw J2kCodestream.Bad("missing tile");
-                        Truncated = true;
+                        // A codestream that is properly closed may leave tiles out (T.803 has such streams); they stay 0.
+                        if (!_cs.SawEoc)
+                        {
+                            if (_strict) throw J2kCodestream.Bad("missing tile");
+                            Truncated = true;
+                        }
                         continue;
                     }
                     tiles.Add(t);
@@ -109,14 +124,21 @@ namespace PixCodec
             // The first tile is parsed before anything large is allocated, so that a header describing a huge
             // image over a few bytes of data fails here.
             J2kTile? first = tiles.Count > 0 ? Parse(tiles[0]) : null;
-            for (int c = 0; c < _planes.Length; c++)
+            if (_sink != null)
             {
-                if (!_needed[c]) continue;
-                var p = _planes[c];
-                long n = (long)p.Width * p.Height;
-                if (n > o.MaxPixels || n > Array.MaxLength) throw new ImageNotSupportedException("JPEG 2000 component exceeds Jp2DecodeOptions.MaxPixels");
-                if (p.Precision > 32) p.Data64 = new long[n]; else p.Data = new int[n];
+                long n = outW * outH * _sink.Channels;
+                if (n > Array.MaxLength) throw new ImageNotSupportedException("JPEG 2000 image too large for one array");
+                _sink.Data = _sink.Type == SampleType.UInt8 ? new byte[n] : new ushort[n];
             }
+            else
+                for (int c = 0; c < _planes.Length; c++)
+                {
+                    if (!_needed[c]) continue;
+                    var p = _planes[c];
+                    long n = (long)p.Width * p.Height;
+                    if (n > o.MaxPixels || n > Array.MaxLength) throw new ImageNotSupportedException("JPEG 2000 component exceeds Jp2DecodeOptions.MaxPixels");
+                    if (p.Precision > 32) p.Data64 = new long[n]; else p.Data = new int[n];
+                }
             if (_parallel && tiles.Count > 1)
             {
                 Parallel.For(0, tiles.Count, i => DecodeTile(i == 0 ? first! : Parse(tiles[i])));
@@ -203,6 +225,12 @@ namespace PixCodec
                 }
                 if (jobs.Count == before) continue;
                 tc.HasData = true;
+            }
+            // zeroed level buffers (blocks without data stay zero); clearing them is worth a thread per component
+            void Allocate(int c)
+            {
+                var tc = tile.Comps[c];
+                if (!tc.HasData) return;
                 for (int r = 0; r <= tc.OutRes; r++)
                 {
                     var res = tc.Res[r];
@@ -211,6 +239,8 @@ namespace PixCodec
                     res.Buffer = !tc.Cod.Reversible ? new float[n] : tc.Wide ? new long[n] : new int[n];
                 }
             }
+            if (_parallel && tile.Comps.Length > 1) Parallel.For(0, tile.Comps.Length, Allocate);
+            else for (int c = 0; c < tile.Comps.Length; c++) Allocate(c);
 
             if (_parallel && jobs.Count > 1)
             {
@@ -254,7 +284,6 @@ namespace PixCodec
             int style = tc.Cod.Style;
             bool ht = (style & J2kCod.Ht) != 0 && blk.Phld != 255;
             int numBps = band.Mb + tc.Roi - blk.Zbp;
-            int maxPasses = ht ? int.MaxValue : Math.Max(3 * numBps - 2, 0);
 
             // gather the codeword segments, each followed by two 0xFF bytes
             Span<int> segStart = stackalloc int[192], segLen = stackalloc int[192], segPasses = stackalloc int[192];
@@ -266,7 +295,7 @@ namespace PixCodec
             coder.EnsureBuf((int)total + 2 * 192 + 16);
             fixed (byte* buf = coder.Buf)
             {
-                for (int id = blk.FirstChunk; id != 0 && pass < maxPasses; id = chunks[id - 1].Next)
+                for (int id = blk.FirstChunk; id != 0; id = chunks[id - 1].Next)
                 {
                     ref var ch = ref chunks[id - 1];
                     if (pass >= segEnd)
@@ -297,8 +326,12 @@ namespace PixCodec
                     // the last HT set that has a cleanup segment
                     int set = -1;
                     for (int s = 0; 2 * s < nseg; s++) if (segLen[2 * s] > 0) set = s;
-                    bool ok = false;
-                    if (set >= 0)
+                    bool ok = set < 0;   // nothing but placeholder passes: the block is zero
+                    if (ok)
+                    {
+                        if (wide) new Span<ulong>(d64, w * h).Clear(); else new Span<uint>(d32, w * h).Clear();
+                    }
+                    else
                     {
                         int cup = 2 * set, refi = cup + 1;
                         int lref = refi < nseg ? segLen[refi] : 0;
@@ -445,6 +478,12 @@ namespace PixCodec
                 long lo = tc.Signed ? -(1L << (prec - 1)) : 0, hi = tc.Signed ? (1L << (prec - 1)) - 1 : (1L << prec) - 1;
                 int ox = (int)(v.X0 - res.C.X0), oy = (int)(v.Y0 - res.C.Y0);
                 long px = v.X0 - _px0[ci], py = v.Y0 - _py0[ci];
+                if (_sink != null)
+                {
+                    WriteToSink(res, ci, w, h, ox, oy, px, py, plane.Width, (int)shift, (int)hi);
+                    res.Buffer = null;
+                    continue;
+                }
                 for (int y = 0; y < h; y++)
                 {
                     long di = (py + y) * plane.Width + px;
@@ -484,6 +523,78 @@ namespace PixCodec
             }
         }
 
+        /// <summary>One component of a tile into its channel of the interleaved image: level shift, clamp, narrow.</summary>
+        void WriteToSink(J2kResolution res, int comp, int w, int h, int ox, int oy, long px, long py, int imageWidth, int shift, int max)
+        {
+            int n = _sink!.Channels, ch = _sink.ChannelOf[comp];
+            void Rows(int y0, int y1)
+            {
+                var tmp = res.Buffer is float[] ? new int[w] : null;
+                fixed (int* t = tmp)
+                    for (int y = y0; y < y1; y++)
+                    {
+                        long si = (long)(oy + y) * res.W + ox;
+                        long di = ((py + y) * imageWidth + px) * n + ch;
+                        int* src = null;
+                        if (res.Buffer is float[] fb)
+                        {
+                            fixed (float* f = &fb[si]) RoundShiftClamp(f, t, w, shift, 0, max);
+                            src = t;
+                        }
+                        if (_sink.Data is byte[] bytes)
+                            fixed (byte* d = &bytes[di])
+                            {
+                                if (src != null) { if (n == 1) Narrow(src, d, w); else for (int x = 0; x < w; x++) d[(long)x * n] = (byte)src[x]; }
+                                else if (res.Buffer is int[] ib)
+                                    fixed (int* s = &ib[si])
+                                    {
+                                        if (n == 1) { ShiftClampNarrow(s, d, w, shift, max); }
+                                        else
+                                            for (int x = 0; x < w; x++)
+                                            {
+                                                int v = s[x] + shift;
+                                                d[(long)x * n] = (byte)((uint)v > (uint)max ? (v < 0 ? 0 : max) : v);
+                                            }
+                                    }
+                                else for (int x = 0; x < w; x++) d[(long)x * n] = (byte)shift;
+                            }
+                        else
+                            fixed (ushort* d = &((ushort[])_sink.Data!)[di])
+                            {
+                                if (src != null) for (int x = 0; x < w; x++) d[(long)x * n] = (ushort)src[x];
+                                else if (res.Buffer is int[] ib)
+                                    fixed (int* s = &ib[si])
+                                        for (int x = 0; x < w; x++)
+                                        {
+                                            int v = s[x] + shift;
+                                            d[(long)x * n] = (ushort)((uint)v > (uint)max ? (v < 0 ? 0 : max) : v);
+                                        }
+                                else for (int x = 0; x < w; x++) d[(long)x * n] = (ushort)shift;
+                            }
+                    }
+            }
+            if (_parallel && (long)w * h > 1 << 18)
+            {
+                int parts = Math.Min(Environment.ProcessorCount, h / 64 + 1);
+                Parallel.For(0, parts, i => Rows((int)((long)h * i / parts), (int)((long)h * (i + 1) / parts)));
+            }
+            else Rows(0, h);
+        }
+
+        static void Narrow(int* src, byte* dst, int n)
+        {
+            for (int i = 0; i < n; i++) dst[i] = (byte)src[i];
+        }
+
+        static void ShiftClampNarrow(int* src, byte* dst, int n, int shift, int max)
+        {
+            for (int i = 0; i < n; i++)
+            {
+                int v = src[i] + shift;
+                dst[i] = (byte)((uint)v > (uint)max ? (v < 0 ? 0 : max) : v);
+            }
+        }
+
         static void ShiftClamp(int* src, int* dst, int n, int shift, int lo, int hi)
         {
             int i = 0;
@@ -498,9 +609,43 @@ namespace PixCodec
 
         static void RoundShiftClamp(float* src, int* dst, int n, int shift, int lo, int hi)
         {
-            // round half to even, as lrintf does in the reference decoder
+            // round half to even (as lrintf does in the reference decoder), then level shift and clamp
+            int i = 0;
             float flo = lo, fhi = hi;
-            for (int i = 0; i < n; i++)
+            if (System.Runtime.Intrinsics.X86.Sse2.IsSupported)
+            {
+                // values far outside the range are clamped as floats first so that the conversion cannot overflow
+                var vmin = System.Runtime.Intrinsics.Vector128.Create(flo - shift - 1f);
+                var vmax = System.Runtime.Intrinsics.Vector128.Create(fhi - shift + 1f);
+                var vs = System.Runtime.Intrinsics.Vector128.Create(shift);
+                var vlo = System.Runtime.Intrinsics.Vector128.Create(lo);
+                var vhi = System.Runtime.Intrinsics.Vector128.Create(hi);
+                for (; i <= n - 4; i += 4)
+                {
+                    var f = System.Runtime.Intrinsics.X86.Sse.LoadVector128(src + i);
+                    f = System.Runtime.Intrinsics.X86.Sse.Min(System.Runtime.Intrinsics.X86.Sse.Max(f, vmin), vmax);
+                    var v = System.Runtime.Intrinsics.X86.Sse2.Add(System.Runtime.Intrinsics.X86.Sse2.ConvertToVector128Int32(f), vs);
+                    v = System.Runtime.Intrinsics.Vector128.Min(System.Runtime.Intrinsics.Vector128.Max(v, vlo), vhi);
+                    System.Runtime.Intrinsics.X86.Sse2.Store(dst + i, v);
+                }
+            }
+            else if (System.Runtime.Intrinsics.Arm.AdvSimd.Arm64.IsSupported)
+            {
+                var vmin = System.Runtime.Intrinsics.Vector128.Create(flo - shift - 1f);
+                var vmax = System.Runtime.Intrinsics.Vector128.Create(fhi - shift + 1f);
+                var vs = System.Runtime.Intrinsics.Vector128.Create(shift);
+                var vlo = System.Runtime.Intrinsics.Vector128.Create(lo);
+                var vhi = System.Runtime.Intrinsics.Vector128.Create(hi);
+                for (; i <= n - 4; i += 4)
+                {
+                    var f = System.Runtime.Intrinsics.Arm.AdvSimd.LoadVector128(src + i);
+                    f = System.Runtime.Intrinsics.Arm.AdvSimd.Min(System.Runtime.Intrinsics.Arm.AdvSimd.Max(f, vmin), vmax);
+                    var v = System.Runtime.Intrinsics.Arm.AdvSimd.Add(System.Runtime.Intrinsics.Arm.AdvSimd.ConvertToInt32RoundToEven(f), vs);
+                    v = System.Runtime.Intrinsics.Vector128.Min(System.Runtime.Intrinsics.Vector128.Max(v, vlo), vhi);
+                    System.Runtime.Intrinsics.Arm.AdvSimd.Store(dst + i, v);
+                }
+            }
+            for (; i < n; i++)
             {
                 float f = MathF.Round(src[i]) + shift;
                 dst[i] = f >= fhi ? hi : f > flo ? (int)f : lo;
