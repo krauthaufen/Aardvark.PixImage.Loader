@@ -230,8 +230,55 @@ namespace PixCodec
                 }
         }
 
+        public static byte[] Encode(ReadOnlySpan<byte> raw, in ExrChunk c, ExrScratch s, float level) => throw new ImageNotSupportedException("DWA encoding");
+
         static string Suffix(string name) { int d = name.LastIndexOf('.'); return d < 0 ? name : name.Substring(d + 1); }
         static string Prefix(string name) { int d = name.LastIndexOf('.'); return d < 0 ? "" : name.Substring(0, d); }
+
+        // The inverse DCT result is rounded to a half and sent through a steep lookup table, so it has to reproduce the
+        // reference decoder's float32 results to the last bit: same constants (7 digit literals, not exact cosines)
+        // and the same order of additions. The reference has several SIMD variants that differ in exactly these
+        // details; this is the order of its AVX code path (the one x86-64 machines with AVX run), established by
+        // comparing against the library on millions of samples: no other association of the sums matches.
+        const float Ca = 3.535536e-01f, Cb = 4.903927e-01f, Cc = 4.619398e-01f, Cd = 4.157349e-01f,
+                    Ce = 2.777855e-01f, Cf = 1.913422e-01f, Cg = 9.754573e-02f;
+
+        /// <summary>8x8 inverse DCT in place (row major): rows first, then columns.</summary>
+        static void InverseDct(float* data)
+        {
+            const float a = Ca, b = Cb, c = Cc, d = Cd, e = Ce, f = Cf, g = Cg;
+            for (int i = 0; i < 8; i++)
+            {
+                float* p = data + i * 8;
+                float p0 = p[0], p1 = p[1], p2 = p[2], p3 = p[3], p4 = p[4], p5 = p[5], p6 = p[6], p7 = p[7];
+                // every output is (pair) + (pair) of products
+                float e0 = (a * p0 + c * p2) + (a * p4 + f * p6), o0 = (b * p1 + d * p3) + (e * p5 + g * p7);
+                float e1 = (a * p0 + f * p2) + (-a * p4 + -c * p6), o1 = (d * p1 + -g * p3) + (-b * p5 + -e * p7);
+                float e2 = (a * p0 + -f * p2) + (-a * p4 + c * p6), o2 = (e * p1 + -b * p3) + (g * p5 + d * p7);
+                float e3 = (a * p0 + -c * p2) + (a * p4 + -f * p6), o3 = (g * p1 + -e * p3) + (d * p5 + -b * p7);
+                p[0] = e0 + o0; p[7] = e0 - o0;
+                p[1] = e1 + o1; p[6] = e1 - o1;
+                p[2] = e2 + o2; p[5] = e2 - o2;
+                p[3] = e3 + o3; p[4] = e3 - o3;
+            }
+            for (int i = 0; i < 8; i++)
+            {
+                float* p = data + i;
+                float p0 = p[0], p1 = p[8], p2 = p[16], p3 = p[24], p4 = p[32], p5 = p[40], p6 = p[48], p7 = p[56];
+                float sum = a * p0 + a * p4, dif = a * p0 - a * p4;
+                float t1 = c * p2 + f * p6, t2 = f * p2 - c * p6;
+                float e0 = sum + t1, e1 = dif + t2, e2 = dif - t2, e3 = sum - t1;
+                // the odd sums are associated differently for every output
+                float o0 = (b * p1 + d * p3) + (e * p5 + g * p7);
+                float o1 = (d * p1 + (-g * p3 + -b * p5)) + -e * p7;
+                float o2 = ((e * p1 + -b * p3) + g * p5) + d * p7;
+                float o3 = (g * p1 + d * p5) + (-e * p3 + -b * p7);
+                p[0] = e0 + o0; p[56] = e0 - o0;
+                p[8] = e1 + o1; p[48] = e1 - o1;
+                p[16] = e2 + o2; p[40] = e2 - o2;
+                p[24] = e3 + o3; p[32] = e3 - o3;
+            }
+        }
 
         static void DecodeDct(int ncomp, int[] chan, ushort[][] planes, ushort[] dc, int[] dcStart, ushort[] ac, ref int acPos, int w, int h)
         {
@@ -262,28 +309,12 @@ namespace PixCodec
                             }
                             if (last == 0)
                             {
-                                float v = *(float*)(h2f + zig[0]) * 0.125f;
+                                float v = *(float*)(h2f + zig[0]) * 3.535536e-01f * 3.535536e-01f;
                                 for (int i = 0; i < 64; i++) blk[i] = v;
                                 continue;
                             }
-                            for (int i = 0; i < 64; i++) tmp[zz[i]] = *(float*)(h2f + zig[i]);
-                            // rows, then columns
-                            for (int v = 0; v < 8; v++)
-                            {
-                                float* r = tmp + v * 8;
-                                float a0 = r[0], a1 = r[1], a2 = r[2], a3 = r[3], a4 = r[4], a5 = r[5], a6 = r[6], a7 = r[7];
-                                for (int x = 0; x < 8; x++)
-                                    blk[v * 8 + x] = a0 * cos[x] + a1 * cos[8 + x] + a2 * cos[16 + x] + a3 * cos[24 + x]
-                                                   + a4 * cos[32 + x] + a5 * cos[40 + x] + a6 * cos[48 + x] + a7 * cos[56 + x];
-                            }
-                            for (int x = 0; x < 8; x++)
-                            {
-                                float a0 = blk[x], a1 = blk[8 + x], a2 = blk[16 + x], a3 = blk[24 + x], a4 = blk[32 + x], a5 = blk[40 + x], a6 = blk[48 + x], a7 = blk[56 + x];
-                                for (int y = 0; y < 8; y++)
-                                    tmp[y * 8 + x] = a0 * cos[y] + a1 * cos[8 + y] + a2 * cos[16 + y] + a3 * cos[24 + y]
-                                                   + a4 * cos[32 + y] + a5 * cos[40 + y] + a6 * cos[48 + y] + a7 * cos[56 + y];
-                            }
-                            for (int i = 0; i < 64; i++) blk[i] = tmp[i];
+                            for (int i = 0; i < 64; i++) blk[zz[i]] = *(float*)(h2f + zig[i]);
+                            InverseDct(blk);
                         }
                         if (ncomp == 3)
                             for (int i = 0; i < 64; i++)

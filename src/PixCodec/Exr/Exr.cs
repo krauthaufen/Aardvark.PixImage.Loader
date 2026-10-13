@@ -34,7 +34,7 @@ namespace PixCodec
 
     public sealed class ExrEncodeOptions
     {
-        /// <summary>Compression (default Zip). All members except Dwaa / Dwab can be written.</summary>
+        /// <summary>Compression (default Zip).</summary>
         public ExrCompression Compression { get; set; } = ExrCompression.Zip;
 
         /// <summary>
@@ -67,12 +67,123 @@ namespace PixCodec
         /// <summary>
         /// Additional header attributes. "displayWindow", "pixelAspectRatio", "screenWindowCenter" and
         /// "screenWindowWidth" replace the defaults; the structural attributes (channels, compression, dataWindow,
-        /// lineOrder, tiles, type, chunkCount, version) cannot be supplied.
+        /// lineOrder, tiles, type, name, chunkCount, version, dwaCompressionLevel) cannot be supplied.
+        /// To carry the descriptive attributes of a decoded file over (pixel aspect ratio, chromaticities, comments,
+        /// custom attributes ...), add <see cref="ExrHeader.GetDescriptiveAttributes"/> of its header here; RawImage
+        /// itself has no place for them.
         /// </summary>
         public IList<ExrAttribute> Attributes { get; } = new List<ExrAttribute>();
 
         /// <summary>Compress chunks on multiple threads when the image is large enough (default true).</summary>
         public bool Parallel { get; set; } = true;
+
+        /// <summary>
+        /// Tile size; both 0 (default) writes a scan line part, both positive a tiled part. For tiled parts
+        /// <see cref="LineOrder"/> DecreasingY writes the tile rows bottom up and RandomY is recorded as such (tiles are
+        /// then written in increasing order, which RandomY permits).
+        /// </summary>
+        public int TileWidth { get; set; }
+        public int TileHeight { get; set; }
+
+        /// <summary>
+        /// Resolution levels of a tiled part: OneLevel (default), MipMap or RipMap. The lower levels are generated with a
+        /// 2x2 (or 2x1 / 1x2) box filter, sizes rounded down; UINT channels take the top left sample instead.
+        /// </summary>
+        public ExrLevelMode LevelMode { get; set; } = ExrLevelMode.OneLevel;
+
+        /// <summary>
+        /// Store an Rgb / Rgba image as luminance Y plus 2x2 subsampled chroma RY, BY (and A), like the reference
+        /// library's WRITE_YC / WRITE_YCA modes: half floats, luma weights from the "chromaticities" attribute in
+        /// <see cref="Attributes"/> (Rec. 709 if absent), chroma low-pass filtered before subsampling. Lossy for chroma;
+        /// negative or non finite colours become 0. Needs even width, height and data window position; scan line only.
+        /// </summary>
+        public bool LuminanceChroma { get; set; }
+
+        /// <summary>
+        /// Quality of DWAA / DWAB (the "dwaCompressionLevel" attribute, default 45): the allowed error of the DCT
+        /// coefficients grows with this value; 0 quantizes nothing, larger values give smaller files.
+        /// </summary>
+        public float DwaCompressionLevel { get; set; } = 45f;
+    }
+
+    /// <summary>One part for <see cref="Exr.EncodeParts"/>.</summary>
+    public sealed class ExrPart
+    {
+        /// <summary>Part name; required and unique in multi-part files.</summary>
+        public string? Name { get; }
+        public int Width { get; }
+        public int Height { get; }
+        public IReadOnlyList<ExrChannelData> Channels { get; }
+        public ExrEncodeOptions Options { get; }
+
+        public ExrPart(string? name, int width, int height, IReadOnlyList<ExrChannelData> channels, ExrEncodeOptions? options = null)
+        {
+            Name = name; Width = width; Height = height;
+            Channels = channels ?? throw new ArgumentNullException(nameof(channels));
+            Options = options ?? new ExrEncodeOptions();
+        }
+
+        /// <summary>A part from an interleaved image, with the channel naming and options of <see cref="Exr.Encode"/>.</summary>
+        public static ExrPart FromImage(string? name, RawImage image, ExrEncodeOptions? options = null)
+        {
+            if (image == null) throw new ArgumentNullException(nameof(image));
+            options ??= new ExrEncodeOptions();
+            if (image.SampleType != SampleType.Float32 && image.SampleType != SampleType.Float16 && image.SampleType != SampleType.UInt32)
+                throw new ImageNotSupportedException($"OpenEXR cannot store {image.SampleType} samples; convert to Float32, Float16 or UInt32");
+            if (options.LuminanceChroma) return LuminanceChromaPart(name, image, options);
+            IReadOnlyList<string>? names = options.ChannelNames;
+            if (names == null)
+                names = image.Color switch
+                {
+                    ColorModel.Gray => new[] { "Y" },
+                    ColorModel.GrayAlpha => new[] { "Y", "A" },
+                    ColorModel.Rgb => new[] { "R", "G", "B" },
+                    ColorModel.Rgba => new[] { "R", "G", "B", "A" },
+                    _ => throw new ArgumentException("ExrEncodeOptions.ChannelNames is required for ColorModel.Other"),
+                };
+            if (names.Count != image.Channels)
+                throw new ArgumentException($"{names.Count} channel names given for an image with {image.Channels} channels");
+            var chans = new ExrChannelData[image.Channels];
+            for (int i = 0; i < chans.Length; i++)
+                chans[i] = new ExrChannelData(names[i], image.Data, options.PixelType, i, image.Channels);
+            return new ExrPart(name, image.Width, image.Height, chans, options);
+        }
+
+        static ExrPart LuminanceChromaPart(string? name, RawImage image, ExrEncodeOptions options)
+        {
+            if (image.Color != ColorModel.Rgb && image.Color != ColorModel.Rgba || image.SampleType == SampleType.UInt32)
+                throw new ImageNotSupportedException("luminance/chroma EXR output needs a floating point Rgb or Rgba image");
+            int w = image.Width, h = image.Height, nc = image.Channels;
+            if (((w | h | options.DataWindowX | options.DataWindowY) & 1) != 0)
+                throw new ImageNotSupportedException("luminance/chroma EXR output needs an even width, height and data window position");
+            if (options.TileWidth > 0 || options.TileHeight > 0) throw new ImageNotSupportedException("luminance/chroma EXR output cannot be tiled");
+            var bits = new ushort[w * h * nc];
+            if (image.SampleType == SampleType.Float16)
+                System.Runtime.InteropServices.MemoryMarshal.Cast<Half, ushort>(image.GetData<Half>()).CopyTo(bits);
+            else
+            {
+                var f = image.GetData<float>();
+                for (int i = 0; i < f.Length; i++) bits[i] = ExrHalf.FromFloat(f[i]);
+            }
+            ExrChromaticities? chroma = null;
+            foreach (var a in options.Attributes) if (a.Name == "chromaticities") chroma = a.AsChromaticities();
+            ExrYca.FromRgb(bits, nc, w, h, ExrYca.LumaWeights(chroma), out var luma, out var ry, out var by);
+            Half[] AsHalf(ushort[] u) => System.Runtime.InteropServices.MemoryMarshal.Cast<ushort, Half>(u).ToArray();
+            var chans = new List<ExrChannelData>
+            {
+                new("Y", AsHalf(luma), ExrPixelType.Half),
+                new("RY", AsHalf(ry), ExrPixelType.Half) { XSampling = 2, YSampling = 2 },
+                new("BY", AsHalf(by), ExrPixelType.Half) { XSampling = 2, YSampling = 2 },
+            };
+            if (nc == 4)
+            {
+                var alpha = new Half[w * h];
+                var all = System.Runtime.InteropServices.MemoryMarshal.Cast<ushort, Half>(bits);
+                for (int i = 0; i < alpha.Length; i++) alpha[i] = all[i * 4 + 3];
+                chans.Add(new ExrChannelData("A", alpha, ExrPixelType.Half));
+            }
+            return new ExrPart(name, w, h, chans, options);
+        }
     }
 
     /// <summary>A named channel for <see cref="Exr.EncodeChannels"/>: samples are read from Data[Offset + i * Stride].</summary>
@@ -86,6 +197,12 @@ namespace PixCodec
         /// <summary>Stored type: float[] / Half[] may be stored as Half or Float, uint[] only as UInt. Null: Half for float data, UInt for uint.</summary>
         public ExrPixelType? PixelType { get; }
         public bool PLinear { get; set; }
+        /// <summary>
+        /// Subsampling (default 1): the channel then has (width / XSampling) x (height / YSampling) samples and the part's
+        /// size and data window position must be multiples of the sampling. Scan line parts only.
+        /// </summary>
+        public int XSampling { get; init; } = 1;
+        public int YSampling { get; init; } = 1;
 
         public ExrChannelData(string name, Array data, ExrPixelType? pixelType = null, int offset = 0, int stride = 1)
         {
@@ -270,42 +387,31 @@ namespace PixCodec
         }
 
         /// <summary>
-        /// Encodes an image as a scan line OpenEXR file to the stream (which only needs to be writable, not seekable).
+        /// Encodes an image as an OpenEXR file to the stream (which only needs to be writable, not seekable): a scan
+        /// line file by default, a tiled one (optionally with generated mip / rip levels) when
+        /// <see cref="ExrEncodeOptions.TileWidth"/> / TileHeight are set.
         /// Float32, Float16 and UInt32 images are accepted; integer 8/16 bit images throw
         /// <see cref="ImageNotSupportedException"/> (convert them to float first). Channels are named Y / Y,A / R,G,B /
         /// R,G,B,A by color model; <see cref="ColorModel.Other"/> needs <see cref="ExrEncodeOptions.ChannelNames"/>.
+        /// With <see cref="ExrEncodeOptions.LuminanceChroma"/> an Rgb / Rgba image is stored as Y, RY, BY(, A).
         /// </summary>
         public static void Encode(RawImage image, Stream output, ExrEncodeOptions? options = null)
-        {
-            if (image == null) throw new ArgumentNullException(nameof(image));
-            options ??= new ExrEncodeOptions();
-            if (image.SampleType != SampleType.Float32 && image.SampleType != SampleType.Float16 && image.SampleType != SampleType.UInt32)
-                throw new ImageNotSupportedException($"OpenEXR cannot store {image.SampleType} samples; convert to Float32, Float16 or UInt32");
-            IReadOnlyList<string>? names = options.ChannelNames;
-            if (names == null)
-                names = image.Color switch
-                {
-                    ColorModel.Gray => new[] { "Y" },
-                    ColorModel.GrayAlpha => new[] { "Y", "A" },
-                    ColorModel.Rgb => new[] { "R", "G", "B" },
-                    ColorModel.Rgba => new[] { "R", "G", "B", "A" },
-                    _ => throw new ArgumentException("ExrEncodeOptions.ChannelNames is required for ColorModel.Other"),
-                };
-            if (names.Count != image.Channels)
-                throw new ArgumentException($"{names.Count} channel names given for an image with {image.Channels} channels");
-            var chans = new ExrChannelData[image.Channels];
-            for (int i = 0; i < chans.Length; i++)
-                chans[i] = new ExrChannelData(names[i], image.Data, options.PixelType, i, image.Channels);
-            ExrEncoder.Encode(image.Width, image.Height, chans, output, options);
-        }
+            => ExrEncoder.Encode(new[] { ExrPart.FromImage(null, image, options) }, output, false);
 
         /// <summary>
-        /// Encodes arbitrary named channels (AOVs, depth, ids, layers such as "diffuse.R") as one scan line part.
-        /// Every channel has width * height samples; types may be mixed. Custom header attributes go into
-        /// <see cref="ExrEncodeOptions.Attributes"/>. <see cref="ExrEncodeOptions.PixelType"/> and ChannelNames are ignored here.
+        /// Encodes arbitrary named channels (AOVs, depth, ids, layers such as "diffuse.R") as one part. Every channel
+        /// has width * height samples (fewer for subsampled channels); types may be mixed. Custom header attributes go
+        /// into <see cref="ExrEncodeOptions.Attributes"/>. PixelType, ChannelNames and LuminanceChroma are ignored here.
         /// </summary>
         public static void EncodeChannels(int width, int height, IReadOnlyList<ExrChannelData> channels, Stream output, ExrEncodeOptions? options = null)
-            => ExrEncoder.Encode(width, height, channels, output, options ?? new ExrEncodeOptions());
+            => ExrEncoder.Encode(new[] { new ExrPart(null, width, height, channels, options) }, output, false);
+
+        /// <summary>
+        /// Writes a multi-part file: each part has its own channels, size, compression and scan line / tiled layout
+        /// (from its <see cref="ExrPart.Options"/>). Part names must be unique; all parts must share the display window
+        /// and pixel aspect ratio, as the format requires.
+        /// </summary>
+        public static void EncodeParts(IReadOnlyList<ExrPart> parts, Stream output) => ExrEncoder.Encode(parts, output, true);
 
         static ExrHeader GetPart(ExrFileStructure file, int index)
         {

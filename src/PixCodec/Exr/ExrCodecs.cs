@@ -108,7 +108,7 @@ namespace PixCodec
         }
 
         /// <summary>Compresses a chunk given in the uncompressed line layout. Returns the bytes to store (raw if compression did not help).</summary>
-        public static byte[] Encode(ExrCompression comp, ReadOnlySpan<byte> raw, in ExrChunk chunk, ExrScratch s, int zipLevel)
+        public static byte[] Encode(ExrCompression comp, ReadOnlySpan<byte> raw, in ExrChunk chunk, ExrScratch s, int zipLevel, float dwaLevel)
         {
             ReadOnlySpan<byte> packed;
             switch (comp)
@@ -134,6 +134,8 @@ namespace PixCodec
                 case ExrCompression.Piz: packed = ExrPiz.Encode(raw, chunk, s); break;
                 case ExrCompression.B44:
                 case ExrCompression.B44A: packed = ExrB44.Encode(raw, chunk, s, comp == ExrCompression.B44A); break;
+                case ExrCompression.Dwaa:
+                case ExrCompression.Dwab: packed = ExrDwa.Encode(raw, chunk, s, dwaLevel); break;
                 default: throw new ImageNotSupportedException($"EXR compression {comp} is not supported for encoding");
             }
             // The format stores a chunk raw when compression does not shrink it; readers detect this by the size.
