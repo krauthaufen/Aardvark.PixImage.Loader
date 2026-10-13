@@ -1,14 +1,18 @@
 # PixCodec
 
 Pure managed image loading and saving for .NET 8. No native binaries, no third-party packages, MIT licensed.
+Little-endian hosts only (x64 and arm64 are tested).
 
 | Format | Decode | Encode |
 |---|---|---|
-| PNG | all colour types and bit depths, interlaced, tRNS, 16 bit | 8/16 bit gray, gray+alpha, RGB, RGBA |
-| JPEG | baseline + progressive, all subsamplings, CMYK/YCCK, restart markers | baseline + progressive, quality, 4:4:4 / 4:2:2 / 4:2:0 |
-| TIFF | classic + BigTIFF, strips + tiles, 1..32 bit int, 16/32/64 bit float, LZW, Deflate, PackBits, CCITT, JPEG, predictors, multi-page, raw tags, region decode | every sample type, strips or tiles, None / LZW / Deflate / PackBits |
-| GIF | 87a/89a, interlace, transparency, animations | single images and animations, quantizer + dithering |
-| OpenEXR | scanline, tiled, multi-part, half/float/uint, all compressions incl. PIZ, B44, DWA | scanline, all compressions except DWA |
+| PNG | everything in the spec, interlaced, 16 bit, APNG, all standard ancillary chunks | 8/16 bit gray, gray+alpha, RGB, RGBA, palette, 1/2/4 bit, interlaced, APNG |
+| JPEG | baseline, progressive, lossless, hierarchical, arithmetic coding, 8 and 12 bit, CMYK/YCCK, scaled decode | baseline, progressive, lossless, arithmetic, 8 and 12 bit |
+| TIFF | classic + BigTIFF, strips + tiles, 1..64 bit int, 16/24/32/64 bit float, LZW, Deflate, PackBits, CCITT, JPEG (incl. old-style, 12 bit, lossless), ZSTD, LZMA, WebP, PixarLog, LogLuv, Lab, multi-page, raw tags, regions, files > 4 GB | every sample type, strips or tiles, None / LZW / Deflate / PackBits / ZSTD / JPEG / CCITT G4, multi-page, overviews, cloud-optimized layout, extra tags |
+| GIF | 87a/89a, interlace, transparency, animations (compositing verified against Chromium) | single images and animations, quantizer + dithering |
+| OpenEXR | scanline, tiled, multi-part, deep, mip/rip levels, half/float/uint, luminance/chroma, all compressions incl. PIZ, B44, DWA | scanline, tiled, multi-part, deep, luminance/chroma, all of those compressions |
+| WebP | lossy, lossless, alpha, animation | lossy, lossless, alpha, animation |
+
+Not supported: JPEG 2000 / JPEG XL / JPEG XR / LERC / JBIG inside TIFF, HTJ2K and ZSTD compressed EXR.
 
 ## Core library
 
@@ -16,17 +20,31 @@ Pure managed image loading and saving for .NET 8. No native binaries, no third-p
 using PixCodec;
 
 RawImage img = ImageCodec.Decode("photo.jpg");      // format is sniffed from the content
-ImageInfo info = ImageCodec.GetInfo("scan.tif");    // format, size, channels, sample type, frames - reads only the headers
 ImageCodec.Encode(img, "out.png");                  // format from the extension
-
 Jpeg.Encode(img, stream, new JpegEncodeOptions { Quality = 85, Progressive = true });
+
+ImageInfo info = ImageCodec.GetInfo("scan.tif");    // reads only the headers
+// info.Format, Width, Height, Channels, SampleType, Color, FrameCount,
+// BitsPerSample, Orientation (+ OrientedWidth/Height), DpiX, DpiY, HasIccProfile, IsAnimated
+if (ImageCodec.TryGetInfo(path, out var i)) { /* ... */ }
 ```
 
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
-in R,G,B,A order with straight alpha. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`)
-with format specific options and extras (GIF animations, TIFF pages / tags / regions, EXR headers and named channels).
+in R,G,B,A order with straight alpha. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`)
+with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
+EXR headers, named channels, levels and deep data.
 
 Malformed files throw `ImageFormatException`, valid files using an unimplemented feature throw `ImageNotSupportedException`.
+
+`GetInfo` reads the leading part of the file only. Exceptions: GIF and animated WebP (frames are counted) and WebP
+files flagged as carrying EXIF/ICC need the whole file; TIFF directories are located by seeking.
+
+## Compression
+
+`PixCodec.Compression` holds fully managed deflate/inflate (zlib, levels 0..9, streaming `Inflater`), Zstandard
+(decode incl. dictionaries, encode), XZ / LZMA (decode incl. BCJ filters, encode) and vectorised CRC-32 / Adler-32.
+The managed deflate is the default; `Zlib.Backend = ZlibBackend.Bcl` (or `PIXCODEC_ZLIB=bcl`) switches to
+`System.IO.Compression`.
 
 ## Aardvark
 
@@ -39,12 +57,15 @@ var pi = PixImage.Load("dem.tif");                  // PixImage<float>, wraps th
 pi.Save("dem.exr");
 ```
 
-Half float EXR channels load as `PixImage<float>`. BGR(A) images are saved as RGB(A).
+Half float EXR channels load as `PixImage<float>`. BGR(A) images are saved as RGB(A). The existing `PixSaveParams`
+classes (JPEG quality, PNG level, TIFF / EXR compression, WebP quality / lossless) are honoured.
 
 ## Tests
 
-`dotnet test`. Decoders are checked against reference decoders (Pillow / libjpeg-turbo, libpng via OpenCV, libtiff,
-ImageMagick, the OpenEXR library) through `.ref` sidecars generated by `tests/oracle/gen_*.py`; encoders are checked by
-decoding their output with the same reference tools (needs `python3` with Pillow, numpy, tifffile, opencv and OpenEXR).
+`dotnet test`. Decoders are checked against reference decoders (libjpeg-turbo, libpng, libtiff, libwebp, the OpenEXR
+library, Chromium, ...) through `.ref` sidecars generated by `tests/oracle/gen_*.py`; encoders are checked by decoding
+their output with the same reference tools. Running the encoder cross-checks needs `python3` with Pillow, numpy,
+tifffile, imagecodecs, opencv and OpenEXR; without python they are skipped. Some extra checks use tools fetched by
+`tests/oracle/gen_png.py --fetch-tools` and `tests/oracle/fetch_webp_vectors.sh`.
 
-zlib/deflate goes through `System.IO.Compression` behind `PixCodec.Compression.Zlib`.
+Third-party data: see `THIRD-PARTY-NOTICES.md`.
