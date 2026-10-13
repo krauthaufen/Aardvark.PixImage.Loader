@@ -335,6 +335,75 @@ namespace PixCodec.JpegImpl
             }
         }
 
+        public static bool HasWide => Use8;
+
+        /// <summary>
+        /// Full size inverse DCT for 16 bit planes (12 bit samples) with 8 lane vectors; same arithmetic as the scalar
+        /// path of <see cref="IdctGeneric"/>, including level shift and clamping to 0..max.
+        /// </summary>
+        public static void Idct8Wide(short* coef, int* quant, ushort* dst, nint stride, int pass1Bits, int center, int max)
+        {
+            Vector.Widen(Vector.Load(coef), out var r0, out var r1);
+            Vector.Widen(Vector.Load(coef + 16), out var r2, out var r3);
+            Vector.Widen(Vector.Load(coef + 32), out var r4, out var r5);
+            Vector.Widen(Vector.Load(coef + 48), out var r6, out var r7);
+            r0 *= Vector.Load(quant); r1 *= Vector.Load(quant + 8);
+            r2 *= Vector.Load(quant + 16); r3 *= Vector.Load(quant + 24);
+            r4 *= Vector.Load(quant + 32); r5 *= Vector.Load(quant + 40);
+            r6 *= Vector.Load(quant + 48); r7 *= Vector.Load(quant + 56);
+            IdctPass(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7, ConstBits - pass1Bits);
+            Transpose8(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7);
+            IdctPass(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7, ConstBits + pass1Bits + 3);
+            Transpose8(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7);
+            var c = new Vector<int>(center); var hi = new Vector<int>(max);
+            StoreRow16(r0, c, hi, dst); dst += stride;
+            StoreRow16(r1, c, hi, dst); dst += stride;
+            StoreRow16(r2, c, hi, dst); dst += stride;
+            StoreRow16(r3, c, hi, dst); dst += stride;
+            StoreRow16(r4, c, hi, dst); dst += stride;
+            StoreRow16(r5, c, hi, dst); dst += stride;
+            StoreRow16(r6, c, hi, dst); dst += stride;
+            StoreRow16(r7, c, hi, dst);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void StoreRow16(Vector<int> v, Vector<int> center, Vector<int> max, ushort* dst)
+        {
+            var x = Vector.Min(Vector.Max(v + center, Vector<int>.Zero), max).AsVector256();
+            Sse2.Store(dst, Sse41.PackUnsignedSaturate(x.GetLower(), x.GetUpper()));
+        }
+
+        /// <summary>Forward DCT + quantization of an 8x8 block of 16 bit samples (12 bit precision); zigzag ordered output.</summary>
+        [SkipLocalsInit]
+        public static void FdctQuantizeWide(ushort* src, nint stride, int center, float* recip, short* zigzagOut)
+        {
+            int* m = stackalloc int[64];
+            if (Use8)
+            {
+                var bias = new Vector<int>(center);
+                var r0 = LoadRow16(src) - bias; var r1 = LoadRow16(src + stride) - bias;
+                var r2 = LoadRow16(src + 2 * stride) - bias; var r3 = LoadRow16(src + 3 * stride) - bias;
+                var r4 = LoadRow16(src + 4 * stride) - bias; var r5 = LoadRow16(src + 5 * stride) - bias;
+                var r6 = LoadRow16(src + 6 * stride) - bias; var r7 = LoadRow16(src + 7 * stride) - bias;
+                FdctPass(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7, false, 1);
+                Transpose8(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7);
+                FdctPass(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7, true, 1);
+                Vector.Store(Quantize(r0, recip), m); Vector.Store(Quantize(r1, recip + 8), m + 8);
+                Vector.Store(Quantize(r2, recip + 16), m + 16); Vector.Store(Quantize(r3, recip + 24), m + 24);
+                Vector.Store(Quantize(r4, recip + 32), m + 32); Vector.Store(Quantize(r5, recip + 40), m + 40);
+                Vector.Store(Quantize(r6, recip + 48), m + 48); Vector.Store(Quantize(r7, recip + 56), m + 56);
+                byte* zz = JpegTables.ZigZagTransposed;
+                for (int i = 0; i < 64; i++) zigzagOut[i] = (short)Math.Clamp(m[zz[i]], -32767, 32767);
+                return;
+            }
+            for (int y = 0; y < 8; y++)
+                for (int x = 0; x < 8; x++) m[y * 8 + x] = src[y * stride + x] - center;
+            FdctQuantizeGeneric(m, 1, recip, zigzagOut);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector<int> LoadRow16(ushort* p) => Avx2.ConvertToVector256Int32(Sse2.LoadVector128(p)).AsVector();
+
         public static bool HasIdct4 => Avx2.IsSupported && ForceLevel < 0;
 
         /// <summary>
@@ -476,6 +545,40 @@ namespace PixCodec.JpegImpl
             }
         }
 
+        /// <summary>
+        /// Like <see cref="FdctQuantize"/>, but leaves the 64 coefficients in transposed (column major) order: with
+        /// AVX2 that is how they come out of the transform, and the block coder can walk them through an index table.
+        /// </summary>
+        [SkipLocalsInit]
+        public static void FdctQuantizeTransposed(byte* src, nint stride, float* recip, short* output)
+        {
+            if (!Use8)
+            {
+                short* zz = stackalloc short[64];
+                FdctQuantize(src, stride, recip, zz);
+                byte* order = JpegTables.ZigZagTransposed;
+                for (int i = 0; i < 64; i++) output[order[i]] = zz[i];
+                return;
+            }
+            var bias = new Vector<int>(128);
+            var r0 = LoadRow8(src) - bias; var r1 = LoadRow8(src + stride) - bias;
+            var r2 = LoadRow8(src + 2 * stride) - bias; var r3 = LoadRow8(src + 3 * stride) - bias;
+            var r4 = LoadRow8(src + 4 * stride) - bias; var r5 = LoadRow8(src + 5 * stride) - bias;
+            var r6 = LoadRow8(src + 6 * stride) - bias; var r7 = LoadRow8(src + 7 * stride) - bias;
+            FdctPass(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7, false);
+            Transpose8(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7);
+            FdctPass(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7, true);
+            StorePair(Quantize(r0, recip), Quantize(r1, recip + 8), output);
+            StorePair(Quantize(r2, recip + 16), Quantize(r3, recip + 24), output + 16);
+            StorePair(Quantize(r4, recip + 32), Quantize(r5, recip + 40), output + 32);
+            StorePair(Quantize(r6, recip + 48), Quantize(r7, recip + 56), output + 48);
+        }
+
+        /// <summary>Two rows of 8 ints to 16 shorts.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void StorePair(Vector<int> a, Vector<int> b, short* dst)
+            => Avx.Store(dst, Avx2.Permute4x64(Avx2.PackSignedSaturate(a.AsVector256(), b.AsVector256()).AsInt64(), 0b11011000).AsInt16());
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static Vector<int> LoadRow8(byte* p)
             => Avx2.ConvertToVector256Int32(Sse2.LoadScalarVector128((ulong*)p).AsByte()).AsVector();
@@ -492,7 +595,7 @@ namespace PixCodec.JpegImpl
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void FdctPass(ref Vector<int> a0, ref Vector<int> a1, ref Vector<int> a2, ref Vector<int> a3,
-            ref Vector<int> a4, ref Vector<int> a5, ref Vector<int> a6, ref Vector<int> a7, bool second)
+            ref Vector<int> a4, ref Vector<int> a5, ref Vector<int> a6, ref Vector<int> a7, bool second, int pass1 = Pass1Bits)
         {
             var t0 = a0 + a7; var t7 = a0 - a7;
             var t1 = a1 + a6; var t6 = a1 - a6;
@@ -501,18 +604,18 @@ namespace PixCodec.JpegImpl
             var t10 = t0 + t3; var t13 = t0 - t3;
             var t11 = t1 + t2; var t12 = t1 - t2;
 
-            int shift = second ? ConstBits + Pass1Bits : ConstBits - Pass1Bits;
+            int shift = second ? ConstBits + pass1 : ConstBits - pass1;
             var round = new Vector<int>(1 << (shift - 1));
             if (second)
             {
-                var r2 = new Vector<int>(1 << (Pass1Bits - 1));
-                a0 = Vector.ShiftRightArithmetic(t10 + t11 + r2, Pass1Bits);
-                a4 = Vector.ShiftRightArithmetic(t10 - t11 + r2, Pass1Bits);
+                var r2 = new Vector<int>(1 << (pass1 - 1));
+                a0 = Vector.ShiftRightArithmetic(t10 + t11 + r2, pass1);
+                a4 = Vector.ShiftRightArithmetic(t10 - t11 + r2, pass1);
             }
             else
             {
-                a0 = Vector.ShiftLeft(t10 + t11, Pass1Bits);
-                a4 = Vector.ShiftLeft(t10 - t11, Pass1Bits);
+                a0 = Vector.ShiftLeft(t10 + t11, pass1);
+                a4 = Vector.ShiftLeft(t10 - t11, pass1);
             }
             var z1 = (t12 + t13) * F0_541196100 + round;
             a2 = Vector.ShiftRightArithmetic(z1 + t13 * F0_765366865, shift);

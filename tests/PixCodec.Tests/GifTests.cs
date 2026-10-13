@@ -30,7 +30,20 @@ public class GifTests(ITestOutputHelper output)
         Assert.Equal(expected.Channels == 4 ? ColorModel.Rgba : ColorModel.Rgb, img.Color);
 
         var info = Gif.GetInfo(data);
-        Assert.Equal(new ImageInfo(ImageFormat.Gif, img.Width, img.Height, img.Channels, SampleType.UInt8, img.Color, FrameRefs(path).Count), info);
+        int frames = FrameRefs(path).Count;
+        Assert.Equal(new ImageInfo(ImageFormat.Gif, img.Width, img.Height, img.Channels, SampleType.UInt8, img.Color, frames)
+        {
+            BitsPerSample = 8,
+            IsAnimated = frames > 1,
+            // exactly what Decode put into the metadata
+            HasIccProfile = img.Metadata?.IccProfile != null,
+            Orientation = img.Metadata?.Orientation ?? 0,
+            DpiX = img.Metadata?.DpiX ?? 0,
+            DpiY = img.Metadata?.DpiY ?? 0,
+        }, info);
+        Assert.Equal(path.Contains("icc"), info.HasIccProfile);
+        Assert.Equal(info, ImageCodec.GetInfo(data));
+        using (var stream = new MemoryStream(data)) Assert.Equal(info, ImageCodec.GetInfo(stream));
         Assert.True(Gif.IsMatch(data));
     }
 
@@ -583,6 +596,56 @@ public class GifTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>
+    /// The global palette statistics book only the pixels that change from frame to frame (weighted by the frames that
+    /// remain). That must give exactly the palette that counting every pixel of every frame gives.
+    /// </summary>
+    [Fact]
+    public void GlobalPaletteStatisticsFromChanges()
+    {
+        var frames = Movie(7, 64, 40, 256, true);
+        static uint[] Pixels(RawImage f)
+        {
+            var d = f.GetData<byte>();
+            var px = new uint[f.Width * f.Height];
+            for (int i = 0; i < px.Length; i++)
+                px[i] = d[i * 4 + 3] < 128 ? 0 : d[i * 4] | (uint)d[i * 4 + 1] << 8 | (uint)d[i * 4 + 2] << 16 | 0xFF000000u;
+            return px;
+        }
+        var all = new GifQuantizer();
+        foreach (var f in frames) all.Add(Pixels(f));
+        var expected = all.BuildPalette(255, 3);
+
+        var weighted = new GifQuantizer();
+        weighted.Add(Pixels(frames[0]), 5);
+        weighted.Add(Pixels(frames[0]), -4);
+        for (int k = 1; k < frames.Count; k++) weighted.Add(Pixels(frames[k]), 1);
+        Assert.Equal(expected, weighted.BuildPalette(255, 3));
+
+        // and through the encoder: the palette in the file is that palette (plus the transparent slot)
+        var gif = Gif.EncodeAnimation(frames.Select(f => new GifInputFrame(f, 50)), new GifEncodeOptions { Dither = GifDither.None });
+        var table = Gif.GetAnimationInfo(gif).GlobalPalette!;
+        for (int i = 0; i < expected.Length; i++)
+            Assert.Equal(expected[i] & 0xFFFFFF, (uint)(table[i * 3] | table[i * 3 + 1] << 8 | table[i * 3 + 2] << 16));
+
+        // frames handed over in different layouts are compared pixel by pixel instead of byte by byte: same file
+        var mixed = frames.Select((f, i) => i % 2 == 0 || HasTransparency(f) ? f : DropAlpha(f)).ToList();
+        Assert.Contains(mixed, f => f.Color == ColorModel.Rgb);
+        Assert.Equal(gif, Gif.EncodeAnimation(mixed.Select(f => new GifInputFrame(f, 50)), new GifEncodeOptions { Dither = GifDither.None }));
+        // the same for a palette that needs no quantizing
+        var few = Movie(6, 40, 30, 4, false);
+        var fewMixed = few.Select((f, i) => i % 2 == 0 ? f : DropAlpha(f)).ToList();
+        Assert.Equal(Gif.EncodeAnimation(few.Select(f => new GifInputFrame(f, 50))), Gif.EncodeAnimation(fewMixed.Select(f => new GifInputFrame(f, 50))));
+    }
+
+    static RawImage DropAlpha(RawImage rgba)
+    {
+        var d = rgba.GetData<byte>();
+        var rgb = new byte[rgba.Width * rgba.Height * 3];
+        for (int i = 0; i < rgba.Width * rgba.Height; i++) d.AsSpan(i * 4, 3).CopyTo(rgb.AsSpan(i * 3));
+        return new RawImage(rgba.Width, rgba.Height, ColorModel.Rgb, rgb);
+    }
+
     [Fact]
     public void PerFramePaletteEncoderIsLazy()
     {
@@ -844,8 +907,107 @@ public class GifTests(ITestOutputHelper output)
             if (!e.GetProperty("source").GetString()!.StartsWith("chromium")) notChromium.Add(name);
             else Assert.Equal(FrameRefs(Fixture((string)row[0])).Count, e.GetProperty("frames").GetInt32());
         }
-        // Chromium refuses a frame whose data ends (with an end code) before all pixels are there; we keep what arrived.
-        Assert.Equal(new[] { "hand_short_frame.gif", "hand_short_frame_interlaced.gif" }, notChromium);
+        // Chromium's ImageDecoder refuses a frame whose data ends (with an end code) before all pixels are there, even
+        // as an unfinished download; an <img> shows it as far as it goes, and so do we by default.
+        Assert.Equal(new[] { "hand_anim_short_second.gif", "hand_short_frame.gif", "hand_short_frame_interlaced.gif" }, notChromium);
+    }
+
+    static System.Text.Json.JsonElement ChromeJson => System.Text.Json.JsonDocument.Parse(File.ReadAllText(Fixture("gif/chrome.json"))).RootElement;
+
+    /// <summary>
+    /// RejectIncompleteFrames reproduces Chromium's ImageDecoder when it has the whole file: chrome.json says for every
+    /// fixture how many frames it hands out before it gives up.
+    /// </summary>
+    [Theory, MemberData(nameof(Fixtures))]
+    public void RejectIncompleteFramesMatchesChromium(string file)
+    {
+        var data = File.ReadAllBytes(Fixture(file));
+        int expected = ChromeJson.GetProperty(Path.GetFileName(file)).GetProperty("framesGivenAllData").GetInt32();
+        int total = FrameRefs(Fixture(file)).Count;
+        var refs = FrameRefs(Fixture(file));
+        var o = new GifDecodeOptions { RejectIncompleteFrames = true };
+        int got = 0;
+        bool threw = false;
+        try
+        {
+            foreach (var f in Gif.EnumerateFrames(data, o)) { AssertEqual(refs[got], f.Image!); got++; }
+        }
+        catch (ImageFormatException) { threw = true; }
+        Assert.Equal(expected, got);
+        Assert.Equal(expected < total, threw);
+        if (expected < total)
+        {
+            Assert.Throws<ImageFormatException>(() => Gif.DecodeAnimation(data, o));
+            Assert.Throws<ImageFormatException>(() => Gif.DecodeAnimation(data, new GifDecodeOptions { RejectIncompleteFrames = true, FrameMode = GifFrameMode.Indexed }));
+            if (expected == 0) Assert.Throws<ImageFormatException>(() => Gif.Decode(data, o));
+            else AssertEqual(Gif.Decode(data), Gif.Decode(data, o));
+            Assert.Equal(total, Gif.DecodeAnimation(data).Frames.Count);     // the default keeps what arrived
+        }
+    }
+
+    /// <summary>
+    /// IncompleteFirstFrameAsRgba: a first frame that is not all there comes back as Chromium shows it (the .0.ref,
+    /// missing pixels transparent) instead of the header-determined Rgb with black.
+    /// </summary>
+    [Theory, MemberData(nameof(Fixtures))]
+    public void IncompleteFirstFrameAsRgbaMatchesChromium(string file)
+    {
+        var path = Fixture(file);
+        var data = File.ReadAllBytes(path);
+        var o = new GifDecodeOptions { IncompleteFirstFrameAsRgba = true };
+        var img = Gif.Decode(data, o);
+        bool incomplete = Gif.DecodeAnimation(data).Frames[0].Truncated;
+        if (incomplete)
+        {
+            Assert.Equal(ColorModel.Rgba, img.Color);
+            AssertEqual(LoadRef(path + ".0.ref"), img);
+        }
+        else AssertEqual(LoadRef(path + ".ref"), img);
+    }
+
+    [Fact]
+    public void IncompleteFirstFrameOptionChangesOnlyOpaqueTruncatedFiles()
+    {
+        var changed = new List<string>();
+        foreach (var row in Fixtures)
+        {
+            var data = File.ReadAllBytes(Fixture((string)row[0]));
+            if (Gif.Decode(data).Channels != Gif.Decode(data, new GifDecodeOptions { IncompleteFirstFrameAsRgba = true }).Channels)
+                changed.Add(Path.GetFileName((string)row[0]));
+        }
+        Assert.Equal(new[] { "hand_short_frame.gif", "hand_short_frame_interlaced.gif", "hand_truncated_data.gif", "hand_truncated_interlaced.gif", "hand_truncated_subblock.gif" }, changed);
+    }
+
+    /// <summary>
+    /// ClampDelays against what Chromium was measured to do while playing hand_delay_*cs.gif in an img element
+    /// (chrome.json "playback"): 0 and 1/100 s play at 100 ms per frame, longer delays as stored (short ones a few
+    /// milliseconds faster than stored on a 60 Hz display, never slower).
+    /// </summary>
+    [Fact]
+    public void ClampDelaysIsWhatChromiumPlays()
+    {
+        var json = ChromeJson;
+        int checkedFiles = 0;
+        foreach (var row in Fixtures)
+        {
+            var name = Path.GetFileName((string)row[0]);
+            if (!name.StartsWith("hand_delay_")) continue;
+            var play = json.GetProperty(name).GetProperty("playback");
+            int stored = play.GetProperty("storedDelayCs").GetInt32();
+            int measured = play.GetProperty("measuredMsPerFrame").GetInt32();
+            bool clamped = play.GetProperty("clampedTo100ms").GetBoolean();
+            var data = File.ReadAllBytes(Fixture((string)row[0]));
+            var frames = Gif.DecodeAnimation(data, new GifDecodeOptions { ClampDelays = true }).Frames;
+            Assert.Equal(6, frames.Count);
+            Assert.All(frames, f => Assert.Equal(stored, f.DelayCs));
+            int ours = frames[0].DelayMs;
+            Assert.Equal(clamped ? 100 : stored * 10, ours);
+            Assert.Equal(clamped, stored <= 1);
+            Assert.InRange(measured, ours * 0.6, ours + 5);     // 2/100 s is played at one frame per 60 Hz refresh
+            Assert.All(Gif.DecodeAnimation(data).Frames, f => Assert.Equal(stored * 10, f.DelayMs));
+            checkedFiles++;
+        }
+        Assert.Equal(7, checkedFiles);
     }
 
     [Fact]

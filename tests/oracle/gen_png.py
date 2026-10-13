@@ -2,6 +2,7 @@
 
   python3 gen_png.py [-v]            regenerate everything (deterministic); -v lists who confirmed each file
   python3 gen_png.py --meta x.png    print what third-party readers report about a PNG's metadata as JSON
+  python3 gen_png.py --fetch-tools   download / build pngcheck, exiftool and libjxl's cjxl + djxl into .tmp/tools
 
 Most files are assembled by hand (make_png below) because no common encoder can produce the whole feature
 matrix: every color type / bit depth, Adam7, each row filter, tRNS color keys, split IDATs, ancillary chunks.
@@ -31,8 +32,56 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.normpath(os.path.join(HERE, '..', 'fixtures', 'png'))
 SUITE = os.path.join(OUT, 'pngsuite')
 
+TMP = os.path.normpath(os.path.join(HERE, '..', '..', '.tmp'))
+TOOLS = os.path.join(TMP, 'tools')
+
 CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 ADAM7 = [(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]  # x0, y0, dx, dy
+
+
+# ---------------------------------------------------------------------------------------------- extra tools
+
+def tool(name):
+    """Command line (list) of an oracle tool that distributions rarely package, or None: looked up on PATH and
+    in .tmp/tools, where `gen_png.py --fetch-tools` puts them.
+      pngcheck  prints the contents of nearly every chunk (the only reader at hand for sBIT values, hIST, sPLT,
+                oFFs, pCAL, sCAL, mDCV, cLLI)
+      exiftool  second reader for sBIT, cICP, sCAL, sTER
+      cjxl/djxl libjxl: converts an APNG to JPEG XL keeping its blend/dispose operations and renders it back with
+                floating point compositing - the only decoder at hand that blends 16 bit APNG frames."""
+    import shutil
+    local = {'pngcheck': [os.path.join(TOOLS, 'pngcheck')],
+             'exiftool': ['perl', os.path.join(TOOLS, 'exiftool-src', 'exiftool')],
+             'cjxl': [os.path.join(TOOLS, 'jxl', 'tools', 'cjxl')],
+             'djxl': [os.path.join(TOOLS, 'jxl', 'tools', 'djxl')]}[name]
+    found = shutil.which(name)
+    if found:
+        return [found]
+    return local if os.path.exists(local[-1]) else None
+
+
+def fetch_tools():
+    """Downloads and builds the tools described in tool() into .tmp/tools (needs gcc, zlib headers, perl, lzip)."""
+    import urllib.request
+    os.makedirs(TOOLS, exist_ok=True)
+
+    def unpack(url, target, flag):
+        os.makedirs(target, exist_ok=True)
+        archive = os.path.join(TOOLS, '_download')
+        urllib.request.urlretrieve(url, archive)
+        subprocess.run(['tar', flag, '-xf', archive, '-C', target] + (['--strip-components=1'] if flag == '-z' else []), check=True)
+        os.remove(archive)
+
+    if not tool('pngcheck'):
+        src = os.path.join(TOOLS, 'pngcheck-src')
+        unpack('https://github.com/pnggroup/pngcheck/archive/refs/tags/v4.0.1.tar.gz', src, '-z')
+        subprocess.run(['gcc', '-O2', '-DUSE_ZLIB', '-o', os.path.join(TOOLS, 'pngcheck'), os.path.join(src, 'pngcheck.c'), '-lz'], check=True)
+    if not tool('exiftool'):
+        unpack('https://github.com/exiftool/exiftool/archive/refs/tags/13.59.tar.gz', os.path.join(TOOLS, 'exiftool-src'), '-z')
+    if not tool('cjxl'):
+        unpack('https://github.com/libjxl/libjxl/releases/download/v0.12.0/jxl-linux-x86_64-static.tar.lz', os.path.join(TOOLS, 'jxl'), '--lzip')
+    for name in ('pngcheck', 'exiftool', 'cjxl', 'djxl'):
+        print(name, '->', tool(name))
 
 
 # ---------------------------------------------------------------------------------------------- PNG writer
@@ -513,7 +562,6 @@ def gen_suite_refs():
 # ---------------------------------------------------------------------------------------------- APNG
 
 APNG = os.path.join(OUT, 'apng')
-TMP = os.path.normpath(os.path.join(HERE, '..', '..', '.tmp'))
 
 CHROME_JS = r"""
 const fs = require('fs');
@@ -664,7 +712,40 @@ def anim_imagecodecs(path, w, h, dtype):
     return a
 
 
-ANIM_DECODERS = [('ffmpeg', anim_ffmpeg), ('pillow', anim_pillow), ('imagecodecs', anim_imagecodecs)]
+def anim_libjxl(path, w, h, dtype):
+    """cjxl stores the APNG frames losslessly together with their blend and dispose operations; djxl renders the
+    animation with floating point compositing and writes full frames, which any APNG reader can take apart.
+    Its blending is rounded from float32, so it can differ from exact rounding by 1 (see judge: 'near')."""
+    import imagecodecs
+    cjxl, djxl = tool('cjxl'), tool('djxl')
+    if not cjxl or not djxl:
+        return None
+    os.makedirs(TMP, exist_ok=True)
+    jxl, out = os.path.join(TMP, '_oracle.jxl'), os.path.join(TMP, '_oracle.apng')
+    try:
+        subprocess.run(cjxl + [path, jxl, '-d', '0', '-e', '3', '--quiet'], check=True, capture_output=True)
+        subprocess.run(djxl + [jxl, out, '--quiet'], check=True, capture_output=True)
+        with open(out, 'rb') as f:
+            a = imagecodecs.apng_decode(f.read())
+    finally:
+        for f in (jxl, out):
+            if os.path.exists(f):
+                os.remove(f)
+    if a.dtype != dtype:
+        return None
+    if a.ndim == 3:
+        a = a[..., None]
+    full = np.iinfo(a.dtype).max
+    if a.shape[3] == 1:
+        a = np.concatenate([a, a, a, np.full_like(a, full)], -1)
+    elif a.shape[3] == 2:
+        a = a[..., [0, 0, 0, 1]]
+    elif a.shape[3] == 3:
+        a = np.concatenate([a, np.full_like(a[..., :1], full)], -1)
+    return a
+
+
+ANIM_DECODERS = [('ffmpeg', anim_ffmpeg), ('pillow', anim_pillow), ('imagecodecs', anim_imagecodecs), ('libjxl', anim_libjxl)]
 
 
 def judge(a, ref, separate_default=False):
@@ -757,6 +838,8 @@ def finish_anims():
         ok = [d for d, v in verdicts.items() if v]
         if len(ok) < (1 if name in SINGLE_ORACLE else 2):
             bad.append(f'{name}: confirmed only by {verdicts}')
+        if name in REQUIRED_ORACLE and not verdicts.get(REQUIRED_ORACLE[name]):
+            bad.append(f'{name}: not confirmed by {REQUIRED_ORACLE[name]} (see tool(); run gen_png.py --fetch-tools)')
     if bad:
         raise SystemExit('animation references lack confirmation:\n  ' + '\n  '.join(bad))
 
@@ -796,11 +879,16 @@ PLAN_OPAQUE = [FULL + (0, 0), (5, 4, 2, 3, 0, 1), (6, 5, 4, 2, 2, 1), (7, 3, 1, 
 PLAN_NO_PREVIOUS = [f[:4] + (0 if f[4] == 2 else f[4], f[5]) for f in PLAN_ALL]
 PLAN_SOURCE = [f[:5] + (0,) for f in PLAN_NO_PREVIOUS]
 
-# References that only one third-party decoder can confirm, and why that is accepted.
-SINGLE_ORACLE = {
-    'ops_rgba16_partial_on_opaque':
-        'no decoder at hand blends 16 bit samples: ffmpeg skips such frames, Pillow and Chrome work at 8 bit, '
-        'imagecodecs blends alpha like a colour channel. Chrome confirms it at 8 bit precision.',
+# References that only one third-party decoder can confirm, and why that is accepted. (None at present: blending
+# of translucent 16 bit frames, which ffmpeg skips and Pillow, Chrome and imagecodecs cannot do at 16 bit, is
+# confirmed by libjxl.)
+SINGLE_ORACLE = {}
+
+# Fixtures that exist to pin down one behaviour need the decoder that can actually judge it.
+REQUIRED_ORACLE = {
+    'ops_rgba16_partial': 'libjxl',
+    'ops_ga16_partial': 'libjxl',
+    'ops_rgba16_partial_on_opaque': 'libjxl',
 }
 
 
@@ -834,6 +922,9 @@ def gen_apng():
     build('ops_rgba16_binary', 6, 16, PLAN_ALL, seed=10)
     build('ops_rgba16_partial_on_opaque', 6, 16, PLAN_OPAQUE, 'partial', seed=11, opaque_first=True)
     build('ops_rgba16_partial_source', 6, 16, PLAN_SOURCE, 'partial', seed=12)
+    # translucent over translucent at 16 bit, every dispose and blend operation
+    build('ops_rgba16_partial', 6, 16, PLAN_ALL, 'partial', seed=40)
+    build('ops_ga16_partial', 4, 16, PLAN_ALL, 'partial', seed=41)
     build('ops_rgb16', 2, 16, PLAN_ALL, seed=13)
     build('ops_gray16', 0, 16, PLAN_ALL, seed=14)
     build('ops_ga16_binary', 4, 16, PLAN_ALL, seed=15)
@@ -975,11 +1066,83 @@ def read_meta(path):
         m['bkgd'] = [int(x) for x in bk.groups()]
     if 'sBIT chunk: present' in err:
         m['sbit'] = True
+    m.update(read_chunks(path))
+    return m
+
+
+def read_chunks(path):
+    """Chunk contents as pngcheck prints them (sBIT values, hIST, sPLT, oFFs, pCAL, sCAL, sTER, cICP names, mDCV,
+    cLLI), with exiftool as a second reader for those it decodes (sBIT, sCAL, sTER, cICP): where both report a
+    value they must agree. 'tools' lists which of the two were available."""
+    import json
+    import re
+    m = {'tools': []}
+    pngcheck, exiftool = tool('pngcheck'), tool('exiftool')
+    if pngcheck:
+        m['tools'].append('pngcheck')
+        out = subprocess.run(pngcheck + ['-vp', path], capture_output=True).stdout.decode('latin-1')
+        blocks = re.split(r'\n  chunk ', out)
+        num = r'([-+0-9.eE]+)'
+        for b in blocks[1:]:
+            name = b[:4]
+            if name == 'sBIT':
+                m['sbit'] = [int(v) for v in re.findall(r'= (\d+) = 0x', b)]
+            elif name == 'hIST':
+                m['hist'] = [int(v) for v in re.findall(r'^\s+\d+:\s+(\d+)\s*$', b, re.M)]
+            elif name == 'sPLT':
+                head = re.search(r'sample depth = (\d+) bits, palette name = (.*)', b)
+                entries = [[int(v) for v in e] for e in re.findall(
+                    r'^\s+\d+:\s+\(\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\).*freq = (\d+)', b, re.M)]
+                m.setdefault('splt', []).append({'name': head.group(2).rstrip('\r'), 'depth': int(head.group(1)), 'entries': entries})
+            elif name == 'oFFs':
+                x, y, unit = re.search(r': (\d+)x(\d+) (\w+) offset', b).groups()
+                m['offs'] = [int(x), int(y), unit]     # pngcheck prints the signed positions as unsigned
+            elif name == 'pCAL':
+                m['pcal'] = {'type': int(re.search(r'equation type (\d+)', b).group(1)),
+                             'name': re.search(r'calibration name = (.*)', b).group(1),
+                             'unit': re.search(r'unit name = (.*)', b).group(1),
+                             'x0': int(re.search(r'x0 = (-?\d+)', b).group(1)), 'x1': int(re.search(r'x1 = (-?\d+)', b).group(1)),
+                             'params': re.findall(r'^\s+p\d = (\S+)', b, re.M)}
+            elif name == 'sCAL':
+                w, h, unit = re.search(r'image size (\S+) x (\S+) (\w+)', b).groups()
+                m['scal'] = [unit, w, h]
+            elif name == 'sTER':
+                m['ster'] = 1 if 'divergent' in b else 0
+            elif name == 'cICP':
+                m['cicp_full_range'] = 'Full range' in b
+            elif name == 'mDCV':
+                wx, wy, rx, ry = re.search(rf'White x = {num} y = {num},\s+Red x = {num} y = {num}', b).groups()
+                gx, gy, bx, by = re.search(rf'Green x = {num} y = {num},\s+Blue x = {num} y = {num}', b).groups()
+                m['mdcv'] = [float(v) for v in (rx, ry, gx, gy, bx, by, wx, wy)] + [
+                    float(re.search(rf'Maximum luminance = {num}', b).group(1)), float(re.search(rf'Minimum luminance = {num}', b).group(1))]
+            elif name == 'cLLI':
+                m['clli'] = [float(re.search(rf'Maximum content light level = {num}', b).group(1)),
+                             float(re.search(rf'Maximum frame average light level = {num}', b).group(1))]
+    if exiftool:
+        m['tools'].append('exiftool')
+        r = subprocess.run(exiftool + ['-j', '-a', '-G1', '-n', path], capture_output=True, text=True)
+        j = json.loads(r.stdout)[0] if r.stdout.strip() else {}
+        if 'PNG:SignificantBits' in j:
+            bits = [int(v) for v in str(j['PNG:SignificantBits']).split()]
+            assert m.setdefault('sbit', bits) == bits, f'{path}: pngcheck and exiftool disagree on sBIT'
+        if 'PNG-cICP:ColorPrimaries' in j:
+            m['cicp'] = [j['PNG-cICP:ColorPrimaries'], j['PNG-cICP:TransferCharacteristics'], j['PNG-cICP:MatrixCoefficients'],
+                         j['PNG-cICP:VideoFullRangeFlag']]
+            assert m.get('cicp_full_range', bool(m['cicp'][3])) == bool(m['cicp'][3]), f'{path}: cICP range flag'
+        if 'PNG:StereoMode' in j:
+            assert m.setdefault('ster', j['PNG:StereoMode']) == j['PNG:StereoMode'], f'{path}: sTER'
+        if 'PNG:SubjectPixelWidth' in j and 'scal' in m:
+            assert float(m['scal'][1]) == j['PNG:SubjectPixelWidth'], f'{path}: sCAL'
+    m.pop('cicp_full_range', None)
+    if list(m) == ['tools']:
+        return {}
     return m
 
 
 def gen_meta():
     """Metadata fixtures and a .meta.json sidecar (see read_meta) for every fixture that has something to report."""
+    if not tool('pngcheck') or not tool('exiftool'):
+        raise SystemExit('pngcheck and exiftool are needed for the metadata sidecars: run gen_png.py --fetch-tools')
     import json
     from PIL import Image, PngImagePlugin
     arr = samples(21, 13, 3, 8, 600)
@@ -1014,6 +1177,34 @@ def gen_meta():
     write_ref(os.path.join(OUT, 'meta_bkgd_palette.png.ref'), ref)
     written.append(('meta_bkgd_palette', who))
 
+    # the rarely used chunks, including the HDR ones of the third edition of the specification
+    rare = samples(24, 9, 3, 8, 700)
+    pre = [
+        chunk(b'cICP', bytes([9, 16, 0, 1])),
+        chunk(b'mDCV', struct.pack('>8HII', 35400, 14600, 8500, 39850, 6550, 2300, 15635, 16450, 10000000, 50)),
+        chunk(b'cLLI', struct.pack('>II', 10000000, 2500000)),
+        chunk(b'sPLT', b'web safe\x00\x08' + b''.join(struct.pack('>4BH', i * 51, 255 - i * 51, 7 * i, 255 - i, 1000 - i) for i in range(6))),
+        chunk(b'sPLT', b'deep\x00\x10' + b''.join(struct.pack('>5H', i * 9000, 65535 - i * 9000, 123 * i, 65535, i) for i in range(4))),
+        chunk(b'oFFs', struct.pack('>iiB', -1234, 56789, 1)),
+        chunk(b'pCAL', b'elevation\x00' + struct.pack('>iiBB', 0, 65535, 0, 2) + b'm\x00' + b'-12.5\x00' + b'0.001953125'),
+        chunk(b'sCAL', b'\x01' + b'0.00025\x00' + b'2.5e-4'),
+        chunk(b'sTER', b'\x01'),
+    ]
+    emit('meta_rare_chunks', make_png(rare, 2, 8, pre=pre), rare)
+    emit('meta_rare_pcal_hyperbolic', make_png(rare[:3, :5], 2, 8, pre=[
+        chunk(b'pCAL', b'density\x00' + struct.pack('>iiBB', 10, 250, 3, 4) + b'g/cm\xb3\x00' + b'1\x00' + b'-2.5E+1\x00' + b'0.125\x00' + b'4'),
+        chunk(b'sCAL', b'\x02' + b'1e-3\x00' + b'0.002'), chunk(b'oFFs', struct.pack('>iiB', 7, -8, 0)), chunk(b'sTER', b'\x00'),
+        chunk(b'mDCv', bytes(24)), chunk(b'cLLi', struct.pack('>II', 5000, 100))]), rare[:3, :5])   # draft spellings
+    hidx = samples(12, 6, 1, 8, 701) % 8
+    hpal = palette(8, 9)
+    with open(os.path.join(OUT, 'meta_hist_palette.png'), 'wb') as f:   # hIST has to follow PLTE
+        data = make_png(hidx, 3, 8, plte=hpal)
+        cut = data.index(b'IDAT') - 4
+        f.write(data[:cut] + chunk(b'hIST', struct.pack('>8H', 5, 0, 65535, 100, 7, 7, 1, 30000)) + data[cut:])
+    ref, who = reference(os.path.join(OUT, 'meta_hist_palette.png'), expand(hidx, 3, 8, hpal))
+    write_ref(os.path.join(OUT, 'meta_hist_palette.png.ref'), ref)
+    written.append(('meta_hist_palette', who))
+
     # written by Pillow and ImageMagick
     info = PngImagePlugin.PngInfo()
     info.add_text('Author', 'Pillow')
@@ -1043,6 +1234,7 @@ def gen_meta():
             if os.path.basename(path).startswith('x') and d == SUITE:
                 continue
             m = read_meta(path)
+            m.pop('tools', None)
             if m:
                 with open(path + '.meta.json', 'w') as f:
                     json.dump(m, f, indent=1, ensure_ascii=False)
@@ -1080,7 +1272,9 @@ def main():
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 3 and sys.argv[1] == '--meta':
+    if len(sys.argv) == 2 and sys.argv[1] == '--fetch-tools':
+        fetch_tools()
+    elif len(sys.argv) == 3 and sys.argv[1] == '--meta':
         # used by the C# tests to check what OUR encoder wrote
         import json
         print(json.dumps(read_meta(sys.argv[2]), ensure_ascii=True))

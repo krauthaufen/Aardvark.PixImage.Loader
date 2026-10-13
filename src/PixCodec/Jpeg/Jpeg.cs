@@ -64,6 +64,13 @@ namespace PixCodec
         public bool Progressive { get; set; }
 
         /// <summary>
+        /// Use arithmetic coding instead of Huffman coding (sequential or, with <see cref="Progressive"/>, progressive):
+        /// 5 to 10 percent smaller files, slower to write and read, and not supported by every decoder (browsers, for
+        /// instance). <see cref="OptimizeHuffman"/> has no meaning then. Not available for <see cref="Lossless"/>.
+        /// </summary>
+        public bool Arithmetic { get; set; }
+
+        /// <summary>
         /// Emit a restart marker every this many MCUs (0 = none, at most 65535). In lossless mode the interval is
         /// rounded up to whole lines.
         /// </summary>
@@ -147,7 +154,14 @@ namespace PixCodec
             }
         }
 
-        /// <summary>Reads header level information without decoding pixel data (what <see cref="Decode"/> with default options returns).</summary>
+        /// <summary>
+        /// Reads header level information without decoding pixel data (what <see cref="Decode"/> with default options returns).
+        /// Only the segments in front of the frame header (SOF) are read - enough of the file has to be present up to
+        /// there, or up to the DNL segment after the first scan when the frame header leaves the height open. Orientation,
+        /// resolution and <see cref="ImageInfo.HasIccProfile"/> therefore reflect JFIF, EXIF and ICC segments that come
+        /// before SOF, which is where every common writer puts them; segments placed after it show up only in the
+        /// metadata of <see cref="Decode"/>.
+        /// </summary>
         public static ImageInfo GetInfo(ReadOnlySpan<byte> data) => GetInfo(data, null);
 
         /// <summary>Reads header level information for a decode with the given options (scaled size, channel layout, orientation).</summary>
@@ -158,9 +172,17 @@ namespace PixCodec
             {
                 var d = Open(p, data, options, headerOnly: true);
                 var (_, model, channels) = Plan(d, options);
-                bool swap = options.ApplyOrientation && d.Metadata.Orientation >= 5;
+                var m = d.Metadata;
+                bool swap = options.ApplyOrientation && m.Orientation >= 5;
                 return new ImageInfo(ImageFormat.Jpeg, swap ? d.OutHeight : d.OutWidth, swap ? d.OutWidth : d.OutHeight, channels,
-                    d.Precision > 8 ? SampleType.UInt16 : SampleType.UInt8, model);
+                    d.Precision > 8 ? SampleType.UInt16 : SampleType.UInt8, model)
+                {
+                    BitsPerSample = d.Precision,
+                    Orientation = options.ApplyOrientation && m.Orientation > 1 ? 1 : m.Orientation,
+                    DpiX = swap ? m.DpiY : m.DpiX,
+                    DpiY = swap ? m.DpiX : m.DpiY,
+                    HasIccProfile = d.HasCompleteIcc,
+                };
             }
         }
 
@@ -354,7 +376,7 @@ namespace PixCodec
         }
 
         static JpegEncodeOptions TiffOptions(JpegEncodeOptions o)
-            => new JpegEncodeOptions { Quality = o.Quality, Subsampling = o.Subsampling, OptimizeHuffman = o.OptimizeHuffman, RestartInterval = o.RestartInterval };
+            => new JpegEncodeOptions { Quality = o.Quality, Subsampling = o.Subsampling, OptimizeHuffman = o.OptimizeHuffman, RestartInterval = o.RestartInterval, Arithmetic = o.Arithmetic };
 
         /// <summary>Encodes an image as JPEG to the stream (which only needs to be writable, not seekable).</summary>
         public static void Encode(RawImage image, Stream output, JpegEncodeOptions? options = null)

@@ -135,6 +135,24 @@ namespace PixCodec
             }
         }
 
+        /// <summary>Adds every pixel <paramref name="weight"/> times (negative: takes it out again).</summary>
+        public unsafe void Add(ReadOnlySpan<uint> pixels, long weight)
+        {
+            fixed (long* cells = _cells)
+            fixed (uint* s = pixels)
+            {
+                for (int i = 0; i < pixels.Length; i++)
+                {
+                    uint c = s[i];
+                    if (c == 0) continue;
+                    uint r = c & 255, g = c >> 8 & 255, b = c >> 16 & 255;
+                    long* cell = cells + (((r >> 3) + 1) * S + (g >> 3) + 1) * S * Fields + ((b >> 3) + 1) * Fields;
+                    cell[0] += weight; cell[1] += r * weight; cell[2] += g * weight; cell[3] += b * weight;
+                    cell[4] += (r * r + g * g + b * b) * weight;
+                }
+            }
+        }
+
         unsafe void Fold()
         {
             if (_hotPixels == 0) return;

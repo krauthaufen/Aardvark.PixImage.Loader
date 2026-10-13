@@ -30,7 +30,7 @@ namespace PixCodec
         public readonly Mode FrameMode;
 
         readonly long _maxPixels, _maxUnbackedPixels;
-        readonly bool _clampDelays;
+        readonly bool _clampDelays, _rejectIncomplete, _incompleteAsRgba;
         byte[]? _icc;
         readonly bool _is89a;
         readonly int _backgroundIndex, _aspect;
@@ -62,6 +62,8 @@ namespace PixCodec
             _maxPixels = Math.Clamp(o.MaxPixels, 1, int.MaxValue / 4);
             _maxUnbackedPixels = Math.Max(0, o.MaxUnbackedPixels);
             _clampDelays = o.ClampDelays;
+            _rejectIncomplete = o.RejectIncompleteFrames;
+            _incompleteAsRgba = o.IncompleteFirstFrameAsRgba;
             if (!Gif.IsMatch(data)) throw new ImageFormatException("not a GIF file");
             if (data.Length < 13) throw new ImageFormatException("truncated GIF header");
             _is89a = data[4] == '9';
@@ -290,6 +292,8 @@ namespace PixCodec
                 else indices = rented = pool.Rent(room);
                 int decoded = GifLzw.Decode(codes.AsSpan(0, codeLen), minCodeSize, indices.AsSpan(0, room));
                 frame.Truncated = decoded < total;
+                if (frame.Truncated && _rejectIncomplete)
+                    throw new ImageFormatException($"GIF frame {frame.Index} has data for {decoded} of its {total} pixels");
 
                 // An opaque, interlaced first frame that stops early is shown the way browsers show one that is still
                 // loading: every finished row also fills the rows below it that later passes would have delivered.
@@ -344,7 +348,7 @@ namespace PixCodec
                     LoadPalette(default, palette);
                 }
 
-                if (mode == Mode.FirstFrame && !FirstFrameHasAlpha(frame))
+                if (mode == Mode.FirstFrame && !FirstFrameHasAlpha(frame) && !(frame.Truncated && _incompleteAsRgba))
                 {
                     var rgb = new byte[checked(Width * Height * 3)];
                     DrawRgb(indices, decoded, frame, palette, rowMap, rowValid, rgb);
@@ -380,6 +384,8 @@ namespace PixCodec
             }
         }
 
+        public bool HasIccProfile => _icc != null;
+
         ImageMetadata? Metadata() => _icc == null ? null : new ImageMetadata { IccProfile = _icc };
 
         /// <summary>
@@ -388,9 +394,10 @@ namespace PixCodec
         /// </summary>
         void CheckSize(long pixels, long backingBytes, string what)
         {
-            if (pixels > _maxPixels) throw new ImageNotSupportedException($"GIF {what} exceeds the configured pixel limit");
+            if (pixels > _maxPixels) throw new ImageNotSupportedException($"GIF {what} of {pixels} pixels exceeds {nameof(GifDecodeOptions)}.{nameof(GifDecodeOptions.MaxPixels)} ({_maxPixels})");
             if (pixels > _maxUnbackedPixels && pixels > backingBytes * MaxPixelsPerByte)
-                throw new ImageFormatException($"GIF {what} size is implausible for the amount of data");
+                throw new ImageFormatException($"GIF {what} of {pixels} pixels is implausible for {backingBytes} bytes of data; " +
+                    $"if the file really has a mostly empty canvas this large, raise {nameof(GifDecodeOptions)}.{nameof(GifDecodeOptions.MaxUnbackedPixels)} (now {_maxUnbackedPixels})");
         }
 
         /// <summary>

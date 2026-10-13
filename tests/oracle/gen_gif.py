@@ -75,6 +75,23 @@ def first_frame_header(data):
             raise ValueError('no image')
 
 
+def image_offsets(data):
+    """Offsets of the image descriptors (the 0x2C bytes), found by walking the blocks - not by searching bytes."""
+    packed = data[10]
+    p = 13 + (3 * (2 << (packed & 7)) if packed & 0x80 else 0)
+    found = []
+    while p < len(data) and data[p] != 0x3B:
+        if data[p] == 0x21:
+            p += 2
+        else:
+            found.append(p)
+            p += 10 + (3 * (2 << (data[p + 9] & 7)) if data[p + 9] & 0x80 else 0) + 1
+        while data[p]:
+            p += data[p] + 1
+        p += 1
+    return found
+
+
 def write_refs(name, frames):
     path = os.path.join(OUT, name)
     data = open(path, 'rb').read()
@@ -449,7 +466,7 @@ def gen_hand():
     # cut inside the pixel data: keep whole codes for the first rows only
     cut = Frame(img)
     stream = lzw(img.ravel()[:100], 3, end_code=False)
-    head = full[:full.index(b'\x2C') + 10]
+    head = full[:image_offsets(full)[0] + 10]
     data = head + bytes([3]) + blocks(stream)[:-1]      # no terminator, no trailer: the file just stops
     cut.decoded = 100
     hand_fixture('hand_truncated_data.gif', 16, 12, PAL8, [cut], data=data, check=False)
@@ -473,18 +490,19 @@ def gen_hand():
     # transparent, so no spreading
     ticut = Frame(img, interlace=True, trans=5)
     ticut.decoded = 70
-    tih = bytearray(tfull_head := build(16, 12, PAL8, [Frame(img, trans=5)])[:build(16, 12, PAL8, [Frame(img, trans=5)]).index(b'\x2C') + 10])
+    tfull = build(16, 12, PAL8, [Frame(img, trans=5)])
+    tih = bytearray(tfull[:image_offsets(tfull)[0] + 10])
     tih[-1] |= 0x40
     hand_fixture('hand_truncated_interlaced_transparent.gif', 16, 12, PAL8, [ticut], data=bytes(tih) + bytes([3]) + blocks(istream)[:-1], check=False)
     # transparent frame, truncated: the rest stays transparent
     tcut = Frame(img, trans=5)
     tcut.decoded = 100
     tfull = build(16, 12, PAL8, [Frame(img, trans=5)])
-    thead = tfull[:tfull.index(b'\x2C') + 10]
+    thead = tfull[:image_offsets(tfull)[0] + 10]
     hand_fixture('hand_truncated_transparent.gif', 16, 12, PAL8, [tcut], data=thead + bytes([3]) + blocks(stream)[:-1], check=False)
     # second frame cut off in its header: only the first one counts
     two_frames = build(16, 12, PAL8, [Frame(img, delay=5), Frame(R(12, 16, 8), delay=5)])
-    second = two_frames.index(b'\x2C', two_frames.index(b'\x2C') + 1)
+    second = image_offsets(two_frames)[1]
     hand_fixture('hand_truncated_second_header.gif', 16, 12, PAL8, [Frame(img, delay=5)], data=two_frames[:second + 5], check=False)
     # more pixels than the frame holds, then garbage after the end code inside the data blocks
     big = np.vstack([img, R(3, 16, 8)])
@@ -540,7 +558,7 @@ def gen_hand():
     def cut_frames(n_px):
         fr = [Frame(R(12, 16, 8), delay=2), Frame(ti, trans=5, interlace=True, delay=2)]
         whole = build(16, 12, PAL8, fr)
-        at = whole.index(b'\x2C', whole.index(b'\x2C') + 1) + 10
+        at = image_offsets(whole)[1] + 10
         return fr, whole[:at] + bytes([3]) + blocks(lzw(ti[INTERLACE(12)].ravel()[:n_px], 3, end_code=False))[:-1]
     for n_px in (40, 90, 150):
         fr, data = cut_frames(n_px)
@@ -586,6 +604,18 @@ def gen_hand():
     hand_fixture('hand_anim_40_frames.gif', 12, 10, PAL8,
                  [Frame(R(10, 12, 8), delay=1)] + [Frame(R(2, 3, 8), x=(k * 5) % 10, y=(k * 3) % 9, delay=k, disposal=k % 4) for k in range(39)],
                  loop=0, check=False)
+    # Frames of one solid color each, all with the same stored delay: what gen_gif_chrome.js plays in an <img> to
+    # measure how long Chromium really shows a frame (chrome.json: "playback").
+    for cs in (0, 1, 2, 3, 5, 10, 20):
+        hand_fixture(f'hand_delay_{cs}cs.gif', 8, 8, PAL8, [Frame(np.full((8, 8), k, np.uint8), delay=cs) for k in range(6)], loop=0)
+    # a later frame whose data ends (end code, terminator) before all its pixels are there, more frames behind it
+    later = [Frame(base, delay=4), Frame(R(8, 10, 8), x=3, y=2, delay=4), Frame(R(6, 6, 8), x=12, y=6, delay=4)]
+    whole = build(24, 16, PAL8, later, loop=0)
+    second = image_offsets(whole)[1]
+    third = image_offsets(whole)[2] - 8        # its graphic control extension
+    later[1].decoded = 33
+    hand_fixture('hand_anim_short_second.gif', 24, 16, PAL8, later, check=False,
+                 data=whole[:second + 10] + bytes([3]) + blocks(lzw(later[1].idx.ravel()[:33], 3)) + whole[third:])
 
 
 def main():

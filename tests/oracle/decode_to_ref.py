@@ -21,6 +21,8 @@ def decode(path):
         import imagecodecs
         with open(path, 'rb') as f:
             return imagecodecs.jpeg8_decode(f.read())
+    if ext == '.webp':
+        return decode_webp(path)
     from PIL import Image
     im = Image.open(path)
     if ext == '.png':
@@ -88,27 +90,51 @@ def decode_png(im):
 
 
 def decode_apng(path, im):
-    """Composited frames by ffmpeg (which keeps 16 bit), cross-checked against Pillow for 8 bit files."""
-    import struct
+    """Composited frames, stacked vertically, on which at least two of these agree exactly (fully transparent
+    pixels aside): ffmpeg (not for palette or sub-byte files, and it skips 16 bit frames that blend), Pillow
+    (8 bit files) and libjxl (cjxl + djxl, if installed - see gen_png.tool). The one case with a single decoder
+    is a 16 bit animation with blended frames, which only libjxl renders."""
     import subprocess
     with open(path, 'rb') as f:
-        depth = f.read(25)[24]
+        depth, ctype = f.read(26)[24:26]
     w, h = im.size
     wide = depth == 16
-    raw = subprocess.run(['ffmpeg', '-v', 'error', '-i', path, '-fps_mode', 'passthrough', '-f', 'rawvideo',
-                          '-pix_fmt', 'rgba64le' if wide else 'rgba', '-'], capture_output=True, check=True).stdout
-    a = np.frombuffer(raw, '<u2' if wide else np.uint8).reshape(-1, h, w, 4)
     n = getattr(im, 'n_frames', 1)
-    assert len(a) == n, f'ffmpeg decoded {len(a)} of {n} frames'
+    results = []
+    if ctype != 3 and depth >= 8:
+        raw = subprocess.run(['ffmpeg', '-v', 'error', '-i', path, '-fps_mode', 'passthrough', '-f', 'rawvideo',
+                              '-pix_fmt', 'rgba64le' if wide else 'rgba', '-'], capture_output=True).stdout
+        size = w * h * (8 if wide else 4)
+        if raw and len(raw) == n * size:
+            results.append(('ffmpeg', np.frombuffer(raw, '<u2' if wide else np.uint8).reshape(n, h, w, 4)))
     if not wide:
-        for i in range(n):
-            im.seek(i)
-            p = np.asarray(im.convert('RGBA')).astype(np.int16)
-            f = a[i].astype(np.int16)
-            p[p[..., 3] == 0] = 0
-            f[f[..., 3] == 0] = 0
-            assert np.array_equal(p, f), f'ffmpeg and Pillow disagree on frame {i}'
-    return a.reshape(-1, w, 4)
+        try:
+            frames = []
+            for i in range(n):
+                im.seek(i)
+                frames.append(np.asarray(im.convert('RGBA')).copy())
+            results.append(('pillow', np.stack(frames)))
+        except Exception:
+            pass  # e.g. interlaced frames
+    try:
+        from gen_png import anim_libjxl
+        a = anim_libjxl(path, w, h, np.uint16 if wide else np.uint8)
+        if a is not None and a.shape == (n, h, w, 4):
+            results.append(('libjxl', a))
+    except Exception:
+        pass
+    # 16 bit frames that blend are rendered by libjxl alone (ffmpeg skips them, Pillow is 8 bit)
+    alone = wide and [r[0] for r in results] == ['libjxl']
+    assert len(results) >= 2 or alone, f'only {[r[0] for r in results]} can decode this animation'
+
+    def visible(a):
+        a = a.copy()
+        a[a[..., 3] == 0] = 0
+        return a
+    first = visible(results[0][1])
+    for name, a in results[1:]:
+        assert np.array_equal(first, visible(a)), f'{results[0][0]} and {name} disagree'
+    return first.reshape(-1, w, 4)
 
 
 def decode_gif(path, im):
@@ -149,6 +175,19 @@ def decode_tiff(path):
         if pg.planarconfig == 2 and pg.samplesperpixel > 1:
             a = np.moveaxis(a, 0, -1)
         return a
+
+
+def decode_webp(path):
+    """What libwebp shows (through Pillow's binding of its animation decoder): the first frame, RGBA when the file
+    signals alpha by the rule documented in Webp.cs, else RGB. A file named *.anim.webp yields all composited RGBA
+    frames stacked vertically."""
+    from gen_webp import libwebp_frames, output_has_alpha
+    with open(path, 'rb') as f:
+        data = f.read()
+    frames = libwebp_frames(data)[0]
+    if path.lower().endswith('.anim.webp'):
+        return np.concatenate(frames, axis=0)
+    return frames[0] if output_has_alpha(data) else frames[0][:, :, :3]
 
 
 def decode_exr(path):

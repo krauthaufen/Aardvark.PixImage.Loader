@@ -61,10 +61,30 @@ namespace PixCodec
         public long MaxUnbackedPixels { get; set; } = 1L << 26;
 
         /// <summary>
-        /// Report frame delays the way browsers play them: 0 and 10 ms become 100 ms in <see cref="GifFrame.DelayMs"/>.
-        /// <see cref="GifFrame.DelayCs"/> always holds the stored value. Off by default.
+        /// Report frame delays the way browsers play them: a stored delay of 0 or 1 (1/100 s) becomes 100 ms in
+        /// <see cref="GifFrame.DelayMs"/>, everything else is taken as stored. This is what Chromium was measured to do
+        /// (an &lt;img&gt; playing frames with stored delays of 0, 1, 2, 3, 5, 10 and 20: see "playback" in
+        /// tests/fixtures/gif/chrome.json). <see cref="GifFrame.DelayCs"/> always holds the stored value. Off by default.
         /// </summary>
         public bool ClampDelays { get; set; }
+
+        /// <summary>
+        /// By default a frame whose pixel data stops early - a truncated file, or data that ends properly before all
+        /// pixels are there - is kept as far as it goes (<see cref="GifFrame.Truncated"/>), which is what a browser
+        /// shows in an &lt;img&gt;. With this option such a frame throws <see cref="ImageFormatException"/> instead,
+        /// like Chromium's WebCodecs ImageDecoder does once it knows the data is complete. Frames before it are still
+        /// delivered by <see cref="Gif.EnumerateFrames"/>.
+        /// </summary>
+        public bool RejectIncompleteFrames { get; set; }
+
+        /// <summary>
+        /// <see cref="Gif.Decode(ReadOnlySpan{byte}, GifDecodeOptions?)"/> picks Rgb or Rgba from the header alone, so
+        /// that <see cref="Gif.GetInfo"/> can tell without decoding; the missing part of an incomplete opaque first
+        /// frame is then black. With this option an incomplete first frame is always returned as Rgba with the
+        /// missing pixels transparent, exactly what Chromium shows (and what the animation API returns anyway) - at
+        /// the price that GetInfo cannot predict the channel count for such files.
+        /// </summary>
+        public bool IncompleteFirstFrameAsRgba { get; set; }
     }
 
     public sealed class GifEncodeOptions
@@ -190,17 +210,37 @@ namespace PixCodec
                && (header[4] == '7' || header[4] == '9') && header[5] == 'a';
 
         /// <summary>
-        /// Reads header level information without decoding pixel data. Width/Height are the logical screen;
-        /// Channels/Color are what <see cref="Decode(ReadOnlySpan{byte}, GifDecodeOptions?)"/> returns; FrameCount walks the block structure of the whole file.
+        /// Reads header level information without decoding pixel data. Width/Height are the logical screen (enlarged by
+        /// a first frame that reaches beyond it); Channels/Color are what
+        /// <see cref="Decode(ReadOnlySpan{byte}, GifDecodeOptions?)"/> returns with default options. BitsPerSample is 8,
+        /// GIF has no resolution or orientation (0).
+        /// <para>
+        /// FrameCount and IsAnimated (more than one frame) need the WHOLE file: the block structure is walked to the
+        /// end. Given only a prefix, this still succeeds as soon as the first image descriptor, its color table and
+        /// its LZW code size byte are there, and then counts the frames whose headers lie inside the prefix - so a
+        /// prefix can report fewer frames than the file has (and IsAnimated = false for an animation).
+        /// <see cref="ImageCodec"/> therefore always hands over the complete GIF.
+        /// </para>
+        /// <para>
+        /// HasIccProfile is true when an ICCRGBG1012 application extension precedes the first image, which is where
+        /// writers put it and exactly when Decode attaches the profile to the image's metadata. (A profile that only
+        /// shows up after the first image is still reported by <see cref="GetAnimationInfo"/>.)
+        /// </para>
         /// </summary>
         public static ImageInfo GetInfo(ReadOnlySpan<byte> data)
         {
             var st = new GifDecoderState(data, null);
             var first = st.Next(data, GifDecoderState.Mode.Skip) ?? throw new ImageFormatException("GIF contains no image");
             bool alpha = st.FirstFrameHasAlpha(first);
+            bool icc = st.HasIccProfile;
             while (st.Next(data, GifDecoderState.Mode.Skip) != null) { }
             return new ImageInfo(ImageFormat.Gif, st.Width, st.Height, alpha ? 4 : 3, SampleType.UInt8,
-                alpha ? ColorModel.Rgba : ColorModel.Rgb, st.FrameCount);
+                alpha ? ColorModel.Rgba : ColorModel.Rgb, st.FrameCount)
+            {
+                BitsPerSample = 8,
+                HasIccProfile = icc,
+                IsAnimated = st.FrameCount > 1,
+            };
         }
 
         /// <summary>

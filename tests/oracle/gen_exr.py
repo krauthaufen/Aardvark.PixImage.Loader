@@ -186,16 +186,21 @@ def gen_yc(yc_source):
         ch = read_parts(path)[0]
         write_ref(path + '.all.ref', stack(ch, ['A', 'BY', 'RY', 'Y']))
         oracle('rgba', path, path + '.ref')
-    # for the encoder: an RGBA image and what the reference makes of it in luminance/chroma form
+    # for the encoder: RGB(A) images and what the reference makes of them in luminance/chroma form (the reference
+    # writer treats images lower than 13 lines differently, hence the small sizes)
     e = clean('encref')
-    src = os.path.join(e, 'rgba_src.exr')
-    p = np.abs(test_pattern(40, 30, 4, np.float32, 21))
-    yy, xx = np.mgrid[0:30, 0:40]
-    p[..., 0] = p[..., 0] * 0.3 + xx / 40.0
-    p[..., 1] = p[..., 1] * 0.2 + yy / 30.0
-    p[10:14, 5:30, :3] = 0.5
-    X.File({'compression': X.ZIP_COMPRESSION}, {n: p[..., i].astype(np.float16) for i, n in enumerate('RGBA')}).write(src)
-    oracle('rgba-to-yc', src, os.path.join(e, 'rgba_src.yc.exr'), 'zip')
+    for name, w, h, alpha in (('rgba_src', 40, 30, True), ('rgb_noisy', 96, 70, False), ('rgb_8x6', 8, 6, False), ('rgba_30x10', 30, 10, True),
+                              ('rgb_6x12', 6, 12, False), ('rgb_4x14', 4, 14, False), ('rgb_2x2', 2, 2, False), ('rgba_14x2', 14, 2, True),
+                              ('rgb_2x40', 2, 40, False), ('rgb_26x28', 26, 28, False)):
+        src = os.path.join(e, name + '.exr')
+        p = np.abs(test_pattern(w, h, 4, np.float32, 21 + w))
+        if name == 'rgba_src':
+            yy, xx = np.mgrid[0:h, 0:w]
+            p[..., 0] = p[..., 0] * 0.3 + xx / float(w)
+            p[..., 1] = p[..., 1] * 0.2 + yy / float(h)
+            p[10:14, 5:30, :3] = 0.5
+        X.File({'compression': X.ZIP_COMPRESSION}, {n: p[..., i].astype(np.float16) for i, n in enumerate('RGBA' if alpha else 'RGB')}).write(src)
+        oracle('rgba-to-yc', src, os.path.join(e, name + '.yc.exr'), 'zip')
 
 
 def level_list(w, h, mode, rounding):
@@ -254,8 +259,10 @@ def flatten(path, names, sort, tidy):
         alpha = lambda s: ch['A'][s] if 'A' in ch else f32(1)
         samples = [(float(ch['Z'][s]) if 'Z' in ch else 0.0, float(ch['ZBack'][s]) if 'ZBack' in ch else None, alpha(s),
                     [f32(ch[n][s]) for n in names]) for s in idx]
-        overlap = sort and tidy and 'ZBack' in ch and any(
-            samples[k][1] > samples[k][0] and samples[k + 1][0] < samples[k][1] for k in range(len(samples) - 1))
+        samples = [(z, z if zb is None else max(zb, z), a, v) for z, zb, a, v in samples]
+        overlap = sort and tidy and 'Z' in ch and any(
+            (samples[k][1] > samples[k][0] and samples[k + 1][0] < samples[k][1]) or samples[k][:2] == samples[k + 1][:2]
+            for k in range(len(samples) - 1))
         if overlap:
             samples = tidy_samples(samples)
         a = f32(0)
@@ -275,7 +282,7 @@ def flatten(path, names, sort, tidy):
 
 
 def tidy_samples(samples):
-    """Split volume samples at all sample boundaries inside them, then merge coinciding volume samples."""
+    """Split volume samples at all sample boundaries inside them, then merge coinciding samples (points too)."""
     cuts = sorted({z for z, zb, a, v in samples} | {zb for z, zb, a, v in samples if zb > z})
     parts = []
     for z, zb, a, v in samples:
@@ -305,7 +312,7 @@ def tidy_samples(samples):
     merged = []
     for p in parts:
         q = merged[-1] if merged else None
-        if q is not None and q[1] > q[0] and q[0] == p[0] and q[1] == p[1]:
+        if q is not None and q[0] == p[0] and q[1] == p[1]:
             a1, a2 = min(max(q[2], 0.0), 1.0), min(max(p[2], 0.0), 1.0)
             am = a1 + a2 - a1 * a2
             vals = []
@@ -357,7 +364,93 @@ def gen_deep():
                 os.remove(tmp)
                 assert np.array_equal(ref, file_order), name
             write_ref('%s.part%d.fileorder.ref' % (path, i), file_order)
-            write_ref('%s.part%d.flat.ref' % (path, i), flatten(dump, names, True, True))
+            flat = flatten(dump, names, True, True)
+            write_ref('%s.part%d.flat.ref' % (path, i), flat)
+            if len(parts) == 1 and 'A' in names:
+                check_with_oiio(path, names, file_order, flat)
+    # deep tiled parts with all mip / rip levels: the samples of every level
+    for name, args in (('tilemip_plain_zips', ('tilemip', 21, 13, 'zips', 'plain', 11)), ('tilerip_zback_rle', ('tilerip', 11, 6, 'rle', 'zback', 12)),
+                       ('tilemip_overlap_none', ('tilemip', 9, 16, 'none', 'overlap', 13))):
+        path = os.path.join(d, name + '.exr')
+        oracle('write-deep', path, *args)
+        for lx, ly in level_list(args[1], args[2], 'mipmap' if args[0] == 'tilemip' else 'ripmap', 'up' if args[0] == 'tilerip' else 'down'):
+            oracle('deep', path, 0, lx, ly, '%s.part0.l%d_%d.deep' % (path, lx, ly))
+        dump = '%s.part0.l0_0.deep' % path
+        names = list(read_deep(dump)[3].keys())
+        write_ref('%s.part0.fileorder.ref' % path, flatten(dump, names, False, False))
+        write_ref('%s.part0.flat.ref' % path, flatten(dump, names, True, True))
+        os.replace(dump, '%s.part0.deep' % path)
+
+
+def check_with_oiio(path, names, file_order, flat):
+    """Third party confirmation of the flattening (optional, pip install OpenImageIO): ImageBufAlgo.flatten composites
+    in file order like the reference; DeepData.sort / split / merge_overlaps followed by "over" is the tidy flattening."""
+    try:
+        import OpenImageIO as oiio
+    except ImportError:
+        return
+    pick = ['R', 'G', 'B', 'A']
+    buf = oiio.ImageBuf(path)
+    onames = list(buf.spec().channelnames)
+    oc = [onames.index(n) for n in pick]
+    rc = [names.index(n) for n in pick]
+    a = oiio.ImageBufAlgo.flatten(buf).get_pixels(oiio.FLOAT)[..., oc]
+    assert np.abs(a - file_order[..., rc]).max() < 1e-6, path
+    dd = buf.deepdata()
+    zc, zbc, ac = dd.Z_channel, dd.Zback_channel, dd.A_channel
+    out = np.zeros((dd.pixels, 4), np.float32)
+    for p in range(dd.pixels):
+        if dd.samples(p) == 0:
+            continue
+        dd.sort(p)
+        depths = set()
+        for s in range(dd.samples(p)):
+            depths.add(dd.deep_value(p, zc, s))
+            depths.add(dd.deep_value(p, zbc, s))
+        for z in sorted(depths):
+            dd.split(p, z)
+        dd.sort(p)
+        dd.merge_overlaps(p)
+        alpha = np.float32(0)
+        for s in range(dd.samples(p)):
+            if alpha >= 1:
+                break
+            t = np.float32(1) - alpha
+            for k, c in enumerate(oc):
+                out[p, k] += t * np.float32(dd.deep_value(p, c, s))
+            alpha = alpha + t * np.float32(dd.deep_value(p, ac, s))
+    diff = np.abs(out.reshape(a.shape) - flat[..., rc]).max()
+    print('  OpenImageIO agrees with the tidy flattening of %s within %.2g' % (os.path.basename(path), diff))
+    assert diff < 1e-3, (path, diff)
+
+
+def gen_selfcheck():
+    """References for files written by OUR encoder (tests/PixCodec.Tests/ExrSelfCheckTests.cs with
+    EXR_WRITE_SELFCHECK=1 writes them): every level and every deep sample as the reference library reads it."""
+    d = os.path.join(OUT, 'selfcheck')
+    if not os.path.isdir(d):
+        return
+    for f in os.listdir(d):
+        if not f.endswith('.exr'):
+            os.remove(os.path.join(d, f))
+    for f in sorted(os.listdir(d)):
+        path = os.path.join(d, f)
+        for i, part in enumerate(X.File(path, header_only=True).parts):
+            hd = part.header
+            kind = str(hd.get('type'))
+            if 'deep' in kind:
+                oracle('deep', path, i, 0, 0, '%s.part%d.deep' % (path, i))
+            elif 'tiles' in hd:
+                t = hd['tiles']
+                dw = hd['dataWindow']
+                w, h = int(dw[1][0] - dw[0][0] + 1), int(dw[1][1] - dw[0][1] + 1)
+                mode = 'mipmap' if t.mode == X.MIPMAP_LEVELS else 'ripmap' if t.mode == X.RIPMAP_LEVELS else None
+                levels = level_list(w, h, mode, 'up' if t.roundingMode == X.ROUND_UP else 'down') if mode else [(0, 0)]
+                for lx, ly in levels:
+                    oracle('level', path, i, lx, ly, '%s.l%d_%d.ref' % (path, lx, ly))
+            else:
+                ch = read_parts(path)[i]
+                write_ref('%s.part%d.ref' % (path, i), stack(ch, sorted(ch.keys(), key=lambda n: n.encode())))
 
 
 OFFICIAL = 'https://raw.githubusercontent.com/AcademySoftwareFoundation/openexr-images/main/'
@@ -542,6 +635,7 @@ def main():
     gen_levels()
     gen_deep()
     gen_official()
+    gen_selfcheck()
 
     total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(OUT) for f in fs)
     print('fixtures: %d files, %.1f kB' % (sum(len(fs) for _, _, fs in os.walk(OUT)), total / 1024))

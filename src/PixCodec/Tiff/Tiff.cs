@@ -27,10 +27,28 @@ namespace PixCodec
         /// </summary>
         public bool ConvertToRgb { get; set; } = true;
 
+        /// <summary>Linear output format for PixarLog compressed files (their tags do not reliably say).</summary>
+        public TiffPixarLogOutput PixarLogOutput { get; set; } = TiffPixarLogOutput.Default;
+
         /// <summary>Decoded size in bytes from which <see cref="Parallel"/> kicks in.</summary>
         internal long ParallelThreshold = 512 * 1024;
 
         internal static readonly TiffDecodeOptions Default = new TiffDecodeOptions();
+    }
+
+    /// <summary>
+    /// PixarLog files hold 11-bit log encoded samples that decode to linear light. Files written by libtiff are
+    /// always tagged as 8-bit, whatever went in, so the wanted precision has to come from the caller.
+    /// </summary>
+    public enum TiffPixarLogOutput
+    {
+        /// <summary>As the file is tagged: 8-bit (the usual case), 16-bit or Float32.</summary>
+        Default,
+        UInt8,
+        /// <summary>Linear values scaled to 0..65535.</summary>
+        UInt16,
+        /// <summary>Linear values, 1.0 = white (values up to about 25 are representable).</summary>
+        Float32,
     }
 
     /// <summary>
@@ -66,7 +84,7 @@ namespace PixCodec
         public TiffCompression Compression { get; set; } = TiffCompression.Deflate;
 
         /// <summary>
-        /// Predictor applied before LZW / Deflate. Ignored for None and PackBits, where other readers (libtiff)
+        /// Predictor applied before LZW / Deflate / Zstd. Ignored for None and PackBits, where other readers (libtiff)
         /// would not undo it.
         /// </summary>
         public TiffPredictor Predictor { get; set; } = TiffPredictor.Auto;
@@ -109,8 +127,28 @@ namespace PixCodec
         /// </summary>
         public IList<TiffTag> ExtraTags { get; set; } = new List<TiffTag>();
 
+        /// <summary>
+        /// Append overviews to the image: reduced resolution pages (NewSubfileType 1), each half the size of the one
+        /// before (2 x 2 box average, alpha averaged like any other sample), until both sides are at most
+        /// <see cref="OverviewMinSize"/>. This is the pyramid layout GDAL and other GIS software read as overviews.
+        /// </summary>
+        public bool BuildOverviews { get; set; }
+
+        /// <summary>Overviews stop once width and height are both at most this many pixels (default 256).</summary>
+        public int OverviewMinSize { get; set; } = 256;
+
+        /// <summary>
+        /// Write a file laid out for range requests the way Cloud Optimized GeoTIFF asks for: tiled (512 x 512 unless
+        /// tile sizes are set), with overviews, all directories at the start of the file, then the tile data of the
+        /// smallest overview up to the full resolution image last. Single image only. The compressed data is held in
+        /// memory until the directories are written. Georeferencing tags go in through <see cref="ExtraTags"/>.
+        /// </summary>
+        public bool CloudOptimized { get; set; }
+
         /// <summary>Test seam: zero bytes inserted after the header, pushing every offset (also past 4 GB).</summary>
         internal long TestPadding;
+
+        internal TiffEncodeOptions Clone() => (TiffEncodeOptions)MemberwiseClone();
     }
 
     /// <summary>One image of a multi-page TIFF to write.</summary>
@@ -135,9 +173,10 @@ namespace PixCodec
     /// TIFF codec: classic TIFF and BigTIFF, strips and tiles, both byte orders, multi-page files.
     /// <para>Decoding:</para>
     /// <list type="bullet">
-    /// <item>Compression: none, LZW, Deflate, PackBits, CCITT RLE / Group 3 / Group 4, JPEG (8 and 12 bit DCT, lossless,
-    /// old-style), ZSTD, LZMA, WebP, SGI LogLuv. Predictors 2 and 3.</item>
-    /// <item>Samples: unsigned and signed integers of 1..32 and 64 bits, floats of 16, 24, 32 and 64 bits. Samples of an
+    /// <item>Compression: none, LZW, Deflate, PackBits, CCITT RLE / Group 3 / Group 4 (incl. uncompressed mode), JPEG
+    /// (8 and 12 bit DCT, lossless, old-style in strips, tiles and planes), ZSTD, LZMA, WebP, SGI LogLuv (32 and
+    /// 24 bit) and LogL, PixarLog. Predictors 2 and 3.</item>
+    /// <item>Samples: unsigned and signed integers of 1..64 bits, floats of 16, 24, 32 and 64 bits. Samples of an
     /// odd bit depth arrive with their stored values in the next larger type (12 bit: UInt16 0..4095; 24-bit floats:
     /// Float32); only 1, 2 and 4 bit unsigned samples are stretched to 0..255 by default, see
     /// <see cref="TiffBitScaling"/>.</item>
@@ -149,8 +188,9 @@ namespace PixCodec
     /// <see cref="ColorModel.Other"/>.</item>
     /// <item>Orientation is reported in the metadata, never applied. Resolution, ICC profile and EXIF are returned.</item>
     /// </list>
-    /// <para>Encoding: all sample types and colour models; none, LZW, Deflate, PackBits, JPEG and CCITT Group 4;
-    /// strips or tiles; multi-page files and pyramids; either byte order; arbitrary extra tags.</para>
+    /// <para>Encoding: all sample types and colour models; none, LZW, Deflate, Zstd, PackBits, JPEG (8 / 12 bit) and
+    /// CCITT Group 4; strips or tiles; multi-page files, generated overviews and a cloud optimized layout; either byte
+    /// order; arbitrary extra tags.</para>
     /// </summary>
     public static unsafe class Tiff
     {
@@ -351,9 +391,14 @@ namespace PixCodec
         Lzw,
         Deflate,
         PackBits,
-        /// <summary>JPEG (compression 7), 8-bit Gray or Rgb only; Rgb is stored as YCbCr. Lossy.</summary>
+        /// <summary>
+        /// JPEG (compression 7): 8-bit Gray or Rgb, or 12-bit from UInt16 images whose samples are 0..4095.
+        /// Rgb is stored as YCbCr. Lossy.
+        /// </summary>
         Jpeg,
         /// <summary>CCITT Group 4 fax (compression 4): 1-bit bilevel output from an 8-bit Gray image.</summary>
         CcittGroup4,
+        /// <summary>Zstandard (compression 50000), with the same predictors as Deflate. Read by libtiff 4.0.10+ / GDAL.</summary>
+        Zstd,
     }
 }

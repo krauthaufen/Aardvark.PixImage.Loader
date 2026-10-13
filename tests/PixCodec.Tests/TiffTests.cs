@@ -10,7 +10,7 @@ public class TiffTests
     // Fixture folders under tests/fixtures/tiff. The top level and most folders are bit exact against third-party
     // decoders; a fixture with a `.tol` sidecar allows that sample difference (YCbCr / Lab / LogLuv maths, lossy codecs).
     // `unverified` holds the few variants no installed decoder reads (see gen_tiff.py for the list).
-    static readonly string[] ActiveDirs = { "", "ycbcr", "lab", "logluv", "jpeg", "jpeg12", "jpegll", "ojpeg", "unverified" };
+    static readonly string[] ActiveDirs = { "", "ycbcr", "lab", "logluv", "pixarlog", "jpeg", "jpeg12", "jpegll", "ojpeg", "unverified" };
 
     static IEnumerable<object[]> Dirs(params string[] dirs) => dirs.SelectMany(d => TestUtil.Files(d.Length == 0 ? "tiff" : Path.Combine("tiff", d), ".tif"));
 
@@ -46,6 +46,14 @@ public class TiffTests
         Assert.Equal((img.Width, img.Height, img.Channels, img.SampleType, img.Color),
             (info.Width, info.Height, info.Channels, info.SampleType, info.Color));
         Assert.Equal(ImageFormat.Tiff, info.Format);
+        // the header level metadata is exactly what decoding reports
+        var md = img.Metadata!;
+        Assert.Equal((md.Orientation, md.DpiX, md.DpiY, md.IccProfile != null), (info.Orientation, info.DpiX, info.DpiY, info.HasIccProfile));
+        Assert.False(info.IsAnimated);
+        var stored = Tiff.ReadTags(bytes).FirstOrDefault(t => t.Id == 258)?.AsIntegers() ?? new long[] { 1 };
+        bool palette = Tiff.ReadTags(bytes).Any(t => t.Id == 262 && t.AsIntegers()[0] == 3);
+        Assert.Equal(palette ? 8 : (int)stored.Max(), info.BitsPerSample);
+        Assert.Equal(info, Tiff.GetInfos(bytes)[0]);
 
         // strips/tiles decoded on several threads give the very same samples
         TestUtil.AssertEqual(img, Tiff.Decode(bytes, ForcedParallel()));
@@ -56,6 +64,8 @@ public class TiffTests
             (".none.ref", new TiffDecodeOptions { BitScaling = TiffBitScaling.None }),
             (".full.ref", new TiffDecodeOptions { BitScaling = TiffBitScaling.FullRange }),
             (".raw.ref", new TiffDecodeOptions { ConvertToRgb = false }),
+            (".u16.ref", new TiffDecodeOptions { PixarLogOutput = TiffPixarLogOutput.UInt16 }),
+            (".f32.ref", new TiffDecodeOptions { PixarLogOutput = TiffPixarLogOutput.Float32 }),
         })
             if (File.Exists(path + suffix))
             {
@@ -70,8 +80,8 @@ public class TiffTests
             TestUtil.AssertEqual(img, Tiff.Decode(fs, Serial));
             Assert.Equal(0, fs.Position);
             TestUtil.AssertEqual(img, Tiff.Decode(fs, ForcedParallel()));
-            var si = Tiff.GetInfo(fs);
-            Assert.Equal((img.Width, img.Height, img.Channels), (si.Width, si.Height, si.Channels));
+            Assert.Equal(info, Tiff.GetInfo(fs));
+            Assert.Equal(info, Tiff.GetInfos(fs)[0]);
         }
         var ms = new MemoryStream();
         ms.Write(new byte[13]);
@@ -115,7 +125,7 @@ public class TiffTests
     [MemberData(nameof(LzmaFixtures))]
     public void DecodesLzmaFixture(string file) => CheckFixture(file);
 
-    [Theory(Skip = "needs PixCodec.Webp.Decode (stub in this branch)")]
+    [Theory]
     [MemberData(nameof(WebpFixtures))]
     public void DecodesWebpFixture(string file) => CheckFixture(file);
 
@@ -372,7 +382,7 @@ public class TiffTests
         (ColorModel.Gray, 1), (ColorModel.GrayAlpha, 2), (ColorModel.Rgb, 3), (ColorModel.Rgba, 4), (ColorModel.Other, 2), (ColorModel.Other, 6),
     };
 
-    static readonly TiffCompression[] AllCompressions = { TiffCompression.None, TiffCompression.Lzw, TiffCompression.Deflate, TiffCompression.PackBits };
+    static readonly TiffCompression[] AllCompressions = { TiffCompression.None, TiffCompression.Lzw, TiffCompression.Deflate, TiffCompression.PackBits, TiffCompression.Zstd };
 
     /// <summary>Deterministic image with gradients, noise and (for floats) non-finite values.</summary>
     internal static RawImage MakeImage(int w, int h, ColorModel color, SampleType type, int channels, int seed = 1)
@@ -770,6 +780,192 @@ public class TiffTests
         Assert.Throws<ArgumentException>(() => Encode(MakeImage(16, 16, ColorModel.Gray, SampleType.UInt16, 1), o));
     }
 
+    [Theory]
+    [InlineData(1, JpegSubsampling.Auto, 92, 0)]
+    [InlineData(3, JpegSubsampling.Chroma444, 90, 64)]
+    [InlineData(3, JpegSubsampling.Chroma420, 80, 0)]
+    public void EncodesJpeg12Bit(int channels, JpegSubsampling subsampling, int quality, int tile)
+    {
+        // UInt16 images with samples 0..4095 are written as 12-bit JPEG
+        var smooth = MakeSmooth(160, 97, channels);
+        var img = RawImage.Create(160, 97, smooth.Color, SampleType.UInt16);
+        var a = img.GetData<ushort>();
+        var s8 = smooth.GetData<byte>();
+        for (int i = 0; i < a.Length; i++) a[i] = (ushort)(s8[i] * 16 + (i * 7 & 15));
+        var o = new TiffEncodeOptions { Compression = TiffCompression.Jpeg, JpegQuality = quality, JpegSubsampling = subsampling, TileWidth = tile, TileHeight = tile, RowsPerStrip = 32 };
+        var file = Encode(img, o);
+        var tags = Tiff.ReadTags(file);
+        Assert.Equal(12, tags.Single(t => t.Id == 258).AsIntegers()[0]);
+        Assert.Equal(7, tags.Single(t => t.Id == 259).AsIntegers()[0]);
+        Assert.Equal(12, Tiff.GetInfo(file).BitsPerSample);
+        var back = Tiff.Decode(file);
+        Assert.Equal((SampleType.UInt16, img.Color, img.Width, img.Height), (back.SampleType, back.Color, back.Width, back.Height));
+        Assert.True(TestUtil.Psnr(img, back, 4095) > 38, $"PSNR {TestUtil.Psnr(img, back, 4095):F1}");
+        Assert.All(back.GetData<ushort>(), v => Assert.True(v <= 4095));
+        // libjpeg-turbo's 12-bit decoder (tifffile + imagecodecs) gives exactly the same samples
+        var oracle = Oracle(file);
+        if (oracle != null) TestUtil.AssertEqual(oracle, back);
+
+        a[5] = 4096;
+        Assert.Throws<ArgumentException>(() => Encode(img, o));
+    }
+
+    // ------------------------------------------------------------------------------------------ overviews, cloud optimized
+
+    /// <summary>Independent 2 x 2 mean for the test (integer rounding half up, edges use the pixels that exist).</summary>
+    static double[] BoxHalf(double[] s, int w, int h, int ch, bool round)
+    {
+        int ow = (w + 1) / 2, oh = (h + 1) / 2;
+        var d = new double[ow * oh * ch];
+        for (int y = 0; y < oh; y++)
+            for (int x = 0; x < ow; x++)
+                for (int c = 0; c < ch; c++)
+                {
+                    double sum = 0; int n = 0;
+                    for (int dy = 0; dy < 2; dy++)
+                        for (int dx = 0; dx < 2; dx++)
+                            if (2 * y + dy < h && 2 * x + dx < w) { sum += s[((2 * y + dy) * w + 2 * x + dx) * ch + c]; n++; }
+                    d[(y * ow + x) * ch + c] = round ? Math.Floor(sum / n + 0.5) : sum / n;
+                }
+        return d;
+    }
+
+    [Theory]
+    [InlineData(SampleType.UInt8, 3)]
+    [InlineData(SampleType.UInt16, 1)]
+    [InlineData(SampleType.Int16, 1)]
+    [InlineData(SampleType.Float32, 1)]
+    [InlineData(SampleType.Float64, 2)]
+    [InlineData(SampleType.UInt64, 1)]
+    public void BuildsOverviews(SampleType type, int channels)
+    {
+        var img = MakeImage(301, 173, RawImage.DefaultColorModel(channels), type, channels);
+        if (type is SampleType.Float32 or SampleType.Float64)
+        {
+            // (finite values: a mean with NaN or infinity in it is not worth comparing)
+            var b = img.GetBytes();
+            var clean = MakeImage(301, 173, img.Color, SampleType.UInt16, channels);
+            var u = clean.GetData<ushort>();
+            if (type == SampleType.Float32) for (int i = 0; i < u.Length; i++) img.GetData<float>()[i] = u[i] / 7f - 100;
+            else for (int i = 0; i < u.Length; i++) img.GetData<double>()[i] = u[i] / 7.0 - 100;
+        }
+        var o = new TiffEncodeOptions { BuildOverviews = true, OverviewMinSize = 40, TileWidth = 64, TileHeight = 64, Compression = TiffCompression.Lzw };
+        var file = Encode(img, o);
+        var infos = Tiff.GetInfos(file);
+        Assert.Equal(new[] { (301, 173), (151, 87), (76, 44), (38, 22) }, infos.Select(i => (i.Width, i.Height)).ToArray());
+        bool integer = !(type is SampleType.Float32 or SampleType.Float64);
+        RawImage level = img;
+        for (int i = 0; i < infos.Length; i++)
+        {
+            var page = Tiff.Decode(file, new TiffDecodeOptions { ImageIndex = i });
+            var tags = Tiff.ReadTags(file, i);
+            Assert.Equal(i > 0, tags.Any(t => t.Id == 254 && t.AsIntegers()[0] == 1));
+            Assert.Contains(tags, t => t.Id == 322);
+            if (i > 0)
+            {
+                // each level is the box average of the one before
+                var expected = BoxHalf(ToDoubles(level), level.Width, level.Height, channels, integer);
+                var got = ToDoubles(page);
+                double tol = type == SampleType.UInt64 ? 4096 : type == SampleType.Float32 ? 1e-3 : integer ? 0 : 1e-9;
+                for (int k = 0; k < got.Length; k++) Assert.True(Math.Abs(expected[k] - got[k]) <= tol, $"level {i} sample {k}: {got[k]} vs {expected[k]}");
+            }
+            else Assert.True(img.GetBytes().SequenceEqual(page.GetBytes()));
+            level = page;
+            var oracle = Oracle(file, i);
+            if (oracle != null) Assert.True(page.GetBytes().SequenceEqual(oracle.GetBytes()), $"level {i}: independent decoder disagrees");
+        }
+        // GDAL sees the reduced pages as overviews of the image
+        var seen = PythonOn(file, "import rasterio\nds = rasterio.open(PATH)\nprint(ds.width, ds.height, ds.count, ds.overviews(1))");
+        if (seen != null) Assert.Equal($"301 173 {channels} [2, 4, 8]", seen);
+        // without the option there is just the image
+        Assert.Equal(1, Tiff.GetImageCount(Encode(img, new TiffEncodeOptions())));
+    }
+
+    static double[] ToDoubles(RawImage img) => img.SampleType switch
+    {
+        SampleType.UInt8 => Array.ConvertAll((byte[])img.Data, x => (double)x),
+        SampleType.UInt16 => Array.ConvertAll((ushort[])img.Data, x => (double)x),
+        SampleType.Int16 => Array.ConvertAll((short[])img.Data, x => (double)x),
+        SampleType.Float32 => Array.ConvertAll((float[])img.Data, x => (double)x),
+        SampleType.UInt64 => Array.ConvertAll((ulong[])img.Data, x => (double)x),
+        _ => (double[])img.Data,
+    };
+
+    [Theory]
+    [InlineData(TiffCompression.Deflate, false, false)]
+    [InlineData(TiffCompression.Lzw, true, false)]
+    [InlineData(TiffCompression.Zstd, false, true)]
+    [InlineData(TiffCompression.Jpeg, false, false)]
+    public void WritesCloudOptimizedGeoTiff(TiffCompression compression, bool big, bool nonSeekable)
+    {
+        var img = compression == TiffCompression.Jpeg ? MakeSmooth(1300, 900, 3) : MakeImage(1300, 900, ColorModel.Rgb, SampleType.UInt8, 3);
+        var o = new TiffEncodeOptions { CloudOptimized = true, Compression = compression, TileWidth = 256, TileHeight = 256, BigTiff = big ? true : null };
+        o.ExtraTags.Add(TiffTag.Doubles(33550, 0.5, 0.5, 0.0));
+        o.ExtraTags.Add(TiffTag.Doubles(33922, 0, 0, 0, 600000.0, 5300000.0, 0));
+        o.ExtraTags.Add(TiffTag.Shorts(34735, 1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, 32633));
+        byte[] file;
+        if (nonSeekable) { var ns = new ForwardOnlyStream(); Tiff.Encode(img, ns, o); file = ns.ToArray(); }
+        else file = Encode(img, o);
+
+        // The layout rules of GDAL's validate_cloud_optimized_geotiff: tiled, with overviews, the main directory right
+        // after the header, the directories in order and before all pixel data, the data of smaller overviews before
+        // that of larger ones and the full resolution data last.
+        int count = Tiff.GetImageCount(file);
+        Assert.Equal(4, count); // 1300x900, 650x450, 325x225, 163x113 (<= 256)
+        long header = file[2] == 43 ? 16 : 8;
+        long firstIfd = file[2] == 43 ? BitConverter.ToInt64(file, 8) : BitConverter.ToUInt32(file, 4);
+        Assert.Equal(header, firstIfd);
+        var firstBlock = new long[count];
+        long lastDirectoryEnd = 0, minData = long.MaxValue;
+        for (int i = 0; i < count; i++)
+        {
+            var tags = Tiff.ReadTags(file, i);
+            long Tag(int id) => tags.Single(t => t.Id == id).AsIntegers()[0];
+            Assert.Equal(256, Tag(322));
+            Assert.Equal(256, Tag(323));
+            Assert.Equal(i > 0, tags.Any(t => t.Id == 254 && t.AsIntegers()[0] == 1));
+            Assert.Equal(i == 0, tags.Any(t => t.Id == 34735)); // georeferencing on the full resolution image only
+            var offsets = tags.Single(t => t.Id == 324).AsIntegers();
+            Assert.Equal(offsets.OrderBy(v => v), offsets);     // tiles in order
+            firstBlock[i] = offsets[0];
+            minData = Math.Min(minData, offsets.Min());
+        }
+        for (int i = 0; i + 1 < count; i++) Assert.True(firstBlock[i] > firstBlock[i + 1], "overview data has to precede the data of the larger level");
+        // every directory (found by walking the chain) lies before the first tile
+        long ifd = firstIfd;
+        for (int i = 0; i < count; i++)
+        {
+            Assert.True(ifd >= lastDirectoryEnd && ifd < minData, $"directory {i} at {ifd} is not in the header part");
+            bool bigFile = file[2] == 43;
+            long entries = bigFile ? BitConverter.ToInt64(file, (int)ifd) : BitConverter.ToUInt16(file, (int)ifd);
+            long nextPos = ifd + (bigFile ? 8 + entries * 20 : 2 + entries * 12);
+            lastDirectoryEnd = nextPos;
+            ifd = bigFile ? BitConverter.ToInt64(file, (int)nextPos) : BitConverter.ToUInt32(file, (int)nextPos);
+        }
+        Assert.Equal(0, ifd);
+
+        var back = Tiff.Decode(file);
+        if (compression == TiffCompression.Jpeg) Assert.True(TestUtil.Psnr(img, back, 255) > 34);
+        else Assert.True(img.GetBytes().SequenceEqual(back.GetBytes()));
+        // a preview needs only the header part and the smallest overview
+        var s = new SparseStream();
+        s.Write(file);
+        s.Position = 0; s.BytesRead = 0;
+        var preview = Tiff.Decode(s, new TiffDecodeOptions { ImageIndex = count - 1 });
+        Assert.Equal((163, 113), (preview.Width, preview.Height));
+        Assert.True(s.BytesRead < file.Length / 8, $"read {s.BytesRead} of {file.Length}");
+
+        // GDAL: georeferencing, block layout and overviews as intended
+        var seen = PythonOn(file, string.Join("\n",
+            "import rasterio",
+            "ds = rasterio.open(PATH)",
+            "print(ds.crs.to_epsg(), ds.transform.a, ds.transform.e, ds.transform.c, ds.transform.f, ds.block_shapes[0], ds.overviews(1), ds.read(1, out_shape=(113, 163)).shape)"));
+        if (seen != null) Assert.Equal("32633 0.5 -0.5 600000.0 5300000.0 (256, 256) [2, 4, 8] (113, 163)", seen);
+
+        // only one image can be cloud optimized
+        Assert.Throws<ArgumentException>(() => Tiff.Encode(new[] { img, img }, new MemoryStream(), o));
+    }
+
     // ------------------------------------------------------------------------------------------ multi-page, tags, EXIF
 
     [Theory]
@@ -1114,8 +1310,48 @@ public class TiffTests
         Assert.True(region.GetData<ushort>().AsSpan(0, 500).SequenceEqual(a.AsSpan(20000 * w + 1000, 500)));
         Assert.True(s.BytesRead < 300L * w * 2 + 100_000, $"read {s.BytesRead} bytes");
 
-        // LZW strips whose decoded size exceeds 2 GB cannot be written by the encoder (its strips stay below 1 GB),
-        // so only the uncompressed path is exercised here.
+    }
+
+    /// <summary>
+    /// Compressed strips that decode to more than 2 GB (LZW, PackBits, Deflate), written row by row and read back
+    /// in one piece. About 5 GB of RAM and a few minutes: only with PIXCODEC_BIG_TESTS=1.
+    /// </summary>
+    [Fact]
+    public void CompressedStripsBeyond2GB()
+    {
+        if (Environment.GetEnvironmentVariable("PIXCODEC_BIG_TESTS") != "1") return;
+        int w = 33000, h = 33000;
+        var img = RawImage.Create(w, h, ColorModel.Gray, SampleType.UInt16);
+        var a = img.GetData<ushort>();
+        var rnd = new Random(9);
+        var row = new ushort[w];
+        // runs of pixels whose two bytes are equal, so that PackBits finds runs as well (its compressed strip has to
+        // stay below 2 GB: compressed data beyond that is not supported)
+        for (int i = 0; i < row.Length; i++) row[i] = (ushort)(((i / 40 * 7 + rnd.Next(2)) & 0xFF) * 0x0101);
+        for (int y = 0; y < h; y++)
+        {
+            row.AsSpan().CopyTo(a.AsSpan(y * w, w));
+            a[y * w + y % w] = (ushort)y;   // every row differs
+            a[y * w + (y * 7 + 13) % w] = (ushort)(y * 31);
+        }
+        foreach (var comp in new[] { TiffCompression.PackBits, TiffCompression.Lzw, TiffCompression.Deflate })
+        {
+            var s = new SparseStream();
+            Tiff.Encode(img, s, new TiffEncodeOptions { Compression = comp, RowsPerStrip = h, BigEndian = comp == TiffCompression.Lzw, CompressionLevel = 1 });
+            s.Position = 0;
+            var tags = Tiff.ReadTags(s);
+            Assert.Single(tags.Single(t => t.Id == 273).AsIntegers());                       // one strip ...
+            Assert.Equal(h, tags.Single(t => t.Id == 278).AsIntegers()[0]);                  // ... of 2.18 GB
+            var back = Tiff.Decode(s);
+            Assert.True(a.AsSpan().SequenceEqual(back.GetData<ushort>()), comp.ToString());
+            back = null;
+            GC.Collect();
+            var region = Tiff.DecodeRegion(s, 5, 31000, 700, 100);
+            Assert.True(region.GetData<ushort>().AsSpan(0, 700).SequenceEqual(a.AsSpan(31000 * w + 5, 700)), comp + " region");
+            // such strips need a seekable target
+            if (comp == TiffCompression.PackBits)
+                Assert.Throws<ArgumentException>(() => Tiff.Encode(img, new ForwardOnlyStream(), new TiffEncodeOptions { Compression = comp, RowsPerStrip = h }));
+        }
     }
 
     [Theory]

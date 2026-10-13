@@ -28,6 +28,8 @@ namespace PixCodec.JpegImpl
             for (int i = 0; i < 64; i++) s_zigzag[80 + i] = (byte)((zz[i] & 7) * 8 + (zz[i] >> 3));
             fixed (byte* p = s_zigzag) ZigZag = p; // pinned object heap: the address is stable
             ZigZagTransposed = ZigZag + 80;
+            for (int i = 0; i < 64; i++) s_identity[i] = (byte)i;
+            fixed (byte* p = s_identity) Identity = p;
         }
 
         /// <summary>Bit i is set when coefficient i of the block is nonzero.</summary>
@@ -65,6 +67,41 @@ namespace PixCodec.JpegImpl
             ulong m = 0;
             for (int i = 0; i < 64; i++) if (blk[i] != 0) m |= 1UL << i;
             return m;
+        }
+
+        // byte b of a mask in transposed natural order -> its bits in zigzag order
+        static readonly ulong[] s_toZigZag = BuildMaskPermutation();
+        public static readonly byte* Identity;
+        static readonly byte[] s_identity = GC.AllocateArray<byte>(64, pinned: true);
+
+        static ulong[] BuildMaskPermutation()
+        {
+            // zigzag position of every element of a transposed block
+            Span<int> position = stackalloc int[64];
+            ReadOnlySpan<byte> zz =
+            [
+                0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+                35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+            ];
+            for (int k = 0; k < 64; k++) position[(zz[k] & 7) * 8 + (zz[k] >> 3)] = k;
+            var t = GC.AllocateArray<ulong>(8 * 256, pinned: true);
+            for (int b = 0; b < 8; b++)
+                for (int v = 0; v < 256; v++)
+                {
+                    ulong m = 0;
+                    for (int bit = 0; bit < 8; bit++) if ((v >> bit & 1) != 0) m |= 1UL << position[b * 8 + bit];
+                    t[b * 256 + v] = m;
+                }
+            return t;
+        }
+
+        /// <summary>Reorders a nonzero mask of a transposed (column major) block into zigzag order.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong TransposedMaskToZigZag(ulong m)
+        {
+            fixed (ulong* t = s_toZigZag)
+                return t[(byte)m] | t[256 + (byte)(m >> 8)] | t[512 + (byte)(m >> 16)] | t[768 + (byte)(m >> 24)]
+                    | t[1024 + (byte)(m >> 32)] | t[1280 + (byte)(m >> 40)] | t[1536 + (byte)(m >> 48)] | t[1792 + (m >> 56)];
         }
 
         /// <summary>Bits ss..se set.</summary>

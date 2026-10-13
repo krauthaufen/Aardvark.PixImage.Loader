@@ -346,9 +346,87 @@ public class PngFeatureTests
         }
         else Assert.Null(meta.Background);
 
-        Assert.Equal(oracle.TryGetProperty("sbit", out _), meta.SignificantBits != null);
-        if (meta.SignificantBits != null) Assert.Equal(colorType switch { 0 => 1, 4 => 2, 6 => 4, _ => 3 }, meta.SignificantBits.Length);
+        // sBIT: values from pngcheck and exiftool (only "present" where neither tool was available)
+        if (oracle.TryGetProperty("sbit", out var sbit))
+        {
+            Assert.NotNull(meta.SignificantBits);
+            Assert.Equal(colorType switch { 0 => 1, 4 => 2, 6 => 4, _ => 3 }, meta.SignificantBits!.Length);
+            if (sbit.ValueKind == JsonValueKind.Array) Assert.Equal(sbit.EnumerateArray().Select(v => (byte)v.GetInt32()), meta.SignificantBits);
+        }
+        else Assert.Null(meta.SignificantBits);
         _ = header;
+
+        // the rarer chunks, as pngcheck prints them (sidecars are always written with it; a live check may lack it)
+        bool pngcheck = !oracle.TryGetProperty("tools", out var tools) || tools.EnumerateArray().Any(t => t.GetString() == "pngcheck");
+        bool exiftool = !oracle.TryGetProperty("tools", out _) || tools.EnumerateArray().Any(t => t.GetString() == "exiftool");
+        if (oracle.TryGetProperty("hist", out var hist)) Assert.Equal(hist.EnumerateArray().Select(v => (ushort)v.GetInt32()), meta.Histogram);
+        else if (pngcheck) Assert.Null(meta.Histogram);
+
+        if (oracle.TryGetProperty("splt", out var splt))
+        {
+            Assert.Equal(splt.GetArrayLength(), meta.SuggestedPalettes.Count);
+            int k = 0;
+            foreach (var e in splt.EnumerateArray())
+            {
+                var mine = meta.SuggestedPalettes[k++];
+                // pngcheck prints the name unpadded; ours is exact
+                Assert.Equal(e.GetProperty("name").GetString(), mine.Name);
+                Assert.Equal(e.GetProperty("depth").GetInt32(), mine.SampleDepth);
+                Assert.Equal(e.GetProperty("entries").EnumerateArray().Select(v => (v[0].GetInt32(), v[1].GetInt32(), v[2].GetInt32(), v[3].GetInt32(), v[4].GetInt32())),
+                             mine.Entries.Select(v => ((int)v.R, (int)v.G, (int)v.B, (int)v.A, (int)v.Frequency)));
+            }
+        }
+        else if (pngcheck) Assert.Empty(meta.SuggestedPalettes);
+
+        if (oracle.TryGetProperty("offs", out var offs))
+        {
+            // pngcheck prints the signed positions as unsigned numbers
+            var o = meta.Offset!.Value;
+            Assert.Equal((offs[0].GetUInt32(), offs[1].GetUInt32(), offs[2].GetString() == "micrometers" ? PngOffsetUnit.Micrometer : PngOffsetUnit.Pixel),
+                         ((uint)o.X, (uint)o.Y, o.Unit));
+        }
+        else if (pngcheck) Assert.Null(meta.Offset);
+
+        static double Num(string s) => double.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
+        if (oracle.TryGetProperty("pcal", out var pcal))
+        {
+            var c = meta.PixelCalibration!;
+            Assert.Equal((pcal.GetProperty("name").GetString(), pcal.GetProperty("unit").GetString(), unchecked((int)pcal.GetProperty("x0").GetInt64()), unchecked((int)pcal.GetProperty("x1").GetInt64()), pcal.GetProperty("type").GetInt32()),   // pngcheck prints them unsigned
+                         (c.Name, c.Unit, c.X0, c.X1, (int)c.Equation));
+            Assert.Equal(pcal.GetProperty("params").EnumerateArray().Select(v => Num(v.GetString()!)), c.Parameters);
+        }
+        else if (pngcheck) Assert.Null(meta.PixelCalibration);
+
+        if (oracle.TryGetProperty("scal", out var scal))
+        {
+            var c = meta.PhysicalScale!.Value;
+            Assert.Equal((scal[0].GetString() == "meters" ? PngScaleUnit.Meter : PngScaleUnit.Radian, Num(scal[1].GetString()!), Num(scal[2].GetString()!)),
+                         (c.Unit, c.PixelWidth, c.PixelHeight));
+        }
+        else if (pngcheck) Assert.Null(meta.PhysicalScale);
+
+        if (oracle.TryGetProperty("ster", out var ster)) Assert.Equal((PngStereoMode)ster.GetInt32(), meta.StereoMode);
+        else if (pngcheck || exiftool) Assert.Null(meta.StereoMode);
+
+        if (oracle.TryGetProperty("cicp", out var cicp))
+            Assert.Equal(new PngCodingIndependentCodePoints((byte)cicp[0].GetInt32(), (byte)cicp[1].GetInt32(), (byte)cicp[2].GetInt32(), cicp[3].GetInt32() == 1),
+                         meta.CodingIndependentCodePoints);
+        else if (exiftool) Assert.Null(meta.CodingIndependentCodePoints);
+
+        // mDCV / cLLI: pngcheck prints six significant digits. Their absence is not asserted, because we also read
+        // the draft spellings (mDCv, cLLi), which pngcheck rejects.
+        if (oracle.TryGetProperty("mdcv", out var mdcv))
+        {
+            var d = meta.MasteringDisplay!.Value;
+            var mine = new[] { d.RedX, d.RedY, d.GreenX, d.GreenY, d.BlueX, d.BlueY, d.WhiteX, d.WhiteY, d.MaxLuminance, d.MinLuminance };
+            for (int i = 0; i < 10; i++) Assert.Equal(mdcv[i].GetDouble(), mine[i], 5 - (int)Math.Max(0, Math.Ceiling(Math.Log10(Math.Max(mine[i], 1)))));
+        }
+        if (oracle.TryGetProperty("clli", out var clli))
+        {
+            var l = meta.ContentLightLevel!.Value;
+            Assert.Equal(clli[0].GetDouble(), l.MaxContentLightLevel, 2);
+            Assert.Equal(clli[1].GetDouble(), l.MaxFrameAverageLightLevel, 2);
+        }
     }
 
     [Fact]
@@ -391,6 +469,35 @@ public class PngFeatureTests
             Assert.Equal(new[] { (byte)bits, (byte)bits, (byte)bits }, Png.ReadMetadata(Load($"png/pngsuite/{name}.png")).SignificantBits);
 
         Assert.True(Png.ReadMetadata(Load("png/m_c2_d08_n_13x9.png")).IsEmpty);
+
+        // the rare chunks, exactly as the generator stored them
+        var r = Png.ReadMetadata(Load("png/meta_rare_chunks.png"));
+        Assert.Equal(new PngCodingIndependentCodePoints(9, 16, 0, true), r.CodingIndependentCodePoints);
+        var md = r.MasteringDisplay!.Value;
+        Assert.Equal((0.708, 0.292, 0.17, 0.797, 0.131, 0.046, 0.3127, 0.329, 1000.0, 0.005),
+                     (Math.Round(md.RedX, 5), Math.Round(md.RedY, 5), Math.Round(md.GreenX, 5), Math.Round(md.GreenY, 5), Math.Round(md.BlueX, 5),
+                      Math.Round(md.BlueY, 5), Math.Round(md.WhiteX, 5), Math.Round(md.WhiteY, 5), Math.Round(md.MaxLuminance, 4), Math.Round(md.MinLuminance, 4)));
+        Assert.Equal((1000.0, 250.0), (Math.Round(r.ContentLightLevel!.Value.MaxContentLightLevel, 4), Math.Round(r.ContentLightLevel.Value.MaxFrameAverageLightLevel, 4)));
+        Assert.Equal(new PngOffset(-1234, 56789, PngOffsetUnit.Micrometer), r.Offset);
+        Assert.Equal(new PngPhysicalScale(PngScaleUnit.Meter, 0.00025, 0.00025), r.PhysicalScale);
+        Assert.Equal(PngStereoMode.DivergingFuse, r.StereoMode);
+        Assert.Equal(("elevation", 0, 65535, PngCalibrationEquation.Linear, "m"), (r.PixelCalibration!.Name, r.PixelCalibration.X0, r.PixelCalibration.X1, r.PixelCalibration.Equation, r.PixelCalibration.Unit));
+        Assert.Equal(new[] { -12.5, 0.001953125 }, r.PixelCalibration.Parameters);
+        Assert.Equal(new[] { ("web safe", 8, 6), ("deep", 16, 4) }, r.SuggestedPalettes.Select(p => (p.Name, p.SampleDepth, p.Entries.Length)));
+        Assert.Equal(new PngSuggestedPaletteEntry(51, 204, 7, 254, 999), r.SuggestedPalettes[0].Entries[1]);
+        Assert.Equal(new PngSuggestedPaletteEntry(27000, 38535, 369, 65535, 3), r.SuggestedPalettes[1].Entries[3]);
+
+        var h = Png.ReadMetadata(Load("png/meta_rare_pcal_hyperbolic.png"));
+        Assert.Equal(("density", 10, 250, PngCalibrationEquation.Hyperbolic, "g/cm\u00b3"), (h.PixelCalibration!.Name, h.PixelCalibration.X0, h.PixelCalibration.X1, h.PixelCalibration.Equation, h.PixelCalibration.Unit));
+        Assert.Equal(new[] { 1.0, -25.0, 0.125, 4.0 }, h.PixelCalibration.Parameters);
+        Assert.Equal(new PngOffset(7, -8), h.Offset);
+        Assert.Equal(PngStereoMode.CrossFuse, h.StereoMode);
+        Assert.Equal(new PngPhysicalScale(PngScaleUnit.Radian, 0.001, 0.002), h.PhysicalScale);
+        // the draft spellings mDCv / cLLi are still read
+        Assert.Equal(new PngMasteringDisplay(0, 0, 0, 0, 0, 0, 0, 0, 0, 0), h.MasteringDisplay);
+        Assert.Equal(0.5, h.ContentLightLevel!.Value.MaxContentLightLevel, 9);
+
+        Assert.Equal(new ushort[] { 5, 0, 65535, 100, 7, 7, 1, 30000 }, Png.ReadMetadata(Load("png/meta_hist_palette.png")).Histogram);
     }
 
     static PngMetadata FullMetadata() => new()
@@ -408,6 +515,19 @@ public class PngFeatureTests
             new PngTextEntry("Tagged", "bonjour") { LanguageTag = "fr-CA", TranslatedKeyword = "Étiqueté" },
             new PngTextEntry("Packed", string.Concat(Enumerable.Repeat("✓ ", 900))) { International = true, Compressed = true },
             new PngTextEntry("Empty", ""),
+        },
+        CodingIndependentCodePoints = new PngCodingIndependentCodePoints(9, 18, 0, true),
+        MasteringDisplay = new PngMasteringDisplay(0.68, 0.32, 0.265, 0.69, 0.15, 0.06, 0.3127, 0.329, 4000, 0.0005),
+        ContentLightLevel = new PngContentLightLevel(1200.5, 300.25),
+        Offset = new PngOffset(-40, 1000000, PngOffsetUnit.Micrometer),
+        PixelCalibration = new PngPixelCalibration("depth", -5, 4095, PngCalibrationEquation.ArbitraryBaseExponential, "\u00b5m", new[] { 0.5, 1e-7, 10.0 }),
+        PhysicalScale = new PngPhysicalScale(PngScaleUnit.Radian, 1.25e-5, 3.0),
+        StereoMode = PngStereoMode.CrossFuse,
+        SuggestedPalettes =
+        {
+            new PngSuggestedPalette("eight", 8, new[] { new PngSuggestedPaletteEntry(1, 2, 3, 255, 9), new PngSuggestedPaletteEntry(255, 0, 128, 0, 65535) }),
+            new PngSuggestedPalette("sixteen bit", 16, new[] { new PngSuggestedPaletteEntry(65535, 256, 3, 40000, 1) }),
+            new PngSuggestedPalette("empty", 8, Array.Empty<PngSuggestedPaletteEntry>()),
         },
     };
 
@@ -440,10 +560,25 @@ public class PngFeatureTests
                          (back.Text[i].Keyword, back.Text[i].Text, back.Text[i].LanguageTag, back.Text[i].TranslatedKeyword, back.Text[i].Compressed));
         }
         Assert.Equal(new[] { false, false, true, true, true, false }, back.Text.Select(t => t.International));
+        Assert.Equal(meta.CodingIndependentCodePoints, back.CodingIndependentCodePoints);
+        Assert.Equal(meta.Offset, back.Offset);
+        Assert.Equal(meta.PhysicalScale, back.PhysicalScale);
+        Assert.Equal(meta.StereoMode, back.StereoMode);
+        Assert.Equal(meta.ContentLightLevel, back.ContentLightLevel);
+        var (m1, m2) = (meta.MasteringDisplay!.Value, back.MasteringDisplay!.Value);
+        Assert.Equal((m1.RedX, m1.GreenY, m1.WhiteX, m1.MaxLuminance, m1.MinLuminance),
+                     (Math.Round(m2.RedX, 9), Math.Round(m2.GreenY, 9), Math.Round(m2.WhiteX, 9), Math.Round(m2.MaxLuminance, 9), Math.Round(m2.MinLuminance, 9)));
+        Assert.Equal((meta.PixelCalibration!.Name, meta.PixelCalibration.X0, meta.PixelCalibration.X1, meta.PixelCalibration.Equation, meta.PixelCalibration.Unit),
+                     (back.PixelCalibration!.Name, back.PixelCalibration.X0, back.PixelCalibration.X1, back.PixelCalibration.Equation, back.PixelCalibration.Unit));
+        Assert.Equal(meta.PixelCalibration.Parameters, back.PixelCalibration.Parameters);
+        Assert.Equal(meta.SuggestedPalettes.Select(p => (p.Name, p.SampleDepth)), back.SuggestedPalettes.Select(p => (p.Name, p.SampleDepth)));
+        for (int i = 0; i < meta.SuggestedPalettes.Count; i++) Assert.Equal(meta.SuggestedPalettes[i].Entries, back.SuggestedPalettes[i].Entries);
+        Assert.Null(back.Histogram); // only written next to an explicit palette
 
         // chunk order: color space before PLTE/IDAT, everything before the pixel data
         Assert.Equal(new[] { "IHDR", "sRGB", "gAMA", "cHRM" }.Concat(channels >= 3 ? new[] { "sBIT" } : Array.Empty<string>())
-                .Concat(new[] { "bKGD", "tIME", "tEXt", "zTXt", "iTXt", "iTXt", "iTXt", "tEXt", "IDAT", "IEND" }),
+                .Concat(new[] { "cICP", "mDCV", "cLLI", "bKGD", "sPLT", "sPLT", "sPLT", "oFFs", "pCAL", "sCAL", "sTER",
+                                "tIME", "tEXt", "zTXt", "iTXt", "iTXt", "iTXt", "tEXt", "IDAT", "IEND" }),
             Chunks(png).Select(c => c.type));
 
         // third-party readers see the same
@@ -496,6 +631,76 @@ public class PngFeatureTests
         png = Png.Encode(rgb, new PngEncodeOptions { Metadata = new PngMetadata { SrgbIntent = PngRenderingIntent.Perceptual } });
         Assert.Null(Png.ReadMetadata(png).SrgbIntent);
         Assert.NotNull(Png.Decode(png).Metadata!.IccProfile);
+    }
+
+    [Fact]
+    public void WritesHistogramWithExplicitPalette()
+    {
+        var indices = RawImage.Create(5, 3, ColorModel.Gray, SampleType.UInt8);
+        for (int i = 0; i < 15; i++) indices.GetData<byte>()[i] = (byte)(i % 3);
+        var palette = new byte[] { 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255 };
+        var meta = new PngMetadata { Histogram = new ushort[] { 5, 65535, 0 } };
+        var png = Png.EncodeIndexed(indices, palette, new PngEncodeOptions { Metadata = meta });
+        Assert.Equal(new[] { "IHDR", "PLTE", "hIST", "IDAT", "IEND" }, Chunks(png).Select(c => c.type));
+        Assert.Equal(meta.Histogram, Png.ReadMetadata(png).Histogram);
+        if (TestUtil.PythonAvailable) AssertMatchesOracle(OracleMeta(png), png);
+
+        // wrong number of entries, or a palette the encoder derived itself: no chunk
+        meta.Histogram = new ushort[] { 1, 2 };
+        Assert.Null(Png.ReadMetadata(Png.EncodeIndexed(indices, palette, new PngEncodeOptions { Metadata = meta })).Histogram);
+        var rgb = RawImage.Create(2, 1, ColorModel.Rgb, SampleType.UInt8);
+        rgb.GetData<byte>()[0] = 9;
+        var auto = Png.Encode(rgb, new PngEncodeOptions { AutoPalette = true, Metadata = new PngMetadata { Histogram = new ushort[] { 1, 1 } } });
+        Assert.Equal(3, auto[25]);
+        Assert.Null(Png.ReadMetadata(auto).Histogram);
+    }
+
+    [Fact]
+    public void RejectsInvalidRareChunkValues()
+    {
+        var img = RawImage.Create(1, 1, ColorModel.Gray, SampleType.UInt8);
+        void Bad<T>(Action<PngMetadata> set) where T : Exception
+        {
+            var m = new PngMetadata();
+            set(m);
+            Assert.Throws<T>(() => Png.Encode(img, new PngEncodeOptions { Metadata = m }));
+        }
+        Bad<ArgumentException>(m => m.SuggestedPalettes.Add(new PngSuggestedPalette("", 8, Array.Empty<PngSuggestedPaletteEntry>())));
+        Bad<ArgumentException>(m => m.SuggestedPalettes.Add(new PngSuggestedPalette("p", 12, Array.Empty<PngSuggestedPaletteEntry>())));
+        Bad<ArgumentException>(m => m.SuggestedPalettes.Add(new PngSuggestedPalette("p", 8, new[] { new PngSuggestedPaletteEntry(256, 0, 0, 0, 0) })));
+        Bad<ArgumentException>(m => m.PixelCalibration = new PngPixelCalibration("c", 0, 1, PngCalibrationEquation.Linear, "m", new[] { 1.0 }));
+        Bad<ArgumentException>(m => m.PixelCalibration = new PngPixelCalibration("c", 3, 3, PngCalibrationEquation.Linear, "m", new[] { 1.0, 2.0 }));
+        Bad<ArgumentException>(m => m.PixelCalibration = new PngPixelCalibration(" c", 0, 1, PngCalibrationEquation.Linear, "m", new[] { 1.0, 2.0 }));
+        Bad<ArgumentOutOfRangeException>(m => m.PixelCalibration = new PngPixelCalibration("c", 0, 1, PngCalibrationEquation.Linear, "m", new[] { 1.0, double.NaN }));
+        Bad<ArgumentOutOfRangeException>(m => m.PhysicalScale = new PngPhysicalScale(PngScaleUnit.Meter, 0, 1));
+        Bad<ArgumentOutOfRangeException>(m => m.PhysicalScale = new PngPhysicalScale((PngScaleUnit)0, 1, 1));
+        Bad<ArgumentOutOfRangeException>(m => m.MasteringDisplay = new PngMasteringDisplay(2, 0, 0, 0, 0, 0, 0, 0, 1, 0));
+        Bad<ArgumentOutOfRangeException>(m => m.ContentLightLevel = new PngContentLightLevel(-1, 0));
+        Bad<ArgumentOutOfRangeException>(m => m.StereoMode = (PngStereoMode)2);
+        Bad<ArgumentOutOfRangeException>(m => m.Offset = new PngOffset(0, 0, (PngOffsetUnit)2));
+    }
+
+    [Fact]
+    public void MalformedRareChunksAreSkipped()
+    {
+        var good = Chunks(Load("png/meta_rare_chunks.png"));
+        byte[] Replace(string type, byte[] body) => Assemble(good.Select(c => c.type == type ? Chunk(type, body) : c.bytes));
+        Assert.Null(Png.ReadMetadata(Replace("cICP", new byte[] { 9, 16, 0, 2 })).CodingIndependentCodePoints);
+        Assert.Null(Png.ReadMetadata(Replace("mDCV", new byte[23])).MasteringDisplay);
+        Assert.Null(Png.ReadMetadata(Replace("cLLI", new byte[9])).ContentLightLevel);
+        Assert.Null(Png.ReadMetadata(Replace("oFFs", new byte[] { 0, 0, 0, 1, 0, 0, 0, 1, 2 })).Offset);
+        Assert.Null(Png.ReadMetadata(Replace("sTER", new byte[] { 2 })).StereoMode);
+        Assert.Null(Png.ReadMetadata(Replace("sCAL", "\u0001abc\0001"u8.ToArray())).PhysicalScale);
+        Assert.Null(Png.ReadMetadata(Replace("sCAL", new byte[] { 3, 49, 0, 49 })).PhysicalScale);          // unit 3
+        Assert.Null(Png.ReadMetadata(Replace("sCAL", new byte[] { 1, 49, 0, 48 })).PhysicalScale);          // zero height
+        Assert.Null(Png.ReadMetadata(Replace("pCAL", "name only"u8.ToArray())).PixelCalibration);
+        Assert.Null(Png.ReadMetadata(Replace("pCAL", new byte[] { 99, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 3, 109, 0, 49, 0, 50, 0, 51 })).PixelCalibration); // 3 parameters for a linear equation
+        Assert.Empty(Png.ReadMetadata(Replace("sPLT", "name\0\u0008\u0001\u0002"u8.ToArray())).SuggestedPalettes);  // partial entry
+        Assert.Empty(Png.ReadMetadata(Replace("sPLT", "name\0\u0007"u8.ToArray())).SuggestedPalettes);              // depth 7
+        var hist = Chunks(Load("png/meta_hist_palette.png"));
+        Assert.Null(Png.ReadMetadata(Assemble(hist.Select(c => c.type == "hIST" ? Chunk("hIST", new byte[14]) : c.bytes))).Histogram);
+        // none of it touches the pixels
+        TestUtil.AssertEqual(Png.Decode(Load("png/meta_rare_chunks.png")), Png.Decode(Replace("pCAL", new byte[3])));
     }
 
     [Fact]
