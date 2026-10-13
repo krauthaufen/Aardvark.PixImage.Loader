@@ -104,7 +104,17 @@ public class PngTests
         Assert.Equal(RawImage.DefaultColorModel(expected.Channels), img.Color);
 
         var info = Png.GetInfo(bytes);
-        Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, img.SampleType, img.Color, info.FrameCount), info);
+        // header level fields: bit depth as stored (8 for palette entries), and exactly what Decode reports as metadata
+        var meta = img.Metadata;
+        Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, img.SampleType, img.Color, info.FrameCount)
+        {
+            BitsPerSample = bytes[25] == 3 ? 8 : bytes[24],
+            Orientation = meta?.Orientation ?? 0,
+            DpiX = meta?.DpiX ?? 0,
+            DpiY = meta?.DpiY ?? 0,
+            HasIccProfile = meta?.IccProfile != null,
+            IsAnimated = rel.Contains("apng"),
+        }, info);
         Assert.Equal(rel.Contains("apng") && !rel.Contains("single_frame"), info.FrameCount > 1);
 
         // same result through the generic entry point and without CRC checks
@@ -229,17 +239,102 @@ public class PngTests
         png = Assemble(new[] { ihdr, Chunk("IDAT", stream[..^3]), iend });
         Assert.Throws<ImageFormatException>(() => Png.Decode(png));
         TestUtil.AssertEqual(Png.Decode(good), Png.Decode(png, noVerify));
+    }
 
-        // the vectorized Adler-32 against the plain one, across block boundaries
-        var rnd = new Random(5);
-        foreach (int n in new[] { 0, 1, 15, 16, 63, 64, 65, 5535, 5536, 5537, 5552, 11072, 100_003 })
+    [Fact]
+    public void PixelStreamInAwkwardPieces()
+    {
+        // the compressed stream handed over one byte per IDAT chunk, with empty chunks in between
+        foreach (var name in new[] { "m_c2_d08_n_33x17", "m_c6_d16_i_33x17", "m_c3_d02_i_13x9", "t_gray_d04_n", "pil_rgb", "stored_level0" })
         {
-            var data = new byte[n];
-            rnd.NextBytes(data);
-            Assert.Equal(Zlib.Adler32(data), PngDecoder.Adler32(data));
-            Array.Fill(data, (byte)255);
-            Assert.Equal(Zlib.Adler32(data), PngDecoder.Adler32(data));
+            var good = Load($"png/{name}.png");
+            var chunks = Chunks(good);
+            var stream = chunks.Where(c => c.type == "IDAT").SelectMany(c => c.bytes.AsSpan(8, c.bytes.Length - 12).ToArray()).ToArray();
+            var list = chunks.TakeWhile(c => c.type != "IDAT").Select(c => c.bytes).ToList();
+            list.Add(Chunk("IDAT", Array.Empty<byte>()));
+            for (int i = 0; i < stream.Length; i++)
+            {
+                list.Add(Chunk("IDAT", new[] { stream[i] }));
+                if (i % 97 == 0) list.Add(Chunk("IDAT", Array.Empty<byte>()));
+            }
+            list.Add(chunks[^1].bytes);
+            TestUtil.AssertEqual(Png.Decode(good), Png.Decode(Assemble(list)));
+            // cut anywhere, it is a truncated image
+            for (int cut = 0; cut < stream.Length; cut += Math.Max(1, stream.Length / 23))
+            {
+                var part = Assemble(new[] { chunks[0].bytes }.Concat(chunks.Skip(1).TakeWhile(c => c.type != "IDAT").Select(c => c.bytes))
+                    .Append(Chunk("IDAT", stream[..cut])).Append(chunks[^1].bytes));
+                Assert.Throws<ImageFormatException>(() => Png.Decode(part));
+                // without verification a cut that only costs the checksum still yields the complete image
+                try { TestUtil.AssertEqual(Png.Decode(good), Png.Decode(part, new PngDecodeOptions { VerifyChecksums = false })); }
+                catch (ImageFormatException) { }
+            }
+            foreach (int cut in new[] { 0, 1, 2, 3 })
+                Assert.Throws<ImageFormatException>(() => Png.Decode(Assemble(new[] { chunks[0].bytes }
+                    .Concat(chunks.Skip(1).TakeWhile(c => c.type != "IDAT").Select(c => c.bytes)).Append(Chunk("IDAT", stream[..cut])).Append(chunks[^1].bytes))));
         }
+    }
+
+    [Fact]
+    public void SurplusPixelDataIsTolerated()
+    {
+        // a stream holding more rows than the image has: the image decodes, with and without verification
+        var rows = new byte[6 * (1 + 5 * 3)];
+        new Random(2).NextBytes(rows);
+        for (int y = 0; y < 6; y++) rows[y * 16] = (byte)(y % 5);
+        var iend = Chunk("IEND", Array.Empty<byte>());
+        var exact = Assemble(new[] { Ihdr(5, 4, 8, 2), Chunk("IDAT", Zlib.Compress(rows.AsSpan(0, 4 * 16))), iend });
+        var surplus = Assemble(new[] { Ihdr(5, 4, 8, 2), Chunk("IDAT", Zlib.Compress(rows)), iend });
+        var oneByte = Assemble(new[] { Ihdr(5, 4, 8, 2), Chunk("IDAT", Zlib.Compress(rows.AsSpan(0, 4 * 16 + 1))), iend });
+        var expected = Png.Decode(exact);
+        foreach (var png in new[] { surplus, oneByte })
+        {
+            TestUtil.AssertEqual(expected, Png.Decode(png));
+            TestUtil.AssertEqual(expected, Png.Decode(png, new PngDecodeOptions { VerifyChecksums = false }));
+        }
+    }
+
+    [Fact]
+    public void GetInfoReportsHeaderFields()
+    {
+        var all = Load("png/meta_all.png");
+        var info = Png.GetInfo(all);
+        Assert.Equal((8, 6, 300.0, 150.0, true, false), (info.BitsPerSample, info.Orientation, info.DpiX, info.DpiY, info.HasIccProfile, info.IsAnimated));
+        Assert.Equal((info.Height, info.Width), (info.OrientedWidth, info.OrientedHeight));
+
+        foreach (var (name, bits) in new[] { ("m_c0_d01_n_13x9", 1), ("m_c0_d02_i_13x9", 2), ("m_c0_d04_n_13x9", 4), ("m_c0_d16_n_13x9", 16),
+                                             ("m_c3_d01_n_13x9", 8), ("m_c3_d04_n_13x9", 8), ("m_c6_d16_n_13x9", 16), ("t_gray_d02_n", 2) })
+            Assert.Equal(bits, Png.GetInfo(Load($"png/{name}.png")).BitsPerSample);
+        Assert.True(Png.GetInfo(Load("png/apng/single_frame.png")).IsAnimated);
+        Assert.Equal((true, 12), (Png.GetInfo(Load("png/apng/ops_rgba8_binary.png")).IsAnimated, Png.GetInfo(Load("png/apng/ops_rgba8_binary.png")).FrameCount));
+
+        // everything GetInfo reports sits in front of the first IDAT: that prefix of the file gives the same answer
+        int idat = all.AsSpan().IndexOf("IDAT"u8);
+        Assert.Equal(info, Png.GetInfo(all.AsSpan(0, idat + 4)));
+        Assert.Equal(info, ImageCodec.GetInfo(new MemoryStream(all), 40));
+
+        // eXIf may also follow the pixel data; then only a full decode sees it
+        var chunks = Chunks(all);
+        var moved = Assemble(chunks.Where(c => c.type != "eXIf" && c.type != "IEND").Select(c => c.bytes)
+            .Append(chunks.Single(c => c.type == "eXIf").bytes).Append(chunks[^1].bytes));
+        Assert.Equal(0, Png.GetInfo(moved).Orientation);
+        Assert.Equal(6, Png.Decode(moved).Metadata!.Orientation);
+        Assert.Equal(info with { Orientation = 0 }, Png.GetInfo(moved));
+
+        // ancillary chunks with a wrong CRC are dropped by both
+        foreach (var type in new[] { "pHYs", "iCCP", "eXIf" })
+        {
+            var damaged = Assemble(chunks.Select(c => { var b = (byte[])c.bytes.Clone(); if (c.type == type) b[^1] ^= 1; return b; }));
+            var i = Png.GetInfo(damaged);
+            var m = Png.Decode(damaged).Metadata!;
+            Assert.Equal((m.DpiX, m.DpiY, m.Orientation, m.IccProfile != null), (i.DpiX, i.DpiY, i.Orientation, i.HasIccProfile));
+            Assert.NotEqual(info, i);
+        }
+
+        // the profile is not inflated for the info: one whose compressed data is corrupt is still announced
+        var badProfile = Assemble(chunks.Select(c => c.type == "iCCP" ? Chunk("iCCP", "name\0\0not a zlib stream"u8.ToArray()) : c.bytes));
+        Assert.True(Png.GetInfo(badProfile).HasIccProfile);
+        Assert.Null(Png.Decode(badProfile).Metadata!.IccProfile);
     }
 
     [Fact]
@@ -487,7 +582,7 @@ public class PngTests
                     var back = Png.Decode(png);
                     Assert.Equal(img.Color, back.Color);
                     TestUtil.AssertEqual(img, back);
-                    Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, type, color), Png.GetInfo(png));
+                    Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, type, color) { BitsPerSample = type == SampleType.UInt8 ? 8 : 16 }, Png.GetInfo(png));
                 }
         }
     }

@@ -92,13 +92,14 @@ namespace PixCodec
 
         /// <summary>
         /// Write a palette (color type 3) image when an 8 bit Rgb/Rgba image has at most 256 distinct colors.
-        /// Lossless: decodes back to the same pixels and color model. Not applied to animations.
+        /// Lossless: decodes back to the same pixels and color model. For an animation the palette covers all frames.
         /// </summary>
         public bool AutoPalette { get; set; }
 
         /// <summary>
         /// Write an 8 bit Gray image with 1, 2 or 4 bits per pixel when every sample is representable at that depth
-        /// (multiples of 255, 85 or 17). Lossless: decodes back to the same UInt8 pixels. Not applied to animations.
+        /// (multiples of 255, 85 or 17). Lossless: decodes back to the same UInt8 pixels. For an animation all frames
+        /// have to fit.
         /// </summary>
         public bool ReduceGrayDepth { get; set; }
 
@@ -106,14 +107,14 @@ namespace PixCodec
         /// Write a GrayAlpha/Rgba image (8 or 16 bit) without its alpha channel, marking one color as transparent
         /// with a tRNS chunk, when that is lossless: alpha is only ever 0 or the maximum, all transparent pixels have
         /// the same color and no opaque pixel has it. Decodes back to the same pixels and color model.
-        /// Not applied to animations.
+        /// For an animation this has to hold across all frames.
         /// </summary>
         public bool ColorKeyTransparency { get; set; }
 
         /// <summary>Write gAMA / pHYs / iCCP / eXIf chunks from <see cref="RawImage.Metadata"/>.</summary>
         public bool WriteMetadata { get; set; } = true;
 
-        /// <summary>PNG specific chunks to write: sRGB, cHRM, sBIT, bKGD, tIME and text.</summary>
+        /// <summary>PNG specific chunks to write: sRGB, cHRM, sBIT, bKGD, tIME, text and the rarer ones <see cref="PngMetadata"/> lists.</summary>
         public PngMetadata? Metadata { get; set; }
 
         /// <summary>Animation only: number of times to play, 0 = forever.</summary>
@@ -124,6 +125,16 @@ namespace PixCodec
         /// The decoded animation is the same either way.
         /// </summary>
         public bool FrameDifferencing { get; set; } = true;
+
+        /// <summary>
+        /// Animation only: let the encoder choose, per frame, how the previous frame is disposed of (left in place,
+        /// cleared, or restored to what was there before) and whether the frame replaces its region or is blended
+        /// over it with unchanged pixels left transparent - whichever compresses smallest. Every candidate is
+        /// compressed to find out, so encoding takes several times as long (up to six trial encodes per frame); the
+        /// decoded animation is the same. Blending is only considered for GrayAlpha / Rgba frames that are stored
+        /// as such. Implies frame differencing.
+        /// </summary>
+        public bool OptimizeFrames { get; set; }
     }
 
     /// <summary>sRGB chunk: the image is in sRGB and should be rendered with this intent.</summary>
@@ -162,6 +173,51 @@ namespace PixCodec
         public string TranslatedKeyword { get; init; } = "";
     }
 
+    /// <summary>One entry of a suggested palette (sPLT): color, alpha and relative frequency, in the palette's sample depth.</summary>
+    public readonly record struct PngSuggestedPaletteEntry(ushort R, ushort G, ushort B, ushort A, ushort Frequency);
+
+    /// <summary>sPLT chunk: a named palette a viewer may use to display a true color image. SampleDepth is 8 or 16.</summary>
+    public sealed record PngSuggestedPalette(string Name, int SampleDepth, PngSuggestedPaletteEntry[] Entries);
+
+    public enum PngOffsetUnit : byte { Pixel = 0, Micrometer = 1 }
+
+    /// <summary>oFFs chunk: position of the image on a page or within a larger image.</summary>
+    public readonly record struct PngOffset(int X, int Y, PngOffsetUnit Unit = PngOffsetUnit.Pixel);
+
+    /// <summary>pCAL equation types; they take 2, 3, 3 and 4 parameters.</summary>
+    public enum PngCalibrationEquation : byte { Linear = 0, BaseEExponential = 1, ArbitraryBaseExponential = 2, Hyperbolic = 3 }
+
+    /// <summary>
+    /// pCAL chunk: maps stored sample values to physical values. X0 and X1 are the sample values the equation's
+    /// input range refers to; Parameters holds as many values as the equation type requires.
+    /// </summary>
+    public sealed record PngPixelCalibration(string Name, int X0, int X1, PngCalibrationEquation Equation, string Unit, double[] Parameters);
+
+    public enum PngScaleUnit : byte { Meter = 1, Radian = 2 }
+
+    /// <summary>sCAL chunk: physical size of one pixel, for images whose subject is not at display scale (maps, micrographs).</summary>
+    public readonly record struct PngPhysicalScale(PngScaleUnit Unit, double PixelWidth, double PixelHeight);
+
+    /// <summary>sTER chunk: the image holds a stereo pair side by side.</summary>
+    public enum PngStereoMode : byte
+    {
+        /// <summary>Right-eye image on the left.</summary>
+        CrossFuse = 0,
+        /// <summary>Left-eye image on the left.</summary>
+        DivergingFuse = 1,
+    }
+
+    /// <summary>cICP chunk: color space as ITU-T H.273 code points (e.g. 9, 16, 0, true = BT.2100 PQ, full range).</summary>
+    public readonly record struct PngCodingIndependentCodePoints(byte ColorPrimaries, byte TransferFunction, byte MatrixCoefficients, bool FullRange);
+
+    /// <summary>mDCV chunk: chromaticities (CIE 1931 xy) and luminance range (cd/m²) of the mastering display.</summary>
+    public readonly record struct PngMasteringDisplay(
+        double RedX, double RedY, double GreenX, double GreenY, double BlueX, double BlueY, double WhiteX, double WhiteY,
+        double MaxLuminance, double MinLuminance);
+
+    /// <summary>cLLI chunk: maximum content light level and maximum frame average light level, in cd/m².</summary>
+    public readonly record struct PngContentLightLevel(double MaxContentLightLevel, double MaxFrameAverageLightLevel);
+
     /// <summary>
     /// PNG specific ancillary information that has no place in <see cref="ImageMetadata"/>.
     /// Read it with <see cref="Png.ReadMetadata"/>, write it through <see cref="PngEncodeOptions.Metadata"/>.
@@ -185,8 +241,33 @@ namespace PixCodec
         /// <summary>tEXt, zTXt and iTXt chunks in file order.</summary>
         public List<PngTextEntry> Text { get; } = new();
 
+        /// <summary>
+        /// hIST chunk: approximate usage frequency of each palette entry. Only meaningful together with the palette
+        /// it describes, so it is written by <see cref="Png.EncodeIndexed(RawImage, ReadOnlySpan{byte}, Stream, PngEncodeOptions?)"/>
+        /// only, and only with one value per palette entry.
+        /// </summary>
+        public ushort[]? Histogram { get; set; }
+        /// <summary>sPLT chunks.</summary>
+        public List<PngSuggestedPalette> SuggestedPalettes { get; } = new();
+        /// <summary>oFFs chunk.</summary>
+        public PngOffset? Offset { get; set; }
+        /// <summary>pCAL chunk.</summary>
+        public PngPixelCalibration? PixelCalibration { get; set; }
+        /// <summary>sCAL chunk.</summary>
+        public PngPhysicalScale? PhysicalScale { get; set; }
+        /// <summary>sTER chunk.</summary>
+        public PngStereoMode? StereoMode { get; set; }
+        /// <summary>cICP chunk.</summary>
+        public PngCodingIndependentCodePoints? CodingIndependentCodePoints { get; set; }
+        /// <summary>mDCV chunk.</summary>
+        public PngMasteringDisplay? MasteringDisplay { get; set; }
+        /// <summary>cLLI chunk.</summary>
+        public PngContentLightLevel? ContentLightLevel { get; set; }
+
         public bool IsEmpty => SrgbIntent == null && Chromaticities == null && SignificantBits == null && Background == null
-                               && LastModified == null && Text.Count == 0;
+                               && LastModified == null && Text.Count == 0 && Histogram == null && SuggestedPalettes.Count == 0
+                               && Offset == null && PixelCalibration == null && PhysicalScale == null && StereoMode == null
+                               && CodingIndependentCodePoints == null && MasteringDisplay == null && ContentLightLevel == null;
     }
 
     /// <summary>One frame handed to <see cref="Png.EncodeAnimation(IEnumerable{PngInputFrame}, Stream, PngEncodeOptions?)"/>:
@@ -262,8 +343,12 @@ namespace PixCodec
             => header.Length >= 8 && header.Slice(0, 8).SequenceEqual(PngChunks.Signature);
 
         /// <summary>
-        /// Reads header level information without decoding pixel data. FrameCount is the frame count announced by
-        /// an APNG's acTL chunk, 1 for a plain PNG.
+        /// Reads header level information without decoding pixel data: IHDR plus the chunks in front of the first
+        /// IDAT, so a prefix of the file reaching that far is enough. FrameCount / IsAnimated come from an APNG's
+        /// acTL chunk (1 / false for a plain PNG), DpiX / DpiY from pHYs, HasIccProfile from iCCP, Orientation
+        /// from eXIf. They equal what <see cref="Decode"/> puts into the metadata, with two exceptions: an eXIf
+        /// chunk stored behind the pixel data (which the format allows) is found by Decode only, and
+        /// HasIccProfile is set without inflating the profile, which Decode drops if its compressed data is corrupt.
         /// </summary>
         public static ImageInfo GetInfo(ReadOnlySpan<byte> data) => PngDecoder.GetInfo(data);
 
@@ -278,7 +363,8 @@ namespace PixCodec
         public static byte[]? ReadPalette(ReadOnlySpan<byte> data) => PngDecoder.ReadPalette(data);
 
         /// <summary>
-        /// Reads the PNG specific ancillary chunks (sRGB, cHRM, sBIT, bKGD, tIME, text) of the whole file without
+        /// Reads the PNG specific ancillary chunks (sRGB, cHRM, sBIT, bKGD, tIME, text, hIST, sPLT, oFFs, pCAL, sCAL,
+        /// sTER, cICP, mDCV, cLLI) of the whole file without
         /// decoding pixel data. Chunks with a wrong CRC or malformed content are skipped.
         /// </summary>
         public static PngMetadata ReadMetadata(ReadOnlySpan<byte> data)

@@ -57,7 +57,11 @@ namespace PixCodec
                           tRNS = 0x74524E53, gAMA = 0x67414D41, pHYs = 0x70485973, iCCP = 0x69434350, eXIf = 0x65584966,
                           sRGB = 0x73524742, cHRM = 0x6348524D, sBIT = 0x73424954, bKGD = 0x624B4744, tIME = 0x74494D45,
                           tEXt = 0x74455874, zTXt = 0x7A545874, iTXt = 0x69545874,
-                          acTL = 0x6163544C, fcTL = 0x6663544C, fdAT = 0x66644154;
+                          acTL = 0x6163544C, fcTL = 0x6663544C, fdAT = 0x66644154,
+                          hIST = 0x68495354, sPLT = 0x73504C54, oFFs = 0x6F464673, pCAL = 0x7043414C, sCAL = 0x7343414C,
+                          sTER = 0x73544552, cICP = 0x63494350, mDCV = 0x6D444356, cLLI = 0x634C4C49,
+                          // spellings of mDCV / cLLI in drafts of the third edition; still read, never written
+                          mDCvDraft = 0x6D444376, cLLiDraft = 0x634C4C69;
 
         public const int FirstChunkAfterHeader = 8 + 12 + 13;
 
@@ -135,32 +139,71 @@ namespace PixCodec
             _ => false,
         };
 
-        /// <summary>
-        /// Walks the chunks in front of the pixel data and picks up PLTE, tRNS and the announced frame count.
-        /// Only tRNS and acTL are CRC checked (they change what GetInfo reports, and a default decode drops them when
-        /// damaged). Stops quietly at IDAT, IEND or where the data ends.
-        /// </summary>
-        public static void ScanHead(ReadOnlySpan<byte> data, scoped in PngHeader h, out ReadOnlySpan<byte> plte, out ReadOnlySpan<byte> trns, out int frames)
+        /// <summary>What the chunks in front of the pixel data say (see <see cref="ScanHead"/>).</summary>
+        public ref struct HeadInfo
         {
-            plte = default; trns = default; frames = 1;
-            bool sawActl = false;
+            public ReadOnlySpan<byte> Plte, Trns;
+            /// <summary>An acTL chunk makes the file an APNG; Frames is the frame count it announces (else 1).</summary>
+            public bool Animated;
+            public int Frames;
+            public double DpiX, DpiY;
+            public int Orientation;
+            public bool HasIccProfile;
+        }
+
+        /// <summary>
+        /// Walks the chunks in front of the first IDAT and picks up what header level information needs: PLTE, tRNS,
+        /// acTL, pHYs, iCCP and eXIf. Ancillary chunks are CRC checked, because a default decode drops them when
+        /// damaged and the two must agree. Stops quietly at IDAT, IEND or where the data ends, so chunks behind the
+        /// pixel data (where eXIf is allowed too) are not seen.
+        /// </summary>
+        public static HeadInfo ScanHead(ReadOnlySpan<byte> data, scoped in PngHeader h)
+        {
+            var info = new HeadInfo { Frames = 1 };
             int pos = FirstChunkAfterHeader;
             while (data.Length - pos >= 12)
             {
                 uint len = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(pos));
                 uint type = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(pos + 4));
-                if (type == IDAT || type == IEND || len > (uint)(data.Length - pos - 12)) return;
+                if (type == IDAT || type == IEND || len > (uint)(data.Length - pos - 12)) break;
                 var body = data.Slice(pos + 8, (int)len);
-                if (type == PLTE && plte.IsEmpty) plte = body;
-                else if (type == tRNS && trns.IsEmpty && IsUsableTransparency(h, body.Length) && CrcOk(data, pos, body.Length)) trns = body;
-                else if (type == acTL && !sawActl && body.Length == 8 && CrcOk(data, pos, 8))
+                switch (type)
                 {
-                    sawActl = true;
-                    uint n = BinaryPrimitives.ReadUInt32BigEndian(body);
-                    if (n is > 0 and <= int.MaxValue) frames = (int)n;
+                    case PLTE:
+                        if (info.Plte.IsEmpty) info.Plte = body;
+                        break;
+                    case tRNS:
+                        if (info.Trns.IsEmpty && IsUsableTransparency(h, body.Length) && CrcOk(data, pos, body.Length)) info.Trns = body;
+                        break;
+                    case acTL:
+                        if (!info.Animated && body.Length == 8 && CrcOk(data, pos, 8)
+                            && BinaryPrimitives.ReadUInt32BigEndian(body) is > 0 and <= int.MaxValue and var n
+                            && BinaryPrimitives.ReadUInt32BigEndian(body.Slice(4)) <= int.MaxValue)
+                        {
+                            info.Animated = true;
+                            info.Frames = (int)n;
+                        }
+                        break;
+                    case pHYs:
+                        if (body.Length == 9 && body[8] == 1 && CrcOk(data, pos, 9))
+                        {
+                            double x = PixelsPerMeterToDpi(BinaryPrimitives.ReadUInt32BigEndian(body));
+                            double y = PixelsPerMeterToDpi(BinaryPrimitives.ReadUInt32BigEndian(body.Slice(4)));
+                            if (x > 0 && y > 0) { info.DpiX = x; info.DpiY = y; }
+                        }
+                        break;
+                    case eXIf:
+                        if (body.Length >= 8 && CrcOk(data, pos, body.Length)) info.Orientation = ExifOrientation(body);
+                        break;
+                    case iCCP:
+                        // structure only - the profile is not inflated here
+                        int nameEnd = body.Slice(0, Math.Min(body.Length, 80)).IndexOf((byte)0);
+                        if (nameEnd >= 1 && body.Length >= nameEnd + 3 && body[nameEnd + 1] == 0 && CrcOk(data, pos, body.Length)) info.HasIccProfile = true;
+                        break;
                 }
                 pos += 12 + (int)len;
             }
+            return info;
         }
 
         /// <summary>
@@ -187,7 +230,8 @@ namespace PixCodec
                 bool critical = IsCritical(type);
                 bool animationChunk = wantAnimation && type is acTL or fcTL or fdAT;
                 bool wanted = critical || animationChunk || type is tRNS or gAMA or pHYs or iCCP or eXIf
-                              || (wantPngMeta && type is sRGB or cHRM or sBIT or bKGD or tIME or tEXt or zTXt or iTXt);
+                              || (wantPngMeta && type is sRGB or cHRM or sBIT or bKGD or tIME or tEXt or zTXt or iTXt
+                                                         or hIST or sPLT or oFFs or pCAL or sCAL or sTER or cICP or mDCV or cLLI or mDCvDraft or cLLiDraft);
                 if (verify && wanted && !CrcOk(data, chunkPos, body.Length))
                 {
                     if (critical) throw new ImageFormatException($"PNG {TypeName(type)} checksum mismatch");
@@ -452,7 +496,122 @@ namespace PixCodec
                 case iTXt:
                     if (ReadText(type, body) is { } entry) (s.PngMeta ??= new PngMetadata()).Text.Add(entry);
                     break;
+                case hIST:
+                    if (h.IsPalette && s.PlteLength > 0 && body.Length == s.PlteLength / 3 * 2)
+                    {
+                        var hist = new ushort[body.Length / 2];
+                        for (int i = 0; i < hist.Length; i++) hist[i] = BinaryPrimitives.ReadUInt16BigEndian(body.Slice(i * 2));
+                        (s.PngMeta ??= new PngMetadata()).Histogram = hist;
+                    }
+                    break;
+                case sPLT:
+                    if (ReadSuggestedPalette(body) is { } palette) (s.PngMeta ??= new PngMetadata()).SuggestedPalettes.Add(palette);
+                    break;
+                case oFFs:
+                    if (body.Length == 9 && body[8] <= 1)
+                        (s.PngMeta ??= new PngMetadata()).Offset = new PngOffset(BinaryPrimitives.ReadInt32BigEndian(body),
+                            BinaryPrimitives.ReadInt32BigEndian(body.Slice(4)), (PngOffsetUnit)body[8]);
+                    break;
+                case pCAL:
+                    if (ReadPixelCalibration(body) is { } calibration) (s.PngMeta ??= new PngMetadata()).PixelCalibration = calibration;
+                    break;
+                case sCAL:
+                    if (body.Length >= 4 && body[0] is 1 or 2)
+                    {
+                        var numbers = body.Slice(1);
+                        int split = numbers.IndexOf((byte)0);
+                        if (split > 0 && TryParseFloat(numbers.Slice(0, split), out double pw) && TryParseFloat(numbers.Slice(split + 1), out double ph) && pw > 0 && ph > 0)
+                            (s.PngMeta ??= new PngMetadata()).PhysicalScale = new PngPhysicalScale((PngScaleUnit)body[0], pw, ph);
+                    }
+                    break;
+                case sTER:
+                    if (body.Length == 1 && body[0] <= 1) (s.PngMeta ??= new PngMetadata()).StereoMode = (PngStereoMode)body[0];
+                    break;
+                case cICP:
+                    if (body.Length == 4 && body[3] <= 1)
+                        (s.PngMeta ??= new PngMetadata()).CodingIndependentCodePoints = new PngCodingIndependentCodePoints(body[0], body[1], body[2], body[3] == 1);
+                    break;
+                case mDCV:
+                case mDCvDraft:
+                    if (body.Length == 24)
+                    {
+                        Span<double> c = stackalloc double[8];
+                        for (int i = 0; i < 8; i++) c[i] = BinaryPrimitives.ReadUInt16BigEndian(body.Slice(i * 2)) * 0.00002;
+                        (s.PngMeta ??= new PngMetadata()).MasteringDisplay = new PngMasteringDisplay(c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                            BinaryPrimitives.ReadUInt32BigEndian(body.Slice(16)) * 0.0001, BinaryPrimitives.ReadUInt32BigEndian(body.Slice(20)) * 0.0001);
+                    }
+                    break;
+                case cLLI:
+                case cLLiDraft:
+                    if (body.Length == 8)
+                        (s.PngMeta ??= new PngMetadata()).ContentLightLevel = new PngContentLightLevel(
+                            BinaryPrimitives.ReadUInt32BigEndian(body) * 0.0001, BinaryPrimitives.ReadUInt32BigEndian(body.Slice(4)) * 0.0001);
+                    break;
             }
+        }
+
+        /// <summary>A floating point number as PNG writes it in ASCII: digits, optional fraction and exponent.</summary>
+        static bool TryParseFloat(ReadOnlySpan<byte> ascii, out double value)
+        {
+            value = 0;
+            if (ascii.Length is 0 or > 80) return false;
+            foreach (byte b in ascii)
+                if (!(b is >= (byte)'0' and <= (byte)'9' or (byte)'+' or (byte)'-' or (byte)'.' or (byte)'e' or (byte)'E')) return false;
+            return double.TryParse(Encoding.ASCII.GetString(ascii), System.Globalization.NumberStyles.Float,
+                       System.Globalization.CultureInfo.InvariantCulture, out value) && double.IsFinite(value);
+        }
+
+        static PngSuggestedPalette? ReadSuggestedPalette(ReadOnlySpan<byte> body)
+        {
+            int nameEnd = body.Slice(0, Math.Min(body.Length, 80)).IndexOf((byte)0);
+            if (nameEnd < 1 || body.Length < nameEnd + 2) return null;
+            int depth = body[nameEnd + 1];
+            if (depth != 8 && depth != 16) return null;
+            var rest = body.Slice(nameEnd + 2);
+            int size = depth == 8 ? 6 : 10;
+            if (rest.Length % size != 0) return null;
+            var entries = new PngSuggestedPaletteEntry[rest.Length / size];
+            for (int i = 0; i < entries.Length; i++)
+            {
+                var e = rest.Slice(i * size, size);
+                entries[i] = depth == 8
+                    ? new PngSuggestedPaletteEntry(e[0], e[1], e[2], e[3], BinaryPrimitives.ReadUInt16BigEndian(e.Slice(4)))
+                    : new PngSuggestedPaletteEntry(BinaryPrimitives.ReadUInt16BigEndian(e), BinaryPrimitives.ReadUInt16BigEndian(e.Slice(2)),
+                        BinaryPrimitives.ReadUInt16BigEndian(e.Slice(4)), BinaryPrimitives.ReadUInt16BigEndian(e.Slice(6)), BinaryPrimitives.ReadUInt16BigEndian(e.Slice(8)));
+            }
+            return new PngSuggestedPalette(Encoding.Latin1.GetString(body.Slice(0, nameEnd)), depth, entries);
+        }
+
+        /// <summary>Parameters each pCAL equation type takes.</summary>
+        public static int CalibrationParameterCount(PngCalibrationEquation equation) => equation switch
+        {
+            PngCalibrationEquation.Linear => 2,
+            PngCalibrationEquation.Hyperbolic => 4,
+            _ => 3,
+        };
+
+        static PngPixelCalibration? ReadPixelCalibration(ReadOnlySpan<byte> body)
+        {
+            // name, 0, x0, x1, equation type, parameter count, unit, 0, then the parameters separated by 0
+            int nameEnd = body.Slice(0, Math.Min(body.Length, 80)).IndexOf((byte)0);
+            if (nameEnd < 1 || body.Length < nameEnd + 12) return null;
+            var rest = body.Slice(nameEnd + 1);
+            int x0 = BinaryPrimitives.ReadInt32BigEndian(rest), x1 = BinaryPrimitives.ReadInt32BigEndian(rest.Slice(4));
+            int equation = rest[8], count = rest[9];
+            if (equation > 3 || x0 == x1 || count != CalibrationParameterCount((PngCalibrationEquation)equation)) return null;
+            rest = rest.Slice(10);
+            int unitEnd = rest.IndexOf((byte)0);
+            if (unitEnd < 0) return null;
+            string unit = Encoding.Latin1.GetString(rest.Slice(0, unitEnd));
+            rest = rest.Slice(unitEnd + 1);
+            var parameters = new double[count];
+            for (int i = 0; i < count; i++)
+            {
+                int end = i == count - 1 ? rest.Length : rest.IndexOf((byte)0);
+                if (end < 0 || !TryParseFloat(rest.Slice(0, end), out parameters[i])) return null;
+                rest = rest.Slice(Math.Min(end + 1, rest.Length));
+            }
+            return new PngPixelCalibration(Encoding.Latin1.GetString(body.Slice(0, nameEnd)), x0, x1, (PngCalibrationEquation)equation, unit, parameters);
         }
 
         static PngTextEntry? ReadText(uint type, ReadOnlySpan<byte> body)
