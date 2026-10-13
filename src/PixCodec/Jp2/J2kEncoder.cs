@@ -499,7 +499,16 @@ namespace PixCodec
         {
             if (b0 is int[] r && b1 is int[] g && b2 is int[] b)
             {
-                for (int i = 0; i < r.Length; i++)
+                int i = 0;
+                if (Vector.IsHardwareAccelerated)
+                    for (; i <= r.Length - Vector<int>.Count; i += Vector<int>.Count)
+                    {
+                        var rr = new Vector<int>(r, i); var gg = new Vector<int>(g, i); var bb = new Vector<int>(b, i);
+                        Vector.ShiftRightArithmetic(rr + gg + gg + bb, 2).CopyTo(r, i);
+                        (bb - gg).CopyTo(g, i);
+                        (rr - gg).CopyTo(b, i);
+                    }
+                for (; i < r.Length; i++)
                 {
                     int rr = r[i], gg = g[i], bb = b[i];
                     r[i] = (rr + 2 * gg + bb) >> 2; g[i] = bb - gg; b[i] = rr - gg;
@@ -515,7 +524,16 @@ namespace PixCodec
             }
             else if (b0 is float[] fr && b1 is float[] fg && b2 is float[] fb)
             {
-                for (int i = 0; i < fr.Length; i++)
+                int i = 0;
+                if (Vector.IsHardwareAccelerated)
+                    for (; i <= fr.Length - Vector<float>.Count; i += Vector<float>.Count)
+                    {
+                        var rr = new Vector<float>(fr, i); var gg = new Vector<float>(fg, i); var bb = new Vector<float>(fb, i);
+                        (0.299f * rr + 0.587f * gg + 0.114f * bb).CopyTo(fr, i);
+                        (-0.168736f * rr - 0.331264f * gg + 0.5f * bb).CopyTo(fg, i);
+                        (0.5f * rr - 0.418688f * gg - 0.081312f * bb).CopyTo(fb, i);
+                    }
+                for (; i < fr.Length; i++)
                 {
                     float rr = fr[i], gg = fg[i], bb = fb[i];
                     fr[i] = 0.299f * rr + 0.587f * gg + 0.114f * bb;
