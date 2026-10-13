@@ -148,9 +148,4 @@ namespace PixCodec
 
         public static void EncodeAnimation(IEnumerable<WebpInputFrame> frames, Stream output, WebpEncodeOptions opt) => throw new ImageNotSupportedException("todo");
     }
-
-    internal static class Vp8Encoder
-    {
-        public static byte[] Encode(uint[] argb, int w, int h, WebpEncodeOptions opt) => throw new ImageNotSupportedException("todo");
-    }
 }

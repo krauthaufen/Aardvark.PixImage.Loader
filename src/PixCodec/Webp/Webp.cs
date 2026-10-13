@@ -56,7 +56,8 @@ namespace PixCodec
         /// Speed versus size, 0 (fastest) .. 6 (smallest), the same scale as libwebp's "method".
         /// Lossless: 0 uses one predictor and greedy matching, higher levels add per-block predictor and cross-color
         /// selection, an entropy image, lazy matching and trials of several color cache sizes and transform sets.
-        /// Lossy: from 3 on 4x4 intra prediction is tried, higher levels refine the mode decisions.
+        /// Lossy: 0 predicts whole macroblocks only; from 1 on 4x4 prediction is tried, with more candidate modes
+        /// run through a full encode-and-measure trial the higher the level.
         /// </summary>
         public int Method { get; set; } = 4;
 
@@ -69,8 +70,9 @@ namespace PixCodec
         /// <summary>Lossy only: number of token partitions, 1, 2, 4 or 8.</summary>
         public int Partitions { get; set; } = 1;
 
-        /// <summary>Lossy only: number of segments (1..4) with their own quantizer, chosen by local activity.</summary>
-        public int Segments { get; set; } = 4;
+        /// <summary>Lossy only: number of segments (1..4) with their own quantizer, chosen by local activity (flat areas
+        /// are quantized finer, busy ones coarser). 1 gives the best PSNR for the size.</summary>
+        public int Segments { get; set; } = 1;
 
         /// <summary>Lossy only: loop filter strength 0..63, or -1 to derive it from the quantizer.</summary>
         public int FilterStrength { get; set; } = -1;

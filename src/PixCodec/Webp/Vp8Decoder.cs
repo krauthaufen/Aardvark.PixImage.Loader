@@ -550,7 +550,7 @@ namespace PixCodec
         // ------------------------------------------------------------------ inverse transforms
 
         /// <summary>Inverse Walsh-Hadamard transform of the Y2 block; the results become the DC of the 16 luma blocks.</summary>
-        static void InverseWht(short* src, short* dst)
+        internal static void InverseWht(short* src, short* dst)
         {
             int* tmp = stackalloc int[16];
             for (int i = 0; i < 4; i++)
