@@ -298,15 +298,18 @@ namespace PixCodec
                 long packedTable = BinaryPrimitives.ReadInt64LittleEndian(hd), packedData = BinaryPrimitives.ReadInt64LittleEndian(hd.Slice(8));
                 long unpackedData = BinaryPrimitives.ReadInt64LittleEndian(hd.Slice(16));
                 pos += hdrSize;
-                long tableSize = (long)cw * ch * 4;
+                // The table has one entry per pixel of the chunk. It is stored raw when its packed size is that of a full
+                // (not clipped) tile, which is what the reference writer does even for the narrower tiles at the edges.
+                long tableSize = (long)cw * ch * 4, nominal = tiled ? (long)part.TileWidth * part.TileHeight * 4 : tableSize;
+                bool rawTable = packedTable == nominal || (comp == ExrCompression.None && packedTable == tableSize);
                 if (packedTable < 0 || packedData < 0 || unpackedData < 0 || packedTable > data.Length - pos || packedData > data.Length - pos - packedTable
-                    || packedTable > tableSize || packedData > unpackedData || tableSize > int.MaxValue || unpackedData > int.MaxValue
-                    || (comp == ExrCompression.None && (packedTable != tableSize || packedData != unpackedData))
+                    || packedTable > nominal || packedData > unpackedData || tableSize > int.MaxValue || unpackedData > int.MaxValue
+                    || (comp == ExrCompression.None && (!rawTable || packedData != unpackedData))
                     || tableSize > Math.Max(packedTable, 1) * MaxRatio || unpackedData > Math.Max(packedData, 1) * MaxRatio)
                     throw new ImageFormatException("EXR deep chunk has impossible sizes");
 
                 ReadOnlySpan<byte> table = data.Slice((int)pos, (int)packedTable);
-                if (packedTable != tableSize)
+                if (!rawTable)
                 {
                     var buf = s.Bytes(2, (int)tableSize).AsSpan(0, (int)tableSize);
                     ExrCodecs.Decode(comp, table, buf, default, s);

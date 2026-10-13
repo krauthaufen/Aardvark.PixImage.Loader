@@ -188,7 +188,7 @@ namespace PixCodec
         /// resolution RY / BY planes (width / 2 x height / 2). Negative and non finite colours are treated as 0, as
         /// luminance/chroma cannot represent them. Width and height must be even.
         /// </summary>
-        public static void FromRgb(ushort[] rgb, int stride, int w, int h, (float R, float G, float B) yw, out ushort[] luma, out ushort[] ry, out ushort[] by)
+        public static void FromRgb(ushort[] rgb, int stride, int w, int h, (float R, float G, float B) yw, int roundY, int roundC, out ushort[] luma, out ushort[] ry, out ushort[] by)
         {
             luma = new ushort[w * h];
             var fr = new ushort[w * h];
@@ -227,22 +227,42 @@ namespace PixCodec
             for (int y2 = 0; y2 < h2; y2++)
                 for (int x2 = 0; x2 < w2; x2++)
                 {
-                    ry[y2 * w2 + x2] = H(Filter(hr, 2 * y2 * w2 + x2, w2, 2 * y2, h));
-                    by[y2 * w2 + x2] = H(Filter(hb, 2 * y2 * w2 + x2, w2, 2 * y2, h));
+                    ry[y2 * w2 + x2] = Round(H(Filter(hr, 2 * y2 * w2 + x2, w2, 2 * y2, h)), roundC);
+                    by[y2 * w2 + x2] = Round(H(Filter(hb, 2 * y2 * w2 + x2, w2, 2 * y2, h)), roundC);
                 }
+            for (int i = 0; i < luma.Length; i++) luma[i] = Round(luma[i], roundY);
         }
 
-        /// <summary>Half band low pass around position pos of a line of n samples (index = centre + (i - pos) * step), edges repeated.</summary>
+        /// <summary>Rounds a half to n significant mantissa bits (n >= 10 keeps it), truncating instead if rounding would overflow.</summary>
+        static ushort Round(ushort h, int n)
+        {
+            if (n >= 10) return h;
+            n = Math.Max(n, 0);
+            int s = h & 0x8000, e = h & 0x7fff;
+            e >>= 9 - n;
+            e += e & 1;
+            e <<= 9 - n;
+            if (e >= 0x7c00) e = ((h & 0x7fff) >> (10 - n)) << (10 - n);
+            return (ushort)(s | e);
+        }
+
+        /// <summary>
+        /// Half band low pass around position pos of a line of n samples (index = centre + (i - pos) * step). Beyond the
+        /// ends the first sample and the sample n - 2 are repeated, and the taps are summed in order of position, both
+        /// as the reference library does.
+        /// </summary>
         static float Filter(ushort[] data, int centre, int step, int pos, int n)
         {
             float s = 0;
-            for (int k = 0; k < 7; k++)
+            for (int d = -13; d <= 13; d += d == -1 ? 1 : d == 0 ? 1 : 2)
             {
-                int d = 13 - 2 * k;
-                int lo = Math.Max(pos - d, 0), hi = Math.Min(pos + d, n - 1);
-                s += (F(data[centre + (lo - pos) * step]) + F(data[centre + (hi - pos) * step])) * Down[k];
+                int i = pos + d;
+                i = i < 0 ? 0 : i >= n ? n - 2 : i;
+                float c = d == 0 ? DownCentre : Down[(13 - Math.Abs(d)) / 2];
+                float v = F(data[centre + (i - pos) * step]) * c;
+                s = d == -13 ? v : s + v;
             }
-            return s + F(data[centre]) * DownCentre;
+            return s;
         }
     }
 }

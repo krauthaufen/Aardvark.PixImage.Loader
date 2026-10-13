@@ -337,7 +337,7 @@ public class ExrEncodeTests
         var f = RawImage.Create(4, 4, ColorModel.Rgb, SampleType.Float32);
         Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(f, ms, new ExrEncodeOptions { PixelType = ExrPixelType.UInt }));
         Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(RawImage.Create(4, 4, ColorModel.Gray, SampleType.UInt32), ms, new ExrEncodeOptions { PixelType = ExrPixelType.Half }));
-        Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(f, ms, new ExrEncodeOptions { Compression = ExrCompression.Dwaa }));
+        Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(f, ms, new ExrEncodeOptions { Compression = (ExrCompression)10 }));
         var other = RawImage.Create(4, 4, ColorModel.Other, SampleType.Float32, 5);
         Assert.Throws<ArgumentException>(() => Exr.Encode(other, ms));
         Assert.Throws<ArgumentException>(() => Exr.Encode(other, ms, new ExrEncodeOptions { ChannelNames = new[] { "a", "b" } }));

@@ -118,6 +118,23 @@ static int cmdWriteYc (int argc, char** argv)
     return 0;
 }
 
+// rgba-to-yc <in> <out> <compression> : re-save through the RGBA interface as luminance/chroma (with A if present)
+static int cmdRgbaToYc (int argc, char** argv)
+{
+    RgbaInputFile in (argv[2]);
+    Box2i dw = in.dataWindow ();
+    int w = dw.max.x - dw.min.x + 1, h = dw.max.y - dw.min.y + 1;
+    Array2D<Rgba> px (h, w);
+    in.setFrameBuffer (&px[0][0] - dw.min.x - (long) dw.min.y * w, 1, w);
+    in.readPixels (dw.min.y, dw.max.y);
+    Header hd (in.displayWindow (), dw, 1, V2f (0, 0), 1, INCREASING_Y, compressionByName (argv[4]));
+    if (hasChromaticities (in.header ())) addChromaticities (hd, chromaticities (in.header ()));
+    RgbaOutputFile out (argv[3], hd, (in.channels () & WRITE_A) ? WRITE_YCA : WRITE_YC);
+    out.setFrameBuffer (&px[0][0] - dw.min.x - (long) dw.min.y * w, 1, w);
+    out.writePixels (h);
+    return 0;
+}
+
 static vector<string> channelNames (const Header& h)
 {
     vector<string> n;
@@ -349,8 +366,8 @@ static int cmdFlatten (int argc, char** argv)
 }
 
 // write-deep <out> <scan|tile|multi> <w> <h> <compression> <variant> <seed>
-// variants: plain (A,Z + R,G,B,id), zback (adds ZBack, non overlapping volumes), overlap (overlapping volumes),
-//           noalpha (Z,R only). "multi" writes a flat part, a deep scan line part and a deep tiled part.
+// variants: plain (A,Z + R,G,B,id; unsorted), sorted (same, front to back), zback (adds ZBack, sorted non overlapping
+//           volumes), overlap (unsorted overlapping volumes), noalpha (Z,R only). "multi" writes a flat part, a deep scan line part and a deep tiled part.
 struct DeepData
 {
     int w, h;
@@ -391,10 +408,11 @@ static void makeDeep (DeepData& d, int w, int h, const string& variant, int seed
             d.f["G"][p] = float (half (rng.unit () * (a > 0 ? a : 0.3f)));
             d.f["B"][p] = float (half (rng.unit () * (a > 0 ? a : 0.3f)));
             d.id[p] = rng.next ();
-            // samples are stored unsorted on purpose; overlap: the next sample may start inside this one
-            if (variant == "overlap") z += rng.next () % 2 ? thick * 0.5f : thick + rng.unit ();
-            else z = (rng.next () % 4 == 0 ? z - 0.37f * (s + 1) : z + thick + rng.unit ());
-            if (variant != "overlap" && z < d.f["Z"][p] && thick > 0) z = d.f["ZBack"][p] + 0.25f;
+            // overlap: the next sample may start inside this one, or in front of it (unsorted);
+            // plain / noalpha: point samples in no particular order; sorted / zback: front to back, no overlap
+            if (variant == "overlap") z += rng.next () % 5 == 0 ? -0.8f : rng.next () % 2 ? thick * 0.5f : thick + rng.unit ();
+            else if (variant == "plain" || variant == "noalpha") z = (rng.next () % 4 == 0 ? z - 0.37f * (s + 1) : z + rng.unit ());
+            else z += thick + rng.unit () + 0.01f;
         }
     }
 }
@@ -515,6 +533,7 @@ int main (int argc, char** argv)
         string c = argc > 1 ? argv[1] : "";
         if (c == "rgba") return cmdRgba (argc, argv);
         if (c == "write-yc") return cmdWriteYc (argc, argv);
+        if (c == "rgba-to-yc") return cmdRgbaToYc (argc, argv);
         if (c == "level") return cmdLevel (argc, argv);
         if (c == "write-levels") return cmdWriteLevels (argc, argv);
         if (c == "deep") return cmdDeep (argc, argv);

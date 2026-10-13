@@ -102,19 +102,23 @@ def decode_tiff(path):
 
 
 def decode_exr(path):
-    """First part of an EXR file as float32 (uint32 if every channel is UINT), channels in R,G,B,A / Y,A order.
+    """A part of an EXR file as float32 (uint32 if every channel is UINT), channels in R,G,B,A / Y,A order.
 
-    Files named *.all.exr are returned with all channels in file (byte-wise alphabetical) order instead.
-    Uses the official OpenEXR python bindings when installed, otherwise OpenCV (colour channels only).
+    Tokens before the extension select what is returned: *.all.exr gives all channels in file (byte-wise
+    alphabetical) order, *.partN.exr part N instead of the first (both may be combined: *.part1.all.exr).
+    Subsampled channels are expanded by replication. Uses the official OpenEXR python bindings when installed,
+    otherwise OpenCV (colour channels of the first part only).
     """
-    want_all = path.lower().endswith('.all.exr')
+    tokens = os.path.basename(path).lower().split('.')[1:-1]
+    want_all = 'all' in tokens
+    part = next((int(t[4:]) for t in tokens if t.startswith('part') and t[4:].isdigit()), 0)
     try:
         import OpenEXR
     except ImportError:
         OpenEXR = None
     if OpenEXR is None:
-        if want_all:
-            raise RuntimeError('reading arbitrary EXR channels needs the OpenEXR python module')
+        if want_all or part:
+            raise RuntimeError('reading arbitrary EXR channels / parts needs the OpenEXR python module')
         os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
         import cv2
         im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -123,14 +127,21 @@ def decode_exr(path):
         if im.ndim == 3:
             im = im[..., [2, 1, 0, 3][:im.shape[2]]]
         return np.ascontiguousarray(im)
-    chans = OpenEXR.File(path, separate_channels=True).parts[0].channels
+    chans = OpenEXR.File(path, separate_channels=True).parts[part].channels
     names = sorted(chans.keys(), key=lambda n: n.encode())
     if not want_all:
         for pick in (['R', 'G', 'B'], ['Y']):
             if all(n in chans for n in pick):
                 names = pick + (['A'] if 'A' in chans else [])
                 break
-    arrs = [chans[n].pixels for n in names]
+    arrs = []
+    for n in names:
+        a = chans[n].pixels
+        if chans[n].ySampling > 1:
+            a = np.repeat(a, chans[n].ySampling, axis=0)
+        if chans[n].xSampling > 1:
+            a = np.repeat(a, chans[n].xSampling, axis=1)
+        arrs.append(a)
     dt = np.uint32 if all(a.dtype == np.uint32 for a in arrs) else np.float32
     return np.stack([a.astype(dt) for a in arrs], axis=-1)
 

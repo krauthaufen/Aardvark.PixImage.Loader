@@ -201,7 +201,7 @@ namespace PixCodec
         }
 
         /// <summary>Splits raw into even bytes followed by odd bytes and applies the delta predictor.</summary>
-        static void Predict(ReadOnlySpan<byte> raw, Span<byte> t)
+        internal static void Predict(ReadOnlySpan<byte> raw, Span<byte> t)
         {
             int n = raw.Length;
             if (n == 0) return;
@@ -248,7 +248,7 @@ namespace PixCodec
             if (o != dst.Length) throw new ImageFormatException("EXR RLE data is truncated");
         }
 
-        static int RleEncode(ReadOnlySpan<byte> src, Span<byte> dst)
+        internal static int RleEncode(ReadOnlySpan<byte> src, Span<byte> dst)
         {
             const int MaxRun = 127, MinRun = 3;
             int n = src.Length, i = 0, o = 0, litStart = 0;

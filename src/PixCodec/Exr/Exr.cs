@@ -100,6 +100,13 @@ namespace PixCodec
         public bool LuminanceChroma { get; set; }
 
         /// <summary>
+        /// Mantissa bits kept for Y and for RY / BY in luminance/chroma output. The defaults 7 and 5 are those of the
+        /// reference library (it rounds to make the channels compress better); 10 keeps full half precision.
+        /// </summary>
+        public int LuminanceRoundBits { get; set; } = 7;
+        public int ChromaRoundBits { get; set; } = 5;
+
+        /// <summary>
         /// Quality of DWAA / DWAB (the "dwaCompressionLevel" attribute, default 45): the allowed error of the DCT
         /// coefficients grows with this value; 0 quantizes nothing, larger values give smaller files.
         /// </summary>
@@ -167,13 +174,13 @@ namespace PixCodec
             }
             ExrChromaticities? chroma = null;
             foreach (var a in options.Attributes) if (a.Name == "chromaticities") chroma = a.AsChromaticities();
-            ExrYca.FromRgb(bits, nc, w, h, ExrYca.LumaWeights(chroma), out var luma, out var ry, out var by);
+            ExrYca.FromRgb(bits, nc, w, h, ExrYca.LumaWeights(chroma), options.LuminanceRoundBits, options.ChromaRoundBits, out var luma, out var ry, out var by);
             Half[] AsHalf(ushort[] u) => System.Runtime.InteropServices.MemoryMarshal.Cast<ushort, Half>(u).ToArray();
             var chans = new List<ExrChannelData>
             {
                 new("Y", AsHalf(luma), ExrPixelType.Half),
-                new("RY", AsHalf(ry), ExrPixelType.Half) { XSampling = 2, YSampling = 2 },
-                new("BY", AsHalf(by), ExrPixelType.Half) { XSampling = 2, YSampling = 2 },
+                new("RY", AsHalf(ry), ExrPixelType.Half) { XSampling = 2, YSampling = 2, PLinear = true },
+                new("BY", AsHalf(by), ExrPixelType.Half) { XSampling = 2, YSampling = 2, PLinear = true },
             };
             if (nc == 4)
             {
