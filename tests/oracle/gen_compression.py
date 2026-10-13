@@ -435,6 +435,8 @@ def bcj_data():
 
     while len(out) < 5000:
         k = r.randint(13)
+        if 5 <= k <= 10 and r.randint(4):  # usually aligned as real code is
+            out += r.bytes(-len(out) % (16 if k == 10 else 4))
         if k < 3:
             out += r.bytes(r.randint(1, 40))
         elif k == 3:  # x86 call/jmp, sometimes back to back or cut short

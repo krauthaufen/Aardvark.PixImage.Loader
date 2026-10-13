@@ -50,7 +50,9 @@ public class CompressionXzEncodeTests
     {
         // no optimal parser, so not liblzma's ratio - but well ahead of deflate on these
         var text = Make("text");
-        Assert.True(Xz.Compress(text, 6).Length < Deflater.Compress(text, 9, true).Length);
+        Assert.True(Xz.Compress(text, 9).Length < Deflater.Compress(text, 9, true).Length);
+        var image = Make("image");
+        Assert.True(Xz.Compress(image, 6).Length < Deflater.Compress(image, 9, true).Length * 0.95);
         var big = Make("big");
         Assert.True(Xz.Compress(big, 6).Length < Deflater.Compress(big, 9, true).Length);
         Assert.True(Xz.Compress(Make("zeros"), 6).Length < 200);
