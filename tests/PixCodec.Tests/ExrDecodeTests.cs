@@ -7,7 +7,9 @@ namespace PixCodec.Tests;
 public class ExrDecodeTests
 {
     public static IEnumerable<object[]> Fixtures => TestUtil.Files("exr", ".exr");
-    public static IEnumerable<object[]> Unsupported => TestUtil.Files(Path.Combine("exr", "unsupported"), ".exr");
+    public static IEnumerable<object[]> Dwa => TestUtil.Files(Path.Combine("exr", "dwa"), ".exr");
+    public static IEnumerable<object[]> Others =>
+        new[] { "yc", "levels", "deep", "encref" }.SelectMany(d => TestUtil.Files(Path.Combine("exr", d), ".exr"));
 
     internal static RawImage HalfToFloat(RawImage img)
     {
@@ -40,6 +42,7 @@ public class ExrDecodeTests
 
     [Theory]
     [MemberData(nameof(Fixtures))]
+    [MemberData(nameof(Dwa))]
     public void DecodesLikeReference(string file)
     {
         var path = TestUtil.Fixture(file);
@@ -57,19 +60,6 @@ public class ExrDecodeTests
         var headers = Exr.ReadHeaders(data);
         for (int p = 1; p < headers.Length; p++)
             Check($"{path}.part{p}.ref", o => Exr.Decode(data, o), p);
-    }
-
-    [Theory]
-    [MemberData(nameof(Unsupported))]
-    public void UnsupportedThrows(string file)
-    {
-        var path = TestUtil.Fixture(file);
-        var data = File.ReadAllBytes(path);
-        Assert.True(Exr.GetInfo(data).Width > 0);
-        Assert.Throws<ImageNotSupportedException>(() => Exr.Decode(data));
-        // luminance/chroma files: no RGB conversion, but the (subsampled) channels are readable
-        if (File.Exists(path + ".all.ref"))
-            Check(path + ".all.ref", o => Exr.DecodeChannels(data, AllNames(data), o));
     }
 
     [Fact]
@@ -164,7 +154,7 @@ public class ExrDecodeTests
         h = Exr.ReadHeaders(File.ReadAllBytes(TestUtil.Fixture("exr/long_names_zip.exr")))[0];
         Assert.Contains(h.Channels, c => c.Name.Length > 31 && c.BaseName == "R");
 
-        h = Exr.ReadHeaders(File.ReadAllBytes(TestUtil.Fixture("exr/unsupported/yc_zip.exr")))[0];
+        h = Exr.ReadHeaders(File.ReadAllBytes(TestUtil.Fixture("exr/yc/py_yc_zip.exr")))[0];
         Assert.Equal((2, 2), (h.FindChannel("RY")!.XSampling, h.FindChannel("RY")!.YSampling));
         h = Exr.ReadHeaders(File.ReadAllBytes(TestUtil.Fixture("exr/b44_plinear.exr")))[0];
         Assert.True(h.FindChannel("R")!.PLinear);
@@ -300,21 +290,6 @@ public class ExrDecodeTests
     }
 
     [Fact]
-    public void DeepDataIsNotSupported()
-    {
-        // the "non-image" version flag marks deep data; the headers stay readable
-        var data = File.ReadAllBytes(TestUtil.Fixture("exr/rgb_half_zip.exr"));
-        data[5] |= 0x08;
-        var h = Exr.ReadHeaders(data)[0];
-        Assert.True(h.IsDeep);
-        Assert.Equal(ExrPartType.DeepScanLine, h.Type);
-        Assert.Equal(35, Exr.GetInfo(data).Width);
-        Assert.Throws<ImageNotSupportedException>(() => Exr.Decode(data));
-        data[5] |= 0x40;    // an unknown flag
-        Assert.Throws<ImageNotSupportedException>(() => Exr.ReadHeaders(data));
-    }
-
-    [Fact]
     public void LyingHeadersAreRejected()
     {
         var data = File.ReadAllBytes(TestUtil.Fixture("exr/rgb_half_zip.exr"));
@@ -337,8 +312,8 @@ public class ExrDecodeTests
 
     [Theory]
     [MemberData(nameof(Fixtures))]
-    [MemberData(nameof(Unsupported))]
-    [MemberData(nameof(ExrDwaTests.Fixtures), MemberType = typeof(ExrDwaTests))]
+    [MemberData(nameof(Dwa))]
+    [MemberData(nameof(Others))]
     public void CorruptInputFailsCleanly(string file)
     {
         var data = File.ReadAllBytes(TestUtil.Fixture(file));
@@ -349,10 +324,15 @@ public class ExrDecodeTests
             {
                 var names = Exr.ReadHeaders(d)[0].Channels.Select(c => c.Name).ToArray();
                 Exr.GetInfo(d);
-                try { Exr.Decode(d); } catch (ImageNotSupportedException) { }
-                Exr.DecodeChannels(d, names, new ExrDecodeOptions { Parallel = false });
-                int parts = Exr.ReadHeaders(d).Length;
-                for (int p = 1; p < parts; p++) Exr.Decode(d, new ExrDecodeOptions { PartIndex = p });
+                var headers = Exr.ReadHeaders(d);
+                for (int p = 0; p < headers.Length; p++)
+                {
+                    try { Exr.Decode(d, new ExrDecodeOptions { PartIndex = p }); } catch (ImageNotSupportedException) { }
+                    if (headers[p].IsDeep) Exr.DecodeDeep(d, null, new ExrDecodeOptions { PartIndex = p });
+                    else Exr.DecodeChannels(d, headers[p].Channels.Select(c => c.Name).ToArray(), new ExrDecodeOptions { Parallel = false, PartIndex = p });
+                    if (headers[p].LevelCountX > 1)
+                        Exr.Decode(d, new ExrDecodeOptions { PartIndex = p, Level = 1 });
+                }
             }
             catch (ImageFormatException) { }
             catch (ImageNotSupportedException) { }

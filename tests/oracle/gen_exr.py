@@ -1,15 +1,25 @@
 """Generates the OpenEXR fixtures in tests/fixtures/exr.
 
+Besides the python bindings this needs the helper exr_oracle (exr_oracle.cpp next to this script, built against the
+system libOpenEXR; it is compiled on first use, set EXR_ORACLE to use an existing binary) for everything the
+bindings cannot write or read: luminance/chroma through the RGBA interface, all levels of mip/rip maps, deep data.
+
+
 Needs the official OpenEXR python bindings (pip install OpenEXR; written with 3.5.2), which both write the files and
 decode them again for the .ref sidecars, so that lossy schemes (B44, PXR24 float) are compared against what the
 reference decoder produces. A few files are written by ImageMagick (linked against OpenEXR 3.1) and multi-level tiled
 files are read back with OpenCV, because the python bindings only write level 0 of them and refuse to read the result.
 
+Directories: . (flat images, bit exact), dwa/ (DWAA/DWAB, bit exact), yc/ (luminance/chroma; .ref is the RGBA
+interface output as float16 RGBA), levels/ (mip/rip maps; name.exr.l<lx>_<ly>.ref per level, all channels),
+deep/ (name.exr.partN.deep raw samples, .fileorder.ref the reference library's flattening, .flat.ref depth sorted
+"tidy" flattening computed here), official/ (files of the openexr-images collection with SHA-256 of reference
+decodes), encref/ (an RGBA image and the luminance/chroma file the reference encoder makes of it).
+
 Sidecars:  name.exr.ref        what Exr.Decode returns with default options (float16 when all channels are HALF)
            name.exr.all.ref    all channels in file order via Exr.DecodeChannels (optional)
            name.exr.partN.ref  default decode of part N of a multi-part file
-Files in unsupported/ (luminance/chroma) must throw ImageNotSupportedException from Exr.Decode; their .all.ref is for
-Exr.DecodeChannels. Files in dwa/ are compared with a tolerance.
+
 """
 import os
 import struct
@@ -130,8 +140,263 @@ def mixed(w, h, seed=2):
     return d
 
 
+ORACLE = os.environ.get('EXR_ORACLE') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'exr_oracle')
+
+
+def oracle(*args):
+    if not os.path.exists(ORACLE):
+        here = os.path.dirname(os.path.abspath(__file__))
+        dev = os.path.join(here, '..', '..', '.tmp', 'dev', 'root', 'usr', 'include')      # headers unpacked from the -dev packages
+        inc = [i for d in ('/usr/include', dev) for i in ('-I' + os.path.join(d, 'OpenEXR'), '-I' + os.path.join(d, 'Imath'))]
+        base = ['g++', '-O1', '-std=c++17'] + inc + [os.path.join(here, 'exr_oracle.cpp'), '-o', ORACLE]
+        lib = '/usr/lib/x86_64-linux-gnu/'
+        if subprocess.run(base + ['-lOpenEXR', '-lImath', '-lIex', '-lIlmThread'], capture_output=True).returncode != 0:
+            subprocess.run(base + [lib + 'libOpenEXR-3_1.so.30', lib + 'libImath-3_1.so.29', lib + 'libIex-3_1.so.30',
+                                   lib + 'libIlmThread-3_1.so.30'], check=True)
+    subprocess.run([ORACLE] + [str(a) for a in args], check=True)
+
+
+def clean(sub):
+    d = os.path.join(OUT, sub)
+    os.makedirs(d, exist_ok=True)
+    for f in os.listdir(d):
+        if not f.startswith('LICENSE') and not (sub == 'official' and f.endswith('.exr')):
+            os.remove(os.path.join(d, f))
+    return d
+
+
+def gen_yc(yc_source):
+    """Luminance/chroma files written by the reference RGBA interface, and what it reads back from them."""
+    d = clean('yc')
+    for name, args in (('yc_piz', (30, 22, 'yc', 'piz', 0, 0, 1)), ('yca_zip', (40, 30, 'yca', 'zip', 0, 0, 2)),
+                       ('yc_none_2x2', (2, 2, 'yc', 'none', 0, 0, 3)), ('yc_b44_window', (64, 50, 'yc', 'b44', -8, -6, 4)),
+                       ('yca_piz_chromaticities', (30, 22, 'yca', 'piz', 4, 2, 5, 'chroma')), ('yca_pxr24', (64, 36, 'yca', 'pxr24', 0, 0, 6)),
+                       ('yc_rle', (18, 34, 'yc', 'rle', 0, 0, 7)), ('yca_dwaa', (72, 40, 'yca', 'dwaa', 0, 0, 8)),
+                       ('yc_dwab', (40, 64, 'yc', 'dwab', 2, 4, 9)), ('y_zip', (22, 14, 'y', 'zip', 0, 0, 10)),
+                       ('ya_piz', (22, 14, 'ya', 'piz', 0, 0, 11))):
+        path = os.path.join(d, name + '.exr')
+        oracle('write-yc', path, *args)
+        oracle('rgba', path, path + '.ref')
+    # written with the python bindings: arbitrary (not filtered) chroma, every compression
+    for cn in ('none', 'rle', 'zip', 'piz', 'pxr24', 'b44'):
+        path = os.path.join(d, 'py_yc_%s.exr' % cn)
+        X.File({'compression': COMP[cn]},
+               {'Y': yc_source[..., 0].copy(), 'RY': X.Channel('RY', yc_source[..., 1].copy(), 2, 2),
+                'BY': X.Channel('BY', yc_source[..., 2].copy(), 2, 2), 'A': yc_source[..., 3].copy()}).write(path)
+        ch = read_parts(path)[0]
+        write_ref(path + '.all.ref', stack(ch, ['A', 'BY', 'RY', 'Y']))
+        oracle('rgba', path, path + '.ref')
+    # for the encoder: an RGBA image and what the reference makes of it in luminance/chroma form
+    e = clean('encref')
+    src = os.path.join(e, 'rgba_src.exr')
+    p = np.abs(test_pattern(40, 30, 4, np.float32, 21))
+    yy, xx = np.mgrid[0:30, 0:40]
+    p[..., 0] = p[..., 0] * 0.3 + xx / 40.0
+    p[..., 1] = p[..., 1] * 0.2 + yy / 30.0
+    p[10:14, 5:30, :3] = 0.5
+    X.File({'compression': X.ZIP_COMPRESSION}, {n: p[..., i].astype(np.float16) for i, n in enumerate('RGBA')}).write(src)
+    oracle('rgba-to-yc', src, os.path.join(e, 'rgba_src.yc.exr'), 'zip')
+
+
+def level_list(w, h, mode, rounding):
+    def count(size):
+        n = 0
+        while (1 << (n + 1)) <= size:
+            n += 1
+        if rounding == 'up' and (1 << n) < size:
+            n += 1
+        return n + 1
+    if mode == 'mipmap':
+        return [(l, l) for l in range(count(max(w, h)))]
+    return [(lx, ly) for ly in range(count(h)) for lx in range(count(w))]
+
+
+def gen_levels():
+    """True multi-level files: every level written and read back by the reference library."""
+    d = clean('levels')
+    for name, args in (('mip_down_zip', ('mipmap', 'down', 37, 21, 8, 8, 'zip', 0, 0)), ('mip_up_piz', ('mipmap', 'up', 33, 18, 16, 16, 'piz', -5, 3)),
+                       ('rip_down_zip', ('ripmap', 'down', 20, 13, 16, 8, 'zip', 0, 0)), ('rip_up_pxr24', ('ripmap', 'up', 19, 9, 8, 8, 'pxr24', 2, -4)),
+                       ('mip_down_b44', ('mipmap', 'down', 40, 40, 64, 64, 'b44', 0, 0)), ('rip_down_rle', ('ripmap', 'down', 9, 6, 4, 4, 'rle', 0, 0))):
+        path = os.path.join(d, name + '.exr')
+        oracle('write-levels', path, *args)
+        for lx, ly in level_list(args[2], args[3], args[0], args[1]):
+            oracle('level', path, 0, lx, ly, '%s.l%d_%d.ref' % (path, lx, ly))
+
+
+def read_deep(path):
+    b = open(path, 'rb').read()
+    assert b[:4] == b'PXDP'
+    w, h, nc, total = [int(v) for v in np.frombuffer(b, np.int32, 4, 4)]
+    counts = np.frombuffer(b, np.uint32, w * h, 20).astype(np.int64)
+    p = 20 + 4 * w * h
+    ch = {}
+    for _ in range(nc):
+        e = b.index(b'\0', p)
+        name = b[p:e].decode()
+        t = b[e + 1]
+        ch[name] = np.frombuffer(b, np.float32 if t == 2 else np.uint32, total, e + 2)
+        p = e + 2 + 4 * total
+    return w, h, counts, ch
+
+
+def flatten(path, names, sort, tidy):
+    """Deep compositing as documented for ExrDeepImage.Flatten, written independently of the C# code."""
+    w, h, counts, ch = read_deep(path)
+    off = np.concatenate([[0], np.cumsum(counts)])
+    out = np.zeros((h * w, len(names)), np.float32)
+    f32 = np.float32
+    for i in range(w * h):
+        idx = list(range(off[i], off[i + 1]))
+        if not idx:
+            continue
+        if sort and 'Z' in ch:
+            idx.sort(key=lambda s: (ch['Z'][s], ch['ZBack'][s] if 'ZBack' in ch else 0, s))
+        alpha = lambda s: ch['A'][s] if 'A' in ch else f32(1)
+        samples = [(float(ch['Z'][s]) if 'Z' in ch else 0.0, float(ch['ZBack'][s]) if 'ZBack' in ch else None, alpha(s),
+                    [f32(ch[n][s]) for n in names]) for s in idx]
+        overlap = sort and tidy and 'ZBack' in ch and any(
+            samples[k][1] > samples[k][0] and samples[k + 1][0] < samples[k][1] for k in range(len(samples) - 1))
+        if overlap:
+            samples = tidy_samples(samples)
+        a = f32(0)
+        acc = np.zeros(len(names), np.float32)
+        for z, zb, sa, vals in samples:
+            if a >= 1:
+                break
+            t = f32(1) - a
+            for k in range(len(names)):
+                acc[k] += t * f32(vals[k])
+            a = a + t * f32(sa)
+        for k, n in enumerate(names):
+            if n == 'A':
+                acc[k] = a
+        out[i] = acc
+    return out.reshape(h, w, len(names))
+
+
+def tidy_samples(samples):
+    """Split volume samples at all sample boundaries inside them, then merge coinciding volume samples."""
+    cuts = sorted({z for z, zb, a, v in samples} | {zb for z, zb, a, v in samples if zb > z})
+    parts = []
+    for z, zb, a, v in samples:
+        a = float(a)
+        v = [float(x) for x in v]
+        if not zb > z:
+            parts.append([z, z, a, v])
+            continue
+        start, length = z, zb - z
+        for c in cuts + [zb]:
+            if c <= start:
+                continue
+            end = min(c, zb)
+            frac = (end - start) / length
+            if a >= 1:
+                na, scale = 1.0, 1.0
+            elif a <= 0:
+                na, scale = 0.0, frac
+            else:
+                na = 1 - (1 - a) ** frac
+                scale = na / a
+            parts.append([start, end, float(np.float32(na)), [float(np.float32(x * scale)) for x in v]])
+            start = end
+            if end >= zb:
+                break
+    parts.sort(key=lambda p: (p[0], p[1]))
+    merged = []
+    for p in parts:
+        q = merged[-1] if merged else None
+        if q is not None and q[1] > q[0] and q[0] == p[0] and q[1] == p[1]:
+            a1, a2 = min(max(q[2], 0.0), 1.0), min(max(p[2], 0.0), 1.0)
+            am = a1 + a2 - a1 * a2
+            vals = []
+            for c1, c2 in zip(q[3], p[3]):
+                if a1 >= 1 and a2 >= 1:
+                    c = (c1 + c2) / 2
+                elif a1 >= 1:
+                    c = c1
+                elif a2 >= 1:
+                    c = c2
+                else:
+                    u1, u2 = -np.log(1 - a1), -np.log(1 - a2)
+                    v1 = u1 / a1 if a1 > 0 else 1
+                    v2 = u2 / a2 if a2 > 0 else 1
+                    wgt = am / (u1 + u2) if am > 0 else 1
+                    c = (c1 * v1 + c2 * v2) * wgt
+                vals.append(float(np.float32(c)))
+            merged[-1] = [q[0], q[1], float(np.float32(am)), vals]
+        else:
+            merged.append(p)
+    return [(z, zb, np.float32(a), v) for z, zb, a, v in merged]
+
+
+def gen_deep():
+    """Deep scan line / deep tiled files written by the reference library, its samples and its flattening."""
+    d = clean('deep')
+    for name, args in (('scan_plain_zips', ('scan', 13, 9, 'zips', 'plain', 1)), ('scan_sorted_rle', ('scan', 17, 6, 'rle', 'sorted', 2)),
+                       ('scan_zback_none', ('scan', 9, 11, 'none', 'zback', 3)), ('scan_overlap_zips', ('scan', 12, 10, 'zips', 'overlap', 4)),
+                       ('tile_plain_zips', ('tile', 21, 13, 'zips', 'plain', 5)), ('tile_overlap_rle', ('tile', 13, 9, 'rle', 'overlap', 6)),
+                       ('tile_sorted_none', ('tile', 10, 12, 'none', 'sorted', 7)), ('multi_zback_zips', ('multi', 13, 9, 'zips', 'zback', 8)),
+                       ('scan_noalpha_zips', ('scan', 8, 5, 'zips', 'noalpha', 9)), ('scan_1x1_rle', ('scan', 1, 1, 'rle', 'plain', 10))):
+        path = os.path.join(d, name + '.exr')
+        oracle('write-deep', path, *args)
+        parts = X.File(path, header_only=True).parts
+        for i, part in enumerate(parts):
+            kind = str(part.header.get('type'))
+            if 'deep' not in kind:
+                write_ref('%s.part%d.ref' % (path, i), stack(read_parts(path)[i], ['R']))
+                continue
+            dump = '%s.part%d.deep' % (path, i)
+            oracle('deep', path, i, 0, 0, dump)
+            names = list(read_deep(dump)[3].keys())
+            file_order = flatten(dump, names, False, False)
+            if 'deepscanline' in kind and 'A' in names:
+                # the reference compositor (deep scan line parts with alpha only) agrees with the file order result
+                tmp = dump + '.tmp'
+                oracle('flatten', path, i, tmp, *names)
+                ref = np.fromfile(tmp, np.float32, offset=20).reshape(file_order.shape)
+                os.remove(tmp)
+                assert np.array_equal(ref, file_order), name
+            write_ref('%s.part%d.fileorder.ref' % (path, i), file_order)
+            write_ref('%s.part%d.flat.ref' % (path, i), flatten(dump, names, True, True))
+
+
+OFFICIAL = 'https://raw.githubusercontent.com/AcademySoftwareFoundation/openexr-images/main/'
+
+
+def gen_official():
+    """A few small files of the openexr-images collection (BSD licence, see LICENSE there); hashes of reference decodes."""
+    import hashlib
+    import urllib.request
+    d = clean('official')
+
+    def fetch(rel, name):
+        path = os.path.join(d, name)
+        if not os.path.exists(path):
+            urllib.request.urlretrieve(OFFICIAL + rel, path)
+        return path
+    fetch('LICENSE', 'LICENSE.openexr-images')
+    tmp = os.path.join(d, '_tmp.bin')
+    for rel in ('MultiResolution/ColorCodedLevels.exr', 'MultiResolution/MirrorPattern.exr'):
+        path = fetch(rel, os.path.basename(rel))
+        lines = []
+        for l in range(10):
+            oracle('level', path, 0, l, l, tmp)
+            lines.append('level %d %d %s' % (l, l, hashlib.sha256(open(tmp, 'rb').read()[20:]).hexdigest()))
+        open(path + '.sha256', 'w').write('\n'.join(lines) + '\n')
+    path = fetch('v2/LowResLeftView/Trunks.exr', 'Trunks.exr')
+    oracle('deep', path, 0, 0, 0, tmp)
+    w, h, counts, ch = read_deep(tmp)
+    hsh = hashlib.sha256(counts.astype(np.int32).tobytes())
+    for n in ch:
+        hsh.update(ch[n].tobytes())
+    lines = ['deep %s' % hsh.hexdigest()]
+    oracle('flatten', path, 0, tmp, 'R', 'G', 'B', 'A')
+    lines.append('flat %s' % hashlib.sha256(open(tmp, 'rb').read()[20:]).hexdigest())
+    open(path + '.sha256', 'w').write('\n'.join(lines) + '\n')
+    os.remove(tmp)
+
+
 def main():
-    os.makedirs(os.path.join(OUT, 'unsupported'), exist_ok=True)
     os.makedirs(os.path.join(OUT, 'dwa'), exist_ok=True)
     for f in os.listdir(OUT):
         if f.endswith('.exr') or f.endswith('.ref'):
@@ -234,16 +499,7 @@ def main():
     X.File([p0, p1, p2]).write(os.path.join(OUT, 'multipart.exr'))
     finish('multipart', RGBA, expect=['zip', 'piz', 'b44'], parts={1: ['Z'], 2: RGB})
 
-    # --- subsampled channels (luminance/chroma style and odd factors)
-    yc = test_pattern(16, 36, 4, np.float16, 6)
-    for cn in ('none', 'rle', 'zip', 'piz', 'pxr24', 'b44'):
-        X.File({'compression': COMP[cn]},
-               {'Y': yc[..., 0].copy(), 'RY': X.Channel('RY', yc[..., 1].copy(), 2, 2), 'BY': X.Channel('BY', yc[..., 2].copy(), 2, 2),
-                'A': yc[..., 3].copy()}).write(os.path.join(OUT, 'unsupported', 'yc_%s.exr' % cn))
-        path = os.path.join(OUT, 'unsupported', 'yc_%s.exr' % cn)
-        d = read_parts(path)[0]
-        assert d['RY'].shape == (36, 16)
-        write_ref(path + '.all.ref', stack(d, ['A', 'BY', 'RY', 'Y']))
+    # --- subsampled channels with odd factors (luminance/chroma files are in yc/)
     sub = test_pattern(24, 36, 3, np.float32, 8)
     X.File({'compression': X.ZIP_COMPRESSION, 'dataWindow': window(-12, 36, 24, 36), 'displayWindow': window(0, 0, 24, 36)},
            {'a': X.Channel('a', sub[..., 0].copy(), 3, 1), 'b': X.Channel('b', sub[..., 1].copy(), 1, 4),
@@ -262,7 +518,7 @@ def main():
         finish('magick_' + cn, RGBA, expect=[cn])
     os.remove(src)
 
-    # --- DWAA / DWAB (lossy DCT; decoders agree only up to float rounding, see ExrDwaTests) in dwa/
+    # --- DWAA / DWAB in dwa/ (lossy, but decoding is deterministic: bit exact like everything else)
     def dwa(name, header, chans, default):
         path = os.path.join(OUT, 'dwa', name + '.exr')
         X.File(header, chans).write(path)
@@ -270,8 +526,7 @@ def main():
         write_ref(path + '.ref', stack(d, default))
         if len(d) > 4:
             write_ref(path + '.all.ref', stack(d, sorted(d.keys(), key=lambda s: s.encode())))
-    for f in os.listdir(os.path.join(OUT, 'dwa')):
-        os.remove(os.path.join(OUT, 'dwa', f))
+    clean('dwa')
     dwa('dwaa_rgba', {'compression': X.DWAA_COMPRESSION}, rgb(67, 45, np.float16, True), RGBA)
     dwa('dwab_rgba', {'compression': X.DWAB_COMPRESSION}, rgb(53, 270, np.float16, True, 3), RGBA)
     dwa('dwaa_mixed', {'compression': X.DWAA_COMPRESSION}, mixed(70, 41), RGBA)
@@ -282,6 +537,11 @@ def main():
     wide = test_pattern(80, 64, 3, np.float32, 6) * np.array([1, 30, 400], np.float32)
     dwa('dwaa_bright', {'compression': X.DWAA_COMPRESSION},
         {'R': wide[..., 0].astype(np.float16), 'G': wide[..., 1].astype(np.float16), 'B': wide[..., 2].astype(np.float16)}, RGB)
+
+    gen_yc(yc_source=test_pattern(16, 36, 4, np.float16, 6))
+    gen_levels()
+    gen_deep()
+    gen_official()
 
     total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(OUT) for f in fs)
     print('fixtures: %d files, %.1f kB' % (sum(len(fs) for _, _, fs in os.walk(OUT)), total / 1024))
