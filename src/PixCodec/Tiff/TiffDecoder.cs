@@ -295,7 +295,22 @@ namespace PixCodec
             return v[0];
         }
 
-        public ImageInfo Info(int frameCount) => new ImageInfo(ImageFormat.Tiff, Width, Height, OutChannels, OutType, OutColor, frameCount);
+        /// <summary>
+        /// Header level description. Orientation, resolution and the ICC flag are exactly what Decode reports in the
+        /// metadata; BitsPerSample is the stored depth (the largest one if the samples differ), 8 for palette images.
+        /// </summary>
+        public ImageInfo Info(int frameCount)
+        {
+            var m = ReadMetadata(false);
+            return new ImageInfo(ImageFormat.Tiff, Width, Height, OutChannels, OutType, OutColor, frameCount)
+            {
+                BitsPerSample = Photometric == 3 ? 8 : Bits,
+                Orientation = m.Orientation,
+                DpiX = m.DpiX,
+                DpiY = m.DpiY,
+                HasIccProfile = m.IccProfile != null,
+            };
+        }
 
         int PlaneSamples => Planar == 2 ? 1 : Spp;
 
@@ -509,7 +524,8 @@ namespace PixCodec
             return new RawImage(rw, rh, OutColor, data, OutChannels, ReadMetadata());
         }
 
-        ImageMetadata ReadMetadata()
+        /// <param name="full">false: header level only (no EXIF blob, the ICC profile only as a non-null marker).</param>
+        ImageMetadata ReadMetadata(bool full = true)
         {
             var m = new ImageMetadata();
             var e = Entries;
@@ -522,6 +538,14 @@ namespace PixCodec
                 var xr = File.Doubles(e, 282); var yr = File.Doubles(e, 283);
                 if (xr != null && xr.Length > 0 && double.IsFinite(xr[0]) && xr[0] > 0) m.DpiX = xr[0] * f;
                 if (yr != null && yr.Length > 0 && double.IsFinite(yr[0]) && yr[0] > 0) m.DpiY = yr[0] * f;
+                if (!full)
+                {
+                    // same test as below without reading the profile: a Byte/Undefined tag with content inside the file
+                    if (TiffFile.Find(e, 34675, out var ie) && (ie.Type == 1 || ie.Type == 7) && ie.Count > 0
+                        && ie.ValueOffset >= 0 && ie.ValueOffset <= File.Src.Length && ie.Count <= File.Src.Length - ie.ValueOffset)
+                        m.IccProfile = Array.Empty<byte>();
+                    return m;
+                }
                 var icc = File.Bytes(e, 34675);
                 if (icc != null && icc.Length > 0) m.IccProfile = icc;
                 // EXIF / GPS directories, repackaged as the standalone EXIF blob other formats carry

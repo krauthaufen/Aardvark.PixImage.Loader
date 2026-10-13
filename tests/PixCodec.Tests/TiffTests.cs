@@ -46,6 +46,14 @@ public class TiffTests
         Assert.Equal((img.Width, img.Height, img.Channels, img.SampleType, img.Color),
             (info.Width, info.Height, info.Channels, info.SampleType, info.Color));
         Assert.Equal(ImageFormat.Tiff, info.Format);
+        // the header level metadata is exactly what decoding reports
+        var md = img.Metadata!;
+        Assert.Equal((md.Orientation, md.DpiX, md.DpiY, md.IccProfile != null), (info.Orientation, info.DpiX, info.DpiY, info.HasIccProfile));
+        Assert.False(info.IsAnimated);
+        var stored = Tiff.ReadTags(bytes).FirstOrDefault(t => t.Id == 258)?.AsIntegers() ?? new long[] { 1 };
+        bool palette = Tiff.ReadTags(bytes).Any(t => t.Id == 262 && t.AsIntegers()[0] == 3);
+        Assert.Equal(palette ? 8 : (int)stored.Max(), info.BitsPerSample);
+        Assert.Equal(info, Tiff.GetInfos(bytes)[0]);
 
         // strips/tiles decoded on several threads give the very same samples
         TestUtil.AssertEqual(img, Tiff.Decode(bytes, ForcedParallel()));
@@ -70,8 +78,8 @@ public class TiffTests
             TestUtil.AssertEqual(img, Tiff.Decode(fs, Serial));
             Assert.Equal(0, fs.Position);
             TestUtil.AssertEqual(img, Tiff.Decode(fs, ForcedParallel()));
-            var si = Tiff.GetInfo(fs);
-            Assert.Equal((img.Width, img.Height, img.Channels), (si.Width, si.Height, si.Channels));
+            Assert.Equal(info, Tiff.GetInfo(fs));
+            Assert.Equal(info, Tiff.GetInfos(fs)[0]);
         }
         var ms = new MemoryStream();
         ms.Write(new byte[13]);
