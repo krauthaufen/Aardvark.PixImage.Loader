@@ -1,6 +1,8 @@
 {
  "_chromium": "Chrome/151.0.7922.173",
  "ff_mandelbrot_palette.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -17,6 +19,8 @@
   "previousReference": "identical"
  },
  "ff_still.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -30,6 +34,8 @@
   "previousReference": "identical"
  },
  "ff_testsrc.gif": {
+  "givenAllData": "6 frames",
+  "framesGivenAllData": 6,
   "source": "chromium",
   "frames": 6,
   "size": [
@@ -48,6 +54,8 @@
   "previousReference": "identical"
  },
  "hand_1x1.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -61,6 +69,8 @@
   "previousReference": "identical"
  },
  "hand_1x1_gif87a.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -74,6 +84,8 @@
   "previousReference": "identical"
  },
  "hand_all_transparent.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -87,6 +99,8 @@
   "previousReference": "identical"
  },
  "hand_anim_40_frames.gif": {
+  "givenAllData": "40 frames",
+  "framesGivenAllData": 40,
   "source": "chromium",
   "frames": 40,
   "size": [
@@ -139,6 +153,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal0.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -156,6 +172,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal0_transparent.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -173,6 +191,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal1.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -190,6 +210,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal1_transparent.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -207,6 +229,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal2.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -224,6 +248,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal2_transparent.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -241,6 +267,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal3.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -258,6 +286,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal3_transparent.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -275,6 +305,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal4.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -291,6 +323,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal7.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -307,6 +341,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal_mixed.gif": {
+  "givenAllData": "8 frames",
+  "framesGivenAllData": 8,
   "source": "chromium",
   "frames": 8,
   "size": [
@@ -327,6 +363,8 @@
   "previousReference": "identical"
  },
  "hand_anim_disposal_mixed_interlaced.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -344,6 +382,8 @@
   "previousReference": "identical"
  },
  "hand_anim_first_beyond_screen.gif": {
+  "givenAllData": "3 frames",
+  "framesGivenAllData": 3,
   "source": "chromium",
   "frames": 3,
   "size": [
@@ -356,9 +396,11 @@
    30
   ],
   "repetitions": 0,
-  "previousReference": "differed: size 10x8 -> 15x11"
+  "previousReference": "identical"
  },
  "hand_anim_gif87a.gif": {
+  "givenAllData": "3 frames",
+  "framesGivenAllData": 3,
   "source": "chromium",
   "frames": 3,
   "size": [
@@ -374,6 +416,8 @@
   "previousReference": "identical"
  },
  "hand_anim_local_palettes_clipped.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -389,7 +433,15 @@
   "repetitions": "infinite",
   "previousReference": "identical"
  },
+ "hand_anim_short_second.gif": {
+  "givenAllData": "1 of 3 frames, then RangeError: Unexpected end of image. Request for frame index 1 can't be satisfied.",
+  "framesGivenAllData": 1,
+  "source": "gen_gif.py",
+  "chromium": "cannot decode: RangeError: Unexpected end of image. Request for frame index 1 can't be satisfied. (frame 1 of 3)"
+ },
  "hand_anim_small_first.gif": {
+  "givenAllData": "3 frames",
+  "framesGivenAllData": 3,
   "source": "chromium",
   "frames": 3,
   "size": [
@@ -405,6 +457,8 @@
   "previousReference": "identical"
  },
  "hand_background_index.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -418,6 +472,8 @@
   "previousReference": "identical"
  },
  "hand_block_size_1.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -431,6 +487,8 @@
   "previousReference": "identical"
  },
  "hand_block_size_7.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -444,6 +502,8 @@
   "previousReference": "identical"
  },
  "hand_clear_when_full.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -457,6 +517,8 @@
   "previousReference": "identical"
  },
  "hand_comment_after_image.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -470,6 +532,8 @@
   "previousReference": "identical"
  },
  "hand_deferred_clear.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -482,7 +546,184 @@
   "repetitions": "infinite",
   "previousReference": "identical"
  },
+ "hand_delay_0cs.gif": {
+  "givenAllData": "6 frames",
+  "framesGivenAllData": 6,
+  "playback": {
+   "storedDelayCs": 0,
+   "measuredMsPerFrame": 100,
+   "clampedTo100ms": true
+  },
+  "source": "chromium",
+  "frames": 6,
+  "size": [
+   8,
+   8
+  ],
+  "durationsMs": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_delay_10cs.gif": {
+  "givenAllData": "6 frames",
+  "framesGivenAllData": 6,
+  "playback": {
+   "storedDelayCs": 10,
+   "measuredMsPerFrame": 99,
+   "clampedTo100ms": false
+  },
+  "source": "chromium",
+  "frames": 6,
+  "size": [
+   8,
+   8
+  ],
+  "durationsMs": [
+   100,
+   100,
+   100,
+   100,
+   100,
+   100
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_delay_1cs.gif": {
+  "givenAllData": "6 frames",
+  "framesGivenAllData": 6,
+  "playback": {
+   "storedDelayCs": 1,
+   "measuredMsPerFrame": 100,
+   "clampedTo100ms": true
+  },
+  "source": "chromium",
+  "frames": 6,
+  "size": [
+   8,
+   8
+  ],
+  "durationsMs": [
+   10,
+   10,
+   10,
+   10,
+   10,
+   10
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_delay_20cs.gif": {
+  "givenAllData": "6 frames",
+  "framesGivenAllData": 6,
+  "playback": {
+   "storedDelayCs": 20,
+   "measuredMsPerFrame": 198,
+   "clampedTo100ms": false
+  },
+  "source": "chromium",
+  "frames": 6,
+  "size": [
+   8,
+   8
+  ],
+  "durationsMs": [
+   200,
+   200,
+   200,
+   200,
+   200,
+   200
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_delay_2cs.gif": {
+  "givenAllData": "6 frames",
+  "framesGivenAllData": 6,
+  "playback": {
+   "storedDelayCs": 2,
+   "measuredMsPerFrame": 17,
+   "clampedTo100ms": false
+  },
+  "source": "chromium",
+  "frames": 6,
+  "size": [
+   8,
+   8
+  ],
+  "durationsMs": [
+   20,
+   20,
+   20,
+   20,
+   20,
+   20
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_delay_3cs.gif": {
+  "givenAllData": "6 frames",
+  "framesGivenAllData": 6,
+  "playback": {
+   "storedDelayCs": 3,
+   "measuredMsPerFrame": 29,
+   "clampedTo100ms": false
+  },
+  "source": "chromium",
+  "frames": 6,
+  "size": [
+   8,
+   8
+  ],
+  "durationsMs": [
+   30,
+   30,
+   30,
+   30,
+   30,
+   30
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
+ "hand_delay_5cs.gif": {
+  "givenAllData": "6 frames",
+  "framesGivenAllData": 6,
+  "playback": {
+   "storedDelayCs": 5,
+   "measuredMsPerFrame": 50,
+   "clampedTo100ms": false
+  },
+  "source": "chromium",
+  "frames": 6,
+  "size": [
+   8,
+   8
+  ],
+  "durationsMs": [
+   50,
+   50,
+   50,
+   50,
+   50,
+   50
+  ],
+  "repetitions": "infinite",
+  "previousReference": "identical"
+ },
  "hand_extension_between_gce_and_image.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -496,6 +737,8 @@
   "previousReference": "identical"
  },
  "hand_extensions.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -509,6 +752,8 @@
   "previousReference": "identical"
  },
  "hand_frame_beyond_interlaced.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -519,9 +764,11 @@
    0
   ],
   "repetitions": "infinite",
-  "previousReference": "differed: size 10x8 -> 15x13"
+  "previousReference": "identical"
  },
  "hand_frame_beyond_screen.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -532,9 +779,11 @@
    0
   ],
   "repetitions": "infinite",
-  "previousReference": "differed: size 10x8 -> 15x11"
+  "previousReference": "identical"
  },
  "hand_frame_larger_than_screen.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -545,9 +794,11 @@
    0
   ],
   "repetitions": "infinite",
-  "previousReference": "differed: size 6x5 -> 11x9"
+  "previousReference": "identical"
  },
  "hand_frame_outside_screen.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -558,9 +809,11 @@
    0
   ],
   "repetitions": "infinite",
-  "previousReference": "differed: size 10x8 -> 23x33"
+  "previousReference": "identical"
  },
  "hand_gce_no_transparency.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -574,6 +827,8 @@
   "previousReference": "identical"
  },
  "hand_gif87a.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -587,6 +842,8 @@
   "previousReference": "identical"
  },
  "hand_icc_profile.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -600,6 +857,8 @@
   "previousReference": "identical"
  },
  "hand_index_beyond_palette.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -613,6 +872,8 @@
   "previousReference": "identical"
  },
  "hand_junk_after_trailer.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -626,6 +887,8 @@
   "previousReference": "identical"
  },
  "hand_local_overrides_global.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -639,6 +902,8 @@
   "previousReference": "identical"
  },
  "hand_local_palette_only.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -652,6 +917,8 @@
   "previousReference": "identical"
  },
  "hand_long_runs.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -665,6 +932,8 @@
   "previousReference": "identical"
  },
  "hand_loop_65535.gif": {
+  "givenAllData": "2 frames",
+  "framesGivenAllData": 2,
   "source": "chromium",
   "frames": 2,
   "size": [
@@ -679,6 +948,8 @@
   "previousReference": "identical"
  },
  "hand_loop_animexts.gif": {
+  "givenAllData": "2 frames",
+  "framesGivenAllData": 2,
   "source": "chromium",
   "frames": 2,
   "size": [
@@ -693,6 +964,8 @@
   "previousReference": "identical"
  },
  "hand_mincode1.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -706,6 +979,8 @@
   "previousReference": "identical"
  },
  "hand_mincode2.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -719,6 +994,8 @@
   "previousReference": "identical"
  },
  "hand_mincode2_2colors.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -732,6 +1009,8 @@
   "previousReference": "identical"
  },
  "hand_mincode3.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -745,6 +1024,8 @@
   "previousReference": "identical"
  },
  "hand_mincode3_4colors.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -758,6 +1039,8 @@
   "previousReference": "identical"
  },
  "hand_mincode4.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -771,6 +1054,8 @@
   "previousReference": "identical"
  },
  "hand_mincode5.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -784,6 +1069,8 @@
   "previousReference": "identical"
  },
  "hand_mincode6.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -797,6 +1084,8 @@
   "previousReference": "identical"
  },
  "hand_mincode7.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -810,6 +1099,8 @@
   "previousReference": "identical"
  },
  "hand_mincode8.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -823,6 +1114,8 @@
   "previousReference": "identical"
  },
  "hand_mincode8_2colors.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -836,6 +1129,8 @@
   "previousReference": "identical"
  },
  "hand_no_end_code.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -849,6 +1144,8 @@
   "previousReference": "identical"
  },
  "hand_no_initial_clear.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -862,6 +1159,8 @@
   "previousReference": "identical"
  },
  "hand_no_palette.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -875,6 +1174,8 @@
   "previousReference": "identical"
  },
  "hand_no_trailer.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -888,6 +1189,8 @@
   "previousReference": "identical"
  },
  "hand_palette_256_local.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -901,6 +1204,8 @@
   "previousReference": "identical"
  },
  "hand_palette_3_entries.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -914,6 +1219,8 @@
   "previousReference": "identical"
  },
  "hand_partial_frame.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -927,6 +1234,8 @@
   "previousReference": "identical"
  },
  "hand_partial_interlaced.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -940,6 +1249,8 @@
   "previousReference": "identical"
  },
  "hand_repeated_clears.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -953,6 +1264,8 @@
   "previousReference": "identical"
  },
  "hand_screen_0x0.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -966,14 +1279,20 @@
   "previousReference": "identical"
  },
  "hand_short_frame.gif": {
+  "givenAllData": "0 of 1 frames, then EncodingError: Failed to decode frame at index 0",
+  "framesGivenAllData": 0,
   "source": "gen_gif.py",
   "chromium": "cannot decode: EncodingError: Failed to decode frame at index 0 (frame 0 of 1)"
  },
  "hand_short_frame_interlaced.gif": {
+  "givenAllData": "0 of 1 frames, then EncodingError: Failed to decode frame at index 0",
+  "framesGivenAllData": 0,
   "source": "gen_gif.py",
   "chromium": "cannot decode: EncodingError: Failed to decode frame at index 0 (frame 0 of 1)"
  },
  "hand_solid_big.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -987,6 +1306,8 @@
   "previousReference": "identical"
  },
  "hand_surplus_pixels.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1000,6 +1321,8 @@
   "previousReference": "identical"
  },
  "hand_transparent.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1013,6 +1336,8 @@
   "previousReference": "identical"
  },
  "hand_transparent_beyond_palette.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1026,6 +1351,8 @@
   "previousReference": "identical"
  },
  "hand_truncated_data.gif": {
+  "givenAllData": "0 of 1 frames, then EncodingError: Failed to decode frame at index 0",
+  "framesGivenAllData": 0,
   "source": "chromium, as an unfinished download",
   "frames": 1,
   "size": [
@@ -1039,6 +1366,8 @@
   "previousReference": "identical"
  },
  "hand_truncated_interlaced.gif": {
+  "givenAllData": "0 of 1 frames, then EncodingError: Failed to decode frame at index 0",
+  "framesGivenAllData": 0,
   "source": "chromium, as an unfinished download",
   "frames": 1,
   "size": [
@@ -1052,6 +1381,8 @@
   "previousReference": "identical"
  },
  "hand_truncated_interlaced_second_150.gif": {
+  "givenAllData": "1 of 2 frames, then RangeError: Unexpected end of image. Request for frame index 1 can't be satisfied.",
+  "framesGivenAllData": 1,
   "source": "chromium, as an unfinished download",
   "frames": 2,
   "size": [
@@ -1066,6 +1397,8 @@
   "previousReference": "identical"
  },
  "hand_truncated_interlaced_second_40.gif": {
+  "givenAllData": "1 of 2 frames, then RangeError: Unexpected end of image. Request for frame index 1 can't be satisfied.",
+  "framesGivenAllData": 1,
   "source": "chromium, as an unfinished download",
   "frames": 2,
   "size": [
@@ -1077,9 +1410,11 @@
    20
   ],
   "repetitions": 0,
-  "previousReference": "differed: frames 1"
+  "previousReference": "identical"
  },
  "hand_truncated_interlaced_second_90.gif": {
+  "givenAllData": "1 of 2 frames, then RangeError: Unexpected end of image. Request for frame index 1 can't be satisfied.",
+  "framesGivenAllData": 1,
   "source": "chromium, as an unfinished download",
   "frames": 2,
   "size": [
@@ -1094,6 +1429,8 @@
   "previousReference": "identical"
  },
  "hand_truncated_interlaced_transparent.gif": {
+  "givenAllData": "0 of 1 frames, then EncodingError: Failed to decode frame at index 0",
+  "framesGivenAllData": 0,
   "source": "chromium, as an unfinished download",
   "frames": 1,
   "size": [
@@ -1107,6 +1444,8 @@
   "previousReference": "identical"
  },
  "hand_truncated_second_header.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1120,6 +1459,8 @@
   "previousReference": "identical"
  },
  "hand_truncated_subblock.gif": {
+  "givenAllData": "0 of 1 frames, then EncodingError: Failed to decode frame at index 0",
+  "framesGivenAllData": 0,
   "source": "chromium, as an unfinished download",
   "frames": 1,
   "size": [
@@ -1133,6 +1474,8 @@
   "previousReference": "identical"
  },
  "hand_truncated_transparent.gif": {
+  "givenAllData": "0 of 1 frames, then EncodingError: Failed to decode frame at index 0",
+  "framesGivenAllData": 0,
   "source": "chromium, as an unfinished download",
   "frames": 1,
   "size": [
@@ -1146,6 +1489,8 @@
   "previousReference": "identical"
  },
  "im_256.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1159,6 +1504,8 @@
   "previousReference": "identical"
  },
  "im_7colors.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1172,6 +1519,8 @@
   "previousReference": "identical"
  },
  "im_anim.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -1189,6 +1538,8 @@
   "previousReference": "identical"
  },
  "im_anim_dispose_bg.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -1206,6 +1557,8 @@
   "previousReference": "identical"
  },
  "im_anim_dispose_prev.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -1223,6 +1576,8 @@
   "previousReference": "identical"
  },
  "im_anim_optframe.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -1240,6 +1595,8 @@
   "previousReference": "identical"
  },
  "im_anim_opttrans.gif": {
+  "givenAllData": "5 frames",
+  "framesGivenAllData": 5,
   "source": "chromium",
   "frames": 5,
   "size": [
@@ -1257,6 +1614,8 @@
   "previousReference": "identical"
  },
  "im_gray5.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1270,6 +1629,8 @@
   "previousReference": "identical"
  },
  "im_interlaced.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1283,6 +1644,8 @@
   "previousReference": "identical"
  },
  "im_transparent.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1296,6 +1659,8 @@
   "previousReference": "identical"
  },
  "pil_1x1.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1309,6 +1674,8 @@
   "previousReference": "identical"
  },
  "pil_anim_disposal0.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -1325,6 +1692,8 @@
   "previousReference": "identical"
  },
  "pil_anim_disposal1.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -1341,6 +1710,8 @@
   "previousReference": "identical"
  },
  "pil_anim_disposal2.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -1357,6 +1728,8 @@
   "previousReference": "identical"
  },
  "pil_anim_disposal3.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -1370,9 +1743,11 @@
    200
   ],
   "repetitions": "infinite",
-  "previousReference": "differed: frames 2,3"
+  "previousReference": "identical"
  },
  "pil_anim_local_palettes.gif": {
+  "givenAllData": "3 frames",
+  "framesGivenAllData": 3,
   "source": "chromium",
   "frames": 3,
   "size": [
@@ -1388,6 +1763,8 @@
   "previousReference": "identical"
  },
  "pil_anim_loop3.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -1404,6 +1781,8 @@
   "previousReference": "identical"
  },
  "pil_anim_noloop.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -1420,6 +1799,8 @@
   "previousReference": "identical"
  },
  "pil_anim_transparent_d1.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -1436,6 +1817,8 @@
   "previousReference": "identical"
  },
  "pil_anim_transparent_d2.gif": {
+  "givenAllData": "4 frames",
+  "framesGivenAllData": 4,
   "source": "chromium",
   "frames": 4,
   "size": [
@@ -1452,6 +1835,8 @@
   "previousReference": "identical"
  },
  "pil_bilevel.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1465,6 +1850,8 @@
   "previousReference": "identical"
  },
  "pil_comment.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1478,6 +1865,8 @@
   "previousReference": "identical"
  },
  "pil_gray.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1491,6 +1880,8 @@
   "previousReference": "identical"
  },
  "pil_interlaced_h1.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1504,6 +1895,8 @@
   "previousReference": "identical"
  },
  "pil_interlaced_h2.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1517,6 +1910,8 @@
   "previousReference": "identical"
  },
  "pil_interlaced_h3.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1530,6 +1925,8 @@
   "previousReference": "identical"
  },
  "pil_interlaced_h4.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1543,6 +1940,8 @@
   "previousReference": "identical"
  },
  "pil_interlaced_h5.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1556,6 +1955,8 @@
   "previousReference": "identical"
  },
  "pil_interlaced_h7.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1569,6 +1970,8 @@
   "previousReference": "identical"
  },
  "pil_interlaced_h8.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1582,6 +1985,8 @@
   "previousReference": "identical"
  },
  "pil_interlaced_h9.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1595,6 +2000,8 @@
   "previousReference": "identical"
  },
  "pil_pal16.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1608,6 +2015,8 @@
   "previousReference": "identical"
  },
  "pil_pal16_interlaced.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1621,6 +2030,8 @@
   "previousReference": "identical"
  },
  "pil_pal2.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1634,6 +2045,8 @@
   "previousReference": "identical"
  },
  "pil_pal256.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1647,6 +2060,8 @@
   "previousReference": "identical"
  },
  "pil_pal256_interlaced.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1660,6 +2075,8 @@
   "previousReference": "identical"
  },
  "pil_pal2_interlaced.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1673,6 +2090,8 @@
   "previousReference": "identical"
  },
  "pil_pal4.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1686,6 +2105,8 @@
   "previousReference": "identical"
  },
  "pil_pal4_interlaced.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1699,6 +2120,8 @@
   "previousReference": "identical"
  },
  "pil_rgba.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1712,6 +2135,8 @@
   "previousReference": "identical"
  },
  "pil_tall.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1725,6 +2150,8 @@
   "previousReference": "identical"
  },
  "pil_transparent.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1738,6 +2165,8 @@
   "previousReference": "identical"
  },
  "pil_transparent_interlaced.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
@@ -1751,6 +2180,8 @@
   "previousReference": "identical"
  },
  "pil_wide.gif": {
+  "givenAllData": "1 frames",
+  "framesGivenAllData": 1,
   "source": "chromium",
   "frames": 1,
   "size": [
