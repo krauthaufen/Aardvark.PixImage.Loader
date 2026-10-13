@@ -1279,6 +1279,105 @@ def gen_logluv():
     SUMMARY.append(('unverified/logl16', ['UNVERIFIED: ' + reason]))
 
 
+def gen_jpeg_deep():
+    """JPEG-in-TIFF beyond 8-bit baseline: 12-bit DCT (written by tifffile / libjpeg-turbo) and lossless JPEG
+    (SOF3, DNG style) streams from imagecodecs wrapped into strips and tiles. References: tifffile + imagecodecs."""
+    rng = np.random.default_rng(61)
+    d12 = os.path.join(OUT, 'jpeg12')
+    os.makedirs(d12, exist_ok=True)
+    g12 = (test_pattern(70, 52, 1, np.uint16, 33)[:, :, 0] >> 4)
+    rgb12 = (test_pattern(70, 52, 3, np.uint16, 34) >> 4)
+    for name, arr, kw in [
+        ('jpeg12_gray_strips', g12, dict(rowsperstrip=16)),
+        ('jpeg12_gray_tiles', g12, dict(tile=(32, 32))),
+        ('jpeg12_ycbcr_strips', rgb12, dict(photometric='ycbcr', rowsperstrip=32)),
+        ('jpeg12_ycbcr_tiles', rgb12, dict(photometric='ycbcr', tile=(48, 32))),
+        ('jpeg12_ycbcr_420_strips', rgb12, dict(photometric='rgb')),
+    ]:
+        path = os.path.join(d12, name + '.tif')
+        tifffile.imwrite(path, arr, compression='jpeg', bitspersample=12, metadata=None, **kw)
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            assert int(pg.compression) == 7 and pg.bitspersample == 12, (name, pg.compression, pg.bitspersample)
+            desc = f'photometric {int(pg.photometric)}, {"tiles" if pg.is_tiled else "strips"} x{len(pg.dataoffsets)}' \
+                   f'{", JPEGTables" if 347 in pg.tags else ""}'
+        ref = ref_tifffile(path)
+        # (tifffile's writer is quirky here: asked for 'rgb' it writes a proper 4:2:0 YCbCr file, asked for 'ycbcr' it
+        # stores the given samples as Y, Cb, Cr unconverted. Both are valid YCbCr files; the reference is what
+        # libjpeg-turbo makes of the streams.)
+        assert ref.dtype == np.uint16 and int(pg.photometric) == (1 if arr.ndim == 2 else 6)
+        write_ref(path + '.ref', ref)
+        SUMMARY.append(('jpeg12/' + name, [f'tifffile (libjpeg-turbo 12 bit): {desc}']))
+
+    g16 = rng.integers(0, 65536, (37, 50), dtype=np.uint16)
+    g16[:8] = test_pattern(50, 8, 1, np.uint16, 35)[:, :, 0]
+    g8 = test_pattern(50, 37, 1, np.uint8, 36)[:, :, 0]
+    rgb8 = test_pattern(50, 37, 3, np.uint8, 37)
+    rgb16 = test_pattern(50, 37, 3, np.uint16, 38)
+
+    def lossless(a, bits):
+        return imagecodecs.jpeg8_encode(a, lossless=True, bitspersample=bits, colorspace='rgb' if a.ndim == 3 and a.shape[2] == 3 else None,
+                                        outcolorspace='rgb' if a.ndim == 3 and a.shape[2] == 3 else None)
+
+    def wrap(name, a, bits, tile=None, rps=None, reshape=None, **extra):
+        """a: (H,W[,C]). reshape: encode every strip/tile as a frame of that many components (DNG colour filter data)."""
+        h, w = a.shape[:2]
+        c = 1 if a.ndim == 2 else a.shape[2]
+        chunks = []
+        if tile:
+            for y in range(0, h, tile[1]):
+                for x in range(0, w, tile[0]):
+                    blk = a[y:y + tile[1], x:x + tile[0]]
+                    pad = [(0, tile[1] - blk.shape[0]), (0, tile[0] - blk.shape[1])] + ([(0, 0)] if a.ndim == 3 else [])
+                    blk = np.ascontiguousarray(np.pad(blk, pad))
+                    if reshape:
+                        blk = blk.reshape(tile[1], tile[0] // reshape, reshape)
+                    chunks.append(lossless(blk, bits))
+            page = dict(tile=tile)
+        else:
+            rps = rps or h
+            chunks = [lossless(np.ascontiguousarray(a[y:y + rps]), bits) for y in range(0, h, rps)]
+            page = dict(rps=rps)
+        page.update(arr=a if a.ndim == 3 else a[:, :, None], bits=bits if bits not in (8, 16) else a.dtype.itemsize * 8,
+                    compression=7, raw_chunks=chunks, **extra)
+        if bits not in (8, 16):
+            page['bits'] = [bits] * c
+        dd = os.path.join(OUT, 'jpegll')
+        os.makedirs(dd, exist_ok=True)
+        path = os.path.join(dd, name + '.tif')
+        write_tiff(path, [page])
+        src = a if a.ndim == 3 else a[:, :, None]
+        try:
+            ref = ref_tifffile(path)
+            who = 'tifffile + imagecodecs'
+        except Exception:
+            ref = None
+        if ref is None or not same(ref, src):
+            # tifffile does not undo the DNG frame reshaping: decode the tile streams with imagecodecs instead
+            assert reshape and tile
+            ref = np.zeros_like(src)
+            i = 0
+            for y in range(0, h, tile[1]):
+                for x in range(0, w, tile[0]):
+                    blk = imagecodecs.jpeg8_decode(chunks[i]).reshape(tile[1], tile[0], c)
+                    ref[y:y + tile[1], x:x + tile[0]] = blk[:h - y, :w - x]
+                    i += 1
+            who = 'imagecodecs (libjpeg-turbo) per tile, frames flattened to rows'
+        assert same(ref, src), name
+        write_ref(path + '.ref', ref)
+        SUMMARY.append(('jpegll/' + name, [who]))
+
+    wrap('jpegll_gray16_strips', g16, 16, rps=10)
+    wrap('jpegll_gray16_tiles', g16, 16, tile=(32, 16))
+    wrap('jpegll_gray12', g16 >> 4, 12, rps=37)
+    wrap('jpegll_gray10_tiles', g16 >> 6, 10, tile=(16, 32))
+    wrap('jpegll_gray8', g8, 8, rps=16)
+    wrap('jpegll_rgb8_tiles', rgb8, 8, tile=(32, 32), photometric=2)
+    wrap('jpegll_rgb16_strips', rgb16, 16, rps=19, photometric=2)
+    wrap('jpegll_dng_cfa16_2comp_tiles', g16, 16, tile=(32, 16), reshape=2)
+    wrap('jpegll_dng_cfa12_2comp_tile', g16 >> 4, 12, tile=(64, 48), reshape=2)
+
+
 def parse_jpeg(b):
     """Splits a baseline JPEG into the pieces an old-style JPEG TIFF spreads over tags."""
     p = 2
@@ -1499,6 +1598,7 @@ def main():
     gen_ccitt()
     gen_ycbcr()
     gen_jpeg()
+    gen_jpeg_deep()
     gen_ojpeg()
     for n, by in SUMMARY:
         assert by, n

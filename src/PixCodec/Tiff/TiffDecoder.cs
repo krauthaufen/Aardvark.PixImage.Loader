@@ -81,6 +81,7 @@ namespace PixCodec
         long[] _offsets = Array.Empty<long>(), _counts = Array.Empty<long>();
         ushort[]? _colorMap;
         byte[] _jpegTables = Array.Empty<byte>();
+        JpegTiffTables? _jpegPrepared;
         TiffOldJpeg? _ojpeg;
         long _t4Options;
         float[]? _yccY, _yccCrR, _yccCbB, _yccCrG, _yccCbG;
@@ -240,7 +241,8 @@ namespace PixCodec
                     OutColor = !ConvertToRgb ? ColorModel.Other : HasAlpha ? ColorModel.Rgba : ColorModel.Rgb;
                     break;
                 case 6:
-                    if (Format != 1 || !UniformBits || Bits != 8 || Spp != 3) throw new ImageNotSupportedException("TIFF: YCbCr needs three 8-bit samples");
+                    if (Format != 1 || !UniformBits || Spp != 3 || (Bits != 8 && !(IsJpeg && Planar == 1)))
+                        throw new ImageNotSupportedException("TIFF: YCbCr needs three 8-bit samples (or JPEG compression)");
                     OutColor = ColorModel.Rgb;
                     break;
                 case 8: case 9: case 10:
@@ -419,7 +421,11 @@ namespace PixCodec
                 if (cm == null || cm.Length < 3 << Bits) throw new ImageFormatException("TIFF: missing or short ColorMap");
                 _colorMap = Array.ConvertAll(cm, x => (ushort)x);
             }
-            if (Compression == 7) _jpegTables = File.Bytes(e, 347) ?? Array.Empty<byte>();
+            if (Compression == 7)
+            {
+                _jpegTables = File.Bytes(e, 347) ?? Array.Empty<byte>();
+                _jpegPrepared = TiffJpegBridge.Prepare(_jpegTables);
+            }
             if (_oldJpeg) _ojpeg = new TiffOldJpeg(this, offs, cnts!);
             if (IsCcitt) _t4Options = File.Integer(e, Compression == 3 ? 292 : 293, 0);
             if (Photometric == 6 && (Kind == TiffChunkKind.YccPacked || YccPlanar)) BuildYccTables();
@@ -624,9 +630,8 @@ namespace PixCodec
                             : count > int.MaxValue ? throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression")
                             : File.Src.Get(offset, (int)count, ref srcRent);
                         bool ycc = Photometric == 6 && !YccPlanar;
-                        ReadOnlySpan<byte> tables = _oldJpeg ? default : _jpegTables;
-                        if (Bps == 1) TiffJpegBridge.Decode8(tables, src, cw, crows, ps, ycc, new Span<byte>(b, (int)size));
-                        else TiffJpegBridge.Decode16(tables, src, cw, crows, ps, ycc, new Span<ushort>(b, (int)(size / 2)));
+                        if (Bps == 1) TiffJpegBridge.Decode8(_jpegPrepared, _jpegTables, src, cw, crows, ps, ycc, new Span<byte>(b, (int)size));
+                        else TiffJpegBridge.Decode16(_jpegPrepared, src, cw, crows, ps, ycc, new Span<ushort>(b, (int)(size / 2)));
                         Transfer(b, (long)cw * ps * Bps, g, TiffChunkKind.Samples);
                     }
                     finally

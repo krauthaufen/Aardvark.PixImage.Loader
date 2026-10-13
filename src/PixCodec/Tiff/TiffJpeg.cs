@@ -8,18 +8,41 @@ namespace PixCodec
     /// <summary>The calls into the JPEG codec that TIFF needs, in one place.</summary>
     internal static class TiffJpegBridge
     {
-        public static void Decode8(ReadOnlySpan<byte> tables, ReadOnlySpan<byte> data, int width, int height, int components, bool ycc, Span<byte> dst)
+        /// <summary>Parses the JPEGTables tag once per image (null when the tag is absent).</summary>
+        public static JpegTiffTables? Prepare(byte[] jpegTables) => jpegTables.Length > 0 ? JpegTiffTables.Parse(jpegTables) : null;
+
+        /// <summary>One strip/tile with up to 8 bits per sample, see <see cref="TiffJpegDecoder"/> for the contract.</summary>
+        public static void Decode8(JpegTiffTables? prepared, ReadOnlySpan<byte> tables, ReadOnlySpan<byte> data, int width, int height, int components, bool ycc, Span<byte> dst)
         {
             if (Tiff.JpegDecoder != null) Tiff.JpegDecoder(tables, data, width, height, components, ycc, dst);
-            else Jpeg.DecodeForTiff(tables, data, width, height, components, ycc, dst);
+            else Jpeg.DecodeForTiff(prepared, data, width, height, components, ycc, dst);
+        }
+
+        /// <summary>
+        /// One strip/tile with 9..16 bits per sample (12-bit DCT or lossless), values as coded. Lossless frames may be
+        /// shaped differently from the tile, the way DNG stores colour filter array data (a W x H single sample tile as
+        /// a W/2 x H two component frame): such a frame is read as flat rows of samples.
+        /// </summary>
+        public static void Decode16(JpegTiffTables? prepared, ReadOnlySpan<byte> data, int width, int height, int components, bool ycc, Span<ushort> dst)
+        {
+            var info = Jpeg.GetTiffStreamInfo(data);
+            if (!info.Lossless || (info.Components == components && info.Width >= width))
+            {
+                Jpeg.DecodeForTiff(prepared, data, width, height, components, ycc, dst);
+                return;
+            }
+            long rowSamples = (long)info.Width * info.Components, need = (long)width * components;
+            if (rowSamples < need || info.Height < height || rowSamples * info.Height > Array.MaxLength)
+                throw new ImageFormatException($"TIFF: lossless JPEG frame {info.Width}x{info.Height}x{info.Components} does not cover the {width}x{height}x{components} strip or tile");
+            var frame = new ushort[rowSamples * info.Height];
+            Jpeg.DecodeForTiff(prepared, data, info.Width, info.Height, info.Components, false, frame);
+            for (int y = 0; y < height; y++)
+                frame.AsSpan((int)(y * rowSamples), (int)need).CopyTo(dst.Slice((int)(y * need), (int)need));
         }
 
         /// <summary>Encodes 8-bit interleaved Gray (1) or Rgb (3) pixels as one self-contained JPEG stream (RGB is stored as YCbCr).</summary>
         public static void Encode(byte[] pixels, int width, int height, int components, JpegEncodeOptions options, Stream output)
             => Jpeg.Encode(new RawImage(width, height, components == 1 ? ColorModel.Gray : ColorModel.Rgb, pixels), output, options);
-
-        public static void Decode16(ReadOnlySpan<byte> tables, ReadOnlySpan<byte> data, int width, int height, int components, bool ycc, Span<ushort> dst)
-            => throw new ImageNotSupportedException("TIFF: JPEG compression with more than 8 bits per sample is not supported");
     }
 
     /// <summary>
