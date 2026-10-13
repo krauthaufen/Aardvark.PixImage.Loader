@@ -29,17 +29,17 @@ public class CompressionZstdEncodeTests
         var frames = new List<byte[]>();
         var originals = new List<byte[]>();
         foreach (var shape in Shapes)
-            foreach (bool checksum in new[] { false, true })
+            foreach (var (level, checksum) in new[] { (1, false), (1, true), (2, false), (3, true), (3, false), (5, false), (7, true), (9, false), (12, false), (19, true), (22, false) })
             {
                 var data = Make(shape);
-                var z = Zstd.Compress(data, checksum);
+                var z = Zstd.Compress(data, level, checksum);
                 Assert.True(data.AsSpan().SequenceEqual(Zstd.Decompress(z)), shape);
                 var dst = new byte[data.Length];
                 Assert.Equal(data.Length, Zstd.Decompress(z, dst));
                 Assert.True(data.AsSpan().SequenceEqual(dst), shape);
                 Assert.True(z.Length <= data.Length + 18 + 3 * (data.Length / 131072 + 1) + 4, $"{shape}: {z.Length} bytes for {data.Length}");
                 frames.Add(z); originals.Add(data);
-                if (!checksum) log.WriteLine($"{shape,-8} {data.Length,7} -> {z.Length,7}  ({(data.Length == 0 ? 0 : 100.0 * z.Length / data.Length):F1}%)");
+                if (!checksum) log.WriteLine($"{shape,-8} L{level,-2} {data.Length,7} -> {z.Length,7}  ({(data.Length == 0 ? 0 : 100.0 * z.Length / data.Length):F1}%)");
             }
         if (!ReferenceAvailable) return;
         var py = Reference(frames)!;
@@ -73,6 +73,15 @@ public class CompressionZstdEncodeTests
             else unit.AsSpan(rnd.Next(unit.Length - Math.Min(n, unit.Length - 1)), Math.Min(n, unit.Length - 1)).CopyTo(data.AsSpan(i));
             i += kind >= 2 ? Math.Min(n, unit.Length - 1) : n;
         }
+        foreach (int level in new[] { 1, 3, 9 })
+        {
+            var zl = Zstd.Compress(data, level, true);
+            Assert.True(zl.Length < data.Length);
+            var back = new byte[data.Length];
+            Assert.Equal(data.Length, Zstd.Decompress(zl, back));
+            Assert.True(data.AsSpan().SequenceEqual(back), "level " + level);
+            if (ReferenceAvailable) Assert.True(data.AsSpan().SequenceEqual(Reference(new[] { zl })![0]), "libzstd, level " + level);
+        }
         var z = Zstd.Compress(data, true);
         Assert.True(z.Length < data.Length);
         var dst = new byte[data.Length];
@@ -91,7 +100,7 @@ public class CompressionZstdEncodeTests
         for (int it = 0; it < 500 * FuzzScale; it++)
         {
             var data = CompressionTestData.Fuzz(rnd);
-            var z = Zstd.Compress(data, rnd.Next(2) == 0);
+            var z = Zstd.Compress(data, new[] { 1, 2, 3, 3, 4, 6, 9, 13, 19 }[rnd.Next(9)], rnd.Next(2) == 0);
             byte[] back;
             try { back = Zstd.Decompress(z); }
             catch (Exception e) { throw new Xunit.Sdk.XunitException($"iteration {it}, {data.Length} bytes: {e.Message}"); }

@@ -387,6 +387,34 @@ public class CompressionBackendTests
         finally { Zlib.Backend = old; }
     }
 
+#if NET9_0_OR_GREATER
+    /// <summary>From .NET 9 on the BCL takes the zlib level itself: the BCL backend must then have real levels too.</summary>
+    [Fact]
+    public void BclBackendMapsEveryLevel()
+    {
+        var old = Zlib.Backend;
+        try
+        {
+            Zlib.Backend = ZlibBackend.Bcl;
+            var data = Make("big");
+            var sizes = new List<int>();
+            for (int level = 0; level <= 9; level++)
+            {
+                var z = Zlib.Compress(data, level);
+                Assert.True(data.AsSpan().SequenceEqual(InflateCore.Decompress(z, 0, true, true)), "level " + level);
+                var ms = new MemoryStream();
+                using (var s = Zlib.CreateCompressor(ms, level)) s.Write(data);
+                Assert.Equal(z.Length, ms.Length);
+                sizes.Add(z.Length);
+            }
+            Assert.True(sizes[0] > data.Length);
+            Assert.True(sizes.Distinct().Count() >= 6, "levels collapse: " + string.Join(" ", sizes));
+            Assert.True(sizes[9] < sizes[1]);
+        }
+        finally { Zlib.Backend = old; }
+    }
+#endif
+
     [Fact]
     public void BackendSelection()
     {

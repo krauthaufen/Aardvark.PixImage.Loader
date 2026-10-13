@@ -33,6 +33,13 @@ public class CompressionBench
         return best;
     }
 
+    static double Once(Action action)
+    {
+        var sw = Stopwatch.StartNew();
+        action();
+        return sw.Elapsed.TotalSeconds;
+    }
+
     [Fact]
     public void Run()
     {
@@ -145,16 +152,43 @@ public class CompressionBench
         if (only == "" || only.Contains("zstd"))
         {
             Out("");
-            Out("| data | Zstd.Compress size | ratio | enc MB/s | own dec MB/s |");
-            Out("|---|---|---|---|---|");
+            Out("| data | Zstd.Compress level: size (enc MB/s) |");
+            Out("|---|---|");
             foreach (var (name, data) in sets)
             {
-                byte[] z = Array.Empty<byte>();
-                double te = Best(() => z = Zstd.Compress(data), 3);
-                var dst = new byte[data.Length];
-                double td = Best(() => Zstd.Decompress(z, dst), 3);
-                Assert.True(data.AsSpan().SequenceEqual(dst));
-                Out($"| {name} | {z.Length} | {100.0 * z.Length / data.Length:F1}% | {data.Length / 1e6 / te:F0} | {data.Length / 1e6 / td:F0} |");
+                if (name == "random") continue;
+                var line = $"| {name} |";
+                foreach (int level in new[] { 1, 2, 3, 4, 5, 7, 9, 13, 16, 19 })
+                {
+                    // the slow levels are timed once on a 12 MB piece
+                    var piece = level >= 7 ? data.AsSpan(0, Math.Min(data.Length, 12_000_000)).ToArray() : data;
+                    byte[] z = Array.Empty<byte>();
+                    double te = level >= 7 ? Once(() => z = Zstd.Compress(piece, level)) : Best(() => z = Zstd.Compress(piece, level), 2, 0.5);
+                    Assert.True(piece.AsSpan().SequenceEqual(Zstd.Decompress(z)));
+                    line += $" L{level}{(level >= 7 ? "*" : "")} {z.Length} ({piece.Length / 1e6 / te:F1})";
+                }
+                Out(line + " |");
+            }
+        }
+
+        if (only == "" || only.Contains("xzenc"))
+        {
+            Out("");
+            Out("| data (first 12 MB) | Xz.Compress level: size (enc MB/s) |");
+            Out("|---|---|");
+            foreach (var (name, data) in sets)
+            {
+                if (name == "random") continue;
+                var piece = data.AsSpan(0, Math.Min(data.Length, 12_000_000)).ToArray();
+                var line = $"| {name} |";
+                foreach (int level in new[] { 1, 3, 6, 9 })
+                {
+                    byte[] z = Array.Empty<byte>();
+                    double te = Once(() => z = Xz.Compress(piece, level));
+                    Assert.True(piece.AsSpan().SequenceEqual(Xz.Decompress(z)));
+                    line += $" L{level} {z.Length} ({piece.Length / 1e6 / te:F1})";
+                }
+                Out(line + " |");
             }
         }
 

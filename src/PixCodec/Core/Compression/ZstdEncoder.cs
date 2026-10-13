@@ -14,8 +14,8 @@ namespace PixCodec.Compression
     /// </summary>
     internal sealed unsafe class ZstdEncoder
     {
-        const int BlockSize = 128 * 1024, HashLog = 17, MinMatch = 4, MaxWindowLog = 23;
-        const int WorkSize = 4 * BlockSize + 4096;
+        const int BlockSize = 128 * 1024, MaxHashLog = 17;
+        const int WorkSize = 9 * BlockSize + 4096;
 
         struct Seq
         {
@@ -77,14 +77,25 @@ namespace PixCodec.Compression
             return t;
         }
 
-        readonly int[] hash = new int[1 << HashLog];
-        readonly Seq[] seqs = new Seq[BlockSize / MinMatch + 8];
+        readonly int[] hash = new int[1 << MaxHashLog];
+        int hashShift, longShift; // 64 - log2(table size)
+        int[] longHash = Array.Empty<int>();
+        int hashBytes;
+        bool useLong;
+        readonly Seq[] seqs = new Seq[BlockSize / 3 + 8];
         readonly byte[] lits = new byte[BlockSize + 64];
         readonly byte[] work = new byte[WorkSize];
-        readonly byte[] llCodes = new byte[BlockSize / MinMatch + 8], mlCodes = new byte[BlockSize / MinMatch + 8], ofCodes = new byte[BlockSize / MinMatch + 8];
+        readonly byte[] llCodes = new byte[BlockSize / 3 + 8], mlCodes = new byte[BlockSize / 3 + 8], ofCodes = new byte[BlockSize / 3 + 8];
         readonly CTable llTable = new CTable(), mlTable = new CTable(), ofTable = new CTable(), weightTable = new CTable();
         readonly ZstdDecoder verifier = new ZstdDecoder();
-        uint rep; // the most recent match offset, as the decoder will see it
+        uint rep; // the most recent match offset, as the decoder will see it (fast level)
+        uint rep0, rep1, rep2; // all three repeat offsets (lazy levels)
+
+        // lazy levels: hash chains
+        int[] chainHead = Array.Empty<int>(), chain = Array.Empty<int>();
+        int chainHashLog, chainMask, searchDepth, lazySteps;
+        // estimated cost in bits of each literal byte value, from the last Huffman coded literals section
+        readonly byte[] litCost = new byte[256];
 
         // ------------------------------------------------------------------------------------ bit output
 
@@ -320,10 +331,31 @@ namespace PixCodec.Compression
 
         static int EncodeHuffmanStream(byte* lit, int n, ushort* codes, byte* lens, byte* dst, byte* dstEnd)
         {
-            var w = new BitWriter { Pos = dst, End = dstEnd };
-            for (int i = n - 1; i >= 0; i--) w.Put(codes[lit[i]], lens[lit[i]]);
-            w.Finish();
-            return w.Overflow ? -1 : (int)(w.Pos - dst);
+            // worst case 11 bits per symbol plus the end mark
+            if (dstEnd - dst < (long)n * 11 / 8 + 16) return -1;
+            byte* o = dst;
+            ulong acc = 0;
+            int bits = 0;
+            int i = n - 1;
+            // symbols go in last to first; five of them (at most 55 bits) fit between flushes
+            for (; i >= 4; i -= 5)
+            {
+                uint s0 = lit[i], s1 = lit[i - 1], s2 = lit[i - 2], s3 = lit[i - 3], s4 = lit[i - 4];
+                acc |= (ulong)codes[s0] << bits; bits += lens[s0];
+                acc |= (ulong)codes[s1] << bits; bits += lens[s1];
+                acc |= (ulong)codes[s2] << bits; bits += lens[s2];
+                acc |= (ulong)codes[s3] << bits; bits += lens[s3];
+                acc |= (ulong)codes[s4] << bits; bits += lens[s4];
+                Unsafe.WriteUnaligned(o, acc);
+                o += bits >> 3;
+                acc >>= bits & ~7;
+                bits &= 7;
+            }
+            for (; i >= 0; i--) { acc |= (ulong)codes[lit[i]] << bits; bits += lens[lit[i]]; }
+            acc |= 1UL << bits; bits++;
+            Unsafe.WriteUnaligned(o, acc);
+            o += (bits + 7) >> 3;
+            return (int)(o - dst);
         }
 
         /// <summary>Writes the literals section for lit[0, n). Always succeeds (raw literals are the fallback).</summary>
@@ -332,7 +364,15 @@ namespace PixCodec.Compression
             if (n < 64) return RawLiterals(lit, n, dst, 0, n);
             uint* freq = stackalloc uint[256];
             for (int i = 0; i < 256; i++) freq[i] = 0;
-            for (int i = 0; i < n; i++) freq[lit[i]]++;
+            {
+                // four interleaved counters: runs of equal bytes do not serialise on one memory cell
+                uint* f4 = stackalloc uint[4 * 256];
+                new Span<uint>(f4, 4 * 256).Clear();
+                int i4 = 0;
+                for (; i4 + 4 <= n; i4 += 4) { f4[lit[i4]]++; f4[256 + lit[i4 + 1]]++; f4[512 + lit[i4 + 2]]++; f4[768 + lit[i4 + 3]]++; }
+                for (; i4 < n; i4++) f4[lit[i4]]++;
+                for (int i = 0; i < 256; i++) freq[i] = f4[i] + f4[256 + i] + f4[512 + i] + f4[768 + i];
+            }
             int last = 255;
             while (freq[last] == 0) last--;
             if (freq[last] == n) return RawLiterals(lit, n, dst, 1, 1); // one value: run length coded
@@ -407,6 +447,7 @@ namespace PixCodec.Compression
             int comp = (int)(o - body);
             if (comp >= n || comp >= 1 << sizeBits) return RawLiterals(lit, n, dst, 0, n);
             // size format: 0 = one stream (10 bit sizes), 1..3 = four streams with 10, 14, 18 bit sizes
+            for (int i = 0; i < 256; i++) litCost[i] = lens[i] != 0 ? lens[i] : (byte)12;
             int format = !four ? 0 : sizeBits == 10 ? 1 : sizeBits == 14 ? 2 : 3;
             ulong h = 2u | (uint)format << 2 | (ulong)n << 4 | (ulong)comp << (4 + sizeBits);
             for (int i = 0; i < headerSize; i++) dst[i] = (byte)(h >> (8 * i));
@@ -484,35 +525,61 @@ namespace PixCodec.Compression
 
                 // The decoder reads this stream backwards, so the last sequence goes in first; within a sequence
                 // the fields go in opposite to the order they are read.
-                var w = new BitWriter { Pos = o, End = dstEnd };
-                int last = nseq - 1;
-                uint sLl = InitState(llTable, ll[last]), sOf = InitState(ofTable, of[last]), sMl = InitState(mlTable, ml[last]);
-                for (int i = last; ; i--)
+                // one sequence adds at most 89 bits; three flushes of a 64 bit accumulator keep up with that
+                if (dstEnd - o < (long)nseq * 12 + 32) return -1;
+                fixed (ushort* llS = llTable.States, mlS = mlTable.States, ofS = ofTable.States)
+                fixed (int* llDb = llTable.DeltaBits, llDs = llTable.DeltaState, mlDb = mlTable.DeltaBits, mlDs = mlTable.DeltaState,
+                    ofDb = ofTable.DeltaBits, ofDs = ofTable.DeltaState)
+                fixed (uint* llBase = LlBase, mlBase = MlBase)
+                fixed (byte* llBits = LlBits, mlBits = MlBits)
                 {
-                    int lc = ll[i], mc = ml[i], oc = of[i];
-                    w.Put((uint)sq[i].LitLen - LlBase[lc], LlBits[lc]);
-                    w.Put((uint)sq[i].MatchLen - MlBase[mc], MlBits[mc]);
-                    w.Put(sq[i].OffValue - (1u << oc), oc);
-                    if (i == 0) break;
-                    // transitions into sequence i's states, read as: literal length, match length, offset
-                    EncodeSymbol(ref w, ofTable, ref sOf, of[i - 1]);
-                    EncodeSymbol(ref w, mlTable, ref sMl, ml[i - 1]);
-                    EncodeSymbol(ref w, llTable, ref sLl, ll[i - 1]);
+                    int last = nseq - 1;
+                    uint sLl = InitState(llTable, ll[last]), sOf = InitState(ofTable, of[last]), sMl = InitState(mlTable, ml[last]);
+                    ulong acc = 0;
+                    int bits = 0;
+                    for (int i = last; ; i--)
+                    {
+                        int lc = ll[i], mc = ml[i], oc = of[i];
+                        acc |= (ulong)((uint)sq[i].LitLen - llBase[lc]) << bits; bits += llBits[lc];
+                        acc |= (ulong)((uint)sq[i].MatchLen - mlBase[mc]) << bits; bits += mlBits[mc];
+                        Unsafe.WriteUnaligned(o, acc); o += bits >> 3; acc >>= bits & ~7; bits &= 7;
+                        acc |= (ulong)(sq[i].OffValue - (1u << oc)) << bits; bits += oc;
+                        Unsafe.WriteUnaligned(o, acc); o += bits >> 3; acc >>= bits & ~7; bits &= 7;
+                        if (i == 0) break;
+                        // transitions into sequence i's states, read as: literal length, match length, offset
+                        int sym = of[i - 1];
+                        int n = (int)((sOf + (uint)ofDb[sym]) >> 16);
+                        acc |= (ulong)(sOf & ((1u << n) - 1)) << bits; bits += n;
+                        sOf = ofS[(int)(sOf >> n) + ofDs[sym]];
+                        sym = ml[i - 1];
+                        n = (int)((sMl + (uint)mlDb[sym]) >> 16);
+                        acc |= (ulong)(sMl & ((1u << n) - 1)) << bits; bits += n;
+                        sMl = mlS[(int)(sMl >> n) + mlDs[sym]];
+                        sym = ll[i - 1];
+                        n = (int)((sLl + (uint)llDb[sym]) >> 16);
+                        acc |= (ulong)(sLl & ((1u << n) - 1)) << bits; bits += n;
+                        sLl = llS[(int)(sLl >> n) + llDs[sym]];
+                        Unsafe.WriteUnaligned(o, acc); o += bits >> 3; acc >>= bits & ~7; bits &= 7;
+                    }
+                    acc |= (ulong)(sMl - (1u << mlTable.Log)) << bits; bits += mlTable.Log;
+                    acc |= (ulong)(sOf - (1u << ofTable.Log)) << bits; bits += ofTable.Log;
+                    acc |= (ulong)(sLl - (1u << llTable.Log)) << bits; bits += llTable.Log;
+                    acc |= 1UL << bits; bits++; // end mark
+                    Unsafe.WriteUnaligned(o, acc);
+                    o += (bits + 7) >> 3;
                 }
-                w.Put(sMl - (1u << mlTable.Log), mlTable.Log);
-                w.Put(sOf - (1u << ofTable.Log), ofTable.Log);
-                w.Put(sLl - (1u << llTable.Log), llTable.Log);
-                w.Finish();
-                if (w.Overflow) return -1;
-                o = w.Pos;
             }
             return (int)(o - dst);
         }
 
         // ------------------------------------------------------------------------------------------ blocks
 
+        // hash of the next hashBytes (5..7) bytes / of the next 8 bytes
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static uint Hash(byte* p) => (uint)(((Unsafe.ReadUnaligned<ulong>(p) << 24) * 0x9E3779B185EBCA87UL) >> (64 - HashLog));
+        static uint Hash(byte* p, int shiftIn, int shiftOut) => (uint)(((Unsafe.ReadUnaligned<ulong>(p) << shiftIn) * 0x9E3779B185EBCA87UL) >> shiftOut);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static uint Hash8(byte* p, int shiftOut) => (uint)((Unsafe.ReadUnaligned<ulong>(p) * 0x9E3779B185EBCA87UL) >> shiftOut);
 
         static int MatchLength(byte* a, byte* b, byte* end)
         {
@@ -528,51 +595,88 @@ namespace PixCodec.Compression
         }
 
         /// <summary>
-        /// Compresses src[start, start + length) (history: everything before start within the window) into dst.
-        /// Returns the size, or 0 when the block is better stored raw.
+        /// Greedy block compressor of the fast levels: one hash table over hashBytes bytes (so only matches of at
+        /// least that length are looked for, which keeps noisy data fast), optionally a second one over 8 bytes that
+        /// is tried first, and the previous offset checked one byte ahead. Compresses src[start, start + length)
+        /// (history: everything before within the window) into dst; returns the size, or 0 for "store it raw".
         /// </summary>
         int CompressBlock(byte* src, int start, int length, int window, byte* dst, int capacity)
         {
             int nseq = 0, nlit = 0;
             uint rep = this.rep;
-            fixed (int* ht = hash)
+            int hashBytes = this.hashBytes, shiftIn = 64 - 8 * hashBytes;
+            bool useLong = this.useLong;
+            int hashShift = this.hashShift, longShift = this.longShift;
+            fixed (int* ht = hash, lt = longHash)
             fixed (Seq* sq = seqs)
             fixed (byte* lit = lits)
             {
                 byte* end = src + start + length;
-                byte* limit = end - 8; // the hash reads eight bytes
+                byte* limit = end - 9; // hashing reads eight bytes, also one position ahead
                 byte* p = src + start, anchor = p;
-                int misses = 0;
                 while (p < limit)
                 {
                     int matchLen = 0;
                     uint offset = 0;
-                    // the previous offset again? (cheap to code)
-                    if (p - src >= rep && p > anchor && Unsafe.ReadUnaligned<uint>(p) == Unsafe.ReadUnaligned<uint>(p - rep))
+                    int pos = (int)(p - src);
+                    // the previous offset again, one byte ahead? (cheap to code and usually the longest)
+                    if ((uint)pos + 1 >= rep && Unsafe.ReadUnaligned<uint>(p + 1) == Unsafe.ReadUnaligned<uint>(p + 1 - rep))
                     {
+                        p++;
                         matchLen = 4 + MatchLength(p - rep + 4, p + 4, end);
                         offset = rep;
                     }
-                    uint h = Hash(p);
-                    int cand = ht[h];
-                    ht[h] = (int)(p - src);
-                    if (matchLen == 0)
+                    else
                     {
-                        long dist = p - src - cand;
-                        if (dist > 0 && dist <= window && Unsafe.ReadUnaligned<uint>(src + cand) == Unsafe.ReadUnaligned<uint>(p))
+                        uint h = Hash(p, shiftIn, hashShift);
+                        int cand = ht[h];
+                        ht[h] = pos;
+                        if (useLong)
                         {
-                            matchLen = 4 + MatchLength(src + cand + 4, p + 4, end);
-                            offset = (uint)dist;
-                            // grow backwards over literals that also match
-                            while (p > anchor && src + cand > src && p[-1] == p[-1 - (long)dist]) { p--; cand--; matchLen++; }
+                            uint hl = Hash8(p, longShift);
+                            int candLong = lt[hl];
+                            lt[hl] = pos;
+                            long distLong = (long)pos - candLong;
+                            if (distLong > 0 && distLong <= window && Unsafe.ReadUnaligned<ulong>(src + candLong) == Unsafe.ReadUnaligned<ulong>(p))
+                            {
+                                matchLen = 8 + MatchLength(src + candLong + 8, p + 8, end);
+                                offset = (uint)distLong;
+                            }
                         }
+                        if (matchLen == 0)
+                        {
+                            long dist = (long)pos - cand;
+                            if (dist > 0 && dist <= window && Unsafe.ReadUnaligned<uint>(src + cand) == Unsafe.ReadUnaligned<uint>(p))
+                            {
+                                int n = 4 + MatchLength(src + cand + 4, p + 4, end);
+                                if (n >= hashBytes)
+                                {
+                                    matchLen = n; offset = (uint)dist;
+                                    if (useLong)
+                                    {
+                                        // a long match starting one byte later is usually the better deal
+                                        uint h1 = Hash8(p + 1, longShift);
+                                        int c1 = lt[h1];
+                                        lt[h1] = pos + 1;
+                                        long d1 = (long)pos + 1 - c1;
+                                        if (d1 > 0 && d1 <= window && Unsafe.ReadUnaligned<ulong>(src + c1) == Unsafe.ReadUnaligned<ulong>(p + 1))
+                                        {
+                                            int n1 = 8 + MatchLength(src + c1 + 8, p + 9, end);
+                                            if (n1 > n) { p++; matchLen = n1; offset = (uint)d1; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (matchLen == 0)
+                        {
+                            // the longer nothing matches, the bigger the steps
+                            p += 1 + ((p - anchor) >> 7);
+                            continue;
+                        }
+                        // grow backwards over literals that also match
+                        while (p > anchor && p - src > offset && p[-1] == p[-1 - (long)offset]) { p--; matchLen++; }
                     }
-                    if (matchLen == 0)
-                    {
-                        p += 1 + (misses++ >> 6);
-                        continue;
-                    }
-                    misses = 0;
                     int litLen = (int)(p - anchor);
                     Buffer.MemoryCopy(anchor, lit + nlit, litLen, litLen);
                     nlit += litLen;
@@ -582,10 +686,14 @@ namespace PixCodec.Compression
                     sq[nseq].OffValue = offset == rep && litLen != 0 ? 1 : offset + 3;
                     nseq++;
                     rep = offset;
-                    // index a couple of positions inside the match
+                    // index two positions inside the match
                     byte* q = p + matchLen - 2;
-                    if (q < limit && q > p) ht[Hash(q)] = (int)(q - src);
-                    if (p + 1 < limit) ht[Hash(p + 1)] = (int)(p + 1 - src);
+                    if (q < limit && q > p)
+                    {
+                        ht[Hash(q, shiftIn, hashShift)] = (int)(q - src);
+                        if (useLong) lt[Hash8(q - 1, longShift)] = (int)(q - 1 - src);
+                    }
+                    if (p + 2 < limit) ht[Hash(p + 2, shiftIn, hashShift)] = (int)(p + 2 - src);
                     p += matchLen;
                     anchor = p;
                 }
@@ -602,37 +710,373 @@ namespace PixCodec.Compression
             }
         }
 
-        // The repeat offset rule has one more twist the block coder must respect: an "offset value" of 1 with a
-        // literal length of zero means the *second* most recent offset. CompressBlock never emits 1 in that case.
+        // ------------------------------------------------------------------------- lazy parsing (levels >= 2)
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        uint ChainHash(byte* p) => (uint)(((Unsafe.ReadUnaligned<ulong>(p) << 24) * 0x9E3779B185EBCA87UL) >> (64 - chainHashLog)); // five bytes
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        void ChainInsert(byte* src, int pos)
+        {
+            uint h = ChainHash(src + pos);
+            chain[pos & chainMask] = chainHead[h];
+            chainHead[h] = pos;
+        }
+
+        /// <summary>
+        /// Best match at p: the repeat offsets usable with this literal run (cheap to code, so they get a bonus)
+        /// and the hash chain. Returns the score (0 = nothing); the position is entered into the chain.
+        /// </summary>
+        int BestMatch(byte* src, byte* p, byte* end, int window, int depth, int litLen, uint r0, uint r1, uint r2, out int length, out uint offset)
+        {
+            length = 0; offset = 0;
+            int score = 0;
+            int pos = (int)(p - src);
+            uint first = Unsafe.ReadUnaligned<uint>(p);
+            // which offsets have a short code depends on whether literals precede the match
+            for (int k = 0; k < 3; k++)
+            {
+                uint r = litLen != 0 ? (k == 0 ? r0 : k == 1 ? r1 : r2) : (k == 0 ? r1 : k == 1 ? r2 : r0 - 1);
+                if (r == 0 || r > (uint)pos || r > (uint)window) continue;
+                if (((Unsafe.ReadUnaligned<uint>(p - r) ^ first) & 0xFFFFFF) != 0) continue;
+                int n = 3 + MatchLength(p - r + 3, p + 3, end);
+                int sc = n * 4 + 4 - k;
+                if (sc > score) { score = sc; length = n; offset = r; }
+            }
+            uint h = ChainHash(p);
+            int cand = chainHead[h];
+            chain[pos & chainMask] = cand;
+            chainHead[h] = pos;
+            int low = Math.Max(0, pos - Math.Min(window, chainMask));
+            for (int steps = depth; cand >= low && steps > 0 && p + length < end; steps--)
+            {
+                byte* c = src + cand;
+                if (Unsafe.ReadUnaligned<uint>(c) == first && c[length] == p[length])
+                {
+                    int n = 4 + MatchLength(c + 4, p + 4, end);
+                    int sc = n * 4 - BitOperations.Log2((uint)(pos - cand) + 1);
+                    if (sc > score) { score = sc; length = n; offset = (uint)(pos - cand); }
+                }
+                int next = chain[cand & chainMask];
+                if (next >= cand) break;
+                cand = next;
+            }
+            return score;
+        }
+
+        // would the bytes of a short match be cheaper as literals? (decisive on noisy image data)
+        bool LiteralsCheaper(byte* p, int length, uint offset, bool isRep)
+        {
+            if (length > 8) return false;
+            int cost = isRep ? 7 : 13 + BitOperations.Log2(offset + 3);
+            int lit = 0;
+            for (int i = 0; i < length; i++) lit += litCost[p[i]];
+            return lit <= cost;
+        }
+
+        int CompressBlockLazy(byte* src, int start, int length, int window, byte* dst, int capacity)
+        {
+            int nseq = 0, nlit = 0;
+            uint r0 = rep0, r1 = rep1, r2 = rep2;
+            fixed (Seq* sq = seqs)
+            fixed (byte* lit = lits)
+            {
+                byte* end = src + start + length;
+                byte* limit = end - 8;
+                byte* p = src + start, anchor = p;
+                int misses = 0;
+                while (p < limit)
+                {
+                    int litLen = (int)(p - anchor);
+                    // the search budget shrinks while nothing useful is found (noisy data), and recovers at once
+                    int depth = Math.Max(searchDepth >> Math.Min(misses >> 5, 4), 2);
+                    int score = BestMatch(src, p, end, window, depth, litLen, r0, r1, r2, out int matchLen, out uint offset);
+                    if (score != 0 && LiteralsCheaper(p, matchLen, offset, IsRep(offset, litLen, r0, r1, r2))) score = 0;
+                    if (score == 0)
+                    {
+                        // step faster through stretches without matches
+                        int step = 1 + (misses++ >> 7);
+                        for (byte* q = p + 1; q < p + step && q < limit; q++) ChainInsert(src, (int)(q - src));
+                        p += step;
+                        continue;
+                    }
+                    misses = 0;
+                    // lazy evaluation: a clearly better match one or two bytes later wins
+                    int inserted = (int)(p - src);
+                    for (int ahead = 1; ahead <= lazySteps && p + ahead < limit; ahead++)
+                    {
+                        byte* q = p + ahead;
+                        inserted = (int)(q - src);
+                        int s2 = BestMatch(src, q, end, window, depth, litLen + ahead, r0, r1, r2, out int len2, out uint off2);
+                        if (s2 > score + (ahead == 1 ? 4 : 7) && !LiteralsCheaper(q, len2, off2, IsRep(off2, litLen + ahead, r0, r1, r2)))
+                        {
+                            p = q; litLen += ahead; score = s2; matchLen = len2; offset = off2;
+                            ahead = 0;
+                        }
+                    }
+                    // grow backwards over literals that also match
+                    while (p > anchor && p - src > offset && p[-1] == p[-1 - (long)offset]) { p--; matchLen++; litLen--; }
+
+                    Buffer.MemoryCopy(anchor, lit + nlit, litLen, litLen);
+                    nlit += litLen;
+                    sq[nseq].LitLen = litLen;
+                    sq[nseq].MatchLen = matchLen;
+                    // offset value and repeat offset history, exactly as the decoder will replay it
+                    uint value;
+                    if (litLen != 0)
+                    {
+                        if (offset == r0) value = 1;
+                        else if (offset == r1) { value = 2; r1 = r0; r0 = offset; }
+                        else if (offset == r2) { value = 3; r2 = r1; r1 = r0; r0 = offset; }
+                        else { value = offset + 3; r2 = r1; r1 = r0; r0 = offset; }
+                    }
+                    else
+                    {
+                        if (offset == r1) { value = 1; r1 = r0; r0 = offset; }
+                        else if (offset == r2) { value = 2; r2 = r1; r1 = r0; r0 = offset; }
+                        else if (offset == r0 - 1) { value = 3; r2 = r1; r1 = r0; r0 = offset; }
+                        else { value = offset + 3; r2 = r1; r1 = r0; r0 = offset; }
+                    }
+                    sq[nseq].OffValue = value;
+                    nseq++;
+                    byte* stop = p + matchLen < limit ? p + matchLen : limit;
+                    for (byte* q = src + inserted + 1; q < stop; q++) ChainInsert(src, (int)(q - src));
+                    p += matchLen;
+                    anchor = p;
+                }
+                int tail = (int)(end - anchor);
+                Buffer.MemoryCopy(anchor, lit + nlit, tail, tail);
+                nlit += tail;
+
+                byte* dstEnd = dst + capacity;
+                int a = EncodeLiterals(lit, nlit, dst, dstEnd - capacity / 2);
+                int b = EncodeSequences(nseq, dst + a, dstEnd);
+                if (b < 0 || a + b >= length) return 0;
+                rep0 = r0; rep1 = r1; rep2 = r2;
+                return a + b;
+            }
+        }
+
+        // ---------------------------------------------------------- price based parsing (levels >= 16)
+
+        int[] optPrice = Array.Empty<int>(), optLen = Array.Empty<int>();
+        uint[] optOff = Array.Empty<uint>(), optRep = Array.Empty<uint>();
+
+        // bits (x8) to code a match of this length: its length code's extra bits plus a typical code cost
+        static int MatchLengthPrice(int len) => 8 * (MlBits[len < 131 ? MlCodeSmall[len] : BitOperations.Log2((uint)len - 3) + 36] + 5);
+
+        /// <summary>
+        /// Chooses the sequence of literals and matches with the lowest estimated cost for the whole block (a
+        /// shortest path over positions; prices come from the last block's literal code and from the size of the
+        /// offsets), instead of deciding match by match.
+        /// </summary>
+        int CompressBlockOptimal(byte* src, int start, int length, int window, byte* dst, int capacity)
+        {
+            if (optPrice.Length < BlockSize + 1)
+            {
+                optPrice = new int[BlockSize + 1]; optLen = new int[BlockSize + 1];
+                optOff = new uint[BlockSize + 1]; optRep = new uint[BlockSize + 1];
+            }
+            const int Sufficient = 256; // a match this long is taken without looking for alternatives
+            int nseq = 0, nlit = 0;
+            fixed (int* price = optPrice, mlen = optLen)
+            fixed (uint* moff = optOff, mrep = optRep)
+            fixed (byte* lc = litCost)
+            fixed (Seq* sq = seqs)
+            fixed (byte* lit = lits)
+            {
+                byte* baseP = src + start;
+                int searchEnd = length - 8; // positions that can be hashed
+                for (int i = 1; i <= length; i++) price[i] = int.MaxValue;
+                price[0] = 0; mlen[0] = 0; mrep[0] = rep0;
+                byte* end = baseP + length;
+                for (int i = 0; i < length; i++)
+                {
+                    int here = price[i];
+                    // a literal
+                    int pl = here + 8 * lc[baseP[i]];
+                    if (pl < price[i + 1]) { price[i + 1] = pl; mlen[i + 1] = 0; mrep[i + 1] = mrep[i]; }
+                    if (i >= searchEnd) continue;
+                    byte* p = baseP + i;
+                    int pos = start + i;
+                    uint first = Unsafe.ReadUnaligned<uint>(p);
+                    int covered = 2; // lengths up to this are already priced with a nearer offset
+                    int seqBase = here + 8 * 3; // a new sequence: its literal length code
+                    // the offset of the path's last match again
+                    uint r = mrep[i];
+                    if (r != 0 && r <= (uint)pos && ((Unsafe.ReadUnaligned<uint>(p - r) ^ first) & 0xFFFFFF) == 0)
+                    {
+                        int n = 3 + MatchLength(p - r + 3, p + 3, end);
+                        int from = n >= Sufficient ? n : 3;
+                        for (int l = from; l <= n; l++)
+                        {
+                            int c = seqBase + 8 * 2 + MatchLengthPrice(l);
+                            if (c < price[i + l]) { price[i + l] = c; mlen[i + l] = l; moff[i + l] = r; mrep[i + l] = r; }
+                        }
+                        covered = n;
+                    }
+                    uint h = ChainHash(p);
+                    int cand = chainHead[h];
+                    chain[pos & chainMask] = cand;
+                    chainHead[h] = pos;
+                    int low = Math.Max(0, pos - Math.Min(window, chainMask));
+                    for (int steps = searchDepth; cand >= low && steps > 0 && covered < length - i; steps--)
+                    {
+                        byte* c = src + cand;
+                        if (Unsafe.ReadUnaligned<uint>(c) == first && c[covered] == p[covered])
+                        {
+                            int n = 4 + MatchLength(c + 4, p + 4, end);
+                            if (n > covered)
+                            {
+                                uint off = (uint)(pos - cand);
+                                int offPrice = seqBase + 8 * (BitOperations.Log2(off + 3) + 6);
+                                int from = n >= Sufficient ? n : Math.Max(covered + 1, 4);
+                                for (int l = from; l <= n; l++)
+                                {
+                                    int cst = offPrice + MatchLengthPrice(l);
+                                    if (cst < price[i + l]) { price[i + l] = cst; mlen[i + l] = l; moff[i + l] = off; mrep[i + l] = off; }
+                                }
+                                covered = n;
+                            }
+                        }
+                        int next = chain[cand & chainMask];
+                        if (next >= cand) break;
+                        cand = next;
+                    }
+                    if (covered >= Sufficient)
+                    {
+                        // jump over the long match (its end is priced through this position only)
+                        int stop = Math.Min(i + covered, searchEnd);
+                        for (int q = i + 1; q < stop; q++) { ChainInsert(src, start + q); price[q] = int.MaxValue - (1 << 28); }
+                        i += covered - 1;
+                    }
+                }
+                // walk the cheapest path backwards, then emit it front to back
+                int count = 0;
+                for (int i = length; i > 0;)
+                {
+                    int l = mlen[i];
+                    if (l == 0) { i--; continue; }
+                    optStack[count++] = (i - l, l, moff[i]);
+                    i -= l;
+                }
+                uint r0 = rep0, r1 = rep1, r2 = rep2;
+                int anchor = 0;
+                for (int k = count - 1; k >= 0; k--)
+                {
+                    var (at, matchLen, offset) = optStack[k];
+                    int litLen = at - anchor;
+                    Buffer.MemoryCopy(baseP + anchor, lit + nlit, litLen, litLen);
+                    nlit += litLen;
+                    sq[nseq].LitLen = litLen;
+                    sq[nseq].MatchLen = matchLen;
+                    sq[nseq].OffValue = OffsetValue(offset, litLen, ref r0, ref r1, ref r2);
+                    nseq++;
+                    anchor = at + matchLen;
+                }
+                int tail = length - anchor;
+                Buffer.MemoryCopy(baseP + anchor, lit + nlit, tail, tail);
+                nlit += tail;
+
+                byte* dstEnd = dst + capacity;
+                int a = EncodeLiterals(lit, nlit, dst, dstEnd - capacity / 2);
+                int b = EncodeSequences(nseq, dst + a, dstEnd);
+                if (b < 0 || a + b >= length) return 0;
+                rep0 = r0; rep1 = r1; rep2 = r2;
+                return a + b;
+            }
+        }
+
+        readonly (int at, int len, uint off)[] optStack = new (int, int, uint)[BlockSize / 3 + 8];
+
+        // offset value for the sequence, and the repeat offset history exactly as the decoder will replay it
+        static uint OffsetValue(uint offset, int litLen, ref uint r0, ref uint r1, ref uint r2)
+        {
+            uint value;
+            if (litLen != 0)
+            {
+                if (offset == r0) return 1;
+                if (offset == r1) { value = 2; r1 = r0; r0 = offset; return value; }
+                value = offset == r2 ? 3 : offset + 3;
+            }
+            else
+            {
+                if (offset == r1) { r1 = r0; r0 = offset; return 1; }
+                value = offset == r2 ? 2 : offset == r0 - 1 ? 3 : offset + 3;
+            }
+            r2 = r1; r1 = r0; r0 = offset;
+            return value;
+        }
+
+        static bool IsRep(uint offset, int litLen, uint r0, uint r1, uint r2)
+            => litLen != 0 ? offset == r0 || offset == r1 || offset == r2 : offset == r1 || offset == r2 || offset == r0 - 1;
 
         [ThreadStatic] static ZstdEncoder? cached;
 
-        public static byte[] Compress(ReadOnlySpan<byte> source, bool checksum) => (cached ??= new ZstdEncoder()).Run(source, checksum);
+        public static byte[] Compress(ReadOnlySpan<byte> source, int level, bool checksum) => (cached ??= new ZstdEncoder()).Run(source, level, checksum);
 
-        byte[] Run(ReadOnlySpan<byte> source, bool checksum)
+        byte[] Run(ReadOnlySpan<byte> source, int level, bool checksum)
         {
+            // the output grows as needed: compressible input near 2 GB must not need a 2 GB buffer up front
             long bound = 18L + source.Length + 3L * (source.Length / BlockSize + 1) + 4;
-            if (bound > Array.MaxLength) throw new ArgumentException("input too large", nameof(source));
-            var output = new byte[bound];
+            var output = new byte[Math.Min(bound, Math.Max(source.Length / 2 + 4096, 4 * BlockSize))];
             int o = 0;
             BinaryPrimitives.WriteUInt32LittleEndian(output, 0xFD2FB528);
             o = 4;
+            // level -> search effort and window
+            // 1, 2: one hash (6 / 5 bytes); 3: two hashes (5 and 8 bytes); 4 and up: hash chains with lazy matching
+            bool fast = level <= 3;
+            hashBytes = level <= 2 ? 6 : 5;
+            useLong = level == 3;
+            // small tables and windows keep the fast levels inside the CPU caches
+            int maxWindowLog = level <= 1 ? 19 : level <= 3 ? 21 : level <= 5 ? 23 : level <= 12 ? 25 : 27;
+            hashShift = 64 - (level <= 1 ? 14 : level == 2 ? 16 : 17);
+            longShift = 64 - MaxHashLog;
+            searchDepth = level <= 4 ? 4 : level == 5 ? 8 : level == 6 ? 16 : level <= 8 ? 32 : level <= 12 ? 64 : level <= 17 ? 128 : 512;
+            lazySteps = level <= 6 ? 1 : 2;
             // window descriptor + 8 byte content size; no dictionary id
-            int windowLog = Math.Clamp(source.Length <= 1 ? 10 : BitOperations.Log2((uint)source.Length - 1) + 1, 10, MaxWindowLog);
+            int windowLog = Math.Clamp(source.Length <= 1 ? 10 : BitOperations.Log2((uint)source.Length - 1) + 1, 10, maxWindowLog);
             int window = 1 << windowLog;
             output[o++] = (byte)(0xC0 | (checksum ? 0x04 : 0));
             output[o++] = (byte)((windowLog - 10) << 3);
             BinaryPrimitives.WriteUInt64LittleEndian(output.AsSpan(o), (ulong)source.Length);
             o += 8;
 
-            hash.AsSpan().Fill(int.MinValue / 2);
-            rep = 1;
-            fixed (byte* src = source, wk = work, dst = output)
+            if (fast)
+            {
+                hash.AsSpan().Fill(int.MinValue / 2);
+                if (useLong)
+                {
+                    if (longHash.Length == 0) longHash = new int[1 << MaxHashLog];
+                    longHash.AsSpan().Fill(int.MinValue / 2);
+                }
+            }
+            else
+            {
+                // tables sized to the input: a small strip should not pay for megabytes of tables
+                chainHashLog = Math.Clamp(windowLog, 12, level <= 5 ? 17 : 20);
+                int chainSize = 1 << Math.Min(windowLog, level <= 5 ? 20 : level <= 12 ? 22 : 24);
+                if (chainHead.Length != 1 << chainHashLog) chainHead = new int[1 << chainHashLog];
+                if (chain.Length != chainSize) chain = new int[chainSize];
+                chainMask = chainSize - 1;
+                chainHead.AsSpan().Fill(-1);
+            }
+            litCost.AsSpan().Fill(8);
+            rep = 1; rep0 = 1; rep1 = 4; rep2 = 8;
+            fixed (byte* src = source, wk = work)
             {
                 int pos = 0;
                 do
                 {
                     int n = Math.Min(BlockSize, source.Length - pos);
+                    if (output.Length - o < n + 16)
+                    {
+                        long want = Math.Min(Math.Max((long)output.Length * 2, (long)o + n + 16), Array.MaxLength);
+                        if (want - o < n + 16) throw new System.IO.IOException("compressed output too large");
+                        Array.Resize(ref output, (int)want);
+                    }
+                    fixed (byte* dst = output)
+                    {
                     bool last = pos + n == source.Length;
                     int type, size, payload;
                     bool same = n > 0;
@@ -645,7 +1089,8 @@ namespace PixCodec.Compression
                     }
                     else
                     {
-                        int c = n >= 16 ? CompressBlock(src, pos, n, window, wk, WorkSize) : 0;
+                        int c = n < 16 ? 0 : fast ? CompressBlock(src, pos, n, window, wk, WorkSize)
+                            : level >= 16 ? CompressBlockOptimal(src, pos, n, window, wk, WorkSize) : CompressBlockLazy(src, pos, n, window, wk, WorkSize);
                         if (c > 0)
                         {
                             type = 2; size = c; payload = c;
@@ -661,10 +1106,12 @@ namespace PixCodec.Compression
                     dst[o] = (byte)header; dst[o + 1] = (byte)(header >> 8); dst[o + 2] = (byte)(header >> 16);
                     o += 3 + payload;
                     pos += n;
+                    }
                 } while (pos < source.Length);
             }
             if (checksum)
             {
+                if (output.Length - o < 4) Array.Resize(ref output, o + 4);
                 BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(o), (uint)Checksums.XxHash64(source));
                 o += 4;
             }

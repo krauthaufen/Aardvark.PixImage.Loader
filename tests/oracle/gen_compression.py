@@ -362,7 +362,6 @@ def gen_zlib(s):
         write("%s__raw.deflate" % name, zl(d, 6, wbits=-15))
     for lv in (2, 3, 4, 5, 7, 8):
         write("text__l%d.zlib" % lv, zl(s["text"], lv))
-    write("big__mem9.zlib", zl(s["big"], 9, mem=9))
     # flushes: empty stored blocks, byte aligned restarts, history resets
     d = s["text"]
     c = zlib.compressobj(6)
@@ -391,6 +390,8 @@ def gen_zstd(s):
     for fast in (1, 3, 10, 50):
         write("mix__fast%d.zst" % fast, zstd_cli(mix, "--fast=%d" % fast))
     for name, data in s.items():
+        if name == "far":  # a deflate window test; the long distance zstd test generates its data at run time
+            continue
         write("%s__l3.zst" % name, zstd_cli(data, "-3"))
         if name not in ("big", "far"):
             write("%s__l3check.zst" % name, zstd_cli(data, "-3", "--check"))
@@ -400,7 +401,6 @@ def gen_zstd(s):
     write("big__long.zst", zstd_cli(big, "-12", "--long=27", "--check"))
     write("big__w10.zst", zstd_cli(big, "-5", "--zstd=wlog=10"))  # smallest window: 1 KiB blocks
     write("text__nolit.zst", zstd_cli(s["text"], "-3", "--no-compress-literals"))
-    write("far__long.zst", zstd_cli(s["far"], "-19", "--long=27"))
     # a file argument stores the content size in the header and "single segment" for small inputs; stdin does not
     tmp = os.path.join(OUT, "_tmp.bin")
     for name in ("text", "one", "empty", "big", "zeros"):
@@ -422,9 +422,105 @@ def gen_zstd(s):
     write("xxlens__multi.zst", b"".join(zstd_cli(t[:n], "-1", "--check") for n in range(0, 101)))
 
 
+def gen_zstd_dict(s):
+    """Dictionaries: one trained by zstd (structured: entropy tables + content) and one of plain content."""
+    import shutil
+    import tempfile
+    r = rng(77)
+
+    def record(i):
+        fields = ["id", "name", "width", "height", "channels", "codec", "created", "tags"]
+        vals = [str(i * 7919 % 100000), WORDS[r.randint(len(WORDS))] + "_" + WORDS[r.randint(len(WORDS))], str(r.randint(8000)), str(r.randint(8000)),
+                str(r.randint(1, 5)), ["png", "jpeg", "tiff", "exr", "gif"][r.randint(5)], "2026-%02d-%02dT%02d:%02d" % (r.randint(1, 13), r.randint(1, 29), r.randint(24), r.randint(60)),
+                "[" + ",".join('"%s"' % WORDS[r.randint(len(WORDS))] for _ in range(r.randint(1, 6))) + "]"]
+        return ("{" + ",".join('"%s":"%s"' % kv for kv in zip(fields, vals)) + "}\n").encode()
+
+    tmp = tempfile.mkdtemp(dir=OUT)
+    try:
+        names = []
+        for i in range(600):
+            n = os.path.join(tmp, "s%04d" % i)
+            with open(n, "wb") as f:
+                f.write(b"".join(record(i * 3 + k) for k in range(1 + r.randint(4))))
+            names.append(n)
+        trained = os.path.join(tmp, "trained")
+        subprocess.run(["zstd", "-q", "--train", "--maxdict=3000", "-o", trained] + names, check=True)
+        write("trained.zdict", open(trained, "rb").read())
+        rawdict = os.path.join(tmp, "raw")
+        with open(rawdict, "wb") as f:
+            f.write(b"".join(record(900000 + k) for k in range(25)))
+        write("rawcontent.zdict", open(rawdict, "rb").read())
+        small = b"".join(record(5000 + k) for k in range(3))
+        large = b"".join(record(7000 + k) for k in range(900))  # several blocks: the dictionary tables only start it off
+        write("dictsmall.bin", small)
+        write("dictlarge.bin", large)
+        for name, data in (("dictsmall", small), ("dictlarge", large)):
+            for tag, d in (("trained", trained), ("rawcontent", rawdict)):
+                for lv in (("1", "3", "19") if name == "dictsmall" else ("3",) if tag == "rawcontent" else ("1", "19")):
+                    write("%s__%s_l%s.zstd" % (name, tag, lv), subprocess.run(["zstd", "-q", "-c", "-" + lv, "--check", "-D", d], input=data, stdout=subprocess.PIPE, check=True).stdout)
+            if name == "dictsmall":
+                write("%s__trained_noid.zstd" % name, subprocess.run(["zstd", "-q", "-c", "-5", "--no-dictID", "-D", trained], input=data, stdout=subprocess.PIPE, check=True).stdout)
+    finally:
+        shutil.rmtree(tmp)
+
+
+def bcj_data():
+    """Bytes that make every BCJ filter convert something: branch instructions of all architectures between noise."""
+    r = rng(42)
+    out = bytearray()
+
+    def le(v):
+        return struct.pack("<I", v & 0xFFFFFFFF)
+
+    def be(v):
+        return struct.pack(">I", v & 0xFFFFFFFF)
+
+    while len(out) < 5000:
+        k = r.randint(13)
+        if 5 <= k <= 10 and r.randint(4):  # usually aligned as real code is
+            out += r.bytes(-len(out) % (16 if k == 10 else 4))
+        if k < 3:
+            out += r.bytes(r.randint(1, 40))
+        elif k == 3:  # x86 call/jmp, sometimes back to back or cut short
+            for _ in range(r.randint(1, 4)):
+                out += bytes([0xE8 if r.randint(2) else 0xE9]) + le(int(r.randint(-70000, 70000)))[:(4 if r.randint(5) else r.randint(1, 4))]
+        elif k == 4:
+            out += bytes([0xE8, 0xE8, 0xE9, 0, 0, 0xFF, 0xFF, 0xE8, 0xFF, 0xFF, 0xFF])[:r.randint(3, 12)]
+        elif k == 5:  # ARM bl
+            out += le(0xEB000000 | r.randint(1 << 24))
+        elif k == 6:  # ARM64 bl, adrp
+            out += le(0x94000000 | r.randint(1 << 26)) + le(0x90000000 | (r.randint(4) << 29) | r.randint(1 << 24))
+        elif k == 7:  # PowerPC bl
+            out += be(0x48000001 | (r.randint(1 << 24) << 2))
+        elif k == 8:  # SPARC call
+            out += be((0x40000000 if r.randint(2) else 0x7FC00000) | r.randint(1 << 22))
+        elif k == 9:  # Thumb bl
+            out += bytes([r.randint(256), 0xF0 | r.randint(8), r.randint(256), 0xF8 | r.randint(8)])
+        elif k == 10:  # IA-64 bundle with branch slots
+            b = bytearray(r.bytes(16))
+            b[0] = (b[0] & 0xE0) | [0x10, 0x11, 0x12, 0x13, 0x16, 0x17, 0x18, 0x19, 0x1C, 0x1D][r.randint(10)]
+            v = int.from_bytes(b, "little")
+            for slot in range(3):
+                pos = 5 + 41 * slot
+                if r.randint(3):
+                    v &= ~(0xF << (pos + 37))
+                    v |= 5 << (pos + 37)
+                    v &= ~(7 << (pos + 9))
+            out += v.to_bytes(16, "little")
+        elif k == 11:  # RISC-V jal and auipc pairs
+            out += le(0x6F | ([1, 5, 0, 3][r.randint(4)] << 7) | (r.randint(1 << 20) << 12))
+            rd = r.randint(0, 32)
+            out += le(0x17 | (rd << 7) | (r.randint(1 << 20) << 12))
+            out += le([0x67, 0x13, 0x03, 0x23, 0x01][r.randint(5)] | (r.randint(32) << 7) | (r.randint(8) << 12) | ((rd if r.randint(4) else r.randint(32)) << 15) | (r.randint(1 << 12) << 20))
+        else:  # input that already looks like the RISC-V filter's marker word
+            out += le(0x3117 | (r.randint(1 << 18) << 14)) + r.bytes(4)
+    return bytes(out[:5000])
+
+
 def gen_xz(s):
     for name, data in s.items():
-        write("%s__p6.xz" % name, lzma.compress(data, lzma.FORMAT_XZ, lzma.CHECK_CRC64, 6))
+        if name != "far":
+            write("%s__p6.xz" % name, lzma.compress(data, lzma.FORMAT_XZ, lzma.CHECK_CRC64, 6))
     d = s["text"]
     for check, tag in ((lzma.CHECK_NONE, "none"), (lzma.CHECK_CRC32, "crc32"), (lzma.CHECK_SHA256, "sha256")):
         write("text__%s.xz" % tag, lzma.compress(d, lzma.FORMAT_XZ, check, 3))
@@ -461,9 +557,15 @@ def gen_xz(s):
         + lzma.compress(parts[3], lzma.FORMAT_XZ, lzma.CHECK_CRC64, filters=[{"id": lzma.FILTER_DELTA, "dist": 3}, {"id": lzma.FILTER_LZMA2, "preset": 9}]) \
         + lzma.compress(parts[4], lzma.FORMAT_XZ, lzma.CHECK_CRC32, 0) + bytes(12)
     write("streams__multi.xz", multi)
-    # an x86 BCJ filter in the chain: valid, but not supported by the decoder
+    # BCJ filters: machine code flavoured data for every architecture (see bcj_data), with and without a start offset
     f = [{"id": lzma.FILTER_X86}, {"id": lzma.FILTER_LZMA2, "preset": 1}]
-    write("text__bcj.xz.unsupported", lzma.compress(s["text"][:2000], lzma.FORMAT_XZ, lzma.CHECK_CRC32, filters=f))
+    write("text__x86.xz", lzma.compress(s["text"], lzma.FORMAT_XZ, lzma.CHECK_CRC32, filters=f))
+    code = bcj_data()
+    write("bcj.bin", code)
+    for name, align in (("x86", 1), ("powerpc", 4), ("ia64", 16), ("arm", 4), ("armthumb", 2), ("sparc", 4), ("arm64", 4), ("riscv", 2)):
+        write("bcj__%s.xz" % name, subprocess.run(["xz", "-c", "--" + name, "--lzma2=preset=1"], input=code, stdout=subprocess.PIPE, check=True).stdout)
+        write("bcj__%s_start.xz" % name, subprocess.run(["xz", "-c", "--%s=start=%d" % (name, align * 4099 * 16), "--delta=dist=2", "--lzma2=preset=0"],
+                                                         input=code, stdout=subprocess.PIPE, check=True).stdout)
     # legacy .lzma: liblzma writes "unknown size + end marker"; the patched copies declare the size instead
     for name in ("text", "image", "big", "one", "empty", "random", "zeros"):
         z = lzma.compress(s[name], lzma.FORMAT_ALONE, preset=5)
@@ -483,6 +585,7 @@ def main():
         write(name + ".bin", data)
     gen_zlib(s)
     gen_zstd(s)
+    gen_zstd_dict(s)
     gen_xz(s)
     # every fixture must round trip through its own reference decoder
     total = 0

@@ -4,8 +4,8 @@ namespace PixCodec.Compression
 {
     /// <summary>
     /// Zstandard (RFC 8878), fully managed. The decoder supports all block types, FSE and Huffman coded literals
-    /// and sequences, repeat offsets, multiple and skippable frames and the xxHash64 content checksum; dictionaries
-    /// are not supported. The compressor is a simple fast one with a single setting (see <see cref="Compress"/>).
+    /// and sequences, repeat offsets, multiple and skippable frames, the xxHash64 content checksum and dictionaries
+    /// (structured or raw content). The compressor is a simple fast one with a single setting (see <see cref="Compress"/>).
     /// </summary>
     public static class Zstd
     {
@@ -36,11 +36,35 @@ namespace PixCodec.Compression
         }
 
         /// <summary>
-        /// Compresses to a single zstd frame (with the content size in its header) that any zstd decoder reads.
-        /// This is a simple fast compressor - greedy matching, Huffman literals, FSE sequences, raw/RLE block
-        /// fallback - with one fixed speed/ratio trade-off; it is not a replacement for the reference
-        /// implementation's higher levels. <paramref name="checksum"/> appends the xxHash64 content checksum.
+        /// As <see cref="Decompress(ReadOnlySpan{byte}, Span{byte})"/>, with a dictionary: either a structured
+        /// one as made by <c>zstd --train</c> (its id must match a frame's dictionary id) or any bytes used as
+        /// plain content ("raw" dictionary). Frames that do not need the dictionary decode as usual.
         /// </summary>
-        public static byte[] Compress(ReadOnlySpan<byte> source, bool checksum = false) => ZstdEncoder.Compress(source, checksum);
+        public static int Decompress(ReadOnlySpan<byte> source, Span<byte> destination, ReadOnlySpan<byte> dictionary)
+        {
+            byte[]? none = null;
+            return (cached ??= new ZstdDecoder()).Decode(source, destination, ref none, dictionary);
+        }
+
+        /// <summary>Decompresses frames of unknown decompressed size with a dictionary.</summary>
+        public static byte[] DecompressWithDictionary(ReadOnlySpan<byte> source, ReadOnlySpan<byte> dictionary)
+        {
+            byte[]? buffer = new byte[(int)Math.Clamp((long)source.Length * 4, 4096, 1 << 20)];
+            int n = (cached ??= new ZstdDecoder()).Decode(source, default, ref buffer, dictionary);
+            if (n != buffer!.Length) Array.Resize(ref buffer, n);
+            return buffer;
+        }
+
+        /// <summary>
+        /// Compresses to a single zstd frame (with the content size in its header) that any zstd decoder reads.
+        /// Levels: 1 = fast greedy matching, 3 = default (lazy matching through hash chains), higher levels search
+        /// deeper with larger windows (up to 22; there is no optimal parser, so the top levels gain less than the
+        /// reference implementation's). Literals are Huffman coded, sequences FSE coded, with raw/RLE fallbacks.
+        /// <paramref name="checksum"/> appends the xxHash64 content checksum.
+        /// </summary>
+        public static byte[] Compress(ReadOnlySpan<byte> source, int level, bool checksum = false) => ZstdEncoder.Compress(source, level, checksum);
+
+        /// <summary>Compresses at the default level (3).</summary>
+        public static byte[] Compress(ReadOnlySpan<byte> source, bool checksum = false) => ZstdEncoder.Compress(source, 3, checksum);
     }
 }

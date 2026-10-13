@@ -3,11 +3,14 @@ using System.Buffers.Binary;
 
 namespace PixCodec.Compression
 {
+    /// <summary>Integrity check stored in an .xz stream.</summary>
+    public enum XzCheck { None = 0, Crc32 = 1, Crc64 = 4, Sha256 = 10 }
+
     /// <summary>
     /// XZ container / LZMA2 decompression (as written by liblzma, used by TIFF compression 34925), fully managed.
     /// Supports the LZMA2 filter with any number of preceding Delta filters, the CRC32, CRC64 and SHA-256 integrity
     /// checks (other check types are skipped), multiple blocks, concatenated streams and stream padding.
-    /// BCJ (executable) filters are not supported. Also decodes the legacy ".lzma" format.
+    /// The BCJ (executable) filters are supported as well. Also decodes the legacy ".lzma" format.
     /// </summary>
     public static class Xz
     {
@@ -54,6 +57,109 @@ namespace PixCodec.Compression
             return buffer;
         }
 
+        /// <summary>
+        /// Compresses to a single-block .xz stream that xz / liblzma read. Level 0..9 selects dictionary size and
+        /// search effort (not liblzma's presets: there is no optimal parser, so expect somewhat larger output).
+        /// <paramref name="deltaDistance"/> (1..256) puts a Delta filter in front of LZMA2, as TIFF writers do
+        /// for predictor data; 0 = none.
+        /// </summary>
+        public static byte[] Compress(ReadOnlySpan<byte> source, int level = 6, int deltaDistance = 0, XzCheck check = XzCheck.Crc64)
+        {
+            if (deltaDistance < 0 || deltaDistance > 256) throw new ArgumentOutOfRangeException(nameof(deltaDistance));
+            if (check != XzCheck.None && check != XzCheck.Crc32 && check != XzCheck.Crc64 && check != XzCheck.Sha256) throw new ArgumentOutOfRangeException(nameof(check));
+            var enc = new LzmaEncoder(level, source.Length);
+            var output = new byte[Math.Max(256, source.Length / 3 + 128)];
+            int n = 0;
+            // stream header
+            Span<byte> tmp = stackalloc byte[64];
+            HeaderMagic.CopyTo(tmp);
+            tmp[6] = 0; tmp[7] = (byte)check;
+            BinaryPrimitives.WriteUInt32LittleEndian(tmp.Slice(8), Checksums.Crc32(tmp.Slice(6, 2), 0));
+            Put(ref output, ref n, tmp.Slice(0, 12));
+            // block header: filters (delta), LZMA2 with the dictionary size code
+            int dictCode = 0;
+            while (dictCode < 40 && ((2L | (dictCode & 1)) << (dictCode / 2 + 11)) < enc.DictionarySize) dictCode++;
+            int h = 1;
+            tmp[h++] = (byte)(deltaDistance > 0 ? 1 : 0);
+            if (deltaDistance > 0) { tmp[h++] = 0x03; tmp[h++] = 1; tmp[h++] = (byte)(deltaDistance - 1); }
+            tmp[h++] = 0x21; tmp[h++] = 1; tmp[h++] = (byte)dictCode;
+            while ((h & 3) != 0) tmp[h++] = 0;
+            tmp[0] = (byte)((h + 4) / 4 - 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(tmp.Slice(h), Checksums.Crc32(tmp.Slice(0, h), 0));
+            int headerSize = h + 4;
+            Put(ref output, ref n, tmp.Slice(0, headerSize));
+            // data
+            int dataStart = n;
+            if (deltaDistance > 0)
+            {
+                var filtered = source.ToArray();
+                for (int i = filtered.Length - 1; i >= deltaDistance; i--) filtered[i] -= filtered[i - deltaDistance];
+                enc.EncodeLzma2(filtered, ref output, ref n);
+            }
+            else enc.EncodeLzma2(source, ref output, ref n);
+            long packed = n - dataStart;
+            Span<byte> zeros = stackalloc byte[4];
+            zeros.Clear();
+            Put(ref output, ref n, zeros.Slice(0, (4 - (n - 12) % 4) % 4));
+            int checkSize = CheckSizes[(int)check];
+            if (check == XzCheck.Crc32) BinaryPrimitives.WriteUInt32LittleEndian(tmp, Checksums.Crc32(source, 0));
+            else if (check == XzCheck.Crc64) BinaryPrimitives.WriteUInt64LittleEndian(tmp, Checksums.Crc64(source));
+            else if (check == XzCheck.Sha256) Checksums.Sha256(source, tmp);
+            Put(ref output, ref n, tmp.Slice(0, checkSize));
+            // index: one record
+            int ix = 0;
+            tmp[ix++] = 0; tmp[ix++] = 1;
+            WriteVarint(tmp, ref ix, (ulong)(headerSize + packed + checkSize));
+            WriteVarint(tmp, ref ix, (ulong)source.Length);
+            while ((ix & 3) != 0) tmp[ix++] = 0;
+            BinaryPrimitives.WriteUInt32LittleEndian(tmp.Slice(ix), Checksums.Crc32(tmp.Slice(0, ix), 0));
+            int indexSize = ix + 4;
+            Put(ref output, ref n, tmp.Slice(0, indexSize));
+            // footer
+            BinaryPrimitives.WriteUInt32LittleEndian(tmp.Slice(4), (uint)(indexSize / 4 - 1));
+            tmp[8] = 0; tmp[9] = (byte)check;
+            BinaryPrimitives.WriteUInt32LittleEndian(tmp, Checksums.Crc32(tmp.Slice(4, 6), 0));
+            tmp[10] = (byte)'Y'; tmp[11] = (byte)'Z';
+            Put(ref output, ref n, tmp.Slice(0, 12));
+            Array.Resize(ref output, n);
+            return output;
+        }
+
+        /// <summary>Compresses to a legacy ".lzma" file (LZMA alone, with the size in the header and no end marker).</summary>
+        public static byte[] CompressLzma(ReadOnlySpan<byte> source, int level = 6) => CompressLzma(source, level, 3, 0, 2);
+
+        // lc 0..8, lp 0..4, pb 0..4 (liblzma itself only reads lc + lp <= 4)
+        internal static byte[] CompressLzma(ReadOnlySpan<byte> source, int level, int lc, int lp, int pb)
+        {
+            var enc = new LzmaEncoder(level, source.Length, lc, lp, pb);
+            var output = new byte[Math.Max(256, source.Length / 3 + 128)];
+            output[0] = enc.Properties;
+            BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(1), (uint)enc.DictionarySize);
+            BinaryPrimitives.WriteUInt64LittleEndian(output.AsSpan(5), (ulong)source.Length);
+            int n = 13;
+            enc.EncodeLzma1(source, ref output, ref n);
+            Array.Resize(ref output, n);
+            return output;
+        }
+
+        static void Put(ref byte[] output, ref int length, ReadOnlySpan<byte> bytes)
+        {
+            if ((long)length + bytes.Length > output.Length)
+            {
+                long want = Math.Min(Math.Max((long)output.Length * 2, (long)length + bytes.Length), Array.MaxLength);
+                if (want < (long)length + bytes.Length) throw new System.IO.IOException("compressed output too large");
+                Array.Resize(ref output, (int)want);
+            }
+            bytes.CopyTo(output.AsSpan(length));
+            length += bytes.Length;
+        }
+
+        static void WriteVarint(Span<byte> dst, ref int pos, ulong v)
+        {
+            while (v >= 0x80) { dst[pos++] = (byte)(v | 0x80); v >>= 7; }
+            dst[pos++] = (byte)v;
+        }
+
         /// <summary>True if the data starts with the .xz stream magic.</summary>
         public static bool IsXz(ReadOnlySpan<byte> source) => source.Length >= 6 && source.Slice(0, 6).SequenceEqual(HeaderMagic);
 
@@ -85,7 +191,9 @@ namespace PixCodec.Compression
             var lzma = cached ??= new LzmaDecoder();
             int pos = 0, outPos = 0;
             bool any = false;
-            Span<int> deltas = stackalloc int[3];
+            // the filters in front of LZMA2: id and parameter (delta distance or BCJ start offset)
+            Span<int> filterIds = stackalloc int[3];
+            Span<uint> filterArgs = stackalloc uint[3];
             Span<byte> digest = stackalloc byte[32];
             while (pos < source.Length)
             {
@@ -124,7 +232,7 @@ namespace PixCodec.Compression
                     ulong packedSize = ulong.MaxValue, unpackedSize = ulong.MaxValue;
                     if ((flags & 0x40) != 0) packedSize = ReadVarint(header, ref hp, hlimit);
                     if ((flags & 0x80) != 0) unpackedSize = ReadVarint(header, ref hp, hlimit);
-                    int deltaCount = 0;
+                    int filterCount = 0;
                     for (int i = 0; i < filters; i++)
                     {
                         ulong id = ReadVarint(header, ref hp, hlimit);
@@ -135,11 +243,24 @@ namespace PixCodec.Compression
                             if (i != filters - 1) throw Bad("LZMA2 must be the last filter");
                             if (propSize != 1 || header[hp] > 40) throw Bad("invalid LZMA2 properties");
                         }
-                        else if (id == 0x03)
+                        else if (id == 0x03 || BcjFilters.IsBcj(id))
                         {
                             if (i == filters - 1) throw Bad("the last filter must be LZMA2");
-                            if (propSize != 1) throw Bad("invalid delta properties");
-                            deltas[deltaCount++] = header[hp] + 1;
+                            uint arg;
+                            if (id == 0x03)
+                            {
+                                if (propSize != 1) throw Bad("invalid delta properties");
+                                arg = header[hp] + 1u;
+                            }
+                            else
+                            {
+                                // optional start offset, a multiple of the instruction alignment
+                                if (propSize != 0 && propSize != 4) throw Bad("invalid BCJ properties");
+                                arg = propSize == 4 ? BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(hp)) : 0;
+                                if (arg % (uint)BcjFilters.Alignment((int)id) != 0) throw Bad("invalid BCJ start offset");
+                            }
+                            filterIds[filterCount] = (int)id;
+                            filterArgs[filterCount++] = arg;
                         }
                         else throw new ImageNotSupportedException("unsupported xz filter 0x" + id.ToString("X"));
                         hp += (int)propSize;
@@ -161,8 +282,12 @@ namespace PixCodec.Compression
                     }
 
                     Span<byte> data = (growable != null ? growable.AsSpan() : destination).Slice(blockOut, outPos - blockOut);
-                    // filters are undone in reverse order: LZMA2 first, then the deltas from last to first
-                    for (int i = deltaCount - 1; i >= 0; i--) UndoDelta(data, deltas[i]);
+                    // filters are undone in reverse order: LZMA2 first, then the others from last to first
+                    for (int i = filterCount - 1; i >= 0; i--)
+                    {
+                        if (filterIds[i] == 0x03) UndoDelta(data, (int)filterArgs[i]);
+                        else BcjFilters.Decode(filterIds[i], data, filterArgs[i]);
+                    }
 
                     if (source.Length - pos < checkSize) throw Bad("truncated block check");
                     var check = source.Slice(pos, checkSize);
