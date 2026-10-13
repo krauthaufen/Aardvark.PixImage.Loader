@@ -1047,6 +1047,9 @@ def gen_vectors():
         if not np.array_equal(other[:, :, :c], px[:, :, :c]):
             raise RuntimeError('vector %s: Pillow and imagecodecs disagree' % name)
         lines.append('%s %d %d %d %s' % (name, px.shape[1], px.shape[0], px.shape[2], hashlib.sha256(px.tobytes()).hexdigest()))
+    # the vector files are not part of the repository (see vectors/README): keep the list when they are not here
+    if not lines:
+        return
     with open(os.path.join(d, 'refs.txt'), 'w') as f:
         f.write('\n'.join(lines) + '\n')
     if REPORT:

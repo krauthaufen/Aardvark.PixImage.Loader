@@ -203,7 +203,7 @@ namespace PixCodec
         {
             if (!TryReadHeader(data, out int w, out int h)) throw Bad("frame header");
             if ((long)w * h > maxPixels)
-                throw new ImageNotSupportedException($"WebP image of {w}x{h} exceeds the configured pixel limit");
+                throw new ImageNotSupportedException($"WebP image of {w}x{h} exceeds WebpDecodeOptions.MaxPixels ({maxPixels})");
             fixed (byte* p = data) return new Vp8Decoder().DecodeFrame(p, data.Length, w, h);
         }
 

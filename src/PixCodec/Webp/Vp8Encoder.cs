@@ -77,6 +77,36 @@ namespace PixCodec
     }
 
     /// <summary>
+    /// Switches for parts of the key frame syntax the encoder has no use for. They exist so that the tests can write
+    /// files that exercise the decoder (and are checked against libwebp); every combination gives a valid stream.
+    /// </summary>
+    internal sealed class Vp8Syntax
+    {
+        public static readonly Vp8Syntax Default = new Vp8Syntax();
+        /// <summary>Segment quantizers and filter levels as differences to the frame values instead of absolute values.</summary>
+        public bool SegmentDeltas;
+        /// <summary>Segmentation enabled, but no segment map: every macroblock is in segment 0.</summary>
+        public bool NoSegmentMap;
+        /// <summary>Segmentation with a map but without segment data: all segments use the frame values.</summary>
+        public bool NoSegmentData;
+        /// <summary>Leave the segment tree probabilities at 255.</summary>
+        public bool DefaultSegmentProbabilities;
+        /// <summary>No "macroblock has no coefficients" flags: every macroblock codes its tokens.</summary>
+        public bool NoSkipFlags;
+        /// <summary>Code with the default token probabilities.</summary>
+        public bool DefaultTokenProbabilities;
+        public bool ColorSpaceBit, ClampingBit, RefreshProbabilitiesBit;
+        /// <summary>Quantizer index offsets for luma DC, the DC and AC of the Y2 block, chroma DC and AC (-15..15).</summary>
+        public int DqY1Dc, DqY2Dc, DqY2Ac, DqUvDc = -4, DqUvAc = -4;
+        /// <summary>Loop filter level offsets for intra frames and for macroblocks with 4x4 prediction (-63..63).</summary>
+        public int? FilterDeltaIntra, FilterDelta4x4;
+        /// <summary>Signal filter deltas as enabled without sending any.</summary>
+        public bool FilterDeltasWithoutUpdate;
+        /// <summary>Loop filter level per segment.</summary>
+        public int[]? SegmentFilterLevels;
+    }
+
+    /// <summary>
     /// Encoder for VP8 key frames: intra mode decision by rate-distortion estimate, forward DCT / WHT, quantization,
     /// token probabilities fitted to the frame in a second pass.
     /// </summary>
@@ -88,8 +118,9 @@ namespace PixCodec
         // Rounding offsets of the quantizer in 1/256: DC rounds to nearest, AC has a slightly wider dead zone
         // (small coefficients cost more bits than the error they remove is worth).
         const int BiasDc = 128, BiasAc = 104;
-        // Chroma is quantized a little finer than luma: its errors spread into two of the three RGB channels.
-        const int UvDelta = -4;
+        // Chroma is quantized a little finer than luma (index offset -4, the default of Vp8Syntax): its errors spread
+        // into two of the three RGB channels.
+        readonly Vp8Syntax _sx;
 
         // ------------------------------------------------------------------ cost tables
 
@@ -175,6 +206,7 @@ namespace PixCodec
         Vp8Encoder(Vp8Frame src, WebpEncodeOptions opt, bool allowI4)
         {
             _src = src; _opt = opt;
+            _sx = opt.Vp8Syntax ?? Vp8Syntax.Default;
             _method = Math.Clamp(opt.Method, 0, 6);
             _allowI4 = allowI4 && _method >= 1;
             _mbW = src.YStride / 16; _mbH = src.Y.Length / src.YStride / 16;
@@ -184,29 +216,30 @@ namespace PixCodec
             _seg = new SegmentQuant[4];
             _segmentMap = new byte[_mbW * _mbH];
             int baseQ = QualityToIndex(opt.Quality);
-            if (_numSegments > 1) AssignSegments();
+            if (_numSegments > 1 && !_sx.NoSegmentMap) AssignSegments();
             for (int s = 0; s < 4; s++)
             {
                 // flat areas show quantization most, busy ones hide it
                 int q = baseQ;
-                if (_numSegments > 1) q = Math.Clamp(baseQ + (int)Math.Round((s - (_numSegments - 1) / 2.0) * (2 + baseQ * 0.12)), 0, 127);
-                SetQuant(ref _seg[s], q);
+                if (_numSegments > 1 && !_sx.NoSegmentData) q = Math.Clamp(baseQ + (int)Math.Round((s - (_numSegments - 1) / 2.0) * (2 + baseQ * 0.12)), 0, 127);
+                SetQuant(ref _seg[s], q, s);
             }
         }
 
-        void SetQuant(ref SegmentQuant m, int q)
+        void SetQuant(ref SegmentQuant m, int q, int segment)
         {
             var dc = Vp8Tables.DcQLookup;
             var ac = Vp8Tables.AcQLookup;
             m.Index = q;
-            m.Y1Dc = dc[q]; m.Y1Ac = ac[q];
-            m.Y2Dc = dc[q] * 2; m.Y2Ac = Math.Max(8, ac[q] * 155 / 100);
-            m.UvDc = Math.Min(132, (int)dc[Math.Clamp(q + UvDelta, 0, 127)]); m.UvAc = ac[Math.Clamp(q + UvDelta, 0, 127)];
+            m.Y1Dc = dc[Math.Clamp(q + _sx.DqY1Dc, 0, 127)]; m.Y1Ac = ac[q];
+            m.Y2Dc = dc[Math.Clamp(q + _sx.DqY2Dc, 0, 127)] * 2; m.Y2Ac = Math.Max(8, ac[Math.Clamp(q + _sx.DqY2Ac, 0, 127)] * 155 / 100);
+            m.UvDc = Math.Min(132, (int)dc[Math.Clamp(q + _sx.DqUvDc, 0, 127)]); m.UvAc = ac[Math.Clamp(q + _sx.DqUvAc, 0, 127)];
             // high resolution theory puts the slope of distortion over rate near q^2 / 35 per bit
             m.Lambda = 0.03 * m.Y1Ac * m.Y1Ac;
             int level = _opt.FilterStrength >= 0 ? _opt.FilterStrength : (m.Y1Ac * 3 + 4) >> 3;
             if (_opt.FilterStrength < 0 && q < 4) level = 0;
             m.FilterLevel = Math.Clamp(level, 0, 63);
+            if (_sx.SegmentFilterLevels != null && _numSegments > 1 && !_sx.NoSegmentData) m.FilterLevel = Math.Clamp(_sx.SegmentFilterLevels[segment], 0, 63);
         }
 
         /// <summary>Sorts the macroblocks into segments by luma activity (mean absolute deviation).</summary>
@@ -754,7 +787,7 @@ namespace PixCodec
                         int* yLasts = i4 ? lasts : bestLasts + 1;
                         for (int n = 0; n < 16; n++) if (yLasts[n] > (i4 ? 0 : 1)) anyY = true;
                         bool y2Any = !i4 && bestLasts[0] > 0;
-                        bool skip = !anyY && !uvAny && !y2Any;
+                        bool skip = !anyY && !uvAny && !y2Any && !_sx.NoSkipFlags;
                         if (skip) skipped++;
                         fixed (byte* mr = &_modes[mbIndex * ModeRecord])
                         {
@@ -894,54 +927,97 @@ namespace PixCodec
                 if (costNew < costOld) { newProbs[i] = (byte)p; updated[i] = true; }
             }
 
+            if (_sx.DefaultTokenProbabilities)
+            {
+                Array.Clear(updated);
+                _probs.CopyTo(newProbs, 0);
+            }
             var bw = new Vp8BoolWriter();
-            bw.PutBit(false);       // color space
-            bw.PutBit(false);       // clamping required
+            bw.PutBit(_sx.ColorSpaceBit);
+            bw.PutBit(_sx.ClampingBit);     // 0: the decoder has to clamp
             // segmentation
             var segProbs = new byte[] { 255, 255, 255 };
-            if (_numSegments > 1)
-            {
-                Span<int> cnt = stackalloc int[4];
-                cnt.Clear();
-                for (int i = 0; i < mbCount; i++) cnt[_segmentMap[i]]++;
-                segProbs[0] = Prob(cnt[0] + cnt[1], mbCount);
-                segProbs[1] = Prob(cnt[0], cnt[0] + cnt[1]);
-                segProbs[2] = Prob(cnt[2], cnt[2] + cnt[3]);
-                bw.PutBit(true);
-                bw.PutBit(true);    // update the map
-                bw.PutBit(true);    // update the segment data
-                bw.PutBit(true);    // absolute values
-                for (int s = 0; s < 4; s++) { bw.PutBit(true); bw.PutSigned(_seg[s].Index, 7); }
-                for (int s = 0; s < 4; s++) { bw.PutBit(true); bw.PutSigned(_seg[s].FilterLevel, 6); }
-                for (int i = 0; i < 3; i++)
-                {
-                    bw.PutBit(segProbs[i] != 255);
-                    if (segProbs[i] != 255) bw.PutLiteral(segProbs[i], 8);
-                }
-            }
-            else bw.PutBit(false);
-            // loop filter: the frame level must not be 0 or the decoder skips filtering altogether
+            bool segmentMap = _numSegments > 1 && !_sx.NoSegmentMap;
+            int baseIndex = _seg[0].Index;
+            // the frame level must not be 0 or the decoder skips filtering altogether
             int frameLevel = _seg[0].FilterLevel;
             if (_numSegments > 1)
-                for (int s = 1; s < _numSegments; s++) frameLevel = Math.Max(frameLevel, _seg[s].FilterLevel);
+            {
+                for (int s = 1; s < 4; s++) frameLevel = Math.Max(frameLevel, _seg[s].FilterLevel);
+                if (_sx.SegmentDeltas) baseIndex = _seg[1].Index;
+                if (segmentMap && !_sx.DefaultSegmentProbabilities)
+                {
+                    Span<int> cnt = stackalloc int[4];
+                    cnt.Clear();
+                    for (int i = 0; i < mbCount; i++) cnt[_segmentMap[i]]++;
+                    segProbs[0] = Prob(cnt[0] + cnt[1], mbCount);
+                    segProbs[1] = Prob(cnt[0], cnt[0] + cnt[1]);
+                    segProbs[2] = Prob(cnt[2], cnt[2] + cnt[3]);
+                }
+                bw.PutBit(true);
+                bw.PutBit(segmentMap);
+                bw.PutBit(!_sx.NoSegmentData);
+                if (!_sx.NoSegmentData)
+                {
+                    bw.PutBit(!_sx.SegmentDeltas);      // absolute values?
+                    for (int s = 0; s < 4; s++)
+                    {
+                        int v = _sx.SegmentDeltas ? _seg[s].Index - baseIndex : _seg[s].Index;
+                        bw.PutBit(v != 0);
+                        if (v != 0) bw.PutSigned(v, 7);
+                    }
+                    for (int s = 0; s < 4; s++)
+                    {
+                        int v = _sx.SegmentDeltas ? _seg[s].FilterLevel - frameLevel : _seg[s].FilterLevel;
+                        bw.PutBit(v != 0);
+                        if (v != 0) bw.PutSigned(v, 6);
+                    }
+                }
+                if (segmentMap)
+                    for (int i = 0; i < 3; i++)
+                    {
+                        bw.PutBit(segProbs[i] != 255);
+                        if (segProbs[i] != 255) bw.PutLiteral(segProbs[i], 8);
+                    }
+            }
+            else bw.PutBit(false);
             bw.PutBit(_opt.SimpleFilter);
             bw.PutLiteral(frameLevel, 6);
             bw.PutLiteral(Math.Clamp(_opt.FilterSharpness, 0, 7), 3);
-            bw.PutBit(false);       // no per-mode filter deltas
+            if (_sx.FilterDeltaIntra != null || _sx.FilterDelta4x4 != null || _sx.FilterDeltasWithoutUpdate)
+            {
+                bw.PutBit(true);
+                bool send = !_sx.FilterDeltasWithoutUpdate;
+                bw.PutBit(send);
+                if (send)
+                {
+                    // four deltas by reference frame (only the intra one matters here), four by prediction mode
+                    for (int i = 0; i < 8; i++)
+                    {
+                        int? v = i == 0 ? _sx.FilterDeltaIntra : i == 4 ? _sx.FilterDelta4x4 : i == 2 || i == 7 ? 9 : null;
+                        bw.PutBit(v != null);
+                        if (v != null) bw.PutSigned(v.Value, 6);
+                    }
+                }
+            }
+            else bw.PutBit(false);
             int numParts = parts.Length;
             bw.PutLiteral(numParts == 8 ? 3 : numParts == 4 ? 2 : numParts == 2 ? 1 : 0, 2);
-            bw.PutLiteral(_seg[0].Index, 7);
-            for (int i = 0; i < 3; i++) bw.PutBit(false);   // no deltas for luma
-            for (int i = 0; i < 2; i++) { bw.PutBit(true); bw.PutSigned(UvDelta, 4); }   // chroma DC and AC
-            bw.PutBit(false);       // refresh_entropy_probs
+            bw.PutLiteral(baseIndex, 7);
+            foreach (int dq in new[] { _sx.DqY1Dc, _sx.DqY2Dc, _sx.DqY2Ac, _sx.DqUvDc, _sx.DqUvAc })
+            {
+                bw.PutBit(dq != 0);
+                if (dq != 0) bw.PutSigned(dq, 4);
+            }
+            bw.PutBit(_sx.RefreshProbabilitiesBit);
             for (int i = 0; i < _probs.Length; i++)
             {
                 bw.Put(updated[i] ? 1 : 0, update[i]);
                 if (updated[i]) bw.PutLiteral(newProbs[i], 8);
             }
             int skipProb = Prob(mbCount - skipped, mbCount);
-            bw.PutBit(true);
-            bw.PutLiteral(skipProb, 8);
+            bw.PutBit(!_sx.NoSkipFlags);
+            if (!_sx.NoSkipFlags) bw.PutLiteral(skipProb, 8);
 
             // prediction records
             var bprobs = Vp8Tables.BModeProbs;
@@ -954,13 +1030,13 @@ namespace PixCodec
                 {
                     int idx = mby * _mbW + mbx;
                     var mr = _modes.AsSpan(idx * ModeRecord, ModeRecord);
-                    if (_numSegments > 1)
+                    if (segmentMap)
                     {
                         int s = _segmentMap[idx];
                         bw.Put(s >> 1, segProbs[0]);
                         bw.Put(s & 1, segProbs[1 + (s >> 1)]);
                     }
-                    bw.Put((mr[0] >> 1) & 1, skipProb);
+                    if (!_sx.NoSkipFlags) bw.Put((mr[0] >> 1) & 1, skipProb);
                     bool i4 = (mr[0] & 1) != 0;
                     bw.Put(i4 ? 0 : 1, 145);
                     if (!i4)

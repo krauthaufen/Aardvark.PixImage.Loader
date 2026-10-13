@@ -111,7 +111,7 @@ namespace PixCodec
         {
             int cw = _c.Width, chh = _c.Height;
             if ((long)cw * chh > _opt.MaxPixels)
-                throw new ImageNotSupportedException($"WebP canvas of {cw}x{chh} exceeds the configured pixel limit");
+                throw new ImageNotSupportedException($"WebP canvas of {cw}x{chh} exceeds WebpDecodeOptions.MaxPixels ({_opt.MaxPixels})");
             var px = DecodeFrame(data, f, 4, _opt.MaxPixels);       // before the canvas: garbage must not allocate one
             var canvas = _canvas ??= new byte[cw * chh * 4];
             var prev = _prev;
@@ -178,13 +178,17 @@ namespace PixCodec
             info.Xmp = c.XmpLength < 0 ? null : data.Slice(c.XmpOffset, c.XmpLength).ToArray();
         }
 
-        public static int OrientationOf(WebpContainer c, ReadOnlySpan<byte> data)
+        /// <summary>Orientation and resolution (pixels per inch) of the EXIF chunk, zeros where it does not say.</summary>
+        public static void ExifInfo(WebpContainer c, ReadOnlySpan<byte> data, out int orientation, out double dpiX, out double dpiY)
         {
-            if (c.ExifLength < 0) return 0;
-            var exif = data.Slice(c.ExifOffset, c.ExifLength);
-            if (exif.Length >= 6 && exif.Slice(0, 6).SequenceEqual("Exif\0\0"u8)) exif = exif.Slice(6);
-            return ExifOrientation(exif);
+            orientation = 0; dpiX = dpiY = 0;
+            if (c.ExifLength < 0) return;
+            ReadExif(StripExifPrefix(data.Slice(c.ExifOffset, c.ExifLength)), out orientation, out dpiX, out dpiY);
         }
+
+        // some writers keep the JPEG APP1 prefix
+        static ReadOnlySpan<byte> StripExifPrefix(ReadOnlySpan<byte> exif)
+            => exif.Length >= 6 && exif.Slice(0, 6).SequenceEqual("Exif\0\0"u8) ? exif.Slice(6) : exif;
 
         static ImageMetadata? Metadata(WebpContainer c, ReadOnlySpan<byte> data)
         {
@@ -193,37 +197,58 @@ namespace PixCodec
             if (c.IccLength >= 0) m.IccProfile = data.Slice(c.IccOffset, c.IccLength).ToArray();
             if (c.ExifLength >= 0)
             {
-                var exif = data.Slice(c.ExifOffset, c.ExifLength);
-                // some writers keep the JPEG APP1 prefix
-                if (exif.Length >= 6 && exif.Slice(0, 6).SequenceEqual("Exif\0\0"u8)) exif = exif.Slice(6);
+                var exif = StripExifPrefix(data.Slice(c.ExifOffset, c.ExifLength));
                 m.Exif = exif.ToArray();
-                m.Orientation = ExifOrientation(exif);
+                ReadExif(exif, out m.Orientation, out m.DpiX, out m.DpiY);
             }
             return m;
         }
 
-        /// <summary>Orientation tag (0x0112) of the first IFD, 0 if absent or the block is malformed.</summary>
-        internal static int ExifOrientation(ReadOnlySpan<byte> t)
+        /// <summary>
+        /// Reads Orientation (0x0112), XResolution / YResolution (0x011A / 0x011B) and ResolutionUnit (0x0128, inch
+        /// unless it says centimeter; "no unit" leaves the resolution unknown) from the first IFD of an EXIF block.
+        /// </summary>
+        internal static void ReadExif(ReadOnlySpan<byte> t, out int orientation, out double dpiX, out double dpiY)
         {
-            if (t.Length < 8) return 0;
+            orientation = 0; dpiX = dpiY = 0;
+            if (t.Length < 8) return;
             bool le;
             if (t[0] == 'I' && t[1] == 'I') le = true;
             else if (t[0] == 'M' && t[1] == 'M') le = false;
-            else return 0;
-            uint ifd = le ? BinaryPrimitives.ReadUInt32LittleEndian(t.Slice(4)) : BinaryPrimitives.ReadUInt32BigEndian(t.Slice(4));
-            if (ifd > (uint)t.Length - 2) return 0;
-            int n = le ? BinaryPrimitives.ReadUInt16LittleEndian(t.Slice((int)ifd)) : BinaryPrimitives.ReadUInt16BigEndian(t.Slice((int)ifd));
+            else return;
+            uint ifd = U32(t, 4, le);
+            if (ifd > (uint)t.Length - 2) return;
+            int n = U16(t, (int)ifd, le);
+            double rx = 0, ry = 0;
+            int unit = 2;
             for (int i = 0; i < n; i++)
             {
                 long e = ifd + 2 + 12L * i;
-                if (e + 12 > t.Length) return 0;
-                var entry = t.Slice((int)e, 12);
-                int tag = le ? BinaryPrimitives.ReadUInt16LittleEndian(entry) : BinaryPrimitives.ReadUInt16BigEndian(entry);
-                if (tag != 0x0112) continue;
-                int v = le ? BinaryPrimitives.ReadUInt16LittleEndian(entry.Slice(8)) : BinaryPrimitives.ReadUInt16BigEndian(entry.Slice(8));
-                return v >= 1 && v <= 8 ? v : 0;
+                if (e + 12 > t.Length) break;
+                int tag = U16(t, (int)e, le), type = U16(t, (int)e + 2, le);
+                if (tag == 0x0112 && type == 3)
+                {
+                    int v = U16(t, (int)e + 8, le);
+                    if (v >= 1 && v <= 8) orientation = v;
+                }
+                else if (tag == 0x0128 && type == 3) unit = U16(t, (int)e + 8, le);
+                else if ((tag == 0x011a || tag == 0x011b) && type == 5)
+                {
+                    uint off = U32(t, (int)e + 8, le);
+                    if (off > (uint)t.Length - 8 || t.Length < 8) continue;
+                    uint num = U32(t, (int)off, le), den = U32(t, (int)off + 4, le);
+                    double v = den == 0 ? 0 : (double)num / den;
+                    if (tag == 0x011a) rx = v; else ry = v;
+                }
             }
-            return 0;
+            double scale = unit == 2 ? 1 : unit == 3 ? 2.54 : 0;
+            dpiX = rx * scale; dpiY = ry * scale;
         }
+
+        static int U16(ReadOnlySpan<byte> t, int o, bool le)
+            => le ? BinaryPrimitives.ReadUInt16LittleEndian(t.Slice(o)) : BinaryPrimitives.ReadUInt16BigEndian(t.Slice(o));
+
+        static uint U32(ReadOnlySpan<byte> t, int o, bool le)
+            => le ? BinaryPrimitives.ReadUInt32LittleEndian(t.Slice(o)) : BinaryPrimitives.ReadUInt32BigEndian(t.Slice(o));
     }
 }

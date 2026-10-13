@@ -106,7 +106,7 @@ namespace PixCodec
             if (!TryReadHeader(data, out width, out height, out _))
                 throw new ImageFormatException("invalid WebP lossless header");
             if ((long)width * height > maxPixels)
-                throw new ImageNotSupportedException($"WebP image of {width}x{height} exceeds the configured pixel limit");
+                throw new ImageNotSupportedException($"WebP image of {width}x{height} exceeds WebpDecodeOptions.MaxPixels ({maxPixels})");
             fixed (byte* p = data)
             {
                 var dec = new Vp8lDecoder(p + 5, data.Length - 5, maxPixels);
@@ -474,7 +474,7 @@ namespace PixCodec
         uint[] DecodePixels(int xsize, int ysize, int[] groups, uint[] tables, uint[]? meta, int prefixBits, int metaWidth, int cacheBits)
         {
             long total = (long)xsize * ysize;
-            if (total > _maxPixels) throw new ImageNotSupportedException("WebP image exceeds the configured pixel limit");
+            if (total > _maxPixels) throw new ImageNotSupportedException($"WebP image exceeds WebpDecodeOptions.MaxPixels ({_maxPixels})");
             int end = (int)total;
             // The buffer grows with the decoded pixels, so that a header lying about the size cannot allocate much.
             const int Chunk = 1 << 16;
