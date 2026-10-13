@@ -30,6 +30,17 @@ def decode(path):
 
 
 def decode_png(im):
+    import struct
+    with open(im.filename, 'rb') as f:
+        depth, ctype = struct.unpack('>BB', f.read(26)[24:26])
+    if depth == 16 and ctype != 0:
+        # Pillow reduces 16 bit color / gray+alpha to 8 bit, OpenCV (libpng) keeps it
+        import cv2
+        a = cv2.imread(im.filename, cv2.IMREAD_UNCHANGED)
+        assert a is not None and a.dtype == np.uint16
+        if ctype == 4:
+            return a[..., [0, 3]]           # comes back as BGRA with B = G = R
+        return a[..., ::-1] if a.shape[2] == 3 else a[..., [2, 1, 0, 3]]
     if im.mode == 'P':
         im = im.convert('RGBA' if 'transparency' in im.info else 'RGB')
     elif im.mode == '1':
