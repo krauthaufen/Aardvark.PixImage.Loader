@@ -79,6 +79,7 @@ namespace PixCodec.JpegImpl
         uint _c;
         uint _a;
         int _ct;
+        int _padding;
         /// <summary>Set when the code stream turned out to be inconsistent; the rest of the scan is not decodable.</summary>
         public bool Corrupt;
 
@@ -95,22 +96,28 @@ namespace PixCodec.JpegImpl
         {
             _stats.AsSpan().Clear();
             _p = p; _end = end;
+            _padding = 0;
+            Corrupt = false;
             _c = 0;
             ByteIn(); _c <<= 8;
             ByteIn(); _c <<= 8;
             _ct = 0;
             _a = 0x10000;
-            Corrupt = false;
         }
 
         void ByteIn()
         {
-            if (_p >= _end) return; // out of data: zeros
-            uint b = *_p;
+            uint b = _p < _end ? *_p : 0xFFu;
             if (b == 0xFF)
             {
                 if (_end - _p >= 2 && _p[1] == 0) _p += 2; // stuffed zero
-                else return; // a marker ends the segment; the decoder keeps running on zero bits
+                else
+                {
+                    // A marker (or the end of the data) ends the segment. The coder may have dropped a few trailing
+                    // zero bytes, so zeros are supplied - but a decoder that keeps asking has lost the stream.
+                    if (++_padding > 64) Corrupt = true;
+                    return;
+                }
             }
             else _p++;
             _c += b << 8;

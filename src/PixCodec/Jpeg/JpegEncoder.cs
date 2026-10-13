@@ -483,6 +483,28 @@ namespace PixCodec.JpegImpl
             {
                 var c = _comps[i];
                 int sw = (w * c.H + _hMax - 1) / _hMax, sh = (h * c.V + _vMax - 1) / _vMax;
+                if (_hMax % c.H == 0 && _vMax % c.V == 0)
+                {
+                    // whole-number ratios: plain averages over fx x fy samples (edge samples repeat)
+                    int fx = _hMax / c.H, fy = _vMax / c.V, area = fx * fy, planeRows = c.BlocksH * 8, st = c.Stride;
+                    var src = full[i];
+                    for (int y = 0; y < planeRows; y++)
+                    {
+                        int sy = Math.Min(y, sh - 1) * fy;
+                        for (int x = 0; x < st; x++)
+                        {
+                            int sx = Math.Min(x, sw - 1) * fx, sum = area >> 1;
+                            for (int j = 0; j < fy; j++)
+                            {
+                                int o = Math.Min(sy + j, h - 1) * w;
+                                for (int k = 0; k < fx; k++) sum += src[o + Math.Min(sx + k, w - 1)];
+                            }
+                            int v = area == 1 ? sum : sum / area;
+                            if (c.Plane16 != null) c.Plane16[y * st + x] = (ushort)v; else c.Plane[y * st + x] = (byte)v;
+                        }
+                    }
+                    continue;
+                }
                 // horizontal, then vertical box filter; source samples past the edge repeat the last one
                 var tmp = new long[sw * h];
                 for (int y = 0; y < h; y++) BoxFilter(full[i], y * w, 1, w, tmp, y * sw, 1, sw, c.H, _hMax);
@@ -548,7 +570,7 @@ namespace PixCodec.JpegImpl
             {
                 byte* b = a + fullW;
                 bool v2 = _vMax == 2;
-                if (Vector.IsHardwareAccelerated && BitConverter.IsLittleEndian)
+                if (Vector.IsHardwareAccelerated)
                 {
                     // each 16 bit lane holds a horizontal pair of samples; the rounding bias alternates between
                     // output columns (0,1 or 1,2) so flat areas do not drift
@@ -594,7 +616,7 @@ namespace PixCodec.JpegImpl
             {
                 byte* s = sp;
                 int x = 0;
-                if ((Ssse3.IsSupported || AdvSimd.Arm64.IsSupported) && BitConverter.IsLittleEndian)
+                if ((Ssse3.IsSupported || AdvSimd.Arm64.IsSupported))
                 {
                     // 4 pixels per step in 32 bit lanes; reads 16 source bytes, so stop while that stays inside the row
                     var spread = ch == 3

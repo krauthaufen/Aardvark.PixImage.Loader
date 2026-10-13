@@ -247,12 +247,15 @@ namespace PixCodec.JpegImpl
         //   4: sqrt2 cos(u pi/16) cos((2x+1) u pi/8)             (zero for u = 4)
         //   2: sqrt2 cos(u pi/16) cos(u pi/8) cos((2x+1) u pi/4)  (zero for even u)
         // The tables hold these in 13 bit fixed point, pre-scaled by 2 resp. 4 like the DC term below.
+        // Entry 0 of every row is the DC weight (1.0 at the same scale).
         static readonly int[] s_reduce4 = ReductionTable(4), s_reduce2 = ReductionTable(2);
 
         static int[] ReductionTable(int n)
         {
-            var t = new int[n * 8];
+            var t = GC.AllocateArray<int>(n * 8, pinned: true);
             for (int x = 0; x < n; x++)
+            {
+                t[x * 8] = 1 << (ConstBits + (n == 4 ? 1 : 2));
                 for (int u = 1; u < 8; u++)
                 {
                     double v = Math.Sqrt(2) * Math.Cos(u * Math.PI / 16);
@@ -260,13 +263,14 @@ namespace PixCodec.JpegImpl
                     int fix = (int)(Math.Abs(v) * (1 << ConstBits) + 0.5);
                     t[x * 8 + u] = Math.Abs(v) < 1e-9 ? 0 : v < 0 ? -fix : fix;
                 }
+            }
             return t;
         }
 
         /// <summary>
-        /// Scalar inverse DCT for the cases the fast 8 bit path does not cover: 12 bit samples (one guard bit less
-        /// in the first pass) and DCT domain downscaling to size x size outputs (8, 4, 2 or 1). Writes size * size
-        /// values, row major, without level shift or clamping.
+        /// Inverse DCT for the cases the fast 8 bit path does not cover: 12 bit samples (one guard bit less in the
+        /// first pass) and DCT domain downscaling to size x size outputs (8, 4, 2 or 1). Writes size * size values,
+        /// row major, without level shift or clamping.
         /// </summary>
         [SkipLocalsInit]
         public static void IdctGeneric(short* coef, int* quant, int size, int pass1Bits, int* output)
@@ -277,34 +281,122 @@ namespace PixCodec.JpegImpl
                 return;
             }
             int* m = stackalloc int[64];
-            for (int i = 0; i < 64; i++) m[i] = coef[i] * quant[i];
             if (size == 8)
             {
+                for (int i = 0; i < 64; i++) m[i] = coef[i] * quant[i];
                 for (int x = 0; x < 8; x++) IdctScalar1D(m + x, 8, ConstBits - pass1Bits);
                 for (int y = 0; y < 8; y++) IdctScalar1D(m + y * 8, 1, ConstBits + pass1Bits + 3);
                 for (int i = 0; i < 64; i++) output[i] = m[i];
                 return;
             }
             int extra = size == 4 ? 1 : 2;
-            int[] k = size == 4 ? s_reduce4 : s_reduce2;
-            // columns: 8 coefficients -> size samples
-            int shift = ConstBits - pass1Bits + extra, round = 1 << (shift - 1);
-            int* ws = stackalloc int[size * 8];
-            for (int x = 0; x < 8; x++)
+            int shift1 = ConstBits - pass1Bits + extra, shift2 = ConstBits + pass1Bits + 3 + extra;
+            fixed (int* k = size == 4 ? s_reduce4 : s_reduce2)
+            {
+                if (Vector<int>.Count == 8 && Vector.IsHardwareAccelerated && ForceLevel != 0)
+                {
+                    Vector.Widen(Vector.Load(coef), out var r0, out var r1);
+                    Vector.Widen(Vector.Load(coef + 16), out var r2, out var r3);
+                    Vector.Widen(Vector.Load(coef + 32), out var r4, out var r5);
+                    Vector.Widen(Vector.Load(coef + 48), out var r6, out var r7);
+                    r0 *= Vector.Load(quant); r1 *= Vector.Load(quant + 8);
+                    r2 *= Vector.Load(quant + 16); r3 *= Vector.Load(quant + 24);
+                    r4 *= Vector.Load(quant + 32); r5 *= Vector.Load(quant + 40);
+                    r6 *= Vector.Load(quant + 48); r7 *= Vector.Load(quant + 56);
+                    var round1 = new Vector<int>(1 << (shift1 - 1));
+                    int round2 = 1 << (shift2 - 1);
+                    for (int y = 0; y < size; y++)
+                    {
+                        // columns: every lane is one column's weighted sum of its 8 coefficients
+                        int* ky = k + y * 8;
+                        var w = r0 * ky[0] + r1 * ky[1] + r2 * ky[2] + r3 * ky[3] + r4 * ky[4] + r5 * ky[5] + r6 * ky[6] + r7 * ky[7] + round1;
+                        w = Vector.ShiftRightArithmetic(w, shift1);
+                        // rows: one dot product per output sample
+                        for (int x = 0; x < size; x++) output[y * size + x] = (Vector.Dot(w, Vector.Load(k + x * 8)) + round2) >> shift2;
+                    }
+                    return;
+                }
+                for (int i = 0; i < 64; i++) m[i] = coef[i] * quant[i];
+                int* ws = stackalloc int[size * 8];
+                for (int x = 0; x < 8; x++)
+                    for (int y = 0; y < size; y++)
+                    {
+                        int acc = 1 << (shift1 - 1);
+                        for (int u = 0; u < 8; u++) acc += k[y * 8 + u] * m[u * 8 + x];
+                        ws[y * 8 + x] = acc >> shift1;
+                    }
                 for (int y = 0; y < size; y++)
-                {
-                    int acc = (m[x] << (ConstBits + extra)) + round;
-                    for (int u = 1; u < 8; u++) acc += k[y * 8 + u] * m[u * 8 + x];
-                    ws[y * 8 + x] = acc >> shift;
-                }
-            shift = ConstBits + pass1Bits + 3 + extra; round = 1 << (shift - 1);
-            for (int y = 0; y < size; y++)
-                for (int x = 0; x < size; x++)
-                {
-                    int acc = (ws[y * 8] << (ConstBits + extra)) + round;
-                    for (int u = 1; u < 8; u++) acc += k[x * 8 + u] * ws[y * 8 + u];
-                    output[y * size + x] = acc >> shift;
-                }
+                    for (int x = 0; x < size; x++)
+                    {
+                        int acc = 1 << (shift2 - 1);
+                        for (int u = 0; u < 8; u++) acc += k[x * 8 + u] * ws[y * 8 + u];
+                        output[y * size + x] = acc >> shift2;
+                    }
+            }
+        }
+
+        public static bool HasIdct4 => Avx2.IsSupported && ForceLevel < 0;
+
+        /// <summary>
+        /// 8 bit half size inverse DCT (8x8 coefficients to 4x4 samples) with AVX2; same arithmetic as
+        /// <see cref="IdctGeneric"/>, using that the weights are symmetric (even coefficients) resp. antisymmetric
+        /// (odd ones) between output x and 3 - x.
+        /// </summary>
+        public static void Idct4(short* coef, int* quant, byte* dst, nint stride)
+        {
+            fixed (int* k = s_reduce4)
+            {
+                int* k1 = k + 8;
+                var r0 = Avx2.MultiplyLow(Avx2.ConvertToVector256Int32(coef), Avx.LoadVector256(quant));
+                var r1 = Avx2.MultiplyLow(Avx2.ConvertToVector256Int32(coef + 8), Avx.LoadVector256(quant + 8));
+                var r2 = Avx2.MultiplyLow(Avx2.ConvertToVector256Int32(coef + 16), Avx.LoadVector256(quant + 16));
+                var r3 = Avx2.MultiplyLow(Avx2.ConvertToVector256Int32(coef + 24), Avx.LoadVector256(quant + 24));
+                var r5 = Avx2.MultiplyLow(Avx2.ConvertToVector256Int32(coef + 40), Avx.LoadVector256(quant + 40));
+                var r6 = Avx2.MultiplyLow(Avx2.ConvertToVector256Int32(coef + 48), Avx.LoadVector256(quant + 48));
+                var r7 = Avx2.MultiplyLow(Avx2.ConvertToVector256Int32(coef + 56), Avx.LoadVector256(quant + 56));
+
+                // columns
+                const int shift1 = ConstBits - Pass1Bits + 1, shift2 = ConstBits + Pass1Bits + 3 + 1;
+                var dc = Avx2.ShiftLeftLogical(r0, ConstBits + 1) + Vector256.Create(1 << (shift1 - 1));
+                var ea = dc + r2 * k[2] + r6 * k[6];
+                var eb = dc + r2 * k1[2] + r6 * k1[6];
+                var oa = r1 * k[1] + r3 * k[3] + r5 * k[5] + r7 * k[7];
+                var ob = r1 * k1[1] + r3 * k1[3] + r5 * k1[5] + r7 * k1[7];
+                var w0 = Avx2.ShiftRightArithmetic(ea + oa, shift1);
+                var w3 = Avx2.ShiftRightArithmetic(ea - oa, shift1);
+                var w1 = Avx2.ShiftRightArithmetic(eb + ob, shift1);
+                var w2 = Avx2.ShiftRightArithmetic(eb - ob, shift1);
+
+                // 4 rows of 8 -> columns (j in the lower, j + 4 in the upper half)
+                var t0 = Avx2.UnpackLow(w0, w1).AsInt64(); var t1 = Avx2.UnpackHigh(w0, w1).AsInt64();
+                var t2 = Avx2.UnpackLow(w2, w3).AsInt64(); var t3 = Avx2.UnpackHigh(w2, w3).AsInt64();
+                var u0 = Avx2.UnpackLow(t0, t2).AsInt32(); var u1 = Avx2.UnpackHigh(t0, t2).AsInt32();
+                var u2 = Avx2.UnpackLow(t1, t3).AsInt32(); var u3 = Avx2.UnpackHigh(t1, t3).AsInt32();
+                Vector128<int> c1 = u1.GetLower(), c5 = u1.GetUpper(), c2 = u2.GetLower(), c6 = u2.GetUpper(), c3 = u3.GetLower(), c7 = u3.GetUpper();
+
+                // rows
+                var dc2 = Sse2.ShiftLeftLogical(u0.GetLower(), ConstBits + 1) + Vector128.Create(1 << (shift2 - 1));
+                var fa = dc2 + c2 * k[2] + c6 * k[6];
+                var fb = dc2 + c2 * k1[2] + c6 * k1[6];
+                var pa = c1 * k[1] + c3 * k[3] + c5 * k[5] + c7 * k[7];
+                var pb = c1 * k1[1] + c3 * k1[3] + c5 * k1[5] + c7 * k1[7];
+                var bias = Vector128.Create(128);
+                var x0 = Sse2.ShiftRightArithmetic(fa + pa, shift2) + bias;
+                var x3 = Sse2.ShiftRightArithmetic(fa - pa, shift2) + bias;
+                var x1 = Sse2.ShiftRightArithmetic(fb + pb, shift2) + bias;
+                var x2 = Sse2.ShiftRightArithmetic(fb - pb, shift2) + bias;
+
+                // columns back to rows, clamp, store
+                var a0 = Sse2.UnpackLow(x0, x1).AsInt64(); var a1 = Sse2.UnpackHigh(x0, x1).AsInt64();
+                var a2 = Sse2.UnpackLow(x2, x3).AsInt64(); var a3 = Sse2.UnpackHigh(x2, x3).AsInt64();
+                var top = Sse2.PackSignedSaturate(Sse2.UnpackLow(a0, a2).AsInt32(), Sse2.UnpackHigh(a0, a2).AsInt32());
+                var bottom = Sse2.PackSignedSaturate(Sse2.UnpackLow(a1, a3).AsInt32(), Sse2.UnpackHigh(a1, a3).AsInt32());
+                var bytes = Sse2.PackUnsignedSaturate(top, bottom).AsUInt32();
+                Unsafe.WriteUnaligned(dst, bytes.GetElement(0));
+                Unsafe.WriteUnaligned(dst + stride, bytes.GetElement(1));
+                Unsafe.WriteUnaligned(dst + 2 * stride, bytes.GetElement(2));
+                Unsafe.WriteUnaligned(dst + 3 * stride, bytes.GetElement(3));
+            }
         }
 
         /// <summary>Scalar forward DCT + quantization for sample precisions above 8 bit (input already level shifted, natural order).</summary>
