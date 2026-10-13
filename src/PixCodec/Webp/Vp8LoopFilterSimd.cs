@@ -343,5 +343,42 @@ namespace PixCodec
                 : Macroblock(p3, ref p2, ref p1, ref p0, ref q0, ref q1, ref q2, q3, limit, interior, hev);
             if (any) StoreColumns(a - 4, b - 4, stride, p3, p2, p1, p0, q0, q1, q2, q3);
         }
+
+        /// <summary>Transposes a 16x16 block of bytes held in sixteen vectors (rows to columns or back).</summary>
+        static void Transpose16(Vector128<byte>* m)
+        {
+            Vector128<byte>* t = stackalloc Vector128<byte>[16];
+            for (int i = 0; i < 8; i++) { t[i] = ZipLo8(m[2 * i], m[2 * i + 1]); t[8 + i] = ZipHi8(m[2 * i], m[2 * i + 1]); }
+            for (int i = 0; i < 4; i++)
+            {
+                m[i] = ZipLo16(t[2 * i], t[2 * i + 1]); m[4 + i] = ZipHi16(t[2 * i], t[2 * i + 1]);
+                m[8 + i] = ZipLo16(t[8 + 2 * i], t[9 + 2 * i]); m[12 + i] = ZipHi16(t[8 + 2 * i], t[9 + 2 * i]);
+            }
+            for (int k = 0; k < 4; k++)
+                for (int i = 0; i < 2; i++)
+                {
+                    t[4 * k + i] = ZipLo32(m[4 * k + 2 * i], m[4 * k + 2 * i + 1]);
+                    t[4 * k + 2 + i] = ZipHi32(m[4 * k + 2 * i], m[4 * k + 2 * i + 1]);
+                }
+            for (int k = 0; k < 8; k++) { m[2 * k] = ZipLo64(t[2 * k], t[2 * k + 1]); m[2 * k + 1] = ZipHi64(t[2 * k], t[2 * k + 1]); }
+        }
+
+        /// <summary>
+        /// The three vertical edges inside a luma macroblock (at x = 4, 8, 12), left to right. The block is turned
+        /// on its side once for all three instead of once per edge.
+        /// </summary>
+        public static void InnerVerticalEdges16(byte* p, int stride, bool simple, int limit, int interior, int hev)
+        {
+            Vector128<byte>* c = stackalloc Vector128<byte>[16];
+            for (int i = 0; i < 16; i++) c[i] = Vector128.Load(p + i * stride);
+            Transpose16(c);
+            bool any = false;
+            for (int e = 4; e < 16; e += 4)
+                any |= simple ? Simple(c[e - 2], ref c[e - 1], ref c[e], c[e + 1], limit)
+                    : Inner(c[e - 4], c[e - 3], ref c[e - 2], ref c[e - 1], ref c[e], ref c[e + 1], c[e + 2], c[e + 3], limit, interior, hev);
+            if (!any) return;
+            Transpose16(c);
+            for (int i = 0; i < 16; i++) c[i].Store(p + i * stride);
+        }
     }
 }

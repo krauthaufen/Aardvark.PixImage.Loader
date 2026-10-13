@@ -75,16 +75,10 @@ namespace PixCodec
             return bit;
         }
 
-        /// <summary>The last bytes of the data one at a time, then zeros.</summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        static ulong LoadTail(ulong value, byte* cur, byte* end, out int consumed)
-        {
-            if (cur < end) { consumed = 1; return (value << 8) | *cur; }
-            consumed = 0;
-            return value << 8;
-        }
-
-        /// <summary><see cref="GetBit"/> on reader state held in locals of the caller.</summary>
+        /// <summary>
+        /// <see cref="GetBit"/> on reader state held in locals of the caller. There is deliberately no call in here:
+        /// state that lives across a call ends up on the stack, and that load/store chain is slower than the arithmetic.
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static int Bit(ref ulong value, ref uint range, ref int bits, ref byte* cur, byte* end, int prob)
         {
@@ -98,20 +92,30 @@ namespace PixCodec
                 }
                 else
                 {
-                    value = LoadTail(value, cur, end, out int n);
-                    cur += n;
+                    // the last bytes one at a time, then zeros
+                    value <<= 8;
+                    if (cur < end) value |= *cur++;
                     bits += 8;
                 }
             }
             uint r = range;
             uint split = (r * (uint)prob) >> 8;
             uint v = (uint)(value >> bits);
-            // Without branches: the caller branches on the result anyway, and a second unpredictable branch here
-            // (plus one for the normalization) would cost more than the arithmetic.
-            uint mask = (uint)((int)(split - v) >> 31);         // all ones for a 1
-            int bit = (int)(mask & 1);
-            value -= (ulong)((split + 1) & mask) << bits;
-            r = split + (mask & (r - 2 * split - 1));           // 1: r - split - 1, 0: split
+            // The decision is a branch on purpose: predicted, it takes the comparison (which waits for the value
+            // window) off the chain from one range to the next. The normalization has no pattern to predict and
+            // stays branch-free.
+            int bit;
+            if (v > split)
+            {
+                r -= split + 1;
+                value -= (ulong)(split + 1) << bits;
+                bit = 1;
+            }
+            else
+            {
+                r = split;
+                bit = 0;
+            }
             int shift = BitOperations.LeadingZeroCount(r + 1) - 24;
             r = ((r + 1) << shift) - 1;
             bits -= shift;
@@ -173,6 +177,16 @@ namespace PixCodec
             public int Y1Dc, Y1Ac, Y2Dc, Y2Ac, UvDc, UvAc;
         }
 
+        static byte[]? _zigzagKeepAlive;
+        static readonly byte* ZigzagPtr = PinnedZigzag();
+
+        static byte* PinnedZigzag()
+        {
+            var a = _zigzagKeepAlive = GC.AllocateArray<byte>(16, pinned: true);
+            Vp8Tables.Zigzag.CopyTo(a);
+            return (byte*)System.Runtime.InteropServices.Marshal.UnsafeAddrOfPinnedArrayElement(a, 0);
+        }
+
         int _mbW, _mbH;
         // frame header
         bool _useSegment, _updateMap;
@@ -190,15 +204,15 @@ namespace PixCodec
         // filter strength per segment and "uses 4x4 prediction": limit (0 = off), interior limit, hev threshold
         readonly int[] _fLimit = new int[8], _fInner = new int[8], _fHev = new int[8];
 
-        public static Vp8Frame Decode(ReadOnlySpan<byte> data, long maxPixels)
+        public static Vp8Frame Decode(ReadOnlySpan<byte> data, long maxPixels, bool threaded = false)
         {
             if (!TryReadHeader(data, out int w, out int h)) throw Bad("frame header");
             if ((long)w * h > maxPixels)
                 throw new ImageNotSupportedException($"WebP image of {w}x{h} exceeds WebpDecodeOptions.MaxPixels ({maxPixels})");
-            fixed (byte* p = data) return new Vp8Decoder().DecodeFrame(p, data.Length, w, h);
+            fixed (byte* p = data) return new Vp8Decoder().DecodeFrame(p, data.Length, w, h, threaded);
         }
 
-        Vp8Frame DecodeFrame(byte* data, int length, int width, int height)
+        Vp8Frame DecodeFrame(byte* data, int length, int width, int height, bool threaded)
         {
             int part0 = (data[0] | data[1] << 8 | data[2] << 16) >> 5;
             if (part0 > length - 10) throw Bad("first partition exceeds the data");
@@ -231,7 +245,29 @@ namespace PixCodec
                 Y = GC.AllocateUninitializedArray<byte>(_mbW * 16 * _mbH * 16), U = GC.AllocateUninitializedArray<byte>(_mbW * 8 * _mbH * 8),
                 V = GC.AllocateUninitializedArray<byte>(_mbW * 8 * _mbH * 8),
             };
-            DecodeMacroblocks(ref br, parts, frame);
+            _br = br; _parts = parts;
+            // token probabilities by coefficient position instead of band: one lookup less per token
+            var bands = Vp8Tables.Bands;
+            for (int t = 0; t < 4; t++)
+                for (int n = 0; n < 17; n++)
+                    Array.Copy(_probs, (t * 8 + bands[n]) * 33, _posProbs, (t * 17 + n) * 33, 33);
+            _topModes = new byte[4 * _mbW];
+            _topNz = new byte[9 * _mbW];
+            _topY = new byte[16 * _mbW + 4];
+            _topU = new byte[8 * _mbW];
+            _topV = new byte[8 * _mbW];
+            // Parsing a macroblock row (modes and tokens) and rebuilding its pixels are separate steps that only meet
+            // in the row record, so for large frames the parser runs ahead on a second thread.
+            if (threaded && _mbW * _mbH >= 2048 && Environment.ProcessorCount > 1 && !OperatingSystem.IsBrowser()) DecodeRowsThreaded(frame);
+            else
+            {
+                var row = new MbRow(_mbW);
+                for (int y = 0; y < _mbH; y++)
+                {
+                    ParseRow(row, y);
+                    ReconstructRow(row, y, frame, true);
+                }
+            }
             return frame;
         }
 
@@ -327,192 +363,290 @@ namespace PixCodec
 
         // ------------------------------------------------------------------ macroblock loop
 
-        void DecodeMacroblocks(ref Vp8BoolReader br, Vp8BoolReader[] parts, Vp8Frame frame)
+        const int ModeBytes = 20;       // per macroblock: 4x4 flag, 16x16 mode, chroma mode, 16 sub-block modes
+
+        /// <summary>What the parser hands to the reconstruction for one row of macroblocks.</summary>
+        sealed class MbRow
         {
-            int mbW = _mbW, mbH = _mbH;
-            var topModes = new byte[4 * mbW];           // sub-block modes above, BDc at the frame edge
-            var topNz = new byte[9 * mbW];              // "block had coefficients" above: 4 Y, 2 U, 2 V, Y2
-            var topY = new byte[16 * mbW + 4];
-            var topU = new byte[8 * mbW];
-            var topV = new byte[8 * mbW];
-            var filterInfo = new int[mbW];              // limit | interior << 8 | hev << 16 | inner << 24
-            byte* work = stackalloc byte[WorkSize];
-            short* coeffs = stackalloc short[25 * 16];
-            new Span<short>(coeffs, 25 * 16).Clear();
+            public readonly byte[] Modes;
+            public readonly uint[] NzY, NzUv;       // two bits per block: 0 empty, 1 only DC, 2 more
+            public readonly int[] Filter;           // limit | interior << 8 | hev << 16 | inner << 24
+            /// <summary>384 dequantized coefficients per macroblock. All zero between uses: the parser writes the
+            /// non-zero ones, the reconstruction clears every block it consumes.</summary>
+            public readonly short[] Coeffs;
+
+            public MbRow(int mbW)
+            {
+                Modes = new byte[ModeBytes * mbW];
+                NzY = new uint[mbW]; NzUv = new uint[mbW]; Filter = new int[mbW];
+                Coeffs = new short[384 * mbW];
+            }
+        }
+
+        Vp8BoolReader _br;
+        Vp8BoolReader[] _parts = Array.Empty<Vp8BoolReader>();
+        readonly byte[] _posProbs = new byte[4 * 17 * 33];
+        const int TypeStride = 17 * 33;
+        byte[] _topModes = Array.Empty<byte>();     // sub-block modes above, BDc at the frame edge
+        byte[] _topNz = Array.Empty<byte>();        // "block had coefficients" above: 4 Y, 2 U, 2 V, Y2
+        byte[] _topY = Array.Empty<byte>(), _topU = Array.Empty<byte>(), _topV = Array.Empty<byte>();
+        readonly byte[] _work = new byte[WorkSize];
+
+        /// <summary>
+        /// Three stages on three threads: parsing runs ahead on a pool thread, the calling thread rebuilds the pixels,
+        /// and a second pool thread follows with the loop filter (which only touches rows that are already rebuilt,
+        /// while prediction reads the unfiltered copies in the line buffers).
+        /// </summary>
+        void DecodeRowsThreaded(Vp8Frame frame)
+        {
+            const int Ahead = 8;
+            bool filter = _filterLevel > 0;
+            using var free = new System.Collections.Concurrent.BlockingCollection<MbRow>();
+            using var parsed = new System.Collections.Concurrent.BlockingCollection<MbRow>();
+            using var rebuilt = new System.Collections.Concurrent.BlockingCollection<(MbRow row, int y)>();
+            using var cancel = new System.Threading.CancellationTokenSource();
+            for (int i = 0; i < Ahead; i++) free.Add(new MbRow(_mbW));
+            var parser = System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    for (int y = 0; y < _mbH; y++)
+                    {
+                        var row = free.Take(cancel.Token);
+                        ParseRow(row, y);
+                        parsed.Add(row);
+                    }
+                }
+                catch (OperationCanceledException) { }
+            });
+            var filterer = !filter ? System.Threading.Tasks.Task.CompletedTask : System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    for (int n = 0; n < _mbH; n++)
+                    {
+                        var (row, y) = rebuilt.Take(cancel.Token);
+                        FilterRow(row, y, frame);
+                        free.Add(row);
+                    }
+                }
+                catch (OperationCanceledException) { }
+            });
+            try
+            {
+                for (int y = 0; y < _mbH; y++)
+                {
+                    var row = parsed.Take();
+                    ReconstructRow(row, y, frame, !filter);
+                    if (filter) rebuilt.Add((row, y));
+                    else free.Add(row);
+                }
+                filterer.Wait();
+            }
+            finally
+            {
+                // the other threads read the caller's pinned data and write the frame: they must be gone before this returns
+                cancel.Cancel();
+                parser.Wait();
+                filterer.Wait();
+            }
+        }
+
+        /// <summary>Reads the prediction records (first partition) and the tokens of one macroblock row.</summary>
+        void ParseRow(MbRow row, int mby)
+        {
+            int mbW = _mbW;
             byte* leftModes = stackalloc byte[4];
             byte* leftNz = stackalloc byte[9];
-            byte* modes = stackalloc byte[16];
+            short* dc = stackalloc short[16];
+            new Span<byte>(leftModes, 4).Clear();
+            new Span<byte>(leftNz, 9).Clear();
+            new Span<short>(dc, 16).Clear();
             var bprobs = Vp8Tables.BModeProbs;
-            int partMask = _numParts - 1;
             bool filter = _filterLevel > 0;
+            ref Vp8BoolReader tr = ref _parts[mby & (_numParts - 1)];
             // the state of the first partition's reader stays in locals (see GetCoeffs)
-            ulong bv = br._value;
-            uint br1 = br._range;
-            int bb = br._bits;
-            byte* bc = br._cur, be = br._end;
-
-            fixed (byte* fy = frame.Y, fu = frame.U, fv = frame.V, probs = _probs)
-            fixed (byte* pTopY = topY, pTopU = topU, pTopV = topV, pTopNz = topNz)
+            ulong bv = _br._value;
+            uint br1 = _br._range;
+            int bb = _br._bits;
+            byte* bc = _br._cur, be = _br._end;
+            fixed (byte* probs = _posProbs, pTopNz = _topNz, topModes = _topModes, pModes = row.Modes)
+            fixed (short* pCoeffs = row.Coeffs)
             {
-                for (int mby = 0; mby < mbH; mby++)
+                for (int mbx = 0; mbx < mbW; mbx++)
                 {
-                    ref Vp8BoolReader tr = ref parts[mby & partMask];
-                    new Span<byte>(leftModes, 4).Clear();
-                    new Span<byte>(leftNz, 9).Clear();
-                    for (int mbx = 0; mbx < mbW; mbx++)
+                    int segment = 0;
+                    if (_updateMap)
+                        segment = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _segProbs[0]) == 0 ? Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _segProbs[1]) : 2 + Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _segProbs[2]);
+                    bool skip = _useSkip && Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _skipProb) != 0;
+                    bool i4 = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 145) == 0;
+                    byte* modes = pModes + mbx * ModeBytes;
+                    modes[0] = (byte)(i4 ? 1 : 0);
+                    if (!i4)
                     {
-                        // ---- prediction record (first partition)
-                        int segment = 0;
-                        if (_updateMap)
-                            segment = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _segProbs[0]) == 0 ? Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _segProbs[1]) : 2 + Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _segProbs[2]);
-                        bool skip = _useSkip && Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _skipProb) != 0;
-                        bool i4 = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 145) == 0;
-                        int ymode = 0;
-                        if (!i4)
-                        {
-                            ymode = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 156) != 0 ? (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 128) != 0 ? TmPred : HPred) : (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 163) != 0 ? VPred : DcPred);
-                            for (int i = 0; i < 4; i++) { topModes[4 * mbx + i] = (byte)ymode; leftModes[i] = (byte)ymode; }
-                        }
-                        else
-                        {
-                            for (int y = 0; y < 4; y++)
-                            {
-                                int l = leftModes[y];
-                                for (int x = 0; x < 4; x++)
-                                {
-                                    var p = bprobs.Slice((topModes[4 * mbx + x] * 10 + l) * 9, 9);
-                                    int m;
-                                    if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[0]) == 0) m = BDc;
-                                    else if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[1]) == 0) m = BTm;
-                                    else if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[2]) == 0) m = BVe;
-                                    else if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[3]) == 0) m = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[4]) == 0 ? BHe : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[5]) == 0 ? BRd : BVr;
-                                    else m = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[6]) == 0 ? BLd : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[7]) == 0 ? BVl : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[8]) == 0 ? BHd : BHu;
-                                    topModes[4 * mbx + x] = (byte)m;
-                                    modes[y * 4 + x] = (byte)m;
-                                    l = m;
-                                }
-                                leftModes[y] = (byte)l;
-                            }
-                        }
-                        int uvmode = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 142) == 0 ? DcPred : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 114) == 0 ? VPred : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 183) != 0 ? TmPred : HPred;
-
-                        // ---- residual tokens
-                        uint nzY = 0, nzUv = 0;     // two bits per block: 0 empty, 1 only DC, 2 more
-                        byte* tnz = pTopNz + 9 * mbx;
-                        if (!skip) ParseResiduals(ref tr, probs, ref _quant[segment], i4, tnz, leftNz, coeffs, out nzY, out nzUv);
-                        else
-                        {
-                            new Span<byte>(tnz, 8).Clear();
-                            new Span<byte>(leftNz, 8).Clear();
-                            if (!i4) tnz[8] = leftNz[8] = 0;
-                        }
-                        if (filter)
-                        {
-                            int k = segment * 2 + (i4 ? 1 : 0);
-                            int inner = i4 || (nzY | nzUv) != 0 ? 1 : 0;
-                            filterInfo[mbx] = _fLimit[k] | _fInner[k] << 8 | _fHev[k] << 16 | inner << 24;
-                        }
-
-                        // ---- prediction borders
-                        byte* yb = work + YOff, ub = work + UOff, vb = work + VOff;
-                        if (mbx == 0)
-                        {
-                            for (int j = 0; j < 16; j++) yb[j * Bps - 1] = 129;
-                            for (int j = 0; j < 8; j++) { ub[j * Bps - 1] = 129; vb[j * Bps - 1] = 129; }
-                            yb[-1 - Bps] = ub[-1 - Bps] = vb[-1 - Bps] = (byte)(mby > 0 ? 129 : 127);
-                        }
-                        else
-                        {
-                            for (int j = -1; j < 16; j++) yb[j * Bps - 1] = yb[j * Bps + 15];
-                            for (int j = -1; j < 8; j++) { ub[j * Bps - 1] = ub[j * Bps + 7]; vb[j * Bps - 1] = vb[j * Bps + 7]; }
-                        }
-                        if (mby > 0)
-                        {
-                            Vector128.Load(pTopY + 16 * mbx).Store(yb - Bps);
-                            Unsafe.WriteUnaligned(ub - Bps, Unsafe.ReadUnaligned<ulong>(pTopU + 8 * mbx));
-                            Unsafe.WriteUnaligned(vb - Bps, Unsafe.ReadUnaligned<ulong>(pTopV + 8 * mbx));
-                        }
-                        else
-                        {
-                            Vector128.Create((byte)127).Store(yb - Bps);
-                            Unsafe.WriteUnaligned(ub - Bps, 0x7f7f7f7f7f7f7f7fUL);
-                            Unsafe.WriteUnaligned(vb - Bps, 0x7f7f7f7f7f7f7f7fUL);
-                        }
-
-                        // ---- luma
-                        if (i4)
-                        {
-                            // The four pixels above and to the right of the macroblock serve all sub-blocks of the right column.
-                            uint tr4;
-                            if (mby == 0) tr4 = 0x7f7f7f7f;
-                            else if (mbx < mbW - 1) tr4 = Unsafe.ReadUnaligned<uint>(pTopY + 16 * mbx + 16);
-                            else tr4 = pTopY[16 * mbx + 15] * 0x01010101u;
-                            Unsafe.WriteUnaligned(yb - Bps + 16, tr4);
-                            Unsafe.WriteUnaligned(yb + 3 * Bps + 16, tr4);
-                            Unsafe.WriteUnaligned(yb + 7 * Bps + 16, tr4);
-                            Unsafe.WriteUnaligned(yb + 11 * Bps + 16, tr4);
-                            for (int n = 0; n < 16; n++)
-                            {
-                                byte* dst = yb + (n >> 2) * 4 * Bps + (n & 3) * 4;
-                                Predict4(dst, modes[n]);
-                                AddResidual(coeffs + n * 16, dst, (int)(nzY >> (2 * n)) & 3);
-                            }
-                        }
-                        else
-                        {
-                            Predict16(yb, ymode, mbx > 0, mby > 0);
-                            if (nzY != 0)
-                                for (int n = 0; n < 16; n++)
-                                    AddResidual(coeffs + n * 16, yb + (n >> 2) * 4 * Bps + (n & 3) * 4, (int)(nzY >> (2 * n)) & 3);
-                        }
-                        // ---- chroma
-                        Predict8(ub, uvmode, mbx > 0, mby > 0);
-                        Predict8(vb, uvmode, mbx > 0, mby > 0);
-                        if (nzUv != 0)
-                            for (int n = 0; n < 4; n++)
-                            {
-                                int o = (n >> 1) * 4 * Bps + (n & 1) * 4;
-                                AddResidual(coeffs + (16 + n) * 16, ub + o, (int)(nzUv >> (2 * n)) & 3);
-                                AddResidual(coeffs + (20 + n) * 16, vb + o, (int)(nzUv >> (2 * n + 8)) & 3);
-                            }
-
-                        // ---- store
-                        byte* dy = fy + (long)mby * 16 * frame.YStride + mbx * 16;
-                        for (int j = 0; j < 16; j++) Vector128.Load(yb + j * Bps).Store(dy + j * frame.YStride);
-                        byte* du = fu + (long)mby * 8 * frame.UVStride + mbx * 8, dv = fv + (long)mby * 8 * frame.UVStride + mbx * 8;
-                        for (int j = 0; j < 8; j++)
-                        {
-                            Unsafe.WriteUnaligned(du + j * frame.UVStride, Unsafe.ReadUnaligned<ulong>(ub + j * Bps));
-                            Unsafe.WriteUnaligned(dv + j * frame.UVStride, Unsafe.ReadUnaligned<ulong>(vb + j * Bps));
-                        }
-                        // the unfiltered bottom rows predict the next macroblock row; the top-left pixel of the next
-                        // macroblock is still in the work area
-                        Vector128.Load(yb + 15 * Bps).Store(pTopY + 16 * mbx);
-                        Unsafe.WriteUnaligned(pTopU + 8 * mbx, Unsafe.ReadUnaligned<ulong>(ub + 7 * Bps));
-                        Unsafe.WriteUnaligned(pTopV + 8 * mbx, Unsafe.ReadUnaligned<ulong>(vb + 7 * Bps));
+                        int ymode = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 156) != 0 ? (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 128) != 0 ? TmPred : HPred) : (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 163) != 0 ? VPred : DcPred);
+                        modes[1] = (byte)ymode;
+                        for (int i = 0; i < 4; i++) { topModes[4 * mbx + i] = (byte)ymode; leftModes[i] = (byte)ymode; }
                     }
+                    else
+                    {
+                        for (int y = 0; y < 4; y++)
+                        {
+                            int l = leftModes[y];
+                            for (int x = 0; x < 4; x++)
+                            {
+                                var p = bprobs.Slice((topModes[4 * mbx + x] * 10 + l) * 9, 9);
+                                int m;
+                                if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[0]) == 0) m = BDc;
+                                else if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[1]) == 0) m = BTm;
+                                else if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[2]) == 0) m = BVe;
+                                else if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[3]) == 0) m = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[4]) == 0 ? BHe : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[5]) == 0 ? BRd : BVr;
+                                else m = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[6]) == 0 ? BLd : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[7]) == 0 ? BVl : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[8]) == 0 ? BHd : BHu;
+                                topModes[4 * mbx + x] = (byte)m;
+                                modes[3 + y * 4 + x] = (byte)m;
+                                l = m;
+                            }
+                            leftModes[y] = (byte)l;
+                        }
+                    }
+                    modes[2] = (byte)(Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 142) == 0 ? DcPred : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 114) == 0 ? VPred : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 183) != 0 ? TmPred : HPred);
 
-                    // Filtering a row only touches it and the rows above, and prediction never reads the frame again.
+                    uint nzY = 0, nzUv = 0;
+                    byte* tnz = pTopNz + 9 * mbx;
+                    if (!skip) ParseResiduals(ref tr, probs, ref _quant[segment], i4, tnz, leftNz, pCoeffs + 384 * mbx, dc, out nzY, out nzUv);
+                    else
+                    {
+                        Unsafe.WriteUnaligned(tnz, 0UL);
+                        Unsafe.WriteUnaligned(leftNz, 0UL);
+                        if (!i4) tnz[8] = leftNz[8] = 0;
+                    }
+                    row.NzY[mbx] = nzY; row.NzUv[mbx] = nzUv;
                     if (filter)
-                        for (int mbx = 0; mbx < mbW; mbx++)
-                            FilterMacroblock(frame, fy, fu, fv, mbx, mby, filterInfo[mbx]);
+                    {
+                        int k = segment * 2 + (i4 ? 1 : 0);
+                        int inner = i4 || (nzY | nzUv) != 0 ? 1 : 0;
+                        row.Filter[mbx] = _fLimit[k] | _fInner[k] << 8 | _fHev[k] << 16 | inner << 24;
+                    }
                 }
             }
+            _br._value = bv; _br._range = br1; _br._bits = bb; _br._cur = bc;
+        }
+
+        /// <summary>Predicts and adds the residuals of one macroblock row; with filterToo the loop filter follows at once.</summary>
+        void ReconstructRow(MbRow row, int mby, Vp8Frame frame, bool filterToo)
+        {
+            int mbW = _mbW;
+            fixed (byte* fy = frame.Y, fu = frame.U, fv = frame.V, work = _work, pModes = row.Modes)
+            fixed (byte* pTopY = _topY, pTopU = _topU, pTopV = _topV)
+            fixed (short* pCoeffs = row.Coeffs)
+            {
+                for (int mbx = 0; mbx < mbW; mbx++)
+                {
+                    byte* modes = pModes + mbx * ModeBytes;
+                    short* coeffs = pCoeffs + 384 * mbx;
+                    uint nzY = row.NzY[mbx], nzUv = row.NzUv[mbx];
+                    // ---- prediction borders
+                    byte* yb = work + YOff, ub = work + UOff, vb = work + VOff;
+                    if (mbx == 0)
+                    {
+                        for (int j = 0; j < 16; j++) yb[j * Bps - 1] = 129;
+                        for (int j = 0; j < 8; j++) { ub[j * Bps - 1] = 129; vb[j * Bps - 1] = 129; }
+                        yb[-1 - Bps] = ub[-1 - Bps] = vb[-1 - Bps] = (byte)(mby > 0 ? 129 : 127);
+                    }
+                    else
+                    {
+                        for (int j = -1; j < 16; j++) yb[j * Bps - 1] = yb[j * Bps + 15];
+                        for (int j = -1; j < 8; j++) { ub[j * Bps - 1] = ub[j * Bps + 7]; vb[j * Bps - 1] = vb[j * Bps + 7]; }
+                    }
+                    if (mby > 0)
+                    {
+                        Vector128.Load(pTopY + 16 * mbx).Store(yb - Bps);
+                        Unsafe.WriteUnaligned(ub - Bps, Unsafe.ReadUnaligned<ulong>(pTopU + 8 * mbx));
+                        Unsafe.WriteUnaligned(vb - Bps, Unsafe.ReadUnaligned<ulong>(pTopV + 8 * mbx));
+                    }
+                    else
+                    {
+                        Vector128.Create((byte)127).Store(yb - Bps);
+                        Unsafe.WriteUnaligned(ub - Bps, 0x7f7f7f7f7f7f7f7fUL);
+                        Unsafe.WriteUnaligned(vb - Bps, 0x7f7f7f7f7f7f7f7fUL);
+                    }
+
+                    // ---- luma
+                    if (modes[0] != 0)
+                    {
+                        // The four pixels above and to the right of the macroblock serve all sub-blocks of the right column.
+                        uint tr4;
+                        if (mby == 0) tr4 = 0x7f7f7f7f;
+                        else if (mbx < mbW - 1) tr4 = Unsafe.ReadUnaligned<uint>(pTopY + 16 * mbx + 16);
+                        else tr4 = pTopY[16 * mbx + 15] * 0x01010101u;
+                        Unsafe.WriteUnaligned(yb - Bps + 16, tr4);
+                        Unsafe.WriteUnaligned(yb + 3 * Bps + 16, tr4);
+                        Unsafe.WriteUnaligned(yb + 7 * Bps + 16, tr4);
+                        Unsafe.WriteUnaligned(yb + 11 * Bps + 16, tr4);
+                        for (int n = 0; n < 16; n++)
+                        {
+                            byte* dst = yb + (n >> 2) * 4 * Bps + (n & 3) * 4;
+                            Predict4(dst, modes[3 + n]);
+                            AddResidual(coeffs + n * 16, dst, (int)(nzY >> (2 * n)) & 3);
+                        }
+                    }
+                    else
+                    {
+                        Predict16(yb, modes[1], mbx > 0, mby > 0);
+                        if (nzY != 0)
+                            for (int n = 0; n < 16; n++)
+                                AddResidual(coeffs + n * 16, yb + (n >> 2) * 4 * Bps + (n & 3) * 4, (int)(nzY >> (2 * n)) & 3);
+                    }
+                    // ---- chroma
+                    Predict8(ub, modes[2], mbx > 0, mby > 0);
+                    Predict8(vb, modes[2], mbx > 0, mby > 0);
+                    if (nzUv != 0)
+                        for (int n = 0; n < 4; n++)
+                        {
+                            int o = (n >> 1) * 4 * Bps + (n & 1) * 4;
+                            AddResidual(coeffs + (16 + n) * 16, ub + o, (int)(nzUv >> (2 * n)) & 3);
+                            AddResidual(coeffs + (20 + n) * 16, vb + o, (int)(nzUv >> (2 * n + 8)) & 3);
+                        }
+
+                    // ---- store
+                    byte* dy = fy + (long)mby * 16 * frame.YStride + mbx * 16;
+                    for (int j = 0; j < 16; j++) Vector128.Load(yb + j * Bps).Store(dy + j * frame.YStride);
+                    byte* du = fu + (long)mby * 8 * frame.UVStride + mbx * 8, dv = fv + (long)mby * 8 * frame.UVStride + mbx * 8;
+                    for (int j = 0; j < 8; j++)
+                    {
+                        Unsafe.WriteUnaligned(du + j * frame.UVStride, Unsafe.ReadUnaligned<ulong>(ub + j * Bps));
+                        Unsafe.WriteUnaligned(dv + j * frame.UVStride, Unsafe.ReadUnaligned<ulong>(vb + j * Bps));
+                    }
+                    // the unfiltered bottom rows predict the next macroblock row; the top-left pixel of the next
+                    // macroblock is still in the work area
+                    Vector128.Load(yb + 15 * Bps).Store(pTopY + 16 * mbx);
+                    Unsafe.WriteUnaligned(pTopU + 8 * mbx, Unsafe.ReadUnaligned<ulong>(ub + 7 * Bps));
+                    Unsafe.WriteUnaligned(pTopV + 8 * mbx, Unsafe.ReadUnaligned<ulong>(vb + 7 * Bps));
+                }
+
+            }
+            if (filterToo) FilterRow(row, mby, frame);
+        }
+
+        /// <summary>The loop filter over one macroblock row. It only touches this row and the three lines above it,
+        /// and prediction never reads the frame, so it may trail the reconstruction.</summary>
+        void FilterRow(MbRow row, int mby, Vp8Frame frame)
+        {
+            if (_filterLevel == 0) return;
+            fixed (byte* fy = frame.Y, fu = frame.U, fv = frame.V)
+                for (int mbx = 0; mbx < _mbW; mbx++)
+                    FilterMacroblock(frame, fy, fu, fv, mbx, mby, row.Filter[mbx]);
         }
 
         // ------------------------------------------------------------------ tokens
 
-        void ParseResiduals(ref Vp8BoolReader br, byte* probs, ref Quant q, bool i4, byte* top, byte* left, short* coeffs, out uint nzY, out uint nzUv)
+        void ParseResiduals(ref Vp8BoolReader br, byte* probs, ref Quant q, bool i4, byte* top, byte* left, short* coeffs, short* dc, out uint nzY, out uint nzUv)
         {
             int first = 0;
-            byte* acProbs = probs + 3 * 264;
-            nzY = 0; nzUv = 0;
+            byte* acProbs = probs + 3 * TypeStride;
             if (!i4)
             {
-                short* dc = coeffs + 24 * 16;
-                int ctx = top[8] + left[8];
-                int nz = GetCoeffs(ref br, probs + 264, ctx, q.Y2Dc, q.Y2Ac, 0, dc);
-                top[8] = left[8] = (byte)(nz > 0 ? 1 : 0);
+                int nz = GetBlocks(ref br, probs + TypeStride, 0, q.Y2Dc, q.Y2Ac, dc, top, left, BlockOrder + 48, 1, out _);
                 if (nz > 1) InverseWht(dc, coeffs);
                 else
                 {
@@ -523,97 +657,99 @@ namespace PixCodec
                 first = 1;
                 acProbs = probs;
             }
-            for (int y = 0; y < 4; y++)
+            GetBlocks(ref br, acProbs, first, q.Y1Dc, q.Y1Ac, coeffs, top, left, BlockOrder, 16, out nzY);
+            GetBlocks(ref br, probs + 2 * TypeStride, 0, q.UvDc, q.UvAc, coeffs + 16 * 16, top, left, BlockOrder + 32, 4, out uint nzU);
+            GetBlocks(ref br, probs + 2 * TypeStride, 0, q.UvDc, q.UvAc, coeffs + 20 * 16, top, left, BlockOrder + 40, 4, out uint nzV);
+            nzUv = nzU | nzV << 8;
+        }
+
+        // for every block its slot in the "had coefficients" context above and to the left: 16 Y, 4 U, 4 V, Y2
+        static byte[]? _blockOrderKeepAlive;
+        static readonly byte* BlockOrder = PinnedBlockOrder();
+
+        static byte* PinnedBlockOrder()
+        {
+            var a = _blockOrderKeepAlive = GC.AllocateArray<byte>(50, pinned: true);
+            for (int n = 0; n < 16; n++) { a[2 * n] = (byte)(n & 3); a[2 * n + 1] = (byte)(n >> 2); }
+            for (int n = 0; n < 4; n++)
             {
-                int l = left[y];
-                for (int x = 0; x < 4; x++)
-                {
-                    short* dst = coeffs + (y * 4 + x) * 16;
-                    int nz = GetCoeffs(ref br, acProbs, l + top[x], q.Y1Dc, q.Y1Ac, first, dst);
-                    l = nz > first ? 1 : 0;
-                    top[x] = (byte)l;
-                    nzY |= (uint)(nz > 1 ? 2 : dst[0] != 0 ? 1 : 0) << (2 * (y * 4 + x));
-                }
-                left[y] = (byte)l;
+                a[32 + 2 * n] = (byte)(4 + (n & 1)); a[33 + 2 * n] = (byte)(4 + (n >> 1));
+                a[40 + 2 * n] = (byte)(6 + (n & 1)); a[41 + 2 * n] = (byte)(6 + (n >> 1));
             }
-            for (int ch = 0; ch < 2; ch++)
-            {
-                for (int y = 0; y < 2; y++)
-                {
-                    int l = left[4 + ch * 2 + y];
-                    for (int x = 0; x < 2; x++)
-                    {
-                        short* dst = coeffs + (16 + ch * 4 + y * 2 + x) * 16;
-                        int nz = GetCoeffs(ref br, probs + 2 * 264, l + top[4 + ch * 2 + x], q.UvDc, q.UvAc, 0, dst);
-                        l = nz > 0 ? 1 : 0;
-                        top[4 + ch * 2 + x] = (byte)l;
-                        nzUv |= (uint)(nz > 1 ? 2 : dst[0] != 0 ? 1 : 0) << (2 * (y * 2 + x) + 8 * ch);
-                    }
-                    left[4 + ch * 2 + y] = (byte)l;
-                }
-            }
+            a[48] = a[49] = 8;
+            return (byte*)System.Runtime.InteropServices.Marshal.UnsafeAddrOfPinnedArrayElement(a, 0);
         }
 
         /// <summary>
-        /// Reads the tokens of one block starting at coefficient <paramref name="n"/> and stores the dequantized values in
-        /// raster order. Returns the position after the last token read (16 when the block runs to its end).
+        /// Reads the tokens of <paramref name="count"/> consecutive blocks of one type, starting each at coefficient
+        /// <paramref name="first"/>, and stores the dequantized values in raster order (16 per block). Updates the
+        /// contexts and returns two bits per block in <paramref name="kinds"/>: 0 nothing, 1 only a DC value, 2 more.
+        /// The return value is the position after the last token of the last block.
+        /// One loop for a whole plane of a macroblock keeps the reader state in registers across its blocks.
         /// </summary>
-        static int GetCoeffs(ref Vp8BoolReader br, byte* probs, int ctx, int dqDc, int dqAc, int n, short* dst)
+        static int GetBlocks(ref Vp8BoolReader br, byte* probs, int first, int dqDc, int dqAc, short* dst, byte* top, byte* left, byte* order, int count, out uint kinds)
         {
-            // probs: [band][context][11] of one block type
-            var bands = Vp8Tables.Bands;
-            var zigzag = Vp8Tables.Zigzag;
-            // the reader state lives in locals for the whole block: going through the struct in memory for every
-            // bool would more than double the time spent here
+            // probs: [position][context][11] of one block type
+            byte* zigzag = ZigzagPtr;
             ulong value = br._value;
             uint range = br._range;
             int bits = br._bits;
             byte* cur = br._cur, end = br._end;
-            byte* p = probs + (bands[n] * 3 + ctx) * 11;
-            for (; n < 16; n++)
+            uint k = 0;
+            int n = first;
+            for (int b = 0; b < count; b++, dst += 16)
             {
-                if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[0]) == 0) break;         // end of block
-                while (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[1]) == 0)             // zero; no end of block may follow
+                byte* ctxTop = top + order[2 * b], ctxLeft = left + order[2 * b + 1];
+                n = first;
+                byte* p = probs + (n * 3 + *ctxTop + *ctxLeft) * 11;
+                for (; n < 16; n++)
                 {
-                    if (++n == 16) goto done;
-                    p = probs + bands[n] * 33;
-                }
-                byte* next = probs + bands[n + 1] * 33;
-                int v;
-                if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[2]) == 0) { v = 1; p = next + 11; }
-                else
-                {
-                    if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[3]) == 0)
+                    if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[0]) == 0) break;         // end of block
+                    while (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[1]) == 0)             // zero; no end of block may follow
                     {
-                        if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[4]) == 0) v = 2;
-                        else v = 3 + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[5]);
+                        if (++n == 16) goto done;
+                        p = probs + n * 33;
                     }
-                    else if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[6]) == 0)
-                    {
-                        if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[7]) == 0)
-                            v = 5 + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 159);
-                        else
-                        {
-                            v = 7 + 2 * Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 165);
-                            v += Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 145);
-                        }
-                    }
+                    byte* next = probs + (n + 1) * 33;
+                    int v;
+                    if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[2]) == 0) { v = 1; p = next + 11; }
                     else
                     {
-                        int b1 = Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[8]);
-                        int cat = 2 * b1 + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[9 + b1]);
-                        var extra = cat == 0 ? Vp8Tables.Cat3 : cat == 1 ? Vp8Tables.Cat4 : cat == 2 ? Vp8Tables.Cat5 : Vp8Tables.Cat6;
-                        v = 0;
-                        for (int i = 0; extra[i] != 0; i++) v += v + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, extra[i]);
-                        v += 3 + (8 << cat);
+                        if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[3]) == 0)
+                        {
+                            if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[4]) == 0) v = 2;
+                            else v = 3 + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[5]);
+                        }
+                        else if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[6]) == 0)
+                        {
+                            if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[7]) == 0)
+                                v = 5 + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 159);
+                            else
+                            {
+                                v = 7 + 2 * Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 165);
+                                v += Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 145);
+                            }
+                        }
+                        else
+                        {
+                            int b1 = Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[8]);
+                            int cat = 2 * b1 + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[9 + b1]);
+                            var extra = cat == 0 ? Vp8Tables.Cat3 : cat == 1 ? Vp8Tables.Cat4 : cat == 2 ? Vp8Tables.Cat5 : Vp8Tables.Cat6;
+                            v = 0;
+                            for (int i = 0; extra[i] != 0; i++) v += v + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, extra[i]);
+                            v += 3 + (8 << cat);
+                        }
+                        p = next + 22;
                     }
-                    p = next + 22;
+                    if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 128) != 0) v = -v;
+                    dst[zigzag[n]] = (short)(v * (n > 0 ? dqAc : dqDc));
                 }
-                if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 128) != 0) v = -v;
-                dst[zigzag[n]] = (short)(v * (n > 0 ? dqAc : dqDc));
+            done:
+                *ctxTop = *ctxLeft = (byte)(n > first ? 1 : 0);
+                k |= (uint)(n > 1 ? 2 : dst[0] != 0 ? 1 : 0) << (2 * b);
             }
-        done:
             br._value = value; br._range = range; br._bits = bits; br._cur = cur;
+            kinds = k;
             return n;
         }
 
@@ -912,7 +1048,7 @@ namespace PixCodec
                 if (_simpleFilter)
                 {
                     if (mbx > 0) Vp8LoopFilterSimd.VerticalEdge(y, y + 8 * ys, ys, 0, limit + 4, 0, 0);
-                    if (inner) for (int i = 4; i < 16; i += 4) Vp8LoopFilterSimd.VerticalEdge(y + i, y + i + 8 * ys, ys, 0, limit, 0, 0);
+                    if (inner) Vp8LoopFilterSimd.InnerVerticalEdges16(y, ys, true, limit, 0, 0);
                     if (mby > 0) Vp8LoopFilterSimd.HorizontalEdge16(y, ys, 0, limit + 4, 0, 0);
                     if (inner) for (int i = 4; i < 16; i += 4) Vp8LoopFilterSimd.HorizontalEdge16(y + i * ys, ys, 0, limit, 0, 0);
                     return;
@@ -925,7 +1061,7 @@ namespace PixCodec
                 }
                 if (inner)
                 {
-                    for (int i = 4; i < 16; i += 4) Vp8LoopFilterSimd.VerticalEdge(y + i, y + i + 8 * ys, ys, 1, limit, interior, hev);
+                    Vp8LoopFilterSimd.InnerVerticalEdges16(y, ys, false, limit, interior, hev);
                     Vp8LoopFilterSimd.VerticalEdge(cu + 4, cv + 4, uvs, 1, limit, interior, hev);
                 }
                 if (mby > 0)

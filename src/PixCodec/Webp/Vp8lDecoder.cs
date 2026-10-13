@@ -36,24 +36,14 @@ namespace PixCodec
                 }
                 else
                 {
-                    // through temporaries, so that the caller's variables can stay in registers
-                    ulong v = val;
-                    int b = bits;
-                    cur = FillTail(ref v, ref b, cur, end);
-                    val = v; bits = b;
+                    // no call here: state that lives across a call is kept on the stack by the JIT
+                    while (bits <= 56 && cur < end)
+                    {
+                        val |= (ulong)*cur++ << bits;
+                        bits += 8;
+                    }
                 }
             }
-        }
-
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        static byte* FillTail(ref ulong val, ref int bits, byte* cur, byte* end)
-        {
-            while (bits <= 56 && cur < end)
-            {
-                val |= (ulong)*cur++ << bits;
-                bits += 8;
-            }
-            return cur;
         }
 
         public void Fill() => Fill(ref Val, ref Bits, ref Cur, End);
@@ -484,27 +474,40 @@ namespace PixCodec
             var data = new uint[Math.Min(end, Chunk)];
             uint[]? cache = cacheBits > 0 ? new uint[1 << cacheBits] : null;
             int cacheShift = 32 - cacheBits;
-            int blockMask = meta == null ? -1 : (1 << prefixBits) - 1;
 
             // the reader state lives in locals while the pixels are decoded
             ulong val = _br.Val;
             int bits = _br.Bits;
             byte* cur = _br.Cur, bufEnd = _br.End;
-            int pos = 0, x = 0, y = 0;
+            int pos = 0;
+            int blockSize = meta == null ? 0 : 1 << prefixBits;
             fixed (uint* t = tables, pm = meta, pc = cache)
             fixed (int* gs = groups)
             {
-                int* g = gs + (pm != null ? (int)pm[0] : 0);
+                int* g = gs;
                 while (pos < end)
                 {
                     int limit = Math.Min(end, data.Length);
                     int pendingLength = 0, pendingDist = 0;
                     fixed (uint* d = data)
                     {
-                        while (pos < limit)
+                        // The loop keeps as little as possible alive: output pointers instead of coordinates, and a
+                        // countdown to the next position where the prefix code group can change.
+                        uint* dp = d + pos, dEnd = d + limit;
+                        int until = 0;
+                        while (dp < dEnd)
                         {
                             if (bits < 0) throw Bad("data ends prematurely");
-                            if ((x & blockMask) == 0 && pm != null) g = gs + pm[(y >> prefixBits) * metaWidth + (x >> prefixBits)];
+                            if (until == 0)
+                            {
+                                until = int.MaxValue;
+                                if (pm != null)
+                                {
+                                    int p0 = (int)(dp - d), x = p0 % xsize, y = p0 / xsize;
+                                    g = gs + pm[(y >> prefixBits) * metaWidth + (x >> prefixBits)];
+                                    until = Math.Min(blockSize - (x & (blockSize - 1)), xsize - x);
+                                }
+                            }
                             Vp8lBitReader.Fill(ref val, ref bits, ref cur, bufEnd);
                             uint px;
                             if ((g[10] & FlagTrivialPixel) != 0) px = (uint)g[11];
@@ -550,6 +553,7 @@ namespace PixCodec
                                         if (dist < 1) dist = 1;
                                     }
                                     if (bits < 0) throw Bad("data ends prematurely");
+                                    pos = (int)(dp - d);
                                     if (dist > pos || length > end - pos) throw Bad("backward reference out of range");
                                     if (length > limit - pos)
                                     {
@@ -557,25 +561,24 @@ namespace PixCodec
                                         pendingLength = length; pendingDist = dist;
                                         break;
                                     }
-                                    uint* dst = d + pos, src = dst - dist;
-                                    if (dist >= length) Buffer.MemoryCopy(src, dst, (long)length * 4, (long)length * 4);
-                                    else if (dist == 1) new Span<uint>(dst, length).Fill(*src);
+                                    uint* src = dp - dist;
+                                    if (dist >= length) Buffer.MemoryCopy(src, dp, (long)length * 4, (long)length * 4);
+                                    else if (dist == 1) new Span<uint>(dp, length).Fill(*src);
                                     else
-                                        for (int i = 0; i < length; i++) dst[i] = src[i];
+                                        for (int i = 0; i < length; i++) dp[i] = src[i];
                                     if (pc != null)
-                                        for (int i = 0; i < length; i++) pc[(dst[i] * 0x1e35a7bdu) >> cacheShift] = dst[i];
-                                    pos += length;
-                                    x += length;
-                                    if (x >= xsize) { y += x / xsize; x %= xsize; }
-                                    if (pm != null && pos < end) g = gs + pm[(y >> prefixBits) * metaWidth + (x >> prefixBits)];
+                                        for (int i = 0; i < length; i++) pc[(dp[i] * 0x1e35a7bdu) >> cacheShift] = dp[i];
+                                    dp += length;
+                                    until = 0;
                                     continue;
                                 }
                                 else px = pc[sym - (NumLiteral + NumLength)];   // below the cache size by construction of the alphabet
                             }
-                            d[pos++] = px;
+                            *dp++ = px;
                             if (pc != null) pc[(px * 0x1e35a7bdu) >> cacheShift] = px;
-                            if (++x == xsize) { x = 0; y++; }
+                            until--;
                         }
+                        if (pendingLength == 0) pos = (int)(dp - d);
                     }
                     if (pos >= end) break;
                     Array.Resize(ref data, (int)Math.Min(end, Math.Max((long)data.Length * 2, (long)pos + pendingLength)));
@@ -587,9 +590,6 @@ namespace PixCodec
                         if (pc != null)
                             for (int i = 0; i < pendingLength; i++) pc[(data[pos + i] * 0x1e35a7bdu) >> cacheShift] = data[pos + i];
                         pos += pendingLength;
-                        x += pendingLength;
-                        if (x >= xsize) { y += x / xsize; x %= xsize; }
-                        if (pm != null && pos < end) g = gs + pm[(y >> prefixBits) * metaWidth + (x >> prefixBits)];
                     }
                 }
             }

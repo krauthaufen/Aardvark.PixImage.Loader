@@ -58,6 +58,14 @@ namespace PixCodec
         public long MaxPixels { get; set; } = 1L << 28;
 
         /// <summary>
+        /// Lossy frames of half a megapixel and more are decoded on several threads: bitstream parsing, rebuilding
+        /// the pixels and the loop filter run as a pipeline (the calling thread plus two pool threads), the color
+        /// conversion in up to four bands. Nearly twice as fast, same result. Set to false to stay on the calling
+        /// thread. Ignored on single-core machines and in the browser.
+        /// </summary>
+        public bool Multithreaded { get; set; } = true;
+
+        /// <summary>
         /// ICCP, EXIF and XMP chunks normally count only when the VP8X header flags them (that is what lets
         /// <see cref="Webp.GetInfo"/> answer from the start of the file, and <see cref="Webp.GetInfo"/> always follows
         /// the flags). With this option the decoding functions and <see cref="Webp.GetAnimationInfo"/> /

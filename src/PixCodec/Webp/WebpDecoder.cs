@@ -32,10 +32,10 @@ namespace PixCodec
         {
             bool alpha = OutputHasAlpha(c);
             byte[] px;
-            if (!c.Animated) px = DecodeFrame(data, c.Frames[0], alpha ? 4 : 3, opt.MaxPixels);
+            if (!c.Animated) px = DecodeFrame(data, c.Frames[0], alpha ? 4 : 3, opt);
             else
             {
-                var st = new WebpDecoder(c, new WebpDecodeOptions { MaxPixels = opt.MaxPixels });
+                var st = new WebpDecoder(c, new WebpDecodeOptions { MaxPixels = opt.MaxPixels, Multithreaded = opt.Multithreaded });
                 px = (byte[])st.Next(data)!.Image.Data;
                 if (!alpha)
                 {
@@ -48,19 +48,19 @@ namespace PixCodec
         }
 
         /// <summary>The frame's own pixels as RGB or RGBA; alpha is 255 where the frame has none.</summary>
-        static byte[] DecodeFrame(ReadOnlySpan<byte> data, WebpFrameEntry f, int channels, long maxPixels)
+        static byte[] DecodeFrame(ReadOnlySpan<byte> data, WebpFrameEntry f, int channels, WebpDecodeOptions opt)
         {
             var bits = data.Slice(f.DataOffset, f.DataLength);
             if (f.Lossless)
             {
-                var argb = Vp8lDecoder.Decode(bits, out int w, out int h, maxPixels);
+                var argb = Vp8lDecoder.Decode(bits, out int w, out int h, opt.MaxPixels);
                 var px = GC.AllocateUninitializedArray<byte>(w * h * channels);
                 ArgbToBytes(argb, px, channels);
                 return px;
             }
-            var frame = Vp8Decoder.Decode(bits, maxPixels);
+            var frame = Vp8Decoder.Decode(bits, opt.MaxPixels, opt.Multithreaded);
             var dst = GC.AllocateUninitializedArray<byte>(frame.Width * frame.Height * channels);
-            WebpYuv.ToRgb(frame, dst, channels);
+            WebpYuv.ToRgb(frame, dst, channels, opt.Multithreaded);
             if (channels == 4 && f.AlphLength >= 0)
             {
                 var a = WebpAlpha.Decode(data.Slice(f.AlphOffset, f.AlphLength), frame.Width, frame.Height);
@@ -114,10 +114,10 @@ namespace PixCodec
             if (_opt.FrameMode == WebpFrameMode.Raw)
             {
                 int ch = f.HasAlpha ? 4 : 3;
-                frame.Image = new RawImage(f.Width, f.Height, ch == 4 ? ColorModel.Rgba : ColorModel.Rgb, DecodeFrame(data, f, ch, _opt.MaxPixels));
+                frame.Image = new RawImage(f.Width, f.Height, ch == 4 ? ColorModel.Rgba : ColorModel.Rgb, DecodeFrame(data, f, ch, _opt));
             }
             else if (!_c.Animated)
-                frame.Image = new RawImage(f.Width, f.Height, ColorModel.Rgba, DecodeFrame(data, f, 4, _opt.MaxPixels));
+                frame.Image = new RawImage(f.Width, f.Height, ColorModel.Rgba, DecodeFrame(data, f, 4, _opt));
             else
                 frame.Image = new RawImage(_c.Width, _c.Height, ColorModel.Rgba, Composite(data, f));
             _index++;
@@ -133,7 +133,7 @@ namespace PixCodec
             int cw = _c.Width, chh = _c.Height;
             if ((long)cw * chh > _opt.MaxPixels)
                 throw new ImageNotSupportedException($"WebP canvas of {cw}x{chh} exceeds WebpDecodeOptions.MaxPixels ({_opt.MaxPixels})");
-            var px = DecodeFrame(data, f, 4, _opt.MaxPixels);       // before the canvas: garbage must not allocate one
+            var px = DecodeFrame(data, f, 4, _opt);       // before the canvas: garbage must not allocate one
             var canvas = _canvas ??= new byte[cw * chh * 4];
             var prev = _prev;
             bool key = prev == null

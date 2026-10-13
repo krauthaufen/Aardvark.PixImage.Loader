@@ -27,14 +27,22 @@ namespace PixCodec
 
         /// <summary>Writes the visible part of the frame as interleaved RGB with <paramref name="step"/> bytes per pixel
         /// (the fourth byte, if any, is set to 255).</summary>
-        public static void ToRgb(Vp8Frame f, byte[] dst, int step)
+        public static void ToRgb(Vp8Frame f, byte[] dst, int step, bool threaded = false)
         {
-            int w = f.Width, h = f.Height, uvH = (h + 1) >> 1;
+            int h = f.Height;
+            int bands = threaded && (long)f.Width * h >= 1 << 19 && !OperatingSystem.IsBrowser() ? Math.Min(4, Environment.ProcessorCount) : 1;
+            if (bands <= 1) ToRgb(f, dst, step, 0, h);
+            else System.Threading.Tasks.Parallel.For(0, bands, i => ToRgb(f, dst, step, (int)((long)h * i / bands), (int)((long)h * (i + 1) / bands)));
+        }
+
+        static void ToRgb(Vp8Frame f, byte[] dst, int step, int y0, int y1)
+        {
+            int w = f.Width, uvH = (f.Height + 1) >> 1;
             var chroma = new byte[2 * w + 32];
             fixed (byte* py = f.Y, pu = f.U, pv = f.V, pd = dst, pc = chroma)
             {
                 byte* u = pc, v = pc + w + 16;
-                for (int y = 0; y < h; y++)
+                for (int y = y0; y < y1; y++)
                 {
                     // rows 2k-1 and 2k lie between the chroma rows k-1 and k; the nearer one weighs three times as much
                     int near = y >> 1, far = (y & 1) != 0 ? near + 1 : near - 1;

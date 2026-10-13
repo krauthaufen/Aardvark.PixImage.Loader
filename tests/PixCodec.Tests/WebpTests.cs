@@ -608,6 +608,46 @@ public class WebpTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void TwoThreadedLossyDecodeGivesTheSamePixels()
+    {
+        // large enough for the parser thread (half a megapixel and more)
+        var img = Photo(1000, 700, ColorModel.Rgb, 12);
+        var single = new WebpDecodeOptions { Multithreaded = false };
+        foreach (var opt in new[] { new WebpEncodeOptions { Quality = 70 }, new WebpEncodeOptions { Quality = 30, Partitions = 8, Segments = 4, SimpleFilter = true }, new WebpEncodeOptions { Quality = 95, Method = 0, FilterStrength = 0 } })
+        {
+            var data = Encode(img, opt);
+            var a = Webp.Decode(data);
+            AssertEqual(Webp.Decode(data, single), a);
+            Assert.True(Psnr(img, a, 255) > 28);
+            var oracle = OracleDecode(data, ".webp");
+            if (oracle != null) AssertEqual(oracle, a);
+            // damaged token data: both paths must end the same way, and the parser thread must not outlive the call
+            var rng = new Random(5);
+            for (int k = 0; k < 12; k++)
+            {
+                var bad = (byte[])data.Clone();
+                for (int i = 0; i < 20; i++) bad[rng.Next(k < 4 ? 40 : 200, bad.Length)] ^= (byte)(1 << rng.Next(8));
+                if (k % 3 == 0) bad = bad.AsSpan(0, bad.Length / 2 + rng.Next(bad.Length / 2)).ToArray();
+                RawImage? x = null, y = null;
+                Exception? ex = null, ey = null;
+                try { x = Webp.Decode(bad); } catch (Exception e) when (e is ImageFormatException or ImageNotSupportedException) { ex = e; }
+                try { y = Webp.Decode(bad, single); } catch (Exception e) when (e is ImageFormatException or ImageNotSupportedException) { ey = e; }
+                Assert.Equal(ex?.GetType(), ey?.GetType());
+                if (x != null) AssertEqual(y!, x);
+            }
+        }
+        // with alpha, and as animation frames
+        var rgba = Photo(900, 640, ColorModel.Rgba, 13);
+        var withAlpha = Encode(rgba, new WebpEncodeOptions { Quality = 60 });
+        AssertEqual(Webp.Decode(withAlpha, single), Webp.Decode(withAlpha));
+        var anim = Webp.EncodeAnimation(new[] { new WebpInputFrame(img), new WebpInputFrame(Photo(1000, 700, ColorModel.Rgb, 14)) }, new WebpEncodeOptions { Quality = 50 });
+        var f1 = Webp.DecodeAnimation(anim);
+        var f2 = Webp.DecodeAnimation(anim, single);
+        for (int i = 0; i < 2; i++) AssertEqual(f2.Frames[i].Image, f1.Frames[i].Image);
+        Assert.True(new WebpDecodeOptions().Multithreaded);
+    }
+
+    [Fact]
     public void LossyQualityScalesSizeAndFidelity()
     {
         var img = Photo(160, 120, ColorModel.Rgb, 2);
