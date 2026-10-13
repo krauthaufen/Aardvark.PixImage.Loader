@@ -96,45 +96,35 @@ namespace PixCodec.JpegImpl
         /// <summary>Set for a tables-only stream (TIFF JPEGTables): no frame or scan is expected.</summary>
         public bool TablesOnly;
 
-        /// <summary>Starts out with the tables defined by another (tables-only) stream. Tables are immutable, so sharing is safe.</summary>
-        public void ImportTables(JpegDecoder other)
+        /// <summary>Starts out with tables defined elsewhere (TIFF JPEGTables). The table objects are immutable, so sharing is safe.</summary>
+        public void ImportTables(JpegTiffTables t)
         {
             for (int i = 0; i < 4; i++)
             {
-                _quant[i] = other._quant[i];
-                _dc[i] = other._dc[i];
-                _ac[i] = other._ac[i];
+                _quant[i] = t.Quant[i];
+                _dc[i] = t.Dc[i];
+                _ac[i] = t.Ac[i];
             }
-            _restartInterval = other._restartInterval;
-            if (other._arith != null)
+            _restartInterval = t.RestartInterval;
+            if (t.Conditioning != null)
             {
                 _arith = new JpegArith();
-                other._arith.DcL.CopyTo(_arith.DcL, 0);
-                other._arith.DcU.CopyTo(_arith.DcU, 0);
-                other._arith.AcK.CopyTo(_arith.AcK, 0);
+                t.Conditioning.AsSpan(0, 4).CopyTo(_arith.DcL);
+                t.Conditioning.AsSpan(4, 4).CopyTo(_arith.DcU);
+                t.Conditioning.AsSpan(8, 4).CopyTo(_arith.AcK);
             }
         }
 
-        public void SetTables(int[]?[] quant, HuffDecodeTable?[] dc, HuffDecodeTable?[] ac, int restartInterval)
+        public void ExportTables(JpegTiffTables t)
         {
             for (int i = 0; i < 4; i++)
             {
-                _quant[i] = quant[i];
-                _dc[i] = dc[i];
-                _ac[i] = ac[i];
+                t.Quant[i] = _quant[i];
+                t.Dc[i] = _dc[i];
+                t.Ac[i] = _ac[i];
             }
-            _restartInterval = restartInterval;
-        }
-
-        public void GetTables(int[]?[] quant, HuffDecodeTable?[] dc, HuffDecodeTable?[] ac, out int restartInterval)
-        {
-            for (int i = 0; i < 4; i++)
-            {
-                quant[i] = _quant[i];
-                dc[i] = _dc[i];
-                ac[i] = _ac[i];
-            }
-            restartInterval = _restartInterval;
+            t.RestartInterval = _restartInterval;
+            if (_arith != null) t.Conditioning = [.. _arith.DcL, .. _arith.DcU, .. _arith.AcK];
         }
 
         /// <summary>The color space libjpeg would assume from the markers and component ids.</summary>

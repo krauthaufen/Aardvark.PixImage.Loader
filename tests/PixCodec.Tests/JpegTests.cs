@@ -291,51 +291,137 @@ public class JpegTests
     // ------------------------------------------------------------------ JPEG in TIFF
 
     public static IEnumerable<object[]> TiffStreams()
-        => Directory.GetFiles(TestUtil.Fixture("jpeg/tiff"), "*.ref").OrderBy(f => f, StringComparer.Ordinal)
-            .Select(f => new object[] { Path.GetFileNameWithoutExtension(f) });
+        => Directory.GetFiles(TestUtil.Fixture("jpeg/tiff"), "*.data.bin").OrderBy(f => f, StringComparer.Ordinal)
+            .Select(f => new object[] { Path.GetFileName(f).Replace(".data.bin", "") });
 
     static RawImage Crop(RawImage img, int w, int h)
     {
-        var o = RawImage.Create(w, h, img.Color, SampleType.UInt8, img.Channels);
-        var s = img.GetData<byte>(); var d = o.GetData<byte>();
-        for (int y = 0; y < h; y++) s.AsSpan(y * img.Width * img.Channels, w * img.Channels).CopyTo(d.AsSpan(y * w * img.Channels));
+        var o = RawImage.Create(w, h, img.Color, img.SampleType, img.Channels);
+        int bytes = img.Channels * RawImage.BytesPerSample(img.SampleType);
+        for (int y = 0; y < h; y++) img.GetBytes().Slice(y * img.Width * bytes, w * bytes).CopyTo(o.GetBytes().Slice(y * w * bytes));
         return o;
     }
 
-    /// <summary>Tables-only + abbreviated stream pairs; the name says whether YCbCr is to be converted (_rgb) or samples returned as stored (_raw).</summary>
+    /// <summary>
+    /// Tables-only + abbreviated stream pairs (8 and 12 bit DCT, arithmetic, lossless); the name says whether YCbCr is to
+    /// be converted (_rgb) or samples returned as stored (_raw). Checked against Pillow / libjpeg-turbo 3.
+    /// </summary>
     [Theory]
     [MemberData(nameof(TiffStreams))]
     public void DecodeForTiff(string name)
     {
         var dir = TestUtil.Fixture("jpeg/tiff");
-        var tables = File.ReadAllBytes(Path.Combine(dir, name + ".tables.bin"));
+        var tableBytes = File.ReadAllBytes(Path.Combine(dir, name + ".tables.bin"));
         var data = File.ReadAllBytes(Path.Combine(dir, name + ".data.bin"));
         var full = TestUtil.LoadRef(Path.Combine(dir, name + ".ref"));
-        bool convert = name.EndsWith("_rgb");
+        bool convert = name.EndsWith("_rgb"), wide = full.SampleType == SampleType.UInt16;
         int ch = full.Channels;
+        var tables = JpegTiffTables.Parse(tableBytes);
+
+        var streamInfo = Jpeg.GetTiffStreamInfo(data);
+        Assert.Equal((full.Width, full.Height, ch), (streamInfo.Width, streamInfo.Height, streamInfo.Components));
+        Assert.Equal(name.StartsWith("ll"), streamInfo.Lossless);
+        Assert.Equal(wide, streamInfo.Precision > 8);
+
         // whole frame, and strips / tiles smaller than the (padded) frame
         foreach (var (w, h) in new[] { (full.Width, full.Height), (full.Width - 1, full.Height), (full.Width, full.Height - 3), (17, 9), (1, 1) })
         {
-            var dst = new byte[w * h * ch];
-            Jpeg.DecodeForTiff(tables, data, w, h, ch, convert, dst);
-            Assert.True(Crop(full, w, h).GetData<byte>().AsSpan().SequenceEqual(dst), $"{name} {w}x{h}");
+            var expected = Crop(full, w, h);
+            var words = new ushort[w * h * ch];
+            Jpeg.DecodeForTiff(tables, data, w, h, ch, convert, words);
+            if (wide) Assert.True(expected.GetData<ushort>().AsSpan().SequenceEqual(words), $"{name} {w}x{h}");
+            else
+            {
+                Assert.True(expected.GetData<byte>().Select(v => (ushort)v).SequenceEqual(words), $"{name} {w}x{h} widened");
+                var dst = new byte[w * h * ch];
+                Jpeg.DecodeForTiff(tables, data, w, h, ch, convert, dst);
+                Assert.True(expected.GetData<byte>().AsSpan().SequenceEqual(dst), $"{name} {w}x{h}");
+                Array.Clear(dst);
+                Jpeg.DecodeForTiff(tableBytes, data, w, h, ch, convert, dst); // the overload that parses the tables itself
+                Assert.True(expected.GetData<byte>().AsSpan().SequenceEqual(dst), $"{name} {w}x{h} raw tables");
+            }
         }
 
-        // the abbreviated stream is useless without its tables; wrong geometry or component count is an error
-        var buf = new byte[full.Width * full.Height * ch];
-        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(ReadOnlySpan<byte>.Empty, data, full.Width, full.Height, ch, convert, buf));
-        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(tables, data, full.Width + 1, full.Height, ch, convert, new byte[(full.Width + 1) * full.Height * ch]));
-        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(tables, data, full.Width, full.Height, ch + 1, convert, new byte[full.Width * full.Height * (ch + 1)]));
-        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(tables.AsSpan(0, tables.Length / 2), data, full.Width, full.Height, ch, convert, buf));
+        // the abbreviated stream is useless without its tables; wrong geometry, depth or component count is an error
+        var buf = new ushort[full.Width * full.Height * ch];
+        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff((JpegTiffTables?)null, data, full.Width, full.Height, ch, convert, buf));
+        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(tables, data, full.Width + 1, full.Height, ch, convert, new ushort[(full.Width + 1) * full.Height * ch]));
+        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(tables, data, full.Width, full.Height, ch + 1, convert, new ushort[full.Width * full.Height * (ch + 1)]));
+        Assert.Throws<ImageFormatException>(() => JpegTiffTables.Parse(tableBytes.AsSpan(0, tableBytes.Length - 5)));
+        if (wide) Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(tables, data, full.Width, full.Height, ch, convert, new byte[buf.Length]));
 
-        // damaged strips never escape with anything but the codec's exceptions
-        var rnd = new Random(name.Length * 31 + data.Length);
-        for (int round = 0; round < 200; round++)
+        // damaged strips never escape with anything but the codec's exceptions; one tables object serves many threads
+        Parallel.For(0, 200, round =>
         {
+            var rnd = new Random(name.Length * 31 + data.Length + round);
             var bad = (byte[])data.Clone();
             if (round % 2 == 0) bad = bad.AsSpan(0, rnd.Next(bad.Length)).ToArray();
             else for (int i = 0; i < 3; i++) bad[rnd.Next(bad.Length)] = (byte)rnd.Next(256);
-            try { Jpeg.DecodeForTiff(tables, bad, full.Width, full.Height, ch, convert, buf); }
+            try { Jpeg.DecodeForTiff(tables, bad, full.Width, full.Height, ch, convert, new ushort[buf.Length]); }
+            catch (ImageFormatException) { }
+            catch (ImageNotSupportedException) { }
+        });
+    }
+
+    public static IEnumerable<object[]> OldStyleFiles()
+        => Directory.GetFiles(TestUtil.Fixture("jpeg/tiff"), "*.old.bin").OrderBy(f => f, StringComparer.Ordinal).Select(f => new object[] { Path.GetFileName(f) });
+
+    /// <summary>Old-style TIFF JPEG (compression 6): tables from the TIFF tags, strips of bare entropy coded data.</summary>
+    [Theory]
+    [MemberData(nameof(OldStyleFiles))]
+    public void DecodeForTiffOldStyle(string file)
+    {
+        var path = Path.Combine(TestUtil.Fixture("jpeg/tiff"), file);
+        var b = File.ReadAllBytes(path);
+        var expected = TestUtil.LoadRef(path.Replace(".old.bin", ".old.ref"));
+        int nc = b[0], o = 1;
+        var q = new byte[nc][]; var dc = new byte[nc][]; var ac = new byte[nc][];
+        for (int i = 0; i < nc; i++)
+        {
+            q[i] = b.AsSpan(o, 64).ToArray(); o += 64;
+            int n = b[o] | b[o + 1] << 8;
+            dc[i] = b.AsSpan(o + 2, n).ToArray().Concat(new byte[] { 1, 2, 3 }).ToArray(); // trailing bytes are tolerated
+            o += 2 + n;
+            n = b[o] | b[o + 1] << 8;
+            ac[i] = b.AsSpan(o + 2, n).ToArray(); o += 2 + n;
+        }
+        int fw = b[o] | b[o + 1] << 8, fh = b[o + 2] | b[o + 3] << 8, hSub = b[o + 4], vSub = b[o + 5], ri = b[o + 6] | b[o + 7] << 8;
+        var strip = b.AsSpan(o + 8).ToArray();
+        Assert.Equal((expected.Width, expected.Height, expected.Channels), (fw, fh, nc));
+
+        var tables = JpegTiffTables.FromOldStyle(q, dc, ac);
+        foreach (var (w, h) in new[] { (fw, fh), (fw - 2, fh - 1), (9, 5) })
+        {
+            var dst = new byte[w * h * nc];
+            Jpeg.DecodeForTiffRaw(tables, strip, fw, fh, nc, hSub, vSub, ri, w, h, nc == 3, dst);
+            Assert.True(Crop(expected, w, h).GetData<byte>().AsSpan().SequenceEqual(dst), $"{file} {w}x{h}");
+        }
+        if (nc == 3)
+        {
+            // chroma tables given only once: the later components fall back to the last table present
+            var shared = JpegTiffTables.FromOldStyle(new[] { q[0], q[1] }, new[] { dc[0], dc[1], null }, new[] { ac[0], ac[1] });
+            var dst = new byte[fw * fh * 3];
+            Jpeg.DecodeForTiffRaw(shared, strip, fw, fh, 3, hSub, vSub, ri, fw, fh, true, dst);
+            Assert.Equal(expected.GetData<byte>(), dst);
+        }
+
+        // a strip that is a complete stream after all goes through the same call
+        var whole = Load("jpeg/photo_420.jpg");
+        var photo = TestUtil.LoadRef(TestUtil.Fixture("jpeg/photo_420.jpg.ref"));
+        var p = new byte[photo.Width * photo.Height * 3];
+        Jpeg.DecodeForTiffRaw(tables, whole, photo.Width, photo.Height, 3, 2, 2, 0, photo.Width, photo.Height, true, p);
+        Assert.Equal(photo.GetData<byte>(), p);
+
+        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiffRaw(JpegTiffTables.FromOldStyle(null, null, null), strip, fw, fh, nc, hSub, vSub, ri, fw, fh, false, new byte[fw * fh * nc]));
+        Assert.Throws<ImageFormatException>(() => JpegTiffTables.FromOldStyle(new[] { new byte[10] }, null, null));
+        Assert.Throws<ImageFormatException>(() => JpegTiffTables.FromOldStyle(null, new[] { new byte[] { 200, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, null));
+        var rnd = new Random(file.Length);
+        for (int round = 0; round < 200; round++)
+        {
+            var bad = (byte[])strip.Clone();
+            if (round % 2 == 0) bad = bad.AsSpan(0, rnd.Next(bad.Length)).ToArray();
+            else for (int i = 0; i < 3; i++) bad[rnd.Next(bad.Length)] = (byte)rnd.Next(256);
+            try { Jpeg.DecodeForTiffRaw(tables, bad, fw, fh, nc, hSub, vSub, ri, fw, fh, nc == 3, new byte[fw * fh * nc]); }
             catch (ImageFormatException) { }
             catch (ImageNotSupportedException) { }
         }
@@ -349,17 +435,17 @@ public class JpegTests
         var ycc = Load("jpeg/photo_420.jpg");
         var rgb = TestUtil.LoadRef(TestUtil.Fixture("jpeg/photo_420.jpg.ref"));
         var a = new byte[rgb.Width * rgb.Height * 3]; var b = new byte[a.Length];
-        Jpeg.DecodeForTiff(default, ycc, rgb.Width, rgb.Height, 3, true, a);
+        Jpeg.DecodeForTiff(ReadOnlySpan<byte>.Empty, ycc, rgb.Width, rgb.Height, 3, true, a);
         Assert.Equal(rgb.GetData<byte>(), a);
-        Jpeg.DecodeForTiff(default, ycc, rgb.Width, rgb.Height, 3, false, b);
+        Jpeg.DecodeForTiff(ReadOnlySpan<byte>.Empty, ycc, rgb.Width, rgb.Height, 3, false, b);
         Assert.NotEqual(a, b);
 
         // an Adobe RGB file decodes the same as stored, and "converting" it applies the YCbCr matrix regardless of the marker
         var stored = TestUtil.LoadRef(TestUtil.Fixture("jpeg/rgb_adobe.jpg.ref"));
         var c = new byte[stored.Width * stored.Height * 3];
-        Jpeg.DecodeForTiff(default, Load("jpeg/rgb_adobe.jpg"), stored.Width, stored.Height, 3, false, c);
+        Jpeg.DecodeForTiff(ReadOnlySpan<byte>.Empty, Load("jpeg/rgb_adobe.jpg"), stored.Width, stored.Height, 3, false, c);
         Assert.Equal(stored.GetData<byte>(), c);
-        Jpeg.DecodeForTiff(default, Load("jpeg/rgb_adobe.jpg"), stored.Width, stored.Height, 3, true, c);
+        Jpeg.DecodeForTiff(ReadOnlySpan<byte>.Empty, Load("jpeg/rgb_adobe.jpg"), stored.Width, stored.Height, 3, true, c);
         Assert.NotEqual(stored.GetData<byte>(), c);
 
         var dir = TestUtil.Fixture("jpeg/tiff");

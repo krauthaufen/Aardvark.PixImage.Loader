@@ -212,40 +212,188 @@ namespace PixCodec
             }
         }
 
+        // ---------------------------------------------------------------- JPEG inside TIFF
+
         /// <summary>
         /// Decodes one JPEG compressed TIFF strip or tile. <paramref name="jpegTables"/> is the content of the JPEGTables
-        /// tag (a tables-only stream, empty when absent), <paramref name="data"/> an abbreviated or complete stream whose
-        /// frame may be larger than width x height; the top left width x height pixels are written interleaved with
-        /// <paramref name="components"/> samples each. No color space guessing: YCbCr is converted to RGB only when asked
-        /// (and the stream has 3 components), otherwise the components come out as stored. Thread safe.
+        /// tag (a tables-only stream, empty when absent) and is parsed on every call; use the overload taking a
+        /// <see cref="JpegTiffTables"/> to parse it once.
         /// </summary>
         internal static void DecodeForTiff(ReadOnlySpan<byte> jpegTables, ReadOnlySpan<byte> data, int width, int height, int components, bool convertYCbCrToRgb, Span<byte> destination)
+            => DecodeForTiff(jpegTables.Length > 0 ? JpegTiffTables.Parse(jpegTables) : null, data, width, height, components, convertYCbCrToRgb, destination);
+
+        /// <summary>
+        /// Decodes one JPEG compressed TIFF strip or tile: an abbreviated or complete stream (DCT based with 8 bit samples,
+        /// or lossless with up to 8 bit) whose frame may be larger than width x height. The top left width x height pixels
+        /// are written interleaved with <paramref name="components"/> samples each, chroma at full resolution. No color
+        /// space guessing: YCbCr is converted to RGB only when asked (and the stream has 3 components), otherwise the
+        /// components come out as stored. Thread safe.
+        /// </summary>
+        internal static void DecodeForTiff(JpegTiffTables? tables, ReadOnlySpan<byte> data, int width, int height, int components, bool convertYCbCrToRgb, Span<byte> destination)
         {
-            if (width <= 0 || height <= 0 || components <= 0 || destination.Length != (long)width * height * components)
+            fixed (byte* p = data)
+            {
+                var d = OpenForTiff(p, data.Length, tables, width, height, components, destination.Length);
+                if (d.Precision > 8) throw new ImageFormatException($"JPEG data in TIFF has {d.Precision} bit samples, expected at most 8");
+                var cs = TiffConversion(components, convertYCbCrToRgb);
+                if (!d.Wide) { JpegPost.Assemble(d, destination, width, height, cs); return; }
+                var wide = new ushort[destination.Length];
+                JpegPost16.Assemble(d, wide, width, height, cs);
+                for (int i = 0; i < wide.Length; i++) destination[i] = (byte)wide[i];
+            }
+        }
+
+        /// <summary>
+        /// Like the byte overload for streams of any precision: 12 bit DCT data gives 0..4095, lossless data its values
+        /// as coded (2..16 bit), 8 bit data is widened unchanged. Nothing is scaled.
+        /// </summary>
+        internal static void DecodeForTiff(JpegTiffTables? tables, ReadOnlySpan<byte> data, int width, int height, int components, bool convertYCbCrToRgb, Span<ushort> destination)
+        {
+            fixed (byte* p = data)
+            {
+                var d = OpenForTiff(p, data.Length, tables, width, height, components, destination.Length);
+                var cs = TiffConversion(components, convertYCbCrToRgb);
+                if (d.Wide) { JpegPost16.Assemble(d, destination, width, height, cs); return; }
+                var narrow = new byte[destination.Length];
+                JpegPost.Assemble(d, narrow, width, height, cs);
+                for (int i = 0; i < narrow.Length; i++) destination[i] = narrow[i];
+            }
+        }
+
+        static JpegColorSpace TiffConversion(int components, bool convertYCbCrToRgb)
+            => components == 3 && convertYCbCrToRgb ? JpegColorSpace.YCbCr : components == 1 ? JpegColorSpace.Gray : JpegColorSpace.Raw;
+
+        static JpegDecoder OpenForTiff(byte* p, int length, JpegTiffTables? tables, int width, int height, int components, int destinationLength)
+        {
+            if (width <= 0 || height <= 0 || components <= 0 || destinationLength != (long)width * height * components)
                 throw new ArgumentException("destination does not match width x height x components");
-            fixed (byte* t = jpegTables)
+            var d = new JpegDecoder(p, length);
+            if (tables != null) d.ImportTables(tables);
+            d.Parse(headerOnly: false);
+            if (d.Comps.Length != components)
+                throw new ImageFormatException($"JPEG data in TIFF has {d.Comps.Length} components, expected {components}");
+            if (d.Width < width || d.Height < height)
+                throw new ImageFormatException($"JPEG data in TIFF is {d.Width}x{d.Height}, smaller than the {width}x{height} strip or tile");
+            return d;
+        }
+
+        /// <summary>Frame parameters of a strip / tile stream (no tables needed), e.g. to size the buffer for a lossless DNG tile.</summary>
+        internal static (int Width, int Height, int Components, int Precision, bool Lossless) GetTiffStreamInfo(ReadOnlySpan<byte> data)
+        {
             fixed (byte* p = data)
             {
                 var d = new JpegDecoder(p, data.Length);
-                if (jpegTables.Length > 0)
-                {
-                    var tables = new JpegDecoder(t, jpegTables.Length) { TablesOnly = true };
-                    tables.Parse(headerOnly: false);
-                    d.ImportTables(tables);
-                }
-                d.Parse(headerOnly: false);
-                if (d.Comps.Length != components)
-                    throw new ImageFormatException($"JPEG data in TIFF has {d.Comps.Length} components, expected {components}");
-                if (d.Width < width || d.Height < height)
-                    throw new ImageFormatException($"JPEG data in TIFF is {d.Width}x{d.Height}, smaller than the {width}x{height} strip or tile");
-                var cs = components == 3 && convertYCbCrToRgb ? JpegColorSpace.YCbCr : components == 1 ? JpegColorSpace.Gray : JpegColorSpace.Raw;
-                if (d.Wide) throw new ImageFormatException("JPEG data in TIFF is not an 8 bit DCT stream");
-                JpegPost.Assemble(d, destination, width, height, cs);
+                d.Parse(headerOnly: true);
+                return (d.Width, d.Height, d.Comps.Length, d.Precision, d.Lossless);
             }
+        }
+
+        /// <summary>
+        /// Old-style TIFF JPEG (compression 6) whose strips / tiles hold bare entropy coded data: baseline, 8 bit, the
+        /// frame described by the TIFF tags. <paramref name="tables"/> comes from <see cref="JpegTiffTables.FromOldStyle"/>;
+        /// component i uses its tables number i (falling back to the last one given). Component 0 is sampled
+        /// hSub x vSub, the others 1 x 1. If the data turns out to start with an SOI marker it is decoded as a normal
+        /// stream with <paramref name="tables"/> as defaults, so this can be called for any compression 6 strip.
+        /// </summary>
+        internal static void DecodeForTiffRaw(JpegTiffTables tables, ReadOnlySpan<byte> entropyData, int frameWidth, int frameHeight,
+            int components, int hSub, int vSub, int restartInterval, int width, int height, bool convertYCbCrToRgb, Span<byte> destination)
+        {
+            if (entropyData.Length >= 2 && entropyData[0] == 0xFF && entropyData[1] == 0xD8)
+            {
+                DecodeForTiff(tables, entropyData, width, height, components, convertYCbCrToRgb, destination);
+                return;
+            }
+            if (frameWidth <= 0 || frameHeight <= 0 || frameWidth > 65535 || frameHeight > 65535 || components < 1 || components > 4
+                || hSub < 1 || hSub > 4 || vSub < 1 || vSub > 4 || restartInterval < 0 || restartInterval > 65535)
+                throw new ImageFormatException("invalid old-style JPEG parameters in TIFF");
+            // wrap the data in the headers it lacks: SOI, SOF0, DRI, SOS ... EOI
+            int head = 2 + 10 + 3 * components + 6 + 8 + 2 * components;
+            var stream = new byte[head + entropyData.Length + 2];
+            int o = 0;
+            void Put(params int[] bytes) { foreach (int b in bytes) stream[o++] = (byte)b; }
+            Put(0xFF, 0xD8);
+            Put(0xFF, 0xC0, 0, 8 + 3 * components, 8, frameHeight >> 8, frameHeight, frameWidth >> 8, frameWidth, components);
+            for (int i = 0; i < components; i++) Put(i + 1, i == 0 ? hSub << 4 | vSub : 0x11, tables.LastIndex(tables.Quant, i));
+            Put(0xFF, 0xDD, 0, 4, restartInterval >> 8, restartInterval);
+            Put(0xFF, 0xDA, 0, 6 + 2 * components, components);
+            for (int i = 0; i < components; i++) Put(i + 1, tables.LastIndex(tables.Dc, i) << 4 | tables.LastIndex(tables.Ac, i));
+            Put(0, 63, 0);
+            entropyData.CopyTo(stream.AsSpan(o));
+            stream[^2] = 0xFF; stream[^1] = 0xD9;
+            DecodeForTiff(tables, stream, width, height, components, convertYCbCrToRgb, destination);
         }
 
         /// <summary>Encodes an image as JPEG to the stream (which only needs to be writable, not seekable).</summary>
         public static void Encode(RawImage image, Stream output, JpegEncodeOptions? options = null)
             => JpegEncoder.Encode(image, output, options ?? new JpegEncodeOptions());
+    }
+
+    /// <summary>
+    /// Quantization and Huffman tables shared by the strips / tiles of a JPEG compressed TIFF, parsed once.
+    /// Immutable after creation and safe to use from several threads.
+    /// </summary>
+    internal sealed class JpegTiffTables
+    {
+        internal readonly int[]?[] Quant = new int[4][];
+        internal readonly HuffDecodeTable?[] Dc = new HuffDecodeTable[4];
+        internal readonly HuffDecodeTable?[] Ac = new HuffDecodeTable[4];
+        internal int RestartInterval;
+        /// <summary>Arithmetic coding conditioning (DC lower / upper bounds and AC thresholds, 4 each), if a DAC segment was present.</summary>
+        internal byte[]? Conditioning;
+
+        JpegTiffTables() { }
+
+        /// <summary>The content of a TIFF JPEGTables tag: a tables-only JPEG stream (may be empty).</summary>
+        public static unsafe JpegTiffTables Parse(ReadOnlySpan<byte> jpegTables)
+        {
+            var t = new JpegTiffTables();
+            if (jpegTables.Length == 0) return t;
+            fixed (byte* p = jpegTables)
+            {
+                var d = new JpegDecoder(p, jpegTables.Length) { TablesOnly = true };
+                d.Parse(headerOnly: false);
+                d.ExportTables(t);
+            }
+            return t;
+        }
+
+        /// <summary>
+        /// Tables of old-style TIFF JPEG (compression 6) as stored at the offsets given by the JPEGQTables, JPEGDCTables
+        /// and JPEGACTables tags, one per component: quantization tables are 64 bytes in zigzag order, Huffman tables 16
+        /// code length counts followed by the symbols (trailing bytes are ignored). Arrays and entries may be missing.
+        /// </summary>
+        public static unsafe JpegTiffTables FromOldStyle(byte[]?[]? qTables, byte[]?[]? dcTables, byte[]?[]? acTables)
+        {
+            var t = new JpegTiffTables();
+            for (int i = 0; i < 4; i++)
+            {
+                if (qTables != null && i < qTables.Length && qTables[i] is { } q)
+                {
+                    if (q.Length < 64) throw new ImageFormatException("truncated JPEG quantization table in TIFF");
+                    var table = new int[64];
+                    for (int k = 0; k < 64; k++) table[JpegTables.ZigZag[k]] = q[k];
+                    t.Quant[i] = table;
+                }
+                if (dcTables != null && i < dcTables.Length && dcTables[i] is { } dc) t.Dc[i] = Huffman(dc);
+                if (acTables != null && i < acTables.Length && acTables[i] is { } ac) t.Ac[i] = Huffman(ac);
+            }
+            return t;
+        }
+
+        static HuffDecodeTable Huffman(byte[] raw)
+        {
+            if (raw.Length < 16) throw new ImageFormatException("truncated JPEG Huffman table in TIFF");
+            int total = 0;
+            for (int i = 0; i < 16; i++) total += raw[i];
+            if (total > 256 || raw.Length < 16 + total) throw new ImageFormatException("invalid JPEG Huffman table in TIFF");
+            return new HuffDecodeTable(raw.AsSpan(0, 16), raw.AsSpan(16, total));
+        }
+
+        /// <summary>Table number for component i: its own if present, else the last one defined before it.</summary>
+        internal int LastIndex(object?[] tables, int i)
+        {
+            while (i > 0 && tables[i] == null) i--;
+            return i;
+        }
     }
 }

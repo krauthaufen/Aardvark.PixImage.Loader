@@ -155,7 +155,7 @@ def round2(cmyk):
 
     # ---- lossless: every precision and predictor, 1 to 4 components
     for bits in range(2, 17):
-        for psv in ([1, 4, 7] if bits not in (8, 12, 16) else range(1, 8)):
+        for psv in ([1 + bits % 7] if bits not in (8, 12, 16) else range(1, 8)):
             emit_ic(f'll_p{bits}_psv{psv}_gray', ic.jpeg8_encode(photo16(33, 21, 1, bits, seed=psv), lossless=True, bitspersample=bits, predictor=psv))
             emit_ic(f'll_p{bits}_psv{psv}_rgb', ic.jpeg8_encode(photo16(23, 31, 3, bits, seed=psv), lossless=True, bitspersample=bits, predictor=psv))
     for (w, h) in [(1, 1), (1, 7), (9, 1), (2, 2)]:
@@ -355,6 +355,73 @@ def main():
     tiff('cmyk_raw', cmyk, True, quality=90)
 
     round2(cmyk)
+
+    # JPEG-in-TIFF beyond 8 bit baseline: a full stream split into its tables and the rest (name suffixes as above)
+    def tiff_split(name, data, ref):
+        d = os.path.join(OUT, 'tiff')
+        tables, rest, i = b'\xff\xd8', b'\xff\xd8', 2
+        for m, s, e in segments(data):
+            if m in (0xDB, 0xC4):
+                tables += data[s:e]
+            else:
+                rest += data[s:e]
+            i = e
+        with open(os.path.join(d, name + '.tables.bin'), 'wb') as f:
+            f.write(tables + b'\xff\xd9')
+        with open(os.path.join(d, name + '.data.bin'), 'wb') as f:
+            f.write(rest + data[i:])
+        write_ref(os.path.join(d, name + '.ref'), ref)
+
+    for name, arr, kw in [('p12_ycc420_rgb', photo16(70, 52, 3, 12), dict(bitspersample=12, level=90, subsampling='420')),
+                          ('p12_gray_raw', photo16(50, 30, 1, 12), dict(bitspersample=12, level=90)),
+                          ('ll16_gray_raw', photo16(50, 30, 1, 16), dict(bitspersample=16, lossless=True, predictor=6)),
+                          ('ll16_rgb_raw', photo16(41, 33, 3, 16), dict(bitspersample=16, lossless=True, predictor=1)),
+                          ('ll10_2comp_raw', photo16(41, 33, 3, 10)[:, :, :2].copy(), dict(bitspersample=10, lossless=True, predictor=4)),
+                          ('ll8_rgb_raw', photo(41, 33), dict(lossless=True, predictor=7))]:
+        data = ic.jpeg8_encode(arr, **kw)
+        tiff_split(name, data, ic.jpeg8_decode(data))
+    data = magick(photo(70, 52), '-define', 'jpeg:arithmetic-coding=on', '-sampling-factor', '2x2', '-quality', '85')
+    tiff_split('arith_ycc420_rgb', data, np.asarray(Image.open(io.BytesIO(data))))
+
+    # old-style TIFF JPEG (compression 6): tables as raw bytes, strips as bare entropy coded data.
+    # Container: u8 component count, then per component q table (64 bytes), DC table and AC table (u16 length + bytes),
+    # then u16 frame width, u16 frame height, u8 hSub, u8 vSub, u16 restart interval, and the entropy coded data.
+    def old_style(name, data):
+        q, huff, sof, sos_end, ri = {}, {}, None, None, 0
+        for m, s, e in segments(data):
+            seg = data[s + 4:e]
+            if m == 0xDB:
+                while seg:
+                    q[seg[0]] = seg[1:65]
+                    seg = seg[65:]
+            elif m == 0xC4:
+                while seg:
+                    n = sum(seg[1:17])
+                    huff[seg[0]] = seg[1:17 + n]
+                    seg = seg[17 + n:]
+            elif m == 0xC0:
+                sof = seg
+            elif m == 0xDD:
+                ri = struct.unpack('>H', seg)[0]
+            elif m == 0xDA:
+                sos, sos_end = seg, e
+        nc = sof[5]
+        out = bytes([nc])
+        for i in range(nc):
+            tq = sof[8 + 3 * i]
+            td, ta = sos[2 + 2 * i] >> 4, sos[2 + 2 * i] & 15
+            out += q[tq] + b''.join(struct.pack('<H', len(t)) + t for t in (huff[td], huff[0x10 | ta]))
+        h, w = struct.unpack('>HH', sof[1:5])
+        out += struct.pack('<HHBBH', w, h, sof[7] >> 4, sof[7] & 15, ri) + data[sos_end:-2]
+        d = os.path.join(OUT, 'tiff')
+        with open(os.path.join(d, name + '.old.bin'), 'wb') as f:
+            f.write(out)
+        write_ref(os.path.join(d, name + '.old.ref'), np.asarray(Image.open(io.BytesIO(data))))
+
+    old_style('ycc420', pil(photo(70, 52), quality=85, subsampling=2))
+    old_style('ycc422_rst', pil(photo(41, 33), quality=85, subsampling=1, restart_marker_blocks=3))
+    old_style('ycc444', pil(photo(40, 40), quality=85, subsampling=0))
+    old_style('gray_rst', pil(photo(50, 30, 1), quality=85, restart_marker_rows=1))
 
     # valid but unsupported
     d = bytearray(pil(photo(16, 16, 1), quality=80))
