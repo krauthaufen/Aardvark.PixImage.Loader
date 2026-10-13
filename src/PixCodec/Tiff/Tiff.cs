@@ -173,9 +173,10 @@ namespace PixCodec
     /// TIFF codec: classic TIFF and BigTIFF, strips and tiles, both byte orders, multi-page files.
     /// <para>Decoding:</para>
     /// <list type="bullet">
-    /// <item>Compression: none, LZW, Deflate, PackBits, CCITT RLE / Group 3 / Group 4, JPEG (8 and 12 bit DCT, lossless,
-    /// old-style), ZSTD, LZMA, WebP, SGI LogLuv. Predictors 2 and 3.</item>
-    /// <item>Samples: unsigned and signed integers of 1..32 and 64 bits, floats of 16, 24, 32 and 64 bits. Samples of an
+    /// <item>Compression: none, LZW, Deflate, PackBits, CCITT RLE / Group 3 / Group 4 (incl. uncompressed mode), JPEG
+    /// (8 and 12 bit DCT, lossless, old-style in strips, tiles and planes), ZSTD, LZMA, WebP, SGI LogLuv (32 and
+    /// 24 bit) and LogL, PixarLog. Predictors 2 and 3.</item>
+    /// <item>Samples: unsigned and signed integers of 1..64 bits, floats of 16, 24, 32 and 64 bits. Samples of an
     /// odd bit depth arrive with their stored values in the next larger type (12 bit: UInt16 0..4095; 24-bit floats:
     /// Float32); only 1, 2 and 4 bit unsigned samples are stretched to 0..255 by default, see
     /// <see cref="TiffBitScaling"/>.</item>
@@ -187,8 +188,9 @@ namespace PixCodec
     /// <see cref="ColorModel.Other"/>.</item>
     /// <item>Orientation is reported in the metadata, never applied. Resolution, ICC profile and EXIF are returned.</item>
     /// </list>
-    /// <para>Encoding: all sample types and colour models; none, LZW, Deflate, PackBits, JPEG and CCITT Group 4;
-    /// strips or tiles; multi-page files and pyramids; either byte order; arbitrary extra tags.</para>
+    /// <para>Encoding: all sample types and colour models; none, LZW, Deflate, Zstd, PackBits, JPEG (8 / 12 bit) and
+    /// CCITT Group 4; strips or tiles; multi-page files, generated overviews and a cloud optimized layout; either byte
+    /// order; arbitrary extra tags.</para>
     /// </summary>
     public static unsafe class Tiff
     {
