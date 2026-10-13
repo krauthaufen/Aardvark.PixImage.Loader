@@ -129,10 +129,9 @@ public class TiffTests
     }
 
     /// <summary>
-    /// JPEG-in-TIFF (compression 7). Disabled until the integrator assigns <c>Tiff.JpegDecoder</c> (see TiffJpegDecoder):
-    /// then remove the Skip. The references were produced by libtiff/libjpeg, hence the tolerance.
+    /// JPEG-in-TIFF (compression 7). The references were produced by libtiff/libjpeg, hence the tolerance.
     /// </summary>
-    [Theory(Skip = "JPEG-in-TIFF hook (Tiff.JpegDecoder) not wired up yet")]
+    [Theory]
     [MemberData(nameof(JpegFixtures))]
     public void DecodesJpegCompressed(string file)
     {

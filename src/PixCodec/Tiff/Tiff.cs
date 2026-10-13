@@ -72,10 +72,10 @@ namespace PixCodec
     public static unsafe class Tiff
     {
         /// <summary>
-        /// Hook for JPEG-in-TIFF (compression 7), see <see cref="TiffJpegDecoder"/>. While null such files throw
-        /// ImageNotSupportedException on decode (GetInfo/ReadTags work regardless).
+        /// Decoder for JPEG-in-TIFF (compression 7) strips and tiles, see <see cref="TiffJpegDecoder"/>.
+        /// A field so tests can substitute it.
         /// </summary>
-        internal static TiffJpegDecoder? JpegDecoder;
+        internal static TiffJpegDecoder? JpegDecoder = Jpeg.DecodeForTiff;
 
         /// <summary>Returns whether the data starts with a TIFF signature (needs at most 16 bytes).</summary>
         public static bool IsMatch(ReadOnlySpan<byte> header) => TiffFile.IsMatch(header);
