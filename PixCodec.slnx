@@ -4,6 +4,7 @@
     <Project Path="src/PixCodec/PixCodec.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Aardvark.PixImage.PixCodec.Tests/Aardvark.PixImage.PixCodec.Tests.csproj" />
     <Project Path="tests/PixCodec.Tests/PixCodec.Tests.csproj" />
   </Folder>
 </Solution>
