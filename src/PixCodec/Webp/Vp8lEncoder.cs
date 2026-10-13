@@ -119,7 +119,6 @@ namespace PixCodec
                         var trial = new Vp8lBitWriter();
                         var cfg = ranked[i].cfg;
                         quick.EncodeStream(trial, cfg.Palette ? argb : (uint[])argb.Clone(), w, h, cfg, palette);
-                        Trace?.Invoke($"trial {i}: estimate {ranked[i].cost:F0} actual {trial.BitCount}");
                         ranked[i] = (trial.BitCount, cfg);
                     }
                 }
@@ -141,7 +140,6 @@ namespace PixCodec
                 var bw = new Vp8lBitWriter();
                 header(bw);
                 // the transforms work in place; the palette path builds its own index image
-                Trace?.Invoke($"config palette={cfg.Palette} subgreen={cfg.SubGreen} predictor={cfg.Predictor} cross={cfg.CrossColor}");
                 EncodeStream(bw, configs.Count > 1 && !cfg.Palette ? (uint[])argb.Clone() : argb, w, h, cfg, palette);
                 if (best == null || bw.BitCount < best.BitCount) best = bw;
             }
@@ -1090,17 +1088,12 @@ namespace PixCodec
             WriteTokens(bw, t, px, w, 0, 0, 0, null, new[] { g }, lay);
         }
 
-        internal static Action<string>? Trace;
-
         void EncodeImage(Vp8lBitWriter bw, uint[] px, int w, int h, bool palette)
         {
-            Trace?.Invoke($"image starts at bit {bw.BitCount}");
             int n = w * h;
             int iters = _method switch { 0 => 2, 1 => 8, 2 => 16, 3 => 32, 4 => 64, 5 => 128, _ => 256 };
             var t = BackwardReferences(px, n, w, iters, _method >= 1, _method >= 2);
-            Trace?.Invoke("lz77 done");
             int cacheBits = _method >= 1 ? SelectCacheBits(t, px, _method >= 4 ? MaxCacheBits : _method >= 2 ? 8 : 6) : 0;
-            Trace?.Invoke("cache selected");
             bw.Put(cacheBits > 0 ? 1u : 0u, 1);
             if (cacheBits > 0) bw.Put((uint)cacheBits, 4);
 
@@ -1119,7 +1112,6 @@ namespace PixCodec
                     var blockHist = new int[blocksWide * blocksHigh][];
                     for (int i = 0; i < blockHist.Length; i++) blockHist[i] = new int[lay.Total];
                     BuildHistograms(t, px, w, cacheBits, blockBits, blocksWide, blockHist, lay);
-                    Trace?.Invoke($"clustering {blockHist.Length} blocks");
                     assign = ClusterHistograms(blockHist, lay, out numGroups);
                     if (numGroups == 1) assign = null;
                 }
@@ -1143,11 +1135,8 @@ namespace PixCodec
                 BuildGroupHistograms(t, px, w, cacheBits, blockBits, blocksWide, assign, hist, lay);
             }
             var groups = new GroupCodes[hist.Length];
-            Trace?.Invoke($"codes start at bit {bw.BitCount}, {hist.Length} groups, cache {cacheBits}, tokens {t.Count}");
             for (int i = 0; i < hist.Length; i++) groups[i] = BuildAndWriteCodes(bw, hist[i], lay);
-            Trace?.Invoke($"data starts at bit {bw.BitCount}");
             WriteTokens(bw, t, px, w, cacheBits, blockBits, blocksWide, assign, groups, lay);
-            Trace?.Invoke($"ends at bit {bw.BitCount}");
         }
 
         static void BuildGroupHistograms(Tokens t, uint[] px, int xsize, int cacheBits, int blockBits, int blocksWide, int[] assign, int[][] hist, Layout lay)
@@ -1191,9 +1180,7 @@ namespace PixCodec
                 bw.Put(1, 1); bw.Put(0, 2);
                 bw.Put((uint)bits - 2, 3);
                 int tw = SubSize(cw, bits), th = SubSize(h, bits);
-                Trace?.Invoke("predictors...");
                 var modes = ChoosePredictors(px, cw, h, bits);
-                Trace?.Invoke("predictors chosen");
                 var img = new uint[tw * th];
                 for (int i = 0; i < img.Length; i++) img[i] = 0xff000000 | (uint)modes[i] << 8;
                 EncodeSubImage(bw, img, tw, th);
@@ -1204,7 +1191,6 @@ namespace PixCodec
                 int bits = cw * h > 1 << 22 ? 5 : 4;
                 int tw = SubSize(cw, bits), th = SubSize(h, bits);
                 var img = ChooseCrossColor(px, cw, h, bits);
-                Trace?.Invoke("cross color done");
                 if (img != null)
                 {
                     bw.Put(1, 1); bw.Put(1, 2);

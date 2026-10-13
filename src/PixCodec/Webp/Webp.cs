@@ -162,9 +162,10 @@ namespace PixCodec
     /// <summary>
     /// WebP codec: lossy (VP8 key frames), lossless (VP8L), alpha, animation and metadata, reading and writing.
     /// <para>
-    /// Alpha rule: <see cref="Decode"/> returns UInt8 Rgba when the VP8X header has its alpha flag set, when the image
-    /// has an ALPH chunk, or when a lossless image sets its alpha_is_used bit; for an animation also when the first
-    /// frame does not cover the canvas. Otherwise it returns UInt8 Rgb. <see cref="GetInfo"/> reports the same.
+    /// Alpha rule: <see cref="Decode"/> returns UInt8 Rgba when the VP8X header has its alpha flag set or when a
+    /// lossless image sets its alpha_is_used bit; for an animation also when the first frame has an ALPH chunk or
+    /// does not cover the canvas. Otherwise it returns UInt8 Rgb. An ALPH chunk next to a still lossy image is
+    /// ignored unless the VP8X alpha flag is set (as libwebp does). <see cref="GetInfo"/> reports the same.
     /// Alpha is straight; the color of fully transparent pixels is returned as stored.
     /// </para>
     /// <para>

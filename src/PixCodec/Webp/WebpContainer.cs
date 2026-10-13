@@ -108,6 +108,8 @@ namespace PixCodec
             else
             {
                 if (still == null) throw Bad("no image data");
+                // like libwebp: without the VP8X alpha flag an ALPH chunk next to a still image is not used
+                if (!c.AlphaFlag && !still.Lossless) { still.AlphLength = -1; still.HasAlpha = false; }
                 if (!c.HasVp8x) { c.Width = still.Width; c.Height = still.Height; }
                 else if (c.Width != still.Width || c.Height != still.Height) throw Bad("canvas and image size differ");
                 c.Frames.Add(still);

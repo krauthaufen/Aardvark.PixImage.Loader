@@ -146,6 +146,118 @@ namespace PixCodec
             foreach (var c in chunks) WriteChunk(s, c.tag, c.data);
         }
 
-        public static void EncodeAnimation(IEnumerable<WebpInputFrame> frames, Stream output, WebpEncodeOptions opt) => throw new ImageNotSupportedException("todo");
+        public static void EncodeAnimation(IEnumerable<WebpInputFrame> frames, Stream output, WebpEncodeOptions opt)
+        {
+            var anmf = new List<(string, byte[])>();
+            uint[]? prev = null;
+            int w = 0, h = 0;
+            bool anyAlpha = false;
+            byte[]? icc = null, exif = null, xmp = null;
+            foreach (var frame in frames)
+            {
+                var image = frame.Image ?? throw new ArgumentException("animation frame without image");
+                var argb = ToArgb(image);
+                if (prev == null)
+                {
+                    w = image.Width; h = image.Height;
+                    CheckSize(w, h);
+                    GetMetadata(image, opt, out icc, out exif, out xmp);
+                }
+                else if (image.Width != w || image.Height != h)
+                    throw new ArgumentException("all animation frames must have the size of the first one");
+                if (opt.Lossless && !opt.Exact && image.HasAlpha)
+                    for (int i = 0; i < argb.Length; i++) if (argb[i] >> 24 == 0) argb[i] = 0;
+
+                // the rectangle to store: everything, or the bounding box of what changed (offsets must be even)
+                int x0 = 0, y0 = 0, x1 = w, y1 = h;
+                bool blend = false;
+                uint[] sub = argb;
+                if (prev != null && opt.FrameDifferencing)
+                {
+                    ChangedBox(argb, prev, w, h, out x0, out y0, out x1, out y1);
+                    x0 &= ~1; y0 &= ~1;
+                    int sw = x1 - x0, sh = y1 - y0;
+                    sub = new uint[sw * sh];
+                    bool changedTranslucent = false, anyUnchanged = false;
+                    for (int y = 0; y < sh; y++)
+                        for (int x = 0; x < sw; x++)
+                        {
+                            int i = (y0 + y) * w + x0 + x;
+                            uint v = argb[i];
+                            sub[y * sw + x] = v;
+                            if (v == prev[i]) anyUnchanged = true;
+                            else if (v >> 24 != 255) changedTranslucent = true;
+                        }
+                    // Lossless: unchanged pixels inside the box can become transparent and be blended away - as long as
+                    // every pixel that did change is opaque, since blending would alter a translucent one.
+                    if (opt.Lossless && anyUnchanged && !changedTranslucent)
+                    {
+                        blend = true;
+                        for (int y = 0; y < sh; y++)
+                            for (int x = 0; x < sw; x++)
+                                if (sub[y * sw + x] == prev[(y0 + y) * w + x0 + x]) sub[y * sw + x] = 0;
+                    }
+                }
+                int fw = x1 - x0, fh = y1 - y0;
+                bool alpha = sub == argb && image.HasAlpha;
+                if (!alpha)
+                    for (int i = 0; i < sub.Length; i++) if (sub[i] >> 24 != 255) { alpha = true; break; }
+                anyAlpha |= alpha;
+                if (sub == argb && opt.Lossless) sub = (uint[])argb.Clone();    // the encoder works in place, argb is kept for the next frame
+                var chunks = EncodeImage(sub, fw, fh, alpha, opt);
+
+                long size = 16;
+                foreach (var c in chunks) size += ChunkSize(c.data);
+                var payload = new byte[size];
+                Put24(payload, 0, x0 / 2); Put24(payload, 3, y0 / 2);
+                Put24(payload, 6, fw - 1); Put24(payload, 9, fh - 1);
+                Put24(payload, 12, Math.Clamp(frame.DurationMs, 0, 0xffffff));
+                payload[15] = (byte)(blend ? 0 : 2);    // bit 1: do not blend, bit 0: dispose to background (never)
+                using (var ms = new MemoryStream(payload, 16, payload.Length - 16))
+                    foreach (var c in chunks) WriteChunk(ms, c.tag, c.data);
+                anmf.Add(("ANMF", payload));
+                prev = argb;
+            }
+            if (prev == null) throw new ArgumentException("an animation needs at least one frame");
+
+            var file = new List<(string, byte[])>();
+            int flags = FlagAnim | (anyAlpha ? FlagAlpha : 0) | (icc != null ? FlagIcc : 0) | (exif != null ? FlagExif : 0) | (xmp != null ? FlagXmp : 0);
+            file.Add(("VP8X", Vp8x(flags, w, h)));
+            if (icc != null) file.Add(("ICCP", icc));
+            var anim = new byte[6];
+            var bg = opt.BackgroundColor;
+            anim[0] = bg.B; anim[1] = bg.G; anim[2] = bg.R; anim[3] = bg.A;
+            BinaryPrimitives.WriteUInt16LittleEndian(anim.AsSpan(4), (ushort)Math.Clamp(opt.LoopCount, 0, 65535));
+            file.Add(("ANIM", anim));
+            file.AddRange(anmf);
+            if (exif != null) file.Add(("EXIF", exif));
+            if (xmp != null) file.Add(("XMP ", xmp));
+            WriteRiff(output, file);
+        }
+
+        static void Put24(byte[] b, int o, int v)
+        {
+            b[o] = (byte)v; b[o + 1] = (byte)(v >> 8); b[o + 2] = (byte)(v >> 16);
+        }
+
+        /// <summary>Bounding box of the pixels that differ; a single pixel when nothing changed.</summary>
+        static void ChangedBox(uint[] cur, uint[] prev, int w, int h, out int x0, out int y0, out int x1, out int y1)
+        {
+            x0 = w; y0 = h; x1 = 0; y1 = 0;
+            for (int y = 0; y < h; y++)
+            {
+                var a = cur.AsSpan(y * w, w);
+                var b = prev.AsSpan(y * w, w);
+                int first = a.CommonPrefixLength(b);
+                if (first == w) continue;
+                int last = w - 1;
+                while (a[last] == b[last]) last--;
+                if (first < x0) x0 = first;
+                if (last + 1 > x1) x1 = last + 1;
+                if (y0 == h) y0 = y;
+                y1 = y + 1;
+            }
+            if (x1 == 0) { x0 = 0; y0 = 0; x1 = 1; y1 = 1; }
+        }
     }
 }
