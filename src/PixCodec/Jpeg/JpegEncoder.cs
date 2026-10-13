@@ -517,23 +517,32 @@ namespace PixCodec.JpegImpl
                 int sw = (w * c.H + _hMax - 1) / _hMax, sh = (h * c.V + _vMax - 1) / _vMax;
                 if (_hMax % c.H == 0 && _vMax % c.V == 0)
                 {
-                    // whole-number ratios: plain averages over fx x fy samples (edge samples repeat)
-                    int fx = _hMax / c.H, fy = _vMax / c.V, area = fx * fy, planeRows = c.BlocksH * 8, st = c.Stride;
+                    // whole-number ratios: plain averages over fx x fy samples; rows / columns past the image repeat the edge
+                    int fx = _hMax / c.H, fy = _vMax / c.V, planeRows = c.BlocksH * 8, st = c.Stride;
                     var src = full[i];
+                    var acc = new int[sw];
                     for (int y = 0; y < planeRows; y++)
                     {
-                        int sy = Math.Min(y, sh - 1) * fy;
-                        for (int x = 0; x < st; x++)
+                        if (y < sh)
                         {
-                            int sx = Math.Min(x, sw - 1) * fx, sum = area >> 1;
+                            Array.Clear(acc);
                             for (int j = 0; j < fy; j++)
                             {
-                                int o = Math.Min(sy + j, h - 1) * w;
-                                for (int k = 0; k < fx; k++) sum += src[o + Math.Min(sx + k, w - 1)];
+                                int o = Math.Min(y * fy + j, h - 1) * w;
+                                int whole = fx == 1 ? sw : w / fx; // outputs whose inputs all exist
+                                if (fx == 1) for (int x = 0; x < whole; x++) acc[x] += src[o + x];
+                                else if (fx == 2) for (int x = 0; x < whole; x++) acc[x] += src[o + 2 * x] + src[o + 2 * x + 1];
+                                else for (int x = 0; x < whole; x++) for (int k = 0; k < fx; k++) acc[x] += src[o + x * fx + k];
+                                for (int x = whole; x < sw; x++) for (int k = 0; k < fx; k++) acc[x] += src[o + Math.Min(x * fx + k, w - 1)];
                             }
-                            int v = area == 1 ? sum : sum / area;
-                            if (c.Plane16 != null) c.Plane16[y * st + x] = (ushort)v; else c.Plane[y * st + x] = (byte)v;
+                            int area = fx * fy, round = area >> 1;
+                            if (c.Plane16 != null) for (int x = 0; x < sw; x++) c.Plane16[y * st + x] = (ushort)((acc[x] + round) / area);
+                            else for (int x = 0; x < sw; x++) c.Plane[y * st + x] = (byte)((acc[x] + round) / area);
+                            if (c.Plane16 != null) c.Plane16.AsSpan(y * st + sw, st - sw).Fill(c.Plane16[y * st + sw - 1]);
+                            else c.Plane.AsSpan(y * st + sw, st - sw).Fill(c.Plane[y * st + sw - 1]);
                         }
+                        else if (c.Plane16 != null) c.Plane16.AsSpan((sh - 1) * st, st).CopyTo(c.Plane16.AsSpan(y * st, st));
+                        else c.Plane.AsSpan((sh - 1) * st, st).CopyTo(c.Plane.AsSpan(y * st, st));
                     }
                     continue;
                 }
@@ -758,10 +767,7 @@ namespace PixCodec.JpegImpl
                         }
                         for (int bx = 0; bx < c.BlocksW; bx++, o += 64)
                         {
-                            ushort* src = plane16 + ((nint)by * c.Stride + bx) * 8;
-                            for (int y = 0; y < 8; y++, src += c.Stride)
-                                for (int x = 0; x < 8; x++) m[y * 8 + x] = src[x] - (1 << (_precision - 1));
-                            JpegDct.FdctQuantizeGeneric(m, 1, recip, o);
+                            JpegDct.FdctQuantizeWide(plane16 + ((nint)by * c.Stride + bx) * 8, c.Stride, 1 << (_precision - 1), recip, o);
                             if (freq != null && bx < c.StatBlocksW && by < c.StatBlocksH) GatherAc(o, freq, _maxAcSize);
                         }
                     }
@@ -1383,12 +1389,61 @@ namespace PixCodec.JpegImpl
             _pos = 0;
         }
 
+        /// <summary>
+        /// Prediction differences of one line (components interleaved, n values). Predictor 0 stands for the first
+        /// line of the image or of a restart interval, which predicts from the left only.
+        /// </summary>
+        static void PredictLine(int[] cur, int[] prev, int[] diff, int n, int nc, int predictor, int initial)
+        {
+            for (int c = 0; c < nc; c++) diff[c] = cur[c] - (predictor == 0 ? initial : prev[c]);
+            int k = nc;
+            if (Vector.IsHardwareAccelerated)
+            {
+                fixed (int* pc = cur, pp = prev, pd = diff)
+                {
+                    for (int vn = Vector<int>.Count; k + vn <= n; k += vn)
+                    {
+                        var ra = Vector.Load(pc + k - nc);
+                        var rb = Vector.Load(pp + k);
+                        var rc = Vector.Load(pp + k - nc);
+                        var pred = predictor switch
+                        {
+                            0 or 1 => ra,
+                            2 => rb,
+                            3 => rc,
+                            4 => ra + rb - rc,
+                            5 => ra + Vector.ShiftRightArithmetic(rb - rc, 1),
+                            6 => rb + Vector.ShiftRightArithmetic(ra - rc, 1),
+                            _ => Vector.ShiftRightArithmetic(ra + rb, 1),
+                        };
+                        Vector.Store(Vector.Load(pc + k) - pred, pd + k);
+                    }
+                }
+            }
+            for (; k < n; k++)
+            {
+                int ra = cur[k - nc], rb = prev[k], rc = prev[k - nc];
+                int pred = predictor switch
+                {
+                    0 or 1 => ra,
+                    2 => rb,
+                    3 => rc,
+                    4 => ra + rb - rc,
+                    5 => ra + ((rb - rc) >> 1),
+                    6 => rb + ((ra - rc) >> 1),
+                    _ => (ra + rb) >> 1,
+                };
+                diff[k] = cur[k] - pred;
+            }
+        }
+
         /// <summary>Predicts every sample and either counts the difference categories or writes the coded differences.</summary>
         void LosslessPass(byte[]? s8, ushort[]? s16, int w, int h, int ch, int nc, int precision, int predictor, int restart, HuffEnc[] tables, bool emit)
         {
             // current and previous line as plain ints, components interleaved
             var cur = new int[w * nc];
             var prev = new int[w * nc];
+            var diff = new int[w * nc];
             int rowsPerInterval = restart == 0 ? int.MaxValue : restart / w;
             int topRow = 0, rst = 0;
             ulong acc = _acc;
@@ -1413,6 +1468,8 @@ namespace PixCodec.JpegImpl
                     for (int x = 0, i = y * w * ch; x < w; x++, i += ch)
                         for (int c = 0; c < nc; c++) cur[x * nc + c] = s8 != null ? s8[i + c] : s16![i + c];
 
+                    PredictLine(cur, prev, diff, w * nc, nc, y == topRow ? 0 : predictor, 1 << (precision - 1));
+
                     for (int x0 = 0; x0 < w; x0 += 256)
                     {
                         // every sample appends at most 8 bytes (31 bits plus stuffing)
@@ -1423,25 +1480,8 @@ namespace PixCodec.JpegImpl
                         {
                             for (int c = 0; c < nc; c++)
                             {
-                                int k = x * nc + c, pred;
-                                if (y == topRow) pred = x == 0 ? 1 << (precision - 1) : cur[k - nc];
-                                else if (x == 0) pred = prev[k];
-                                else
-                                {
-                                    int ra = cur[k - nc], rb = prev[k], rc = prev[k - nc];
-                                    pred = predictor switch
-                                    {
-                                        1 => ra,
-                                        2 => rb,
-                                        3 => rc,
-                                        4 => ra + rb - rc,
-                                        5 => ra + ((rb - rc) >> 1),
-                                        6 => rb + ((ra - rc) >> 1),
-                                        _ => (ra + rb) >> 1,
-                                    };
-                                }
                                 // differences are taken modulo 65536; -32768 and +32768 coincide and get their own category
-                                int d = (short)(cur[k] - pred);
+                                int d = (short)diff[x * nc + c];
                                 int s = d == short.MinValue ? 16 : BitLength(Math.Abs(d));
                                 if (!emit) { tables[c].Freq[s]++; continue; }
                                 uint e = tables[c].Packed[s];

@@ -763,6 +763,11 @@ namespace PixCodec.JpegImpl
         {
             int* v = stackalloc int[64];
             int s = c.S;
+            if (!dcOnly && s == 8 && !_differential && c.Plane16 != null && JpegDct.HasWide)
+            {
+                JpegDct.Idct8Wide(block, c.Quant, c.Plane16 + ((nint)row * c.Stride + col) * 8, c.Stride, Precision == 8 ? 2 : 1, 1 << (Precision - 1), (1 << Precision) - 1);
+                return;
+            }
             // a lone DC coefficient gives a flat block at every size
             if (dcOnly) new Span<int>(v, s * s).Fill((block[0] * c.Quant[0] + 4) >> 3);
             else JpegDct.IdctGeneric(block, c.Quant, s, Precision == 8 ? 2 : 1, v);

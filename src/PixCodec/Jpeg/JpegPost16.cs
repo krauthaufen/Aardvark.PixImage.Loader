@@ -72,13 +72,63 @@ namespace PixCodec.JpegImpl
 
         static void YccToRgb(ushort* yp, ushort* cbp, ushort* crp, ushort* dst, int w, int center, int max)
         {
-            for (int x = 0; x < w; x++, dst += 3)
+            int x = 0;
+            if (System.Numerics.Vector.IsHardwareAccelerated && !JpegPost.ForceScalar)
+            {
+                // whole vectors of 16 bit samples, computed in 32 bit lanes (the products stay far below 2^31 at 12 bit)
+                int n = System.Numerics.Vector<ushort>.Count;
+                ushort* tmp = stackalloc ushort[3 * n];
+                var vc = new System.Numerics.Vector<int>(center); var vmax = new System.Numerics.Vector<int>(max);
+                var half = new System.Numerics.Vector<int>(32768);
+                for (; x + n <= w; x += n, dst += 3 * n)
+                {
+                    System.Numerics.Vector.Widen(System.Numerics.Vector.Load(yp + x), out var y0, out var y1);
+                    System.Numerics.Vector.Widen(System.Numerics.Vector.Load(cbp + x), out var b0, out var b1);
+                    System.Numerics.Vector.Widen(System.Numerics.Vector.Load(crp + x), out var r0, out var r1);
+                    Convert(y0, b0, r0, vc, vmax, half, out var rr0, out var gg0, out var bb0);
+                    Convert(y1, b1, r1, vc, vmax, half, out var rr1, out var gg1, out var bb1);
+                    System.Numerics.Vector.Store(System.Numerics.Vector.Narrow(rr0, rr1), tmp);
+                    System.Numerics.Vector.Store(System.Numerics.Vector.Narrow(gg0, gg1), tmp + n);
+                    System.Numerics.Vector.Store(System.Numerics.Vector.Narrow(bb0, bb1), tmp + 2 * n);
+                    for (int i = 0; i < n; i++)
+                    {
+                        dst[3 * i] = tmp[i]; dst[3 * i + 1] = tmp[n + i]; dst[3 * i + 2] = tmp[2 * n + i];
+                    }
+                }
+            }
+            for (; x < w; x++, dst += 3)
             {
                 int yy = yp[x], cb = cbp[x] - center, cr = crp[x] - center;
                 dst[0] = (ushort)Math.Clamp(yy + ((91881 * cr + 32768) >> 16), 0, max);
                 dst[1] = (ushort)Math.Clamp(yy + (int)((-22554L * cb - 46802L * cr + 32768) >> 16), 0, max);
                 dst[2] = (ushort)Math.Clamp(yy + (int)((116130L * cb + 32768) >> 16), 0, max);
             }
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        static void Convert(System.Numerics.Vector<uint> y, System.Numerics.Vector<uint> cbU, System.Numerics.Vector<uint> crU,
+            System.Numerics.Vector<int> center, System.Numerics.Vector<int> max, System.Numerics.Vector<int> half,
+            out System.Numerics.Vector<uint> r, out System.Numerics.Vector<uint> g, out System.Numerics.Vector<uint> b)
+        {
+            var yy = System.Numerics.Vector.AsVectorInt32(y);
+            var cb = System.Numerics.Vector.AsVectorInt32(cbU) - center;
+            var cr = System.Numerics.Vector.AsVectorInt32(crU) - center;
+            var zero = System.Numerics.Vector<int>.Zero;
+            var rr = yy + System.Numerics.Vector.ShiftRightArithmetic(cr * 91881 + half, 16);
+            var gg = yy + System.Numerics.Vector.ShiftRightArithmetic(cb * -22554 + cr * -46802 + half, 16);
+            var bb = yy + System.Numerics.Vector.ShiftRightArithmetic(cb * 116130 + half, 16);
+            r = System.Numerics.Vector.AsVectorUInt32(System.Numerics.Vector.Min(System.Numerics.Vector.Max(rr, zero), max));
+            g = System.Numerics.Vector.AsVectorUInt32(System.Numerics.Vector.Min(System.Numerics.Vector.Max(gg, zero), max));
+            b = System.Numerics.Vector.AsVectorUInt32(System.Numerics.Vector.Min(System.Numerics.Vector.Max(bb, zero), max));
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        static System.Numerics.Vector<int> Sum(ushort* a, ushort* b, int i, System.Numerics.Vector<int> three)
+        {
+            // 3 * a + b for one vector of samples, widened from 16 bit
+            System.Numerics.Vector.Widen(System.Numerics.Vector.Load(a + i), out var a0, out _);
+            System.Numerics.Vector.Widen(System.Numerics.Vector.Load(b + i), out var b0, out _);
+            return System.Numerics.Vector.AsVectorInt32(a0) * three + System.Numerics.Vector.AsVectorInt32(b0);
         }
 
         static ushort* GetLine(JpegComponent c, int y, int w, ushort* line, ref int cachedRow)
@@ -139,7 +189,27 @@ namespace PixCodec.JpegImpl
                     int near = (y & 1) == 0 ? Math.Max(sy - 1, 0) : Math.Min(sy + 1, c.SampledH - 1);
                     ushort* a = plane + sy * stride, b = plane + near * stride;
                     int prev = 3 * a[0] + b[0], cur = prev;
-                    for (int i = 0; i < n; i++)
+                    int start = 0;
+                    if (System.Numerics.Vector.IsHardwareAccelerated && !JpegPost.ForceScalar && n > 2 * System.Numerics.Vector<int>.Count + 2)
+                    {
+                        // interior samples in 32 bit lanes; even and odd outputs are interleaved through 16 + 16 bit packing
+                        int vn = System.Numerics.Vector<int>.Count;
+                        var three = new System.Numerics.Vector<int>(3);
+                        int i = 1;
+                        for (; i + 2 * vn + 1 <= n; i += vn) // (the loads read two lane counts of samples)
+                        {
+                            var c0 = Sum(a, b, i, three); var cm = Sum(a, b, i - 1, three); var cp = Sum(a, b, i + 1, three);
+                            var even = System.Numerics.Vector.ShiftRightArithmetic(c0 * three + cm + new System.Numerics.Vector<int>(8), 4);
+                            var odd = System.Numerics.Vector.ShiftRightArithmetic(c0 * three + cp + new System.Numerics.Vector<int>(7), 4);
+                            System.Numerics.Vector.Store(System.Numerics.Vector.AsVectorUInt16(even | System.Numerics.Vector.ShiftLeft(odd, 16)), line + 2 * i);
+                        }
+                        // sample 0 and the tail go through the scalar loop
+                        line[0] = (ushort)((4 * prev + 8) >> 4);
+                        line[1] = (ushort)((3 * prev + 3 * a[1] + b[1] + 7) >> 4);
+                        start = i;
+                        prev = 3 * a[i - 1] + b[i - 1]; cur = 3 * a[i] + b[i];
+                    }
+                    for (int i = start; i < n; i++)
                     {
                         int next = i + 1 < n ? 3 * a[i + 1] + b[i + 1] : cur;
                         line[2 * i] = (ushort)((3 * cur + prev + 8) >> 4);
