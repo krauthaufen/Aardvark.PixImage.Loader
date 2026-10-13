@@ -123,6 +123,8 @@ namespace PixCodec
             public uint[] Data;
         }
 
+        internal static Action<string>? Trace;
+
         uint[] DecodeImageStream(int xsize, int ysize, bool level0)
         {
             Transform[]? transforms = null;
@@ -138,11 +140,13 @@ namespace PixCodec
                     seen |= 1 << type;
                     ref Transform t = ref transforms[numTransforms++];
                     t.Type = type; t.XSize = xsize; t.Data = Array.Empty<uint>();
+                    Trace?.Invoke($"transform {type}");
                     switch (type)
                     {
                         case 0:
                         case 1:
                             t.Bits = (int)_br.ReadBits(3) + 2;
+                            Trace?.Invoke($"  bits {t.Bits}");
                             t.Data = DecodeImageStream(SubSize(xsize, t.Bits), SubSize(ysize, t.Bits), false);
                             break;
                         case 3:
@@ -196,6 +200,7 @@ namespace PixCodec
                 }
             }
 
+            if (level0) Trace?.Invoke($"cache {cacheBits} prefixBits {prefixBits} groups {numGroups} size {xsize}x{ysize}");
             var groups = new int[numGroups * GroupInts];
             var tables = ReadPrefixCodes(groups, mapping, cacheBits);
             var pixels = DecodePixels(xsize, ysize, groups, tables, meta, prefixBits, metaWidth, cacheBits);
@@ -491,6 +496,8 @@ namespace PixCodec
             uint constant = (uint)groups[g + 11];
             int gOff = groups[g], gMask = groups[g + 1];
 
+            int tLit = 0, tCopy = 0, tCache = 0; long tCopyPx = 0, tExtra = 0; var dh = new System.Collections.Generic.SortedDictionary<int,int>();
+            try {
             while (pos < end)
             {
                 if (br.Bits < 0) throw Bad("data ends prematurely");
@@ -534,6 +541,7 @@ namespace PixCodec
                     }
                     if (br.Bits < 0) throw Bad("data ends prematurely");
                     if (dist > pos || length > end - pos) throw Bad("backward reference out of range");
+                    tCopy++; tCopyPx += length; int dk = distCode <= 120 ? distCode : 1000 + System.Numerics.BitOperations.Log2((uint)distCode); dh.TryGetValue(dk, out int dv); dh[dk] = dv + 1;
                     if (pos + length > data.Length) Array.Resize(ref data, (int)Math.Min(end, Math.Max((long)data.Length * 2, pos + length)));
                     var dst = data.AsSpan(pos, length);
                     if (dist >= length) data.AsSpan(pos - dist, length).CopyTo(dst);
@@ -561,14 +569,16 @@ namespace PixCodec
                     continue;
                 }
                 // sym - 280 is below the cache size by construction of the alphabet
-                px = cache![(int)sym - (NumLiteral + NumLength)];
+                px = cache![(int)sym - (NumLiteral + NumLength)]; tCache++; tLit--;
 
             literal:
                 if (pos >= data.Length) Array.Resize(ref data, (int)Math.Min(end, (long)data.Length * 2));
                 data[pos++] = px;
                 if (cache != null) cache[(int)((px * 0x1e35a7bdu) >> cacheShift)] = px;
                 if (++x == xsize) { x = 0; y++; }
+                tLit++;
             }
+            } finally { if (Trace != null && end > 5000) Trace($"lit {tLit} cache {tCache} copies {tCopy} covering {tCopyPx}; dist codes: " + string.Join(" ", System.Linq.Enumerable.Select(dh, kv => kv.Key + ":" + kv.Value))); }
             if (br.Bits < 0) throw Bad("data ends prematurely");
             return data;
         }
