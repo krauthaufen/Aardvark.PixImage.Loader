@@ -183,7 +183,7 @@ namespace PixCodec
 
         public static byte[] Encode(uint[] argb, int w, int h, WebpEncodeOptions opt)
         {
-            var frame = WebpYuv.FromArgb(argb, w, h);
+            var frame = WebpYuv.FromArgb(argb, w, h, opt.Chroma);
             var enc = new Vp8Encoder(frame, opt, true);
             var res = enc.Run();
             if (res == null)

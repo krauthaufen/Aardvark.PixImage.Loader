@@ -644,6 +644,105 @@ public class WebpTests(ITestOutputHelper output)
             }
     }
 
+    [Fact]
+    public void LossyAlphaQuality()
+    {
+        var img = Photo(90, 70, ColorModel.Rgba, 4);
+        var src = (byte[])img.Data;
+        int lastSize = 0, lastError = 255;
+        foreach (int q in new[] { 100, 90, 50, 10, 0 })
+        {
+            var data = Encode(img, new WebpEncodeOptions { Quality = 80, AlphaQuality = q });
+            var back = (byte[])Webp.Decode(data).Data;
+            int maxError = 0;
+            var levels = new HashSet<byte>();
+            for (int i = 3; i < src.Length; i += 4)
+            {
+                maxError = Math.Max(maxError, Math.Abs(src[i] - back[i]));
+                levels.Add(back[i]);
+                if (src[i] == 0 || src[i] == 255) Assert.Equal(src[i], back[i]);
+            }
+            output.WriteLine($"alpha quality {q}: {data.Length} bytes, {levels.Count} levels, max error {maxError}");
+            if (q == 100) Assert.Equal(0, maxError);
+            else
+            {
+                // near 100 the few merged levels can cost as much as they save; lower down the file has to shrink
+                Assert.True((q > 50 || data.Length < lastSize) && maxError >= lastError, $"quality {q}");
+                Assert.True(levels.Count <= 2 + q * q * 254 / 10000 && maxError <= 128);
+            }
+            if (q == 0) Assert.Equal(2, levels.Count);
+            lastSize = data.Length; lastError = maxError;
+            var oracle = OracleDecode(data, ".webp");
+            if (oracle != null) AssertEqual(Webp.Decode(data), oracle);
+        }
+    }
+
+    [Fact]
+    public void ChromaModes()
+    {
+        // colored text: the place where subsampled chroma hurts
+        var img = RawImage.Create(128, 96, ColorModel.Rgb, SampleType.UInt8);
+        var d = (byte[])img.Data;
+        for (int y = 0; y < 96; y++)
+            for (int x = 0; x < 128; x++)
+            {
+                bool stroke = y < 48 ? x % 9 < 3 : (x + y) % 11 < 2;
+                var c = stroke ? (y < 48 ? (220, 30, 40) : (20, 60, 230)) : (235, 235, 228);
+                d[(y * 128 + x) * 3] = (byte)c.Item1; d[(y * 128 + x) * 3 + 1] = (byte)c.Item2; d[(y * 128 + x) * 3 + 2] = (byte)c.Item3;
+            }
+        var psnr = new Dictionary<WebpChroma, double>();
+        foreach (var mode in new[] { WebpChroma.Average, WebpChroma.LinearLight, WebpChroma.Sharp })
+        {
+            var data = Encode(img, new WebpEncodeOptions { Quality = 90, Chroma = mode });
+            var back = Webp.Decode(data);
+            psnr[mode] = Psnr(img, back, 255);
+            output.WriteLine($"{mode}: {data.Length} bytes, {psnr[mode]:F2} dB");
+            var oracle = OracleDecode(data, ".webp");
+            if (oracle != null) AssertEqual(back, oracle);
+        }
+        Assert.True(psnr[WebpChroma.Sharp] > psnr[WebpChroma.Average] + 0.3);
+        Assert.True(psnr[WebpChroma.Average] > psnr[WebpChroma.LinearLight]);
+        Assert.Equal(WebpChroma.Sharp, new WebpEncodeOptions().Chroma);
+        // gray input has no chroma to get wrong: all modes give the same file
+        var gray = Photo(64, 48, ColorModel.Gray, 2);
+        Assert.Equal(Encode(gray, new WebpEncodeOptions { Chroma = WebpChroma.Average }), Encode(gray, new WebpEncodeOptions { Chroma = WebpChroma.Sharp }));
+    }
+
+    [Fact]
+    public void NearLossless()
+    {
+        foreach (var color in new[] { ColorModel.Rgb, ColorModel.Rgba })
+        {
+            var img = Photo(160, 120, color, 6);
+            var src = (byte[])img.Data;
+            int ch = img.Channels;
+            // a flat patch, which has to stay exact
+            for (int y = 10; y < 40; y++) for (int x = 10; x < 60; x++) { src[(y * 160 + x) * ch] = 201; src[(y * 160 + x) * ch + 1] = 77; src[(y * 160 + x) * ch + 2] = 3; if (ch == 4) src[(y * 160 + x) * ch + 3] = 255; }
+            int lossless = Encode(img, new WebpEncodeOptions { Lossless = true }).Length, last = lossless;
+            foreach (int q in new[] { 90, 70, 50, 30, 0 })
+            {
+                var data = Encode(img, new WebpEncodeOptions { Lossless = true, NearLossless = q });
+                var back = (byte[])Webp.Decode(data).Data;
+                int limit = 1 << (4 - q / 20), maxError = 0;
+                for (int i = 0; i < src.Length; i++)
+                {
+                    int e = Math.Abs(src[i] - back[i]);
+                    if (ch == 4 && (i % 4 == 3 || src[i | 3] == 0)) Assert.Equal(0, e);       // alpha and hidden colors
+                    maxError = Math.Max(maxError, e);
+                }
+                for (int y = 11; y < 39; y++) for (int x = 11; x < 59; x++) Assert.Equal(201, back[(y * 160 + x) * ch]);
+                output.WriteLine($"{color} near-lossless {q}: {data.Length} bytes (lossless {lossless}), max error {maxError}");
+                Assert.True(maxError <= limit && maxError > 0, $"max error {maxError} at {q}");
+                Assert.True(data.Length < last, $"{data.Length} >= {last} at {q}");
+                last = data.Length;
+                var oracle = OracleDecode(data, ".webp");
+                if (oracle != null) AssertEqual(Webp.Decode(data), oracle);
+            }
+            Assert.True(last < lossless * 0.6);
+            AssertEqual(img, Webp.Decode(Encode(img, new WebpEncodeOptions { Lossless = true, NearLossless = 100 })));
+        }
+    }
+
     // ------------------------------------------------------------------ animation encoder
 
     static List<WebpInputFrame> MovingBox(int w, int h, ColorModel color, int count)

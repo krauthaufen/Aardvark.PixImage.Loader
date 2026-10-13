@@ -51,31 +51,69 @@ namespace PixCodec
             {
                 if (!opt.Exact && hasAlpha)
                     for (int i = 0; i < argb.Length; i++) if (argb[i] >> 24 == 0) argb[i] = 0;
+                if (opt.NearLossless < 100) argb = NearLossless(argb, w, h, 5 - Math.Clamp(opt.NearLossless, 0, 99) / 20);
                 chunks.Add(("VP8L", Vp8lEncoder.Encode(argb, w, h, hasAlpha, opt.Method)));
             }
             else
             {
-                if (hasAlpha) chunks.Add(("ALPH", EncodeAlpha(argb, w, h, opt.Method)));
+                if (hasAlpha) chunks.Add(("ALPH", EncodeAlpha(argb, w, h, opt.Method, opt.AlphaQuality)));
                 chunks.Add(("VP8 ", Vp8Encoder.Encode(argb, w, h, opt)));
             }
             return chunks;
         }
 
-        static byte[] EncodeAlpha(uint[] argb, int w, int h, int method)
+        /// <summary>
+        /// Near-lossless preprocessing: color channels of pixels that differ from a neighbor are rounded to multiples
+        /// of 2^bits (255 stays reachable), which makes the prediction residuals much cheaper. Pixels inside flat
+        /// areas, alpha and fully transparent pixels are left alone; no channel moves by more than 2^(bits-1).
+        /// </summary>
+        internal static uint[] NearLossless(uint[] argb, int w, int h, int bits)
+        {
+            var res = (uint[])argb.Clone();
+            int half = 1 << (bits - 1);
+            uint Round(uint v) => (uint)Math.Min(255, (int)((v + half) >> bits << bits));
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    int i = y * w + x;
+                    uint v = argb[i];
+                    if (v >> 24 == 0) continue;
+                    bool flat = (x == 0 || argb[i - 1] == v) && (x == w - 1 || argb[i + 1] == v) && (y == 0 || argb[i - w] == v) && (y == h - 1 || argb[i + w] == v);
+                    if (flat) continue;
+                    res[i] = (v & 0xff000000) | Round((v >> 16) & 0xff) << 16 | Round((v >> 8) & 0xff) << 8 | Round(v & 0xff);
+                }
+            return res;
+        }
+
+        /// <summary>The alpha plane as ALPH chunk payload; below quality 100 it is reduced to fewer levels first.</summary>
+        static byte[] EncodeAlpha(uint[] argb, int w, int h, int method, int quality)
         {
             // the plane goes into the green channel of a lossless stream, which brings its own prediction
             var plane = new uint[argb.Length];
-            for (int i = 0; i < plane.Length; i++) plane[i] = 0xff000000 | (argb[i] >> 24) << 8;
+            quality = Math.Clamp(quality, 0, 100);
+            int header = 0;
+            if (quality < 100)
+            {
+                // 2 levels at quality 0, 256 at 100; fully transparent and fully opaque always survive
+                int levels = 2 + quality * quality * 254 / 10000;
+                var map = new byte[256];
+                for (int v = 0; v < 256; v++) map[v] = (byte)((v * (levels - 1) + 127) / 255 * 255 / (levels - 1));
+                for (int i = 0; i < plane.Length; i++) plane[i] = 0xff000000 | (uint)map[argb[i] >> 24] << 8;
+                header = 1 << 4;        // pre-processing: level reduction
+            }
+            else
+                for (int i = 0; i < plane.Length; i++) plane[i] = 0xff000000 | (argb[i] >> 24) << 8;
             var stream = Vp8lEncoder.EncodeHeaderless(plane, w, h, method);
             if (stream.Length < argb.Length)
             {
                 var res = new byte[stream.Length + 1];
-                res[0] = 1;     // lossless compression, no filter, no pre-processing
+                res[0] = (byte)(header | 1);    // lossless compression, no filter
                 stream.CopyTo(res, 1);
                 return res;
             }
             var raw = new byte[argb.Length + 1];
-            for (int i = 0; i < argb.Length; i++) raw[i + 1] = (byte)(argb[i] >> 24);
+            raw[0] = (byte)header;
+            for (int i = 0; i < argb.Length; i++) raw[i + 1] = (byte)(plane[i] >> 8);
             return raw;
         }
 

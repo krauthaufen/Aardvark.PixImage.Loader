@@ -31,6 +31,18 @@ namespace PixCodec
         Background = 1,
     }
 
+    /// <summary>How the lossy encoder derives the half-resolution chroma planes.</summary>
+    public enum WebpChroma
+    {
+        /// <summary>The mean of each 2x2 block (what the decoder's interpolation undoes best on average).</summary>
+        Average = 0,
+        /// <summary>The mean in linear light: saturated edges keep their brightness to the eye, at a cost in PSNR.</summary>
+        LinearLight = 1,
+        /// <summary>The mean, then luma is corrected per pixel for the chroma the decoder will interpolate there:
+        /// sharper colored edges and text. A little slower.</summary>
+        Sharp = 2,
+    }
+
     public sealed class WebpDecodeOptions
     {
         /// <summary>Content of the frames returned by the animation API. <see cref="Webp.Decode"/> ignores it.</summary>
@@ -77,6 +89,22 @@ namespace PixCodec
         /// compresses best (only alpha 0 is guaranteed to come back).
         /// </summary>
         public bool Exact { get; set; } = true;
+
+        /// <summary>
+        /// Lossy only: quality of the alpha channel, 0..100. 100 stores it lossless; below that it is reduced to fewer
+        /// levels (2 at quality 0; alpha 0 and 255 are always kept) and then stored lossless.
+        /// </summary>
+        public int AlphaQuality { get; set; } = 100;
+
+        /// <summary>
+        /// Lossless only: 100 is lossless; lower values round the color channels of pixels on edges and in texture to
+        /// multiples of 2 (80..99), 4 (60..79), 8, 16 or 32 (0..19) before encoding, so no channel is off by more than
+        /// half of that. Flat areas, alpha and fully transparent pixels stay exact.
+        /// </summary>
+        public int NearLossless { get; set; } = 100;
+
+        /// <summary>Lossy only: how chroma is subsampled. Sharp gives the best PSNR on photographs as well as on drawings.</summary>
+        public WebpChroma Chroma { get; set; } = WebpChroma.Sharp;
 
         /// <summary>Test hook: unusual but valid choices in the lossy bitstream syntax.</summary>
         internal Vp8Syntax? Vp8Syntax { get; set; }
