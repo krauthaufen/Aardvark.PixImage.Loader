@@ -11,6 +11,7 @@ import struct
 import subprocess
 import tempfile
 import numpy as np
+import imagecodecs as ic
 from PIL import Image
 from pxref import write_ref, test_pattern
 
@@ -84,6 +85,145 @@ def segments(data):
         if m == 0xDA:
             return
         i += 2 + ln
+
+
+def emit_ic(name, data, sub=None):
+    """Fixture whose reference is the imagecodecs (libjpeg-turbo 3) decode: needed beyond 8 bit and for lossless."""
+    d = OUT if sub is None else os.path.join(OUT, sub)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, name + '.jpg')
+    with open(path, 'wb') as f:
+        f.write(data)
+    write_ref(path + '.ref', ic.jpeg8_decode(data))
+
+
+def photo16(w, h, c, bits, seed=5):
+    """photo() spread over the given bit depth, with detail in the low bits."""
+    rng = np.random.default_rng(seed + bits)
+    a = photo(w, h, c, seed).astype(np.float64) / 255
+    a = np.clip(a + (rng.random(a.shape) - 0.5) * 0.02, 0, 1)
+    return np.round(a * ((1 << bits) - 1)).astype(np.uint16 if bits > 8 else np.uint8)
+
+
+def with_dnl(data):
+    """Moves the image height from the frame header into a DNL segment after the first scan."""
+    d = bytearray(data)
+    sos = None
+    for m, s, e in segments(data):
+        if m in (0xC0, 0xC1, 0xC2, 0xC9, 0xCA):
+            height = bytes(d[s + 5:s + 7])
+            d[s + 5:s + 7] = b'\0\0'
+        if m == 0xDA:
+            sos = e
+    i = sos
+    while not (d[i] == 0xFF and d[i + 1] != 0 and not 0xD0 <= d[i + 1] <= 0xD7):
+        i += 1
+    return bytes(d[:i]) + b'\xff\xdc\x00\x04' + height + bytes(d[i:])
+
+
+def round2(cmyk):
+    # ---- arithmetic coding (ImageMagick writes it; reference = Pillow)
+    ar = ['-define', 'jpeg:arithmetic-coding=on']
+    for sf in ['1x1', '2x1', '2x2']:
+        for (w, h) in [(1, 1), (7, 5), (17, 33), (65, 65), (100, 75)]:
+            emit(f'arith_{sf}_{w}x{h}', magick(photo(w, h, seed=w + 3), *ar, '-quality', '85', '-sampling-factor', sf))
+            emit(f'arith_prog_{sf}_{w}x{h}', magick(photo(w, h, seed=w + 4), *ar, '-quality', '85', '-sampling-factor', sf, '-interlace', 'JPEG'))
+    for q in [3, 30, 60, 98, 100]:
+        emit(f'arith_q{q}', magick(test_pattern(64, 48, 3, seed=q), *ar, '-quality', str(q), '-sampling-factor', '2x2'))
+        emit(f'arith_prog_q{q}', magick(test_pattern(61, 47, 3, seed=q), *ar, '-quality', str(q), '-sampling-factor', '1x1', '-interlace', 'JPEG'))
+        emit(f'arith_gray_q{q}', magick(test_pattern(40, 40, 1, seed=q)[:, :, 0], *ar, '-quality', str(q)))
+    emit('arith_noise', magick(np.random.default_rng(3).integers(0, 256, (48, 56, 3), dtype=np.uint8), *ar, '-quality', '99'))
+    emit('arith_prog_noise', magick(np.random.default_rng(3).integers(0, 256, (48, 56, 3), dtype=np.uint8), *ar, '-quality', '99', '-interlace', 'JPEG'))
+    emit('arith_flat', magick(np.full((40, 40, 3), (200, 30, 90), np.uint8), *ar))
+    emit('arith_prog_gray', magick(photo(100, 75, 1), *ar, '-quality', '50', '-interlace', 'JPEG'))
+    emit('arith_photo', magick(photo(200, 152), *ar, '-quality', '92', '-sampling-factor', '2x2'))
+    for ri in [1, 3, 20]:
+        emit(f'arith_rst{ri}', magick(photo(70, 50), *ar, '-quality', '80', '-sampling-factor', '2x2', '-define', f'jpeg:restart-interval={ri}'))
+        emit(f'arith_prog_rst{ri}', magick(photo(70, 50), *ar, '-quality', '80', '-interlace', 'JPEG', '-define', f'jpeg:restart-interval={ri}'))
+    emit('arith_cmyk', magick(photo(40, 30), *ar, '-colorspace', 'CMYK'))
+
+    # ---- 12 bit DCT (libjpeg-turbo 3 via imagecodecs writes and reads it)
+    for ss in ['444', '422', '420']:
+        for (w, h) in [(1, 1), (7, 5), (17, 33), (65, 65)]:
+            emit_ic(f'p12_{ss}_{w}x{h}', ic.jpeg8_encode(photo16(w, h, 3, 12, seed=w), bitspersample=12, level=85, subsampling=ss))
+    for q in [5, 50, 95, 100]:
+        emit_ic(f'p12_q{q}', ic.jpeg8_encode(photo16(64, 48, 3, 12), bitspersample=12, level=q, subsampling='420'))
+        emit_ic(f'p12_gray_q{q}', ic.jpeg8_encode(photo16(40, 37, 1, 12), bitspersample=12, level=q))
+    emit_ic('p12_opt', ic.jpeg8_encode(photo16(64, 48, 3, 12), bitspersample=12, level=80, optimize=True))
+    emit_ic('p12_noise', ic.jpeg8_encode(np.random.default_rng(2).integers(0, 4096, (40, 44, 3), dtype=np.uint16), bitspersample=12, level=100, subsampling='444'))
+    emit_ic('p12_extreme', ic.jpeg8_encode(np.kron(np.random.default_rng(8).integers(0, 2, (9, 9, 3), dtype=np.uint16) * 4095, np.ones((7, 7, 1), np.uint16)), bitspersample=12, level=60, subsampling='420'))
+
+    # ---- lossless: every precision and predictor, 1 to 4 components
+    for bits in range(2, 17):
+        for psv in ([1, 4, 7] if bits not in (8, 12, 16) else range(1, 8)):
+            emit_ic(f'll_p{bits}_psv{psv}_gray', ic.jpeg8_encode(photo16(33, 21, 1, bits, seed=psv), lossless=True, bitspersample=bits, predictor=psv))
+            emit_ic(f'll_p{bits}_psv{psv}_rgb', ic.jpeg8_encode(photo16(23, 31, 3, bits, seed=psv), lossless=True, bitspersample=bits, predictor=psv))
+    for (w, h) in [(1, 1), (1, 7), (9, 1), (2, 2)]:
+        emit_ic(f'll_{w}x{h}', ic.jpeg8_encode(photo16(w, h, 3, 16), lossless=True, bitspersample=16, predictor=4))
+    emit_ic('ll_noise16', ic.jpeg8_encode(np.random.default_rng(1).integers(0, 65536, (30, 41), dtype=np.uint16), lossless=True, bitspersample=16, predictor=1))
+    emit_ic('ll_extremes16', ic.jpeg8_encode(np.random.default_rng(1).choice(np.array([0, 65535, 32768, 1], np.uint16), (30, 41, 3)), lossless=True, bitspersample=16, predictor=7))
+    emit_ic('ll_flat', ic.jpeg8_encode(np.full((20, 20, 3), 77, np.uint8), lossless=True))
+    emit_ic('ll_cmyk', ic.jpeg8_encode(np.asarray(cmyk), lossless=True, colorspace='cmyk'))
+    emit_ic('ll_2comp', ic.jpeg8_encode(photo(31, 17)[:, :, :2].copy(), lossless=True))
+    emit_ic('ll_ljpeg', ic.ljpeg_encode(photo16(40, 30, 1, 16)))
+    emit_ic('ll_ljpeg_12', ic.ljpeg_encode(photo16(40, 30, 1, 12), bitspersample=12))
+    # point transform: declare the low bits dropped (the decoder scales the samples back up)
+    for pt, bits in [(1, 8), (3, 12), (4, 16)]:
+        d = bytearray(ic.jpeg8_encode(photo16(33, 21, 3, bits - pt), lossless=True, bitspersample=bits, predictor=4))
+        for m, s, e in segments(bytes(d)):
+            if m == 0xDA:
+                d[e - 1] = pt
+        emit_ic(f'll_pt{pt}_p{bits}', bytes(d))
+
+    # ---- DNL: the height arrives after the first scan
+    emit('dnl_baseline', with_dnl(pil(photo(40, 30), quality=80, subsampling=2)), ref=pil(photo(40, 30), quality=80, subsampling=2))
+    emit('dnl_progressive', with_dnl(pil(photo(40, 30), quality=80, progressive=True)), ref=pil(photo(40, 30), quality=80, progressive=True))
+    emit('dnl_gray_rst', with_dnl(pil(photo(33, 41, 1), quality=80, restart_marker_blocks=2)), ref=pil(photo(33, 41, 1), quality=80, restart_marker_blocks=2))
+
+    # ---- a real YCCK file (luma and K at full, chroma at half resolution)
+    emit('ycck_420', ic.jpeg8_encode(np.asarray(cmyk), colorspace='cmyk', outcolorspace='ycck', level=90))
+
+    # ---- decode options: references for selected fixtures in jpeg/options/<fixture>.<variant>.ref
+    opt = os.path.join(OUT, 'options')
+    os.makedirs(opt, exist_ok=True)
+    scaled = ['rgb_444_65x65', 'rgb_422_65x65', 'rgb_420_65x65', 'rgb_411_65x65', 'rgb_420_17x33', 'rgb_422_33x17', 'rgb_420_16x16', 'rgb_420_9x9',
+              'rgb_444_7x5', 'gray_65x65', 'gray_17x33', 'photo_420', 'photo_422', 'photo_444', 'prog_420_100x75', 'prog_422_65x65', 'q100_444',
+              'q10_420', 'im_1x2_65x65', 'im_4x1_65x65', 'im_2x2_2x1_2x1_65x65', 'im_2x1_1x2_1x2_50x37', 'im_4x2_65x65', 'im_2x4_33x17', 'im_3x1_50x37',
+              'im_2x2_1x2_1x2_65x65', 'im_1x1_2x1_2x1_65x65', 'cmyk_420', 'arith_2x2_65x65', 'arith_prog_2x1_100x75', 'noise_420', 'extreme', 'rst_blocks1_420']
+    for name in scaled:
+        src = os.path.join(OUT, name + '.jpg')
+        w, h = Image.open(src).size
+        for s in (2, 4, 8):
+            im = Image.open(src)
+            if w // s == 0 or h // s == 0:
+                continue
+            im.draft(None, (w // s, h // s))
+            if im.size != (-(-w // s), -(-h // s)) or getattr(im, 'decoderconfig', (1,))[0] != s:
+                continue
+            im.load()
+            write_ref(os.path.join(opt, f'{name}.s{s}.ref'), to_rgb_ref(im))
+    for name in ['rgb_420_65x65', 'rgb_422_33x17', 'rgb_444_7x5', 'prog_420_100x75', 'im_1x2_65x65', 'arith_2x2_65x65']:
+        im = Image.open(os.path.join(OUT, name + '.jpg'))
+        im.draft('YCbCr', im.size)
+        im.load()
+        assert im.mode == 'YCbCr'
+        write_ref(os.path.join(opt, name + '.ycc.ref'), np.asarray(im))
+    for name in ['cmyk', 'cmyk_420', 'ycck', 'ycck_420', 'cmyk_prog']:
+        im = Image.open(os.path.join(OUT, name + '.jpg'))
+        im.load()
+        write_ref(os.path.join(opt, name + '.cmyk.ref'), 255 - np.asarray(im))  # undo Pillow's inversion: samples as libjpeg delivers them
+
+    # ---- EXIF orientation: reference = Pillow's exif_transpose
+    from PIL import ImageOps
+    for o in range(1, 9):
+        exif = Image.Exif()
+        exif[0x0112] = o
+        for tag, arr in (('rgb', photo(23, 14)), ('gray', photo(9, 20, 1))):
+            data = pil(arr, quality=85, exif=exif.tobytes(), dpi=(300, 100))
+            path = os.path.join(opt, f'orient{o}_{tag}.jpg')
+            with open(path, 'wb') as f:
+                f.write(data)
+            write_ref(path + '.ref', np.asarray(ImageOps.exif_transpose(Image.open(io.BytesIO(data)))))
 
 
 def main():
@@ -214,19 +354,17 @@ def main():
     tiff('gray_raw', photo(50, 30, 1), True, quality=85)
     tiff('cmyk_raw', cmyk, True, quality=90)
 
+    round2(cmyk)
+
     # valid but unsupported
-    emit('arithmetic', magick(photo(40, 30), '-define', 'jpeg:arithmetic-coding=on'), 'unsupported', ref=False)
     d = bytearray(pil(photo(16, 16, 1), quality=80))
-    for m, s, e in segments(bytes(d)):
+    for m, st, e in segments(bytes(d)):
         if m == 0xC0:
-            d[s + 1] = 0xC3  # lossless frame marker
-    emit('lossless_marker', bytes(d), 'unsupported', ref=False)
-    d = bytearray(pil(photo(16, 16, 1), quality=80))
-    for m, s, e in segments(bytes(d)):
-        if m == 0xC0:
-            d[s + 1] = 0xC1
-            d[s + 4] = 12  # 12 bit extended sequential
-    emit('precision12', bytes(d), 'unsupported', ref=False)
+            d[st + 1] = 0xC5  # differential sequential frame: hierarchical mode
+    emit('hierarchical_marker', bytes(d), 'unsupported', ref=False)
+    d = bytearray(ic.jpeg8_encode(photo(16, 16, 1), lossless=True))
+    d[d.find(b'\xff\xc3') + 1] = 0xCB  # lossless with arithmetic coding
+    emit('lossless_arithmetic_marker', bytes(d), 'unsupported', ref=False)
 
     total = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(OUT) for f in fs)
     n = sum(len(fs) for _, _, fs in os.walk(OUT))

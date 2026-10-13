@@ -240,6 +240,88 @@ namespace PixCodec.JpegImpl
             p[3 * s] = (t13 + o0) >> shift; p[4 * s] = (t13 - o0) >> shift;
         }
 
+        // ---------------------------------------------------------------- inverse, any precision / reduced size
+
+        // Reduced size outputs are the exact box averages of the full 8 point inverse transform. Averaging pairs
+        // (4 outputs) or quadruples (2 outputs) of its cosines collapses to one cosine per coefficient:
+        //   4: sqrt2 cos(u pi/16) cos((2x+1) u pi/8)             (zero for u = 4)
+        //   2: sqrt2 cos(u pi/16) cos(u pi/8) cos((2x+1) u pi/4)  (zero for even u)
+        // The tables hold these in 13 bit fixed point, pre-scaled by 2 resp. 4 like the DC term below.
+        static readonly int[] s_reduce4 = ReductionTable(4), s_reduce2 = ReductionTable(2);
+
+        static int[] ReductionTable(int n)
+        {
+            var t = new int[n * 8];
+            for (int x = 0; x < n; x++)
+                for (int u = 1; u < 8; u++)
+                {
+                    double v = Math.Sqrt(2) * Math.Cos(u * Math.PI / 16);
+                    v *= n == 4 ? 2 * Math.Cos((2 * x + 1) * u * Math.PI / 8) : 4 * Math.Cos(u * Math.PI / 8) * Math.Cos((2 * x + 1) * u * Math.PI / 4);
+                    int fix = (int)(Math.Abs(v) * (1 << ConstBits) + 0.5);
+                    t[x * 8 + u] = Math.Abs(v) < 1e-9 ? 0 : v < 0 ? -fix : fix;
+                }
+            return t;
+        }
+
+        /// <summary>
+        /// Scalar inverse DCT for the cases the fast 8 bit path does not cover: 12 bit samples (one guard bit less
+        /// in the first pass) and DCT domain downscaling to size x size outputs (8, 4, 2 or 1). Writes size * size
+        /// values, row major, without level shift or clamping.
+        /// </summary>
+        [SkipLocalsInit]
+        public static void IdctGeneric(short* coef, int* quant, int size, int pass1Bits, int* output)
+        {
+            if (size == 1)
+            {
+                output[0] = (coef[0] * quant[0] + 4) >> 3;
+                return;
+            }
+            int* m = stackalloc int[64];
+            for (int i = 0; i < 64; i++) m[i] = coef[i] * quant[i];
+            if (size == 8)
+            {
+                for (int x = 0; x < 8; x++) IdctScalar1D(m + x, 8, ConstBits - pass1Bits);
+                for (int y = 0; y < 8; y++) IdctScalar1D(m + y * 8, 1, ConstBits + pass1Bits + 3);
+                for (int i = 0; i < 64; i++) output[i] = m[i];
+                return;
+            }
+            int extra = size == 4 ? 1 : 2;
+            int[] k = size == 4 ? s_reduce4 : s_reduce2;
+            // columns: 8 coefficients -> size samples
+            int shift = ConstBits - pass1Bits + extra, round = 1 << (shift - 1);
+            int* ws = stackalloc int[size * 8];
+            for (int x = 0; x < 8; x++)
+                for (int y = 0; y < size; y++)
+                {
+                    int acc = (m[x] << (ConstBits + extra)) + round;
+                    for (int u = 1; u < 8; u++) acc += k[y * 8 + u] * m[u * 8 + x];
+                    ws[y * 8 + x] = acc >> shift;
+                }
+            shift = ConstBits + pass1Bits + 3 + extra; round = 1 << (shift - 1);
+            for (int y = 0; y < size; y++)
+                for (int x = 0; x < size; x++)
+                {
+                    int acc = (ws[y * 8] << (ConstBits + extra)) + round;
+                    for (int u = 1; u < 8; u++) acc += k[x * 8 + u] * ws[y * 8 + u];
+                    output[y * size + x] = acc >> shift;
+                }
+        }
+
+        /// <summary>Scalar forward DCT + quantization for sample precisions above 8 bit (input already level shifted, natural order).</summary>
+        [SkipLocalsInit]
+        public static void FdctQuantizeGeneric(int* m, int pass1Bits, float* recip, short* zigzagOut)
+        {
+            for (int x = 0; x < 8; x++) FdctScalar1D(m + x, 8, false, pass1Bits);
+            TransposeInPlace(m);
+            for (int x = 0; x < 8; x++) FdctScalar1D(m + x, 8, true, pass1Bits);
+            byte* zz = JpegTables.ZigZagTransposed;
+            for (int i = 0; i < 64; i++)
+            {
+                float f = m[zz[i]] * recip[zz[i]];
+                zigzagOut[i] = (short)Math.Clamp((int)(f + (f < 0 ? -0.5f : 0.5f)), -32767, 32767);
+            }
+        }
+
         // ---------------------------------------------------------------- forward
 
         /// <summary>
@@ -363,22 +445,22 @@ namespace PixCodec.JpegImpl
             a1 = Vector.ShiftRightArithmetic(t7 + z1 + z4, shift);
         }
 
-        static void FdctScalar1D(int* p, int s, bool second)
+        static void FdctScalar1D(int* p, int s, bool second, int pass1 = Pass1Bits)
         {
             int a0 = p[0], a1 = p[s], a2 = p[2 * s], a3 = p[3 * s], a4 = p[4 * s], a5 = p[5 * s], a6 = p[6 * s], a7 = p[7 * s];
             int t0 = a0 + a7, t7 = a0 - a7, t1 = a1 + a6, t6 = a1 - a6, t2 = a2 + a5, t5 = a2 - a5, t3 = a3 + a4, t4 = a3 - a4;
             int t10 = t0 + t3, t13 = t0 - t3, t11 = t1 + t2, t12 = t1 - t2;
-            int shift = second ? ConstBits + Pass1Bits : ConstBits - Pass1Bits;
+            int shift = second ? ConstBits + pass1 : ConstBits - pass1;
             int round = 1 << (shift - 1);
             if (second)
             {
-                p[0] = (t10 + t11 + (1 << (Pass1Bits - 1))) >> Pass1Bits;
-                p[4 * s] = (t10 - t11 + (1 << (Pass1Bits - 1))) >> Pass1Bits;
+                p[0] = (t10 + t11 + (1 << (pass1 - 1))) >> pass1;
+                p[4 * s] = (t10 - t11 + (1 << (pass1 - 1))) >> pass1;
             }
             else
             {
-                p[0] = (t10 + t11) << Pass1Bits;
-                p[4 * s] = (t10 - t11) << Pass1Bits;
+                p[0] = (t10 + t11) << pass1;
+                p[4 * s] = (t10 - t11) << pass1;
             }
             int z1 = (t12 + t13) * F0_541196100 + round;
             p[2 * s] = (z1 + t13 * F0_765366865) >> shift;

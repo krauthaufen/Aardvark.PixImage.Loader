@@ -30,7 +30,7 @@ public class JpegTests
 
         Assert.True(Jpeg.IsMatch(data));
         var info = Jpeg.GetInfo(data);
-        Assert.Equal(new ImageInfo(ImageFormat.Jpeg, actual.Width, actual.Height, actual.Channels, SampleType.UInt8, actual.Color), info);
+        Assert.Equal(new ImageInfo(ImageFormat.Jpeg, actual.Width, actual.Height, actual.Channels, actual.SampleType, actual.Color), info);
     }
 
     /// <summary>The scalar and the generic vector code paths give the same pixels as the AVX2 one.</summary>

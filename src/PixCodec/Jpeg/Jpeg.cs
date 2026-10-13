@@ -4,9 +4,36 @@ using PixCodec.JpegImpl;
 
 namespace PixCodec
 {
-    /// <summary>Reserved for decoder settings; there are none yet.</summary>
     public sealed class JpegDecodeOptions
     {
+        /// <summary>
+        /// Decode at 1/1, 1/2, 1/4 or 1/8 of the size (value 1, 2, 4 or 8) by using smaller inverse DCTs: much faster
+        /// than decoding and shrinking, with the same result as libjpeg's scaled decoding. The output is
+        /// ceil(size / denominator). Ignored for lossless JPEG.
+        /// </summary>
+        public int ScaleDenominator { get; set; } = 1;
+
+        /// <summary>
+        /// Return 4 component (CMYK / YCCK) images as 4 channel <see cref="ColorModel.Other"/> data instead of converting
+        /// them to RGB. The samples are C, M, Y, K as stored, which for the usual Adobe files means inverted (255 = no ink);
+        /// YCCK is brought to that same form.
+        /// </summary>
+        public bool RawCmyk { get; set; }
+
+        /// <summary>
+        /// Skip the YCbCr to RGB conversion: YCbCr images come back as 3 channel <see cref="ColorModel.Other"/> data
+        /// holding Y, Cb, Cr at full resolution (and YCCK, together with <see cref="RawCmyk"/>, as Y, Cb, Cr, K).
+        /// </summary>
+        public bool KeepYCbCr { get; set; }
+
+        /// <summary>Rotate / mirror the pixels according to the EXIF orientation; the reported orientation then is 1.</summary>
+        public bool ApplyOrientation { get; set; }
+
+        /// <summary>
+        /// By default <see cref="Jpeg.Decode"/> and <see cref="Jpeg.GetInfo(ReadOnlySpan{byte})"/> skip junk in front of the
+        /// first SOI marker (some cameras and container formats prepend data). Set to require the data to start with it.
+        /// </summary>
+        public bool RequireSoiAtStart { get; set; }
     }
 
     /// <summary>Chroma resolution of an encoded color JPEG.</summary>
@@ -56,32 +83,109 @@ namespace PixCodec
         public static bool IsMatch(ReadOnlySpan<byte> header)
             => header.Length >= 3 && header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF;
 
-        /// <summary>Reads header level information without decoding pixel data.</summary>
-        public static ImageInfo GetInfo(ReadOnlySpan<byte> data)
+        static readonly JpegDecodeOptions s_defaults = new JpegDecodeOptions();
+
+        /// <summary>Offset of the SOI marker that starts the image.</summary>
+        static int FindStart(ReadOnlySpan<byte> data, JpegDecodeOptions o)
         {
+            if (IsMatch(data)) return 0;
+            int i = o.RequireSoiAtStart ? -1 : data.IndexOf((ReadOnlySpan<byte>)[0xFF, 0xD8, 0xFF]);
+            if (i < 0) throw new ImageFormatException("invalid JPEG: missing SOI marker");
+            return i;
+        }
+
+        static JpegDecoder Open(byte* p, ReadOnlySpan<byte> data, JpegDecodeOptions o, bool headerOnly)
+        {
+            if (o.ScaleDenominator is not (1 or 2 or 4 or 8)) throw new ArgumentException("ScaleDenominator must be 1, 2, 4 or 8");
+            int start = FindStart(data, o);
+            var d = new JpegDecoder(p + start, data.Length - start) { ScaleDenominator = o.ScaleDenominator };
+            d.Parse(headerOnly);
+            return d;
+        }
+
+        /// <summary>What the decoder returns for this frame under the given options.</summary>
+        static (JpegColorSpace Conversion, ColorModel Model, int Channels) Plan(JpegDecoder d, JpegDecodeOptions o)
+        {
+            int nc = d.Comps.Length;
+            if (nc == 1) return (JpegColorSpace.Gray, ColorModel.Gray, 1);
+            // lossless frames are never color transformed (there is no agreed convention, and it would not be lossless)
+            var cs = d.Lossless ? JpegColorSpace.Raw : d.ColorSpace;
+            switch (nc)
+            {
+                case 3:
+                    if (cs == JpegColorSpace.YCbCr && !o.KeepYCbCr) return (cs, ColorModel.Rgb, 3);
+                    return (JpegColorSpace.Raw, cs == JpegColorSpace.YCbCr ? ColorModel.Other : ColorModel.Rgb, 3);
+                case 4:
+                    if (cs == JpegColorSpace.Raw || (o.RawCmyk && (cs == JpegColorSpace.Cmyk || o.KeepYCbCr))) return (JpegColorSpace.Raw, ColorModel.Other, 4);
+                    if (o.RawCmyk) return (JpegColorSpace.YcckToCmyk, ColorModel.Other, 4);
+                    return (cs, ColorModel.Rgb, 3);
+                default:
+                    return (JpegColorSpace.Raw, ColorModel.Other, nc);
+            }
+        }
+
+        /// <summary>Reads header level information without decoding pixel data (what <see cref="Decode"/> with default options returns).</summary>
+        public static ImageInfo GetInfo(ReadOnlySpan<byte> data) => GetInfo(data, null);
+
+        /// <summary>Reads header level information for a decode with the given options (scaled size, channel layout, orientation).</summary>
+        public static ImageInfo GetInfo(ReadOnlySpan<byte> data, JpegDecodeOptions? options)
+        {
+            options ??= s_defaults;
             fixed (byte* p = data)
             {
-                var d = new JpegDecoder(p, data.Length);
-                d.Parse(headerOnly: true);
-                bool gray = d.Comps.Length == 1;
-                return new ImageInfo(ImageFormat.Jpeg, d.Width, d.Height, gray ? 1 : 3, SampleType.UInt8, gray ? ColorModel.Gray : ColorModel.Rgb);
+                var d = Open(p, data, options, headerOnly: true);
+                var (_, model, channels) = Plan(d, options);
+                bool swap = options.ApplyOrientation && d.Metadata.Orientation >= 5;
+                return new ImageInfo(ImageFormat.Jpeg, swap ? d.OutHeight : d.OutWidth, swap ? d.OutWidth : d.OutHeight, channels,
+                    d.Precision > 8 ? SampleType.UInt16 : SampleType.UInt8, model);
             }
         }
 
         /// <summary>
-        /// Decodes a complete JPEG file held in memory to 8 bit Gray or Rgb. Files that end early decode as far as the
-        /// data goes (the remainder is gray); EXIF orientation is reported in the metadata, not applied.
+        /// Decodes a complete JPEG file held in memory. 8 bit frames give UInt8 samples, deeper ones (12 bit DCT, lossless
+        /// up to 16 bit) UInt16 holding the values as coded, e.g. 0..4095 for 12 bit - they are not scaled to the full
+        /// 16 bit range. Files that end early decode as far as the data goes (the remainder is gray). The EXIF orientation
+        /// is reported in the metadata and only applied on request.
         /// </summary>
         public static RawImage Decode(ReadOnlySpan<byte> data, JpegDecodeOptions? options = null)
         {
+            options ??= s_defaults;
             fixed (byte* p = data)
             {
-                var d = new JpegDecoder(p, data.Length);
-                d.Parse(headerOnly: false);
-                bool gray = d.Comps.Length == 1;
-                var pixels = GC.AllocateUninitializedArray<byte>(checked(d.Width * d.Height * (gray ? 1 : 3)));
-                JpegPost.Assemble(d, pixels);
-                return new RawImage(d.Width, d.Height, gray ? ColorModel.Gray : ColorModel.Rgb, pixels, 0, d.HasMetadata ? d.Metadata : null);
+                var d = Open(p, data, options, headerOnly: false);
+                var (cs, model, channels) = Plan(d, options);
+                int w = d.OutWidth, h = d.OutHeight;
+                int count = checked(w * h * channels);
+                Array pixels;
+                if (!d.Wide)
+                {
+                    var bytes = GC.AllocateUninitializedArray<byte>(count);
+                    JpegPost.Assemble(d, bytes, w, h, cs);
+                    pixels = bytes;
+                }
+                else
+                {
+                    var words = GC.AllocateUninitializedArray<ushort>(count);
+                    JpegPost16.Assemble(d, words, w, h, cs);
+                    if (d.Precision > 8) pixels = words;
+                    else
+                    {
+                        // lossless with up to 8 bit
+                        var bytes = GC.AllocateUninitializedArray<byte>(count);
+                        for (int i = 0; i < count; i++) bytes[i] = (byte)words[i];
+                        pixels = bytes;
+                    }
+                }
+                var meta = d.HasMetadata ? d.Metadata : null;
+                if (options.ApplyOrientation && meta != null && meta.Orientation > 1)
+                {
+                    pixels = pixels is byte[] b8
+                        ? JpegMeta.Reorient(b8, ref w, ref h, channels, meta.Orientation)
+                        : JpegMeta.Reorient((ushort[])pixels, ref w, ref h, channels, meta.Orientation);
+                    if (meta.Orientation >= 5) (meta.DpiX, meta.DpiY) = (meta.DpiY, meta.DpiX);
+                    meta.Orientation = 1;
+                }
+                return new RawImage(w, h, model, pixels, channels, meta);
             }
         }
 
@@ -112,6 +216,7 @@ namespace PixCodec
                 if (d.Width < width || d.Height < height)
                     throw new ImageFormatException($"JPEG data in TIFF is {d.Width}x{d.Height}, smaller than the {width}x{height} strip or tile");
                 var cs = components == 3 && convertYCbCrToRgb ? JpegColorSpace.YCbCr : components == 1 ? JpegColorSpace.Gray : JpegColorSpace.Raw;
+                if (d.Wide) throw new ImageFormatException("JPEG data in TIFF is not an 8 bit DCT stream");
                 JpegPost.Assemble(d, destination, width, height, cs);
             }
         }
