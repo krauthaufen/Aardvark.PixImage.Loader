@@ -151,10 +151,12 @@ namespace PixCodec
             }
             if (_oldJpeg)
             {
-                // the strips of an old-style JPEG file are pieces of ONE frame: treat the image as a single chunk
-                if (Tiled || Planar != 1) throw new ImageNotSupportedException("TIFF: tiled or planar old-style JPEG is not supported");
-                _storedStrips = (int)(((long)Height + ChunkH - 1) / ChunkH);
-                ChunkH = Height;
+                // the strips of an old-style JPEG file are pieces of ONE frame (per plane): treat them as a single chunk
+                if (!Tiled)
+                {
+                    _storedStrips = (int)(((long)Height + ChunkH - 1) / ChunkH);
+                    ChunkH = Height;
+                }
             }
             Across = (int)(((long)Width + ChunkW - 1) / ChunkW);
             Down = (int)(((long)Height + ChunkH - 1) / ChunkH);
@@ -404,7 +406,7 @@ namespace PixCodec
         void LoadChunks()
         {
             var e = Entries;
-            int total = _oldJpeg ? _storedStrips : ChunksPerPlane * (Planar == 2 ? Spp : 1);
+            int total = (_oldJpeg && !Tiled ? _storedStrips : ChunksPerPlane) * (Planar == 2 ? Spp : 1);
             var offs = File.Integers(e, Tiled ? 324 : 273) ?? (Tiled ? File.Integers(e, 273) : null);
             if (offs == null) throw new ImageFormatException("TIFF: missing strip/tile offsets");
             if (offs.Length < total) throw new ImageFormatException("TIFF: too few strip/tile offsets");
@@ -470,7 +472,7 @@ namespace PixCodec
                 _jpegTables = File.Bytes(e, 347) ?? Array.Empty<byte>();
                 _jpegPrepared = TiffJpegBridge.Prepare(_jpegTables);
             }
-            if (_oldJpeg) _ojpeg = new TiffOldJpeg(this, offs, cnts!);
+            if (_oldJpeg) _ojpeg = new TiffOldJpeg(this, offs, cnts!, _storedStrips);
             if (IsCcitt) _t4Options = File.Integer(e, Compression == 3 ? 292 : 293, 0);
             if (Photometric == 6 && (Kind == TiffChunkKind.YccPacked || YccPlanar)) BuildYccTables();
         }
@@ -687,7 +689,7 @@ namespace PixCodec
                     byte* b = (byte*)NativeMemory.Alloc((nuint)size);
                     try
                     {
-                        ReadOnlySpan<byte> src = _oldJpeg ? _ojpeg!.BuildStream()
+                        ReadOnlySpan<byte> src = _oldJpeg ? _ojpeg!.BuildStream(plane, Tiled ? index : -1, cw, crows)
                             : count > int.MaxValue ? throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression")
                             : File.Src.Get(offset, (int)count, ref srcRent);
                         bool ycc = Photometric == 6 && !YccPlanar;

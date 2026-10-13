@@ -1565,14 +1565,16 @@ def parse_jpeg(b):
                 k = sum(seg[i + 1:i + 17])
                 (dc if seg[i] >> 4 == 0 else ac)[seg[i] & 15] = seg[i + 1:i + 17 + k]
                 i += 17 + k
-        elif m == 0xC0:
+        elif m in (0xC0, 0xC3):
             h, w, k = struct.unpack('>HHB', seg[1:6])
             sof = (h, w, [(seg[6 + 3 * c], seg[7 + 3 * c], seg[8 + 3 * c]) for c in range(k)])
         elif m == 0xDD:
             dri = struct.unpack('>H', seg)[0]
         elif m == 0xDA:
             sos = {seg[1 + 2 * c]: seg[2 + 2 * c] for c in range(seg[0])}
-            return dict(q=q, dc=dc, ac=ac, sof=sof, sos=sos, dri=dri, scan_start=p + 2 + n, scan_end=b.rindex(b'\xff\xd9'))
+            k = 1 + 2 * seg[0]
+            return dict(q=q, dc=dc, ac=ac, sof=sof, sos=sos, dri=dri, scan_start=p + 2 + n, scan_end=b.rindex(b'\xff\xd9'),
+                        ss=seg[k], al=seg[k + 2] & 15)
         p += 2 + n
 
 
@@ -1663,6 +1665,116 @@ def gen_ojpeg():
                          ('ojpeg_tables_gray_restart_strips', jpg(gray, restart_marker_rows=1), True)]:
         page, exp = tables_page(j, per)
         finish(name, page, j, exp)
+
+    def libtiff_note(path, exp):
+        try:
+            lib = np.asarray(Image.open(path).convert('RGB' if exp.ndim == 3 and exp.shape[2] == 3 else 'L'))
+            dist = int(np.abs(lib.astype(int) - exp.reshape(lib.shape).astype(int)).max())
+            return f'libtiff (Pillow) reads the file: max {dist} away' if dist <= 40 else \
+                f'libtiff (Pillow) opens the file but does not decode this layout correctly (max {dist} away)'
+        except Exception as ex:
+            return f'libtiff (Pillow) does not read this layout ({str(ex)[:40]})'
+
+    def raw_file(name, page, exp, who, tol=0):
+        dd = os.path.join(OUT, 'ojpeg')
+        path = os.path.join(dd, name + '.tif')
+        write_tiff(path, [page])
+        write_ref(path + '.ref', exp)
+        if tol:
+            write_tol(path, tol)
+        SUMMARY.append(('ojpeg/' + name, [who + '; ' + libtiff_note(path, exp)]))
+
+    # 4. tiles: every tile is a frame of its own, sharing the tables in the tags
+    for name, sub, tw in [('ojpeg_tables_tiled_444', 0, 32), ('ojpeg_tables_tiled_420', 2, 48)]:
+        th = 32
+        h, w = rgb.shape[:2]
+        parts, infos = [], []
+        exp = np.zeros_like(rgb)
+        for y in range(0, h, th):
+            for x in range(0, w, tw):
+                blk = rgb[y:y + th, x:x + tw]
+                blk = np.pad(blk, ((0, th - blk.shape[0]), (0, tw - blk.shape[1]), (0, 0)), mode='edge')
+                j = jpg(np.ascontiguousarray(blk), subsampling=sub)
+                info = parse_jpeg(j)
+                infos.append(info)
+                parts.append(j[info['scan_start']:info['scan_end']])
+                dec = np.asarray(Image.open(io.BytesIO(j)))
+                exp[y:y + th, x:x + tw] = dec[:h - y, :w - x]
+        assert all(i['q'] == infos[0]['q'] and i['dc'] == infos[0]['dc'] and i['ac'] == infos[0]['ac'] for i in infos)
+        info = infos[0]
+        comps = info['sof'][2]
+        blobs, pos, offs = [], 8, {519: [], 520: [], 521: []}
+        for tag, pick in ((519, lambda c: info['q'][c[2]]), (520, lambda c: info['dc'][info['sos'][c[0]] >> 4]),
+                          (521, lambda c: info['ac'][info['sos'][c[0]] & 15])):
+            for c in comps:
+                offs[tag].append(pos)
+                blobs.append(pick(c))
+                pos += len(blobs[-1])
+        hv = comps[0][1]
+        page = dict(arr=np.zeros((h, w, 3), np.uint8), photometric=6, compression=6, tile=(tw, th), prefix=b''.join(blobs), raw_chunks=parts,
+                    tags=[(512, 3, [1]), (530, 3, [hv >> 4, hv & 15])] + [(t, 4, o) for t, o in offs.items()])
+        raw_file(name, page, exp, 'libjpeg-turbo on the per-tile streams')
+
+    # 5. PlanarConfiguration 2: one single-component frame per plane (Y, Cb, Cr), each with the tables of its index.
+    #    Reference: Pillow decodes the three plane streams and converts YCbCr to RGB (PixCodec uses the TIFF
+    #    coefficient maths in floats, hence the tolerance).
+    ycc = np.asarray(Image.fromarray(rgb).convert('YCbCr'))
+    for name, per in [('ojpeg_planar_444', False), ('ojpeg_planar_444_restart_strips', True)]:
+        h, w = rgb.shape[:2]
+        streams = [jpg(np.ascontiguousarray(ycc[:, :, c]), **(dict(restart_marker_rows=1) if per else {})) for c in range(3)]
+        infos = [parse_jpeg(j) for j in streams]
+        dec = np.stack([np.asarray(Image.open(io.BytesIO(j))) for j in streams], axis=-1)
+        exp = np.asarray(Image.fromarray(dec, 'YCbCr').convert('RGB'))
+        blobs, pos, offs = [], 8, {519: [], 520: [], 521: []}
+        for tag, key in ((519, 'q'), (520, 'dc'), (521, 'ac')):
+            for i in infos:
+                offs[tag].append(pos)
+                blobs.append(i[key][0])
+                pos += len(blobs[-1])
+        parts = []
+        for j, i in zip(streams, infos):
+            scan = j[i['scan_start']:i['scan_end']]
+            if per:
+                start = k = 0
+                while k < len(scan) - 1:
+                    if scan[k] == 0xFF and 0xD0 <= scan[k + 1] <= 0xD7:
+                        parts.append(scan[start:k])
+                        start = k = k + 2
+                    else:
+                        k += 1
+                parts.append(scan[start:])
+            else:
+                parts.append(scan)
+        tags = [(512, 3, [1]), (530, 3, [1, 1])] + [(t, 4, o) for t, o in offs.items()]
+        if per:
+            tags.append((515, 3, [infos[0]['dri']]))
+        page = dict(arr=np.zeros((h, w, 3), np.uint8), photometric=6, compression=6, planar=2, rps=8 if per else h, prefix=b''.join(blobs),
+                    raw_chunks=parts, tags=tags)
+        raw_file(name, page, exp, 'libjpeg-turbo on the per-plane streams + Pillow YCbCr to RGB', tol=2)
+
+    # 6. lossless (JPEGProc 14): predictor and point transform in tags, DC tables only
+    g16 = test_pattern(70, 52, 1, np.uint16, 39)[:, :, 0]
+    for name, a, bits, pm in [('ojpeg_lossless_gray8', gray, 8, 1), ('ojpeg_lossless_gray16', g16, 16, 1), ('ojpeg_lossless_gray12', g16 >> 4, 12, 1),
+                              ('ojpeg_lossless_rgb8', rgb, 8, 2)]:
+        c3 = a.ndim == 3
+        j = imagecodecs.jpeg8_encode(np.ascontiguousarray(a), lossless=True, bitspersample=bits, colorspace='rgb' if c3 else None,
+                                     outcolorspace='rgb' if c3 else None)
+        info = parse_jpeg(j)
+        h, w, comps = info['sof']
+        exp = imagecodecs.jpeg8_decode(j)
+        assert np.array_equal(exp, a)
+        blobs, pos, dcs = [], 8, []
+        for c in comps:
+            dcs.append(pos)
+            blobs.append(info['dc'][info['sos'][c[0]] >> 4])
+            pos += len(blobs[-1])
+        arr = a if c3 else a[:, :, None]
+        page = dict(arr=np.zeros_like(arr), photometric=pm, compression=6, rps=h, prefix=b''.join(blobs),
+                    raw_chunks=[j[info['scan_start']:info['scan_end']]],
+                    tags=[(512, 3, [14]), (517, 3, [info['ss']] * len(comps)), (518, 3, [info['al']] * len(comps)), (520, 4, dcs)])
+        if bits not in (8, 16):
+            page['bits'] = [bits] * len(comps)
+        raw_file(name, page, exp if c3 else exp[:, :, None], 'imagecodecs (libjpeg-turbo) on the embedded lossless stream')
 
     # 3. JPEGInterchangeFormat holds only the header with the tables; the strip is the scan data stored elsewhere
     j = jpg(rgb, subsampling=2)
