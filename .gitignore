@@ -1,0 +1,6 @@
+bin/
+obj/
+*.user
+.vs/
+tests/fixtures/_tmp/
+__pycache__/

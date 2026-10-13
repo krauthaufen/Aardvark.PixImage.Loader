@@ -1,0 +1,187 @@
+using System;
+using System.Runtime.InteropServices;
+
+namespace PixCodec
+{
+    /// <summary>Element type of a single channel sample. The numeric values are part of the test reference format.</summary>
+    public enum SampleType : byte
+    {
+        UInt8 = 0,
+        UInt16 = 1,
+        UInt32 = 2,
+        Int8 = 3,
+        Int16 = 4,
+        Int32 = 5,
+        /// <summary>IEEE half float, stored as <see cref="Half"/>[].</summary>
+        Float16 = 6,
+        Float32 = 7,
+        Float64 = 8,
+    }
+
+    /// <summary>Meaning of the interleaved channels. Channel order is always as named (R, G, B, A).</summary>
+    public enum ColorModel : byte
+    {
+        Gray = 0,
+        GrayAlpha = 1,
+        Rgb = 2,
+        Rgba = 3,
+        /// <summary>Arbitrary samples per pixel without a color interpretation (e.g. multispectral TIFF).</summary>
+        Other = 4,
+    }
+
+    public enum ImageFormat : byte
+    {
+        Unknown = 0,
+        Png,
+        Jpeg,
+        Tiff,
+        Gif,
+        Exr,
+    }
+
+    /// <summary>Optional, format independent metadata. Decoders fill in what they find, encoders write what they can.</summary>
+    public sealed class ImageMetadata
+    {
+        /// <summary>Raw ICC profile, if embedded.</summary>
+        public byte[]? IccProfile;
+        /// <summary>Raw EXIF blob (starting at the TIFF header), if embedded.</summary>
+        public byte[]? Exif;
+        /// <summary>Horizontal / vertical resolution in pixels per inch, 0 if unknown.</summary>
+        public double DpiX, DpiY;
+        /// <summary>File gamma (PNG gAMA), 0 if unknown.</summary>
+        public double Gamma;
+        /// <summary>EXIF orientation 1..8, 0 if unknown. Decoders do NOT apply it.</summary>
+        public int Orientation;
+    }
+
+    /// <summary>Cheap header level information about an encoded image.</summary>
+    public readonly record struct ImageInfo(
+        ImageFormat Format, int Width, int Height, int Channels, SampleType SampleType, ColorModel Color, int FrameCount = 1);
+
+    /// <summary>
+    /// A decoded image: tightly packed, row-major (top row first), channel-interleaved samples in a typed array.
+    /// <see cref="Data"/> has exactly Width * Height * Channels elements and its element type matches <see cref="SampleType"/>
+    /// (byte[], ushort[], uint[], sbyte[], short[], int[], Half[], float[], double[]).
+    /// Alpha is never premultiplied.
+    /// </summary>
+    public sealed class RawImage
+    {
+        public int Width { get; }
+        public int Height { get; }
+        public int Channels { get; }
+        public SampleType SampleType { get; }
+        public ColorModel Color { get; }
+        public Array Data { get; }
+        public ImageMetadata? Metadata { get; set; }
+
+        public RawImage(int width, int height, ColorModel color, Array data, int channels = 0, ImageMetadata? metadata = null)
+        {
+            if (width <= 0 || height <= 0) throw new ArgumentException("image dimensions must be positive");
+            if (channels == 0) channels = ChannelCount(color);
+            if (color != ColorModel.Other && channels != ChannelCount(color))
+                throw new ArgumentException($"{color} requires {ChannelCount(color)} channels, got {channels}");
+            if (channels <= 0) throw new ArgumentException("channel count must be positive");
+            if (data.LongLength != (long)width * height * channels)
+                throw new ArgumentException($"data length {data.LongLength} does not match {width}x{height}x{channels}");
+            Width = width; Height = height; Channels = channels; Color = color; Data = data;
+            SampleType = SampleTypeOf(data.GetType().GetElementType()!);
+            Metadata = metadata;
+        }
+
+        /// <summary>Allocates a zeroed image.</summary>
+        public static RawImage Create(int width, int height, ColorModel color, SampleType type, int channels = 0)
+        {
+            if (channels == 0) channels = ChannelCount(color);
+            return new RawImage(width, height, color, CreateArray(type, checked(width * height * channels)), channels);
+        }
+
+        public bool HasAlpha => Color == ColorModel.GrayAlpha || Color == ColorModel.Rgba;
+
+        /// <summary>The typed sample array. Throws if T does not match <see cref="SampleType"/>.</summary>
+        public T[] GetData<T>() where T : unmanaged
+            => Data as T[] ?? throw new InvalidOperationException($"image holds {SampleType} samples, not {typeof(T).Name}");
+
+        /// <summary>The samples reinterpreted as raw bytes in machine byte order.</summary>
+        public Span<byte> GetBytes() => Data switch
+        {
+            byte[] a => a,
+            sbyte[] a => MemoryMarshal.AsBytes<sbyte>(a),
+            ushort[] a => MemoryMarshal.AsBytes<ushort>(a),
+            short[] a => MemoryMarshal.AsBytes<short>(a),
+            uint[] a => MemoryMarshal.AsBytes<uint>(a),
+            int[] a => MemoryMarshal.AsBytes<int>(a),
+            Half[] a => MemoryMarshal.AsBytes<Half>(a),
+            float[] a => MemoryMarshal.AsBytes<float>(a),
+            double[] a => MemoryMarshal.AsBytes<double>(a),
+            _ => throw new InvalidOperationException(),
+        };
+
+        public static int ChannelCount(ColorModel color) => color switch
+        {
+            ColorModel.Gray => 1,
+            ColorModel.GrayAlpha => 2,
+            ColorModel.Rgb => 3,
+            ColorModel.Rgba => 4,
+            _ => 0,
+        };
+
+        public static ColorModel DefaultColorModel(int channels) => channels switch
+        {
+            1 => ColorModel.Gray,
+            2 => ColorModel.GrayAlpha,
+            3 => ColorModel.Rgb,
+            4 => ColorModel.Rgba,
+            _ => ColorModel.Other,
+        };
+
+        public static int BytesPerSample(SampleType type) => type switch
+        {
+            SampleType.UInt8 or SampleType.Int8 => 1,
+            SampleType.UInt16 or SampleType.Int16 or SampleType.Float16 => 2,
+            SampleType.UInt32 or SampleType.Int32 or SampleType.Float32 => 4,
+            SampleType.Float64 => 8,
+            _ => throw new ArgumentOutOfRangeException(nameof(type)),
+        };
+
+        public static Array CreateArray(SampleType type, int length) => type switch
+        {
+            SampleType.UInt8 => new byte[length],
+            SampleType.Int8 => new sbyte[length],
+            SampleType.UInt16 => new ushort[length],
+            SampleType.Int16 => new short[length],
+            SampleType.UInt32 => new uint[length],
+            SampleType.Int32 => new int[length],
+            SampleType.Float16 => new Half[length],
+            SampleType.Float32 => new float[length],
+            SampleType.Float64 => new double[length],
+            _ => throw new ArgumentOutOfRangeException(nameof(type)),
+        };
+
+        public static SampleType SampleTypeOf(Type t)
+        {
+            if (t == typeof(byte)) return SampleType.UInt8;
+            if (t == typeof(sbyte)) return SampleType.Int8;
+            if (t == typeof(ushort)) return SampleType.UInt16;
+            if (t == typeof(short)) return SampleType.Int16;
+            if (t == typeof(uint)) return SampleType.UInt32;
+            if (t == typeof(int)) return SampleType.Int32;
+            if (t == typeof(Half)) return SampleType.Float16;
+            if (t == typeof(float)) return SampleType.Float32;
+            if (t == typeof(double)) return SampleType.Float64;
+            throw new ArgumentException($"unsupported sample element type {t}");
+        }
+    }
+
+    /// <summary>The encoded data is malformed or truncated.</summary>
+    public class ImageFormatException : Exception
+    {
+        public ImageFormatException(string message) : base(message) { }
+        public ImageFormatException(string message, Exception inner) : base(message, inner) { }
+    }
+
+    /// <summary>The encoded data is valid but uses a feature this library does not implement.</summary>
+    public class ImageNotSupportedException : NotSupportedException
+    {
+        public ImageNotSupportedException(string message) : base(message) { }
+    }
+}

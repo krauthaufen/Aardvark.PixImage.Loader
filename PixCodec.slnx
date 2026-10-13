@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PixCodec/PixCodec.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PixCodec.Tests/PixCodec.Tests.csproj" />
+  </Folder>
+</Solution>
