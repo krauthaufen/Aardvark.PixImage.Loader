@@ -26,17 +26,9 @@ namespace PixCodec
                 if (!float.IsFinite(f)) r = 0;
                 else if (exp) r = f >= limit ? 65504f : MathF.Exp(f / 8f);
                 else r = f < 0 ? 0 : 8f * MathF.Log(f);
-                t[i] = RoundToHalf(r);
+                t[i] = ExrHalf.FromFloatIeee(r);
             }
             return t;
-        }
-
-        // like ExrHalf.FromFloat, but overflow gives infinity (IEEE behaviour, as the reference tables have it)
-        static ushort RoundToHalf(float f)
-        {
-            if (float.IsNegativeInfinity(f)) return 0xfc00;
-            if (MathF.Abs(f) >= 65520f) return (ushort)(f < 0 ? 0xfc00 : 0x7c00);
-            return ExrHalf.FromFloat(f);
         }
 
         static ImageFormatException Corrupt() => new("EXR B44 data is truncated");

@@ -67,7 +67,7 @@ namespace PixCodec
                     throw new ImageNotSupportedException($"channel '{c.Name}': cannot store {(kind == 0 ? "uint" : "floating point")} samples as {type}");
                 if (c.Data.LongLength < c.Offset + ((long)width * height - 1) * c.Stride + 1)
                     throw new ArgumentException($"channel '{c.Name}' has too few samples for {width}x{height}");
-                e._chans[i] = new ExrChan { Type = (int)type, XS = 1, YS = 1, PLinear = c.PLinear, Bytes = type == ExrPixelType.Half ? 2 : 4 };
+                e._chans[i] = new ExrChan { Name = c.Name, Type = (int)type, XS = 1, YS = 1, PLinear = c.PLinear, Bytes = type == ExrPixelType.Half ? 2 : 4 };
                 e._sources[i] = new Source { Kind = kind, Offset = c.Offset, Stride = c.Stride };
                 lineBytes += (long)width * e._chans[i].Bytes;
             }

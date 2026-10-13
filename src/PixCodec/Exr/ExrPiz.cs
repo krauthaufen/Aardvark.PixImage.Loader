@@ -100,7 +100,7 @@ namespace PixCodec
             }
         }
 
-        static void HufDecode(ReadOnlySpan<byte> src, Span<ushort> dst, Tables t, ExrScratch s)
+        internal static void HufDecode(ReadOnlySpan<byte> src, Span<ushort> dst, Tables t, ExrScratch s)
         {
             if (dst.Length == 0) return;
             if (src.Length < 20) throw Corrupt("truncated huffman header");

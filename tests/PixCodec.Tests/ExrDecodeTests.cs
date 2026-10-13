@@ -300,6 +300,21 @@ public class ExrDecodeTests
     }
 
     [Fact]
+    public void DeepDataIsNotSupported()
+    {
+        // the "non-image" version flag marks deep data; the headers stay readable
+        var data = File.ReadAllBytes(TestUtil.Fixture("exr/rgb_half_zip.exr"));
+        data[5] |= 0x08;
+        var h = Exr.ReadHeaders(data)[0];
+        Assert.True(h.IsDeep);
+        Assert.Equal(ExrPartType.DeepScanLine, h.Type);
+        Assert.Equal(35, Exr.GetInfo(data).Width);
+        Assert.Throws<ImageNotSupportedException>(() => Exr.Decode(data));
+        data[5] |= 0x40;    // an unknown flag
+        Assert.Throws<ImageNotSupportedException>(() => Exr.ReadHeaders(data));
+    }
+
+    [Fact]
     public void LyingHeadersAreRejected()
     {
         var data = File.ReadAllBytes(TestUtil.Fixture("exr/rgb_half_zip.exr"));
@@ -323,6 +338,7 @@ public class ExrDecodeTests
     [Theory]
     [MemberData(nameof(Fixtures))]
     [MemberData(nameof(Unsupported))]
+    [MemberData(nameof(ExrDwaTests.Fixtures), MemberType = typeof(ExrDwaTests))]
     public void CorruptInputFailsCleanly(string file)
     {
         var data = File.ReadAllBytes(TestUtil.Fixture(file));

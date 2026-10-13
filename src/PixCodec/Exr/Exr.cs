@@ -90,8 +90,10 @@ namespace PixCodec
     /// OpenEXR codec.
     /// <para>
     /// Decoding supports version 2 scan line and tiled files (level 0 of mip/rip maps), multi-part files, HALF / FLOAT /
-    /// UINT channels and the compressions None, RLE, ZIPS, ZIP, PIZ, PXR24, B44 and B44A. Deep data and DWAA / DWAB
-    /// throw <see cref="ImageNotSupportedException"/>. The decoded image always covers the data window.
+    /// UINT channels and all compressions: None, RLE, ZIPS, ZIP, PIZ, PXR24, B44, B44A, DWAA and DWAB. Deep data
+    /// throws <see cref="ImageNotSupportedException"/>. The decoded image always covers the data window.
+    /// All schemes decode bit exactly like the reference library except DWAA / DWAB, whose float DCT makes a small
+    /// fraction of the samples differ by a rounding step (as it does between builds of the reference library).
     /// </para>
     /// </summary>
     public static class Exr

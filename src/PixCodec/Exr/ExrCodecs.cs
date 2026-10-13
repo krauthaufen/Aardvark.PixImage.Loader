@@ -101,6 +101,8 @@ namespace PixCodec
                 case ExrCompression.Piz: ExrPiz.Decode(src, dst, chunk, s); break;
                 case ExrCompression.B44:
                 case ExrCompression.B44A: ExrB44.Decode(src, dst, chunk, s); break;
+                case ExrCompression.Dwaa:
+                case ExrCompression.Dwab: ExrDwa.Decode(src, dst, chunk, s); break;
                 default: throw new ImageNotSupportedException($"EXR compression {comp} is not supported");
             }
         }
@@ -152,7 +154,7 @@ namespace PixCodec
         // ---- byte delta predictor + even/odd byte split shared by RLE and ZIP ----
 
         /// <summary>Undoes the delta predictor in place, then interleaves the two halves of t into dst.</summary>
-        static void Reconstruct(Span<byte> t, Span<byte> dst)
+        internal static void Reconstruct(Span<byte> t, Span<byte> dst)
         {
             int n = t.Length;
             if (n == 0) return;
@@ -220,7 +222,7 @@ namespace PixCodec
 
         // ---- RLE: signed count byte; negative = -count literal bytes, otherwise count + 1 copies of the next byte ----
 
-        static void RleDecode(ReadOnlySpan<byte> src, Span<byte> dst)
+        internal static void RleDecode(ReadOnlySpan<byte> src, Span<byte> dst)
         {
             int p = 0, o = 0;
             while (p < src.Length)

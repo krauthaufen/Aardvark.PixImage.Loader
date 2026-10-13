@@ -32,10 +32,8 @@ namespace PixCodec
         {
             var part = file.Parts[partIndex];
             if (part.IsDeep) throw new ImageNotSupportedException("EXR deep data is not supported");
-            if (part.Compression > ExrCompression.B44A)
-                throw new ImageNotSupportedException(part.Compression <= ExrCompression.Dwab
-                    ? $"EXR {part.Compression.ToString().ToUpperInvariant()} compression is not supported"
-                    : $"EXR compression {(int)part.Compression} is not supported");
+            if (part.Compression > ExrCompression.Dwab)
+                throw new ImageNotSupportedException($"EXR compression {(int)part.Compression} is not supported");
             var chans = part.Chans;
             if (part.IsTiled)
                 foreach (var c in chans)

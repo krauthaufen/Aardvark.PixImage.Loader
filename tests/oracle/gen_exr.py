@@ -8,7 +8,8 @@ files are read back with OpenCV, because the python bindings only write level 0 
 Sidecars:  name.exr.ref        what Exr.Decode returns with default options (float16 when all channels are HALF)
            name.exr.all.ref    all channels in file order via Exr.DecodeChannels (optional)
            name.exr.partN.ref  default decode of part N of a multi-part file
-Files in unsupported/ have no sidecar; they must throw ImageNotSupportedException.
+Files in unsupported/ (luminance/chroma) must throw ImageNotSupportedException from Exr.Decode; their .all.ref is for
+Exr.DecodeChannels. Files in dwa/ are compared with a tolerance.
 """
 import os
 import struct
@@ -131,6 +132,7 @@ def mixed(w, h, seed=2):
 
 def main():
     os.makedirs(os.path.join(OUT, 'unsupported'), exist_ok=True)
+    os.makedirs(os.path.join(OUT, 'dwa'), exist_ok=True)
     for f in os.listdir(OUT):
         if f.endswith('.exr') or f.endswith('.ref'):
             os.remove(os.path.join(OUT, f))
@@ -260,9 +262,26 @@ def main():
         finish('magick_' + cn, RGBA, expect=[cn])
     os.remove(src)
 
-    # --- unsupported
-    for cn, c in (('dwaa', X.DWAA_COMPRESSION), ('dwab', X.DWAB_COMPRESSION)):
-        X.File({'compression': c}, rgb(20, 20)).write(os.path.join(OUT, 'unsupported', cn + '.exr'))
+    # --- DWAA / DWAB (lossy DCT; decoders agree only up to float rounding, see ExrDwaTests) in dwa/
+    def dwa(name, header, chans, default):
+        path = os.path.join(OUT, 'dwa', name + '.exr')
+        X.File(header, chans).write(path)
+        d = read_parts(path)[0]
+        write_ref(path + '.ref', stack(d, default))
+        if len(d) > 4:
+            write_ref(path + '.all.ref', stack(d, sorted(d.keys(), key=lambda s: s.encode())))
+    for f in os.listdir(os.path.join(OUT, 'dwa')):
+        os.remove(os.path.join(OUT, 'dwa', f))
+    dwa('dwaa_rgba', {'compression': X.DWAA_COMPRESSION}, rgb(67, 45, np.float16, True), RGBA)
+    dwa('dwab_rgba', {'compression': X.DWAB_COMPRESSION}, rgb(53, 270, np.float16, True, 3), RGBA)
+    dwa('dwaa_mixed', {'compression': X.DWAA_COMPRESSION}, mixed(70, 41), RGBA)
+    dwa('dwaa_float_rgb', {'compression': X.DWAA_COMPRESSION}, rgb(64, 40, np.float32), RGB)
+    dwa('dwaa_y', {'compression': X.DWAA_COMPRESSION}, {'Y': test_pattern(90, 33, 1, np.float16, 5)[..., 0].copy()}, ['Y'])
+    dwa('dwaa_tiled', {'compression': X.DWAA_COMPRESSION, 'type': X.tiledimage, 'tiles': tiles(48, 40)}, rgb(100, 60, np.float16, True, 4), RGBA)
+    dwa('dwab_tiny_raw', {'compression': X.DWAB_COMPRESSION}, rgb(5, 3), RGB)      # too small to compress: stored raw
+    wide = test_pattern(80, 64, 3, np.float32, 6) * np.array([1, 30, 400], np.float32)
+    dwa('dwaa_bright', {'compression': X.DWAA_COMPRESSION},
+        {'R': wide[..., 0].astype(np.float16), 'G': wide[..., 1].astype(np.float16), 'B': wide[..., 2].astype(np.float16)}, RGB)
 
     total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(OUT) for f in fs)
     print('fixtures: %d files, %.1f kB' % (sum(len(fs) for _, _, fs in os.walk(OUT)), total / 1024))

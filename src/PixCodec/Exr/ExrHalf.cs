@@ -98,6 +98,13 @@ namespace PixCodec
             return FromFloatSlow(x, sign);
         }
 
+        /// <summary>float -> half with IEEE overflow to infinity (what the reference lookup tables were built with).</summary>
+        public static ushort FromFloatIeee(float f)
+        {
+            if (MathF.Abs(f) >= 65520f) return (ushort)(f < 0 ? 0xfc00 : 0x7c00);
+            return FromFloat(f);
+        }
+
         static ushort FromFloatSlow(uint x, uint sign)
         {
             if (x >= 0x47800000u)

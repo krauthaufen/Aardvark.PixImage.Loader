@@ -222,7 +222,7 @@ namespace PixCodec
             for (int i = 0; i < Chans.Length; i++)
             {
                 var c = Channels[i];
-                Chans[i] = new ExrChan { Type = (int)c.PixelType, XS = c.XSampling, YS = c.YSampling, PLinear = c.PLinear, Bytes = c.PixelType == ExrPixelType.Half ? 2 : 4 };
+                Chans[i] = new ExrChan { Name = c.Name, Type = (int)c.PixelType, XS = c.XSampling, YS = c.YSampling, PLinear = c.PLinear, Bytes = c.PixelType == ExrPixelType.Half ? 2 : 4 };
             }
 
             var comp = Find("compression", 1) ?? throw new ImageFormatException("EXR header has no compression attribute");
@@ -350,6 +350,7 @@ namespace PixCodec
 
     internal struct ExrChan
     {
+        public string Name;
         public int Type;      // ExrPixelType
         public int XS, YS;
         public bool PLinear;
