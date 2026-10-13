@@ -22,16 +22,16 @@ namespace PixCodec
             FirstFrame,
         }
 
-        // Plausibility bound for sizes read from headers: an LZW code is at least 3 bits wide and expands to at most
-        // 4095 pixels, so a file cannot paint more than this many pixels per byte. Any image that fills its canvas
-        // passes by a wide margin; small canvases are always allowed.
+        // An LZW code is at least 3 bits wide and expands to at most 4095 pixels, so a file cannot paint more than
+        // this many pixels per byte.
         const long MaxPixelsPerByte = 10923;
-        const long AlwaysAllowedPixels = 1L << 20;
 
         public int Width, Height, FrameCount;
         public readonly Mode FrameMode;
 
-        readonly long _maxPixels;
+        readonly long _maxPixels, _maxUnbackedPixels;
+        readonly bool _clampDelays;
+        byte[]? _icc;
         readonly bool _is89a;
         readonly int _backgroundIndex, _aspect;
         readonly uint[]? _globalPalette;
@@ -53,11 +53,15 @@ namespace PixCodec
         int[]? _rowMap;
 
         static readonly uint OpaqueBlack = Pack(0, 0, 0);
+        static readonly GifDecodeOptions DefaultOptions = new GifDecodeOptions();
 
         public GifDecoderState(ReadOnlySpan<byte> data, GifDecodeOptions? options)
         {
             FrameMode = options?.FrameMode == GifFrameMode.Indexed ? Mode.Indexed : Mode.Composited;
-            _maxPixels = Math.Clamp(options?.MaxPixels ?? (1L << 28), 1, int.MaxValue / 4);
+            var o = options ?? DefaultOptions;
+            _maxPixels = Math.Clamp(o.MaxPixels, 1, int.MaxValue / 4);
+            _maxUnbackedPixels = Math.Max(0, o.MaxUnbackedPixels);
+            _clampDelays = o.ClampDelays;
             if (!Gif.IsMatch(data)) throw new ImageFormatException("not a GIF file");
             if (data.Length < 13) throw new ImageFormatException("truncated GIF header");
             _is89a = data[4] == '9';
@@ -78,10 +82,8 @@ namespace PixCodec
             }
         }
 
-        static uint Pack(byte r, byte g, byte b)
-            => BitConverter.IsLittleEndian
-                ? r | (uint)g << 8 | (uint)b << 16 | 0xFF000000u
-                : (uint)r << 24 | (uint)g << 16 | (uint)b << 8 | 0xFFu;
+        // R, G, B, A bytes in memory order (little-endian hosts only, like the rest of the library).
+        static uint Pack(byte r, byte g, byte b) => r | (uint)g << 8 | (uint)b << 16 | 0xFF000000u;
 
         static void LoadPalette(ReadOnlySpan<byte> rgb, uint[] palette)
         {
@@ -101,6 +103,7 @@ namespace PixCodec
             if (_globalRgb != null && _backgroundIndex * 3 + 2 < _globalRgb.Length)
                 info.BackgroundColor = (_globalRgb[_backgroundIndex * 3], _globalRgb[_backgroundIndex * 3 + 1], _globalRgb[_backgroundIndex * 3 + 2]);
             info.PixelAspectRatio = _aspect;
+            info.IccProfile = _icc;
             info.IsGif89a = _is89a;
             if (_comments != null) info.Comments = _comments;
         }
@@ -181,6 +184,13 @@ namespace PixCodec
                             p += n + 1;
                         }
                     }
+                    else if (first == 11 && block.SequenceEqual("ICCRGBG1012"u8))
+                    {
+                        // ICC profile, the convention ImageMagick introduced and browsers read
+                        var ms = new System.IO.MemoryStream();
+                        for (int p = start + 1 + first; data[p] != 0; p += data[p] + 1) ms.Write(data.Slice(p + 1, data[p]));
+                        if (ms.Length > 0) _icc = ms.ToArray();
+                    }
                     break;
                 case 0xFE:
                     {
@@ -218,12 +228,12 @@ namespace PixCodec
             int minCodeSize = data[_pos++];
             if (fw == 0 || fh == 0) throw new ImageFormatException("GIF frame with zero size");
             if (minCodeSize < 1 || minCodeSize > 11) throw new ImageFormatException("invalid GIF LZW code size");
-            // Some writers leave the logical screen empty; the first frame then defines it.
-            if (Width == 0 || Height == 0)
+            // Like Chromium: a first frame that reaches beyond the logical screen (or a screen left at 0 x 0) enlarges
+            // the screen to hold it; later frames are clipped.
+            if (FrameCount == 0)
             {
-                if (FrameCount != 0) throw new ImageFormatException("GIF logical screen has zero size");
-                Width = Math.Min(fx + fw, 65535);
-                Height = Math.Min(fy + fh, 65535);
+                Width = Math.Max(Width, fx + fw);
+                Height = Math.Max(Height, fy + fh);
             }
 
             var frame = new GifFrame
@@ -231,6 +241,8 @@ namespace PixCodec
                 Index = FrameCount,
                 X = fx, Y = fy, Width = fw, Height = fh,
                 DelayCs = _gceDelay,
+                // What browsers play: 0 and 1/100 s are too fast to be meant and become 1/10 s.
+                DelayMs = _clampDelays && _gceDelay <= 1 ? 100 : _gceDelay * 10,
                 // Like browsers: method 4 is an old alias of "restore previous", 5..7 mean nothing.
                 Disposal = _gceDisposal == 4 ? GifDisposal.RestorePrevious : _gceDisposal > 4 ? GifDisposal.Unspecified : (GifDisposal)_gceDisposal,
                 Interlaced = (packed & 0x40) != 0,
@@ -246,16 +258,6 @@ namespace PixCodec
             {
                 frame.Truncated = !complete;
                 return frame;
-            }
-
-            long cap = Math.Max(AlwaysAllowedPixels, data.Length * MaxPixelsPerByte);
-            long framePixels = (long)fw * fh, screenPixels = (long)Width * Height;
-            if (framePixels > cap) throw new ImageFormatException("GIF frame size is implausible for the amount of data");
-            if (framePixels > _maxPixels) throw new ImageNotSupportedException("GIF frame exceeds the configured pixel limit");
-            if (mode != Mode.Indexed)
-            {
-                if (screenPixels > cap) throw new ImageFormatException("GIF screen size is implausible for the amount of data");
-                if (screenPixels > _maxPixels) throw new ImageNotSupportedException("GIF screen exceeds the configured pixel limit");
             }
 
             // Reassemble the sub-blocks into one contiguous code stream.
@@ -275,28 +277,58 @@ namespace PixCodec
                     p += n;
                 }
 
+                // Sizes come from headers that may lie. Arrays the caller gets (canvas, indexed frame) follow
+                // CheckSize; the scratch buffer for the indices is never larger than what the data can fill.
+                long framePixels = (long)fw * fh;
+                CheckSize(framePixels, codeLen, "frame");
+                if (mode != Mode.Indexed) CheckSize((long)Width * Height, data.Length, "logical screen");
                 int total = (int)framePixels;
+                int room = (int)Math.Min(total, (long)codeLen * 8 / (minCodeSize + 1) * 4096 + 1);
+
                 byte[] indices;
                 if (mode == Mode.Indexed && !frame.Interlaced) indices = new byte[total];
-                else indices = rented = pool.Rent(total);
-                int decoded = GifLzw.Decode(codes.AsSpan(0, codeLen), minCodeSize, indices.AsSpan(0, total));
+                else indices = rented = pool.Rent(room);
+                int decoded = GifLzw.Decode(codes.AsSpan(0, codeLen), minCodeSize, indices.AsSpan(0, room));
                 frame.Truncated = decoded < total;
+
+                // An opaque, interlaced first frame that stops early is shown the way browsers show one that is still
+                // loading: every finished row also fills the rows below it that later passes would have delivered.
+                // (Later or transparent frames just keep what they got - Chromium does the same.)
+                int[]? rowMap = frame.Interlaced ? RowMap(fh) : null;
+                int[]? rowValid = null;
+                byte[]? spread = null;
+                if (frame.Interlaced && decoded < total && frame.Index == 0 && frame.TransparentIndex < 0)
+                {
+                    spread = SpreadInterlaced(indices, decoded, fw, fh, out rowValid);
+                    rowMap = null;
+                }
 
                 if (mode == Mode.Indexed)
                 {
                     byte fill = (byte)Math.Max(0, frame.TransparentIndex);
-                    indices.AsSpan(decoded, total - decoded).Fill(fill);
-                    if (frame.Interlaced)
+                    if (spread != null)
                     {
-                        var map = RowMap(fh);
+                        for (int y = 0; y < fh; y++) spread.AsSpan(y * fw + rowValid![y], fw - rowValid[y]).Fill(fill);
+                        indices = spread;
+                    }
+                    else if (frame.Interlaced)
+                    {
                         var dst = new byte[total];
-                        for (int y = 0; y < fh; y++) indices.AsSpan(map[y] * fw, fw).CopyTo(dst.AsSpan(y * fw));
+                        if (decoded < total) dst.AsSpan().Fill(fill);
+                        for (int y = 0; y < fh; y++)
+                        {
+                            long at = (long)rowMap![y] * fw;
+                            int have = (int)Math.Clamp(decoded - at, 0, fw);
+                            if (have > 0) indices.AsSpan((int)at, have).CopyTo(dst.AsSpan(y * fw));
+                        }
                         indices = dst;
                     }
+                    else indices.AsSpan(decoded, total - decoded).Fill(fill);
                     frame.Indices = indices;
-                    frame.Palette = !localRgb.IsEmpty ? localRgb.ToArray() : _globalRgb != null ? (byte[])_globalRgb.Clone() : GrayRamp();
+                    frame.Palette = !localRgb.IsEmpty ? localRgb.ToArray() : _globalRgb != null ? (byte[])_globalRgb.Clone() : new byte[768];
                     return frame;
                 }
+                if (spread != null) indices = spread;
 
                 uint[] palette;
                 if (!localRgb.IsEmpty)
@@ -307,17 +339,16 @@ namespace PixCodec
                 else if (_globalPalette != null) palette = _globalPalette;
                 else
                 {
-                    // No color table at all: the spec leaves it to the decoder, use a gray ramp.
+                    // No color table at all: the spec leaves it to the decoder; Chromium shows black.
                     palette = _localPalette ??= new uint[256];
-                    LoadPalette(GrayRamp(), palette);
+                    LoadPalette(default, palette);
                 }
 
-                int[]? rowMap = frame.Interlaced ? RowMap(fh) : null;
                 if (mode == Mode.FirstFrame && !FirstFrameHasAlpha(frame))
                 {
                     var rgb = new byte[checked(Width * Height * 3)];
-                    DrawRgb(indices, decoded, frame, palette, rowMap, rgb);
-                    frame.Image = new RawImage(Width, Height, ColorModel.Rgb, rgb);
+                    DrawRgb(indices, decoded, frame, palette, rowMap, rowValid, rgb);
+                    frame.Image = new RawImage(Width, Height, ColorModel.Rgb, rgb, 0, Metadata());
                     return frame;
                 }
 
@@ -336,10 +367,10 @@ namespace PixCodec
                 }
                 _prevDisposal = (int)frame.Disposal; _prevX = fx; _prevY = fy; _prevW = cw; _prevH = ch;
 
-                Draw(indices, decoded, frame, palette, rowMap, canvas, cw, ch);
+                Draw(indices, decoded, frame, palette, rowMap, rowValid, canvas, cw, ch);
 
                 byte[] pixels = mode == Mode.FirstFrame ? _canvas : (byte[])_canvas.Clone();
-                frame.Image = new RawImage(Width, Height, ColorModel.Rgba, pixels);
+                frame.Image = new RawImage(Width, Height, ColorModel.Rgba, pixels, 0, Metadata());
                 return frame;
             }
             finally
@@ -349,11 +380,46 @@ namespace PixCodec
             }
         }
 
-        static byte[] GrayRamp()
+        ImageMetadata? Metadata() => _icc == null ? null : new ImageMetadata { IccProfile = _icc };
+
+        /// <summary>
+        /// MaxPixels is a hard limit. Below it, anything up to MaxUnbackedPixels is taken at its word; beyond that the
+        /// data has to be long enough to paint that many pixels.
+        /// </summary>
+        void CheckSize(long pixels, long backingBytes, string what)
         {
-            var p = new byte[768];
-            for (int i = 0; i < 256; i++) p[i * 3] = p[i * 3 + 1] = p[i * 3 + 2] = (byte)i;
-            return p;
+            if (pixels > _maxPixels) throw new ImageNotSupportedException($"GIF {what} exceeds the configured pixel limit");
+            if (pixels > _maxUnbackedPixels && pixels > backingBytes * MaxPixelsPerByte)
+                throw new ImageFormatException($"GIF {what} size is implausible for the amount of data");
+        }
+
+        /// <summary>
+        /// De-interlaces an incomplete frame: rows of pass 1/2/3 are repeated over the 8/4/2 rows they stand for until a
+        /// later pass overwrites them. rowValid[y] is the number of pixels row y ended up with.
+        /// </summary>
+        static byte[] SpreadInterlaced(byte[] fileOrder, int decoded, int fw, int fh, out int[] rowValid)
+        {
+            var dst = new byte[fw * fh];
+            rowValid = new int[fh];
+            int n = 0;
+            for (int pass = 0; pass < 4; pass++)
+            {
+                int first = pass == 0 ? 0 : 8 >> pass, step = pass == 0 ? 8 : 16 >> pass, repeat = 8 >> pass;
+                for (int y = first; y < fh; y += step, n++)
+                {
+                    int have = (int)Math.Min(fw, decoded - (long)n * fw);
+                    if (have <= 0) return dst;
+                    var row = fileOrder.AsSpan(n * fw, have);
+                    // an unfinished row only lands in its own place
+                    int rows = have == fw ? Math.Min(repeat, fh - y) : 1;
+                    for (int k = 0; k < rows; k++)
+                    {
+                        row.CopyTo(dst.AsSpan((y + k) * fw));
+                        rowValid[y + k] = Math.Max(rowValid[y + k], have);
+                    }
+                }
+            }
+            return dst;
         }
 
         void DisposePrevious(Span<uint> canvas)
@@ -383,7 +449,7 @@ namespace PixCodec
             return map;
         }
 
-        void Draw(byte[] indices, int decoded, GifFrame f, uint[] palette, int[]? rowMap, Span<uint> canvas, int cw, int ch)
+        void Draw(byte[] indices, int decoded, GifFrame f, uint[] palette, int[]? rowMap, int[]? rowValid, Span<uint> canvas, int cw, int ch)
         {
             int fw = f.Width, trans = f.TransparentIndex;
             fixed (byte* src0 = indices)
@@ -393,8 +459,9 @@ namespace PixCodec
                 for (int y = 0; y < ch; y++)
                 {
                     long start = (long)(rowMap != null ? rowMap[y] : y) * fw;
-                    int n = (int)Math.Min(cw, decoded - start);     // pixels of this row that were actually decoded
-                    if (n <= 0) { if (rowMap == null) break; continue; }
+                    // pixels of this row that were actually decoded
+                    int n = rowValid != null ? Math.Min(cw, rowValid[y]) : (int)Math.Min(cw, decoded - start);
+                    if (n <= 0) continue;
                     byte* s = src0 + start;
                     uint* d = dst0 + (long)(f.Y + y) * Width + f.X;
                     if (trans < 0)
@@ -414,10 +481,9 @@ namespace PixCodec
         }
 
         /// <summary>Opaque frame covering the whole screen, written as packed RGB; undecoded pixels stay black.</summary>
-        void DrawRgb(byte[] indices, int decoded, GifFrame f, uint[] palette, int[]? rowMap, byte[] rgb)
+        void DrawRgb(byte[] indices, int decoded, GifFrame f, uint[] palette, int[]? rowMap, int[]? rowValid, byte[] rgb)
         {
             int fw = f.Width, w = Width;
-            bool le = BitConverter.IsLittleEndian;
             fixed (byte* src0 = indices)
             fixed (uint* pal = palette)
             fixed (byte* dst0 = rgb)
@@ -425,17 +491,14 @@ namespace PixCodec
                 for (int y = 0; y < Height; y++)
                 {
                     long start = (long)(rowMap != null ? rowMap[y] : y) * fw;
-                    int n = (int)Math.Min(w, decoded - start);
-                    if (n <= 0) { if (rowMap == null) break; continue; }
+                    int n = rowValid != null ? Math.Min(w, rowValid[y]) : (int)Math.Min(w, decoded - start);
+                    if (n <= 0) continue;
                     byte* s = src0 + start;
                     byte* d = dst0 + (long)y * w * 3;
                     int x = 0;
-                    if (le)
-                    {
-                        // 4 byte stores spill into the next pixel, so the last one of a row is written bytewise
-                        // (the following row may already be there when interlaced, or never come when truncated).
-                        for (; x < n - 1; x++, d += 3) *(uint*)d = pal[s[x]];
-                    }
+                    // 4 byte stores spill into the next pixel, so the last one of a row is written bytewise
+                    // (the following row may already be there when interlaced, or never come when truncated).
+                    for (; x < n - 1; x++, d += 3) *(uint*)d = pal[s[x]];
                     for (; x < n; x++, d += 3)
                     {
                         byte* c = (byte*)(pal + s[x]);

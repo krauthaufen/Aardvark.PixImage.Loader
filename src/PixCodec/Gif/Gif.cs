@@ -46,12 +46,25 @@ namespace PixCodec
         public GifFrameMode FrameMode { get; set; } = GifFrameMode.Composited;
 
         /// <summary>
-        /// Upper bound for the logical screen and for a single frame, in pixels; larger files are rejected with
-        /// <see cref="ImageNotSupportedException"/>. Independent of this, a canvas or frame of more than one megapixel
-        /// is rejected as malformed when the file is too short to ever fill it (fewer bytes than pixels / 10923, the
-        /// best LZW can do) - that also hits the rare valid file with tiny frames on a huge, mostly empty canvas.
+        /// Hard upper bound for the logical screen and for a single frame, in pixels; anything larger is rejected with
+        /// <see cref="ImageNotSupportedException"/>.
         /// </summary>
         public long MaxPixels { get; set; } = 1L << 28;
+
+        /// <summary>
+        /// Sizes in GIF headers are not tied to the amount of data: a few bytes can announce a 65535 x 65535 screen. A
+        /// screen or frame of up to this many pixels is accepted as announced; a larger one only if the data is long
+        /// enough to paint it (at least pixels / 10923 bytes, the best LZW can do), otherwise the file is rejected as
+        /// malformed. Images that fill their canvas always pass; raise this for a legitimately huge, mostly empty
+        /// canvas, lower it (together with <see cref="MaxPixels"/>) for untrusted input. The default allows 64 megapixels.
+        /// </summary>
+        public long MaxUnbackedPixels { get; set; } = 1L << 26;
+
+        /// <summary>
+        /// Report frame delays the way browsers play them: 0 and 10 ms become 100 ms in <see cref="GifFrame.DelayMs"/>.
+        /// <see cref="GifFrame.DelayCs"/> always holds the stored value. Off by default.
+        /// </summary>
+        public bool ClampDelays { get; set; }
     }
 
     public sealed class GifEncodeOptions
@@ -110,6 +123,10 @@ namespace PixCodec
         public byte[]? GlobalPalette { get; internal set; }
         /// <summary>Raw pixel aspect ratio byte of the header (0 = not given).</summary>
         public int PixelAspectRatio { get; internal set; }
+        /// <summary>Pixel width / height: (byte + 15) / 64 as the specification defines it, 1 when not given.</summary>
+        public double PixelAspect => PixelAspectRatio == 0 ? 1.0 : (PixelAspectRatio + 15) / 64.0;
+        /// <summary>ICC profile from an ICCRGBG1012 application extension, or null. Also set as the decoded images' metadata.</summary>
+        public byte[]? IccProfile { get; internal set; }
         public bool IsGif89a { get; internal set; }
         public IReadOnlyList<string> Comments { get; internal set; } = Array.Empty<string>();
     }
@@ -122,14 +139,15 @@ namespace PixCodec
     public sealed class GifFrame
     {
         public int Index { get; internal set; }
-        /// <summary>Frame rectangle on the logical screen exactly as stored (it may reach beyond the screen).</summary>
+        /// <summary>Frame rectangle on the logical screen exactly as stored (a later frame may reach beyond the screen).</summary>
         public int X { get; internal set; }
         public int Y { get; internal set; }
         public int Width { get; internal set; }
         public int Height { get; internal set; }
-        /// <summary>Raw delay in 1/100 s. No browser-style clamping of tiny values is applied.</summary>
+        /// <summary>Delay in 1/100 s exactly as stored.</summary>
         public int DelayCs { get; internal set; }
-        public int DelayMs => DelayCs * 10;
+        /// <summary>Delay in milliseconds; with <see cref="GifDecodeOptions.ClampDelays"/> what a browser would wait.</summary>
+        public int DelayMs { get; internal set; }
         public GifDisposal Disposal { get; internal set; }
         public bool Interlaced { get; internal set; }
         /// <summary>Transparent palette index, -1 if the frame has none.</summary>
@@ -150,10 +168,18 @@ namespace PixCodec
     /// <summary>
     /// GIF codec (GIF87a / GIF89a).
     /// <para>
-    /// Decoding rules: the canvas starts transparent; pixels outside every frame stay transparent. A frame reaching
-    /// beyond the logical screen is clipped to it. Palette indices beyond the color table decode as opaque black.
-    /// Pixel data that ends early (truncated file, missing end code) leaves the rest of the frame untouched; anything
-    /// structurally wrong before the first frame, and invalid LZW codes, throw <see cref="ImageFormatException"/>.
+    /// Decoding follows what Chromium displays (the test references are Chromium's frames): the canvas starts
+    /// transparent and pixels outside every frame stay transparent, whatever the background color says. Disposal 2
+    /// clears to transparent; disposal 3 on the first frame restores the empty canvas; 4 means 3, 5..7 mean nothing.
+    /// A first frame that reaches beyond the logical screen enlarges the screen, later frames are clipped to it.
+    /// Palette indices beyond the color table, and files without any color table, decode as opaque black.
+    /// </para>
+    /// <para>
+    /// Pixel data that ends early (truncated file, missing end code) leaves the rest of the frame untouched, except
+    /// that an opaque interlaced first frame fills the gaps between the rows it has from the rows above, as browsers
+    /// do while an image loads. Anything structurally wrong before the first frame, and invalid LZW codes, throw
+    /// <see cref="ImageFormatException"/>. One deliberate difference: a frame whose data properly ends before all
+    /// pixels are there is kept as far as it goes, where Chromium drops it.
     /// </para>
     /// </summary>
     public static class Gif
@@ -187,6 +213,20 @@ namespace PixCodec
         {
             var st = new GifDecoderState(data, options);
             var first = st.Next(data, GifDecoderState.Mode.FirstFrame) ?? throw new ImageFormatException("GIF contains no image");
+            return first.Image!;
+        }
+
+        /// <summary>
+        /// Like <see cref="Decode(ReadOnlySpan{byte}, GifDecodeOptions?)"/>, and also returns what else the file says:
+        /// comments, loop count, pixel aspect ratio, frame count, palette, ICC profile.
+        /// </summary>
+        public static RawImage Decode(ReadOnlySpan<byte> data, out GifAnimationInfo info, GifDecodeOptions? options = null)
+        {
+            var st = new GifDecoderState(data, options);
+            var first = st.Next(data, GifDecoderState.Mode.FirstFrame) ?? throw new ImageFormatException("GIF contains no image");
+            while (st.Next(data, GifDecoderState.Mode.Skip) != null) { }
+            info = new GifAnimationInfo();
+            st.FillInfo(info);
             return first.Image!;
         }
 

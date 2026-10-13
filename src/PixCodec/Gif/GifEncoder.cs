@@ -18,6 +18,7 @@ namespace PixCodec
         readonly MemoryStream _head = new MemoryStream();
         int _w, _h;
         GifPalette? _global;
+        byte[]? _icc;
 
         public GifEncoder(Stream output, GifEncodeOptions options, bool animation)
         {
@@ -36,7 +37,7 @@ namespace PixCodec
                 throw new ImageNotSupportedException("GIF needs a Gray, GrayAlpha, Rgb or Rgba image");
             if (image.Width > 65535 || image.Height > 65535)
                 throw new ImageNotSupportedException("GIF images are limited to 65535 x 65535");
-            if (first) { _w = image.Width; _h = image.Height; }
+            if (first) { _w = image.Width; _h = image.Height; _icc = image.Metadata?.IccProfile; }
             else if (image.Width != _w || image.Height != _h)
                 throw new ArgumentException("all frames of a GIF animation must have the same size");
         }
@@ -173,6 +174,18 @@ namespace PixCodec
                 s.Write(stackalloc byte[] { 0x21, 0xFF, 11 });
                 s.Write("NETSCAPE2.0"u8);
                 s.Write(stackalloc byte[] { 3, 1, (byte)loops, (byte)(loops >> 8), 0 });
+            }
+            if (_icc is { Length: > 0 })
+            {
+                s.Write(stackalloc byte[] { 0x21, 0xFF, 11 });
+                s.Write("ICCRGBG1012"u8);
+                for (int i = 0; i < _icc.Length; i += 255)
+                {
+                    int n = Math.Min(255, _icc.Length - i);
+                    s.WriteByte((byte)n);
+                    s.Write(_icc, i, n);
+                }
+                s.WriteByte(0);
             }
             if (!string.IsNullOrEmpty(_o.Comment))
             {
