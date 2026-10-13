@@ -108,6 +108,19 @@ public class LoaderTests
     }
 
     [Fact]
+    public void ExrLuminanceChroma()
+    {
+        var img = new PixImage<float>(Col.Format.RGB, new V2i(32, 16));
+        img.Volume.SetByCoord((x, y, c) => 0.5f + 0.4f * MathF.Sin(x / 9f + c) * MathF.Cos(y / 7f));
+        var back = RoundTrip<float>(img, new PixExrSaveParams(PixExrCompression.Zip, luminanceChroma: true));
+        Assert.Equal(Col.Format.RGB, back.Format);
+        var a = img.Volume.Data; var b = back.Volume.Data;
+        double se = 0;
+        for (int i = 0; i < a.Length; i++) se += (a[i] - b[i]) * (double)(a[i] - b[i]);
+        Assert.True(Math.Sqrt(se / a.Length) < 0.05); // lossy: chroma is subsampled 2x2
+    }
+
+    [Fact]
     public void ExrFromByteIsNormalized()
     {
         var img = Make(Col.Format.RGB, 8, 8, i => (byte)(i * 5));

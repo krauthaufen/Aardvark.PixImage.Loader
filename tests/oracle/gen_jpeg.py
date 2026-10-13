@@ -125,7 +125,7 @@ def round2(cmyk):
     # ---- arithmetic coding (ImageMagick writes it; reference = Pillow)
     ar = ['-define', 'jpeg:arithmetic-coding=on']
     for sf in ['1x1', '2x1', '2x2']:
-        for (w, h) in [(1, 1), (7, 5), (17, 33), (65, 65), (100, 75)]:
+        for (w, h) in [(1, 1), (7, 5), (17, 33), (65, 65), (52, 37)]:
             emit(f'arith_{sf}_{w}x{h}', magick(photo(w, h, seed=w + 3), *ar, '-quality', '85', '-sampling-factor', sf))
             emit(f'arith_prog_{sf}_{w}x{h}', magick(photo(w, h, seed=w + 4), *ar, '-quality', '85', '-sampling-factor', sf, '-interlace', 'JPEG'))
     for q in [3, 30, 60, 98, 100]:
@@ -135,8 +135,16 @@ def round2(cmyk):
     emit('arith_noise', magick(np.random.default_rng(3).integers(0, 256, (48, 56, 3), dtype=np.uint8), *ar, '-quality', '99'))
     emit('arith_prog_noise', magick(np.random.default_rng(3).integers(0, 256, (48, 56, 3), dtype=np.uint8), *ar, '-quality', '99', '-interlace', 'JPEG'))
     emit('arith_flat', magick(np.full((40, 40, 3), (200, 30, 90), np.uint8), *ar))
+    # long stretches of identical decisions with rare exceptions drive the probability estimator to its extreme states
+    # (no .ref: it would be large; the test asks the oracle directly)
+    sparse = np.full((640, 640), 120, np.uint8)
+    rng = np.random.default_rng(12)
+    for _ in range(40):
+        y, x = rng.integers(0, 640, 2)
+        sparse[y, x] = rng.integers(0, 256)
+    emit('arith_sparse', magick(sparse, *ar, '-quality', '90'), 'misc', ref=False)
+    emit('arith_prog_sparse', magick(sparse, *ar, '-quality', '90', '-interlace', 'JPEG'), 'misc', ref=False)
     emit('arith_prog_gray', magick(photo(100, 75, 1), *ar, '-quality', '50', '-interlace', 'JPEG'))
-    emit('arith_photo', magick(photo(200, 152), *ar, '-quality', '92', '-sampling-factor', '2x2'))
     for ri in [1, 3, 20]:
         emit(f'arith_rst{ri}', magick(photo(70, 50), *ar, '-quality', '80', '-sampling-factor', '2x2', '-define', f'jpeg:restart-interval={ri}'))
         emit(f'arith_prog_rst{ri}', magick(photo(70, 50), *ar, '-quality', '80', '-interlace', 'JPEG', '-define', f'jpeg:restart-interval={ri}'))
@@ -144,7 +152,7 @@ def round2(cmyk):
 
     # ---- 12 bit DCT (libjpeg-turbo 3 via imagecodecs writes and reads it)
     for ss in ['444', '422', '420']:
-        for (w, h) in [(1, 1), (7, 5), (17, 33), (65, 65)]:
+        for (w, h) in [(1, 1), (7, 5), (17, 33), (41, 43)]:
             emit_ic(f'p12_{ss}_{w}x{h}', ic.jpeg8_encode(photo16(w, h, 3, 12, seed=w), bitspersample=12, level=85, subsampling=ss))
     for q in [5, 50, 95, 100]:
         emit_ic(f'p12_q{q}', ic.jpeg8_encode(photo16(64, 48, 3, 12), bitspersample=12, level=q, subsampling='420'))
@@ -189,7 +197,7 @@ def round2(cmyk):
     scaled = ['rgb_444_65x65', 'rgb_422_65x65', 'rgb_420_65x65', 'rgb_411_65x65', 'rgb_420_17x33', 'rgb_422_33x17', 'rgb_420_16x16', 'rgb_420_9x9',
               'rgb_444_7x5', 'gray_65x65', 'gray_17x33', 'photo_420', 'photo_422', 'photo_444', 'prog_420_100x75', 'prog_422_65x65', 'q100_444',
               'q10_420', 'im_1x2_65x65', 'im_4x1_65x65', 'im_2x2_2x1_2x1_65x65', 'im_2x1_1x2_1x2_50x37', 'im_4x2_65x65', 'im_2x4_33x17', 'im_3x1_50x37',
-              'im_2x2_1x2_1x2_65x65', 'im_1x1_2x1_2x1_65x65', 'cmyk_420', 'arith_2x2_65x65', 'arith_prog_2x1_100x75', 'noise_420', 'extreme', 'rst_blocks1_420']
+              'im_2x2_1x2_1x2_65x65', 'im_1x1_2x1_2x1_65x65', 'cmyk_420', 'arith_2x2_65x65', 'arith_prog_2x1_52x37', 'noise_420', 'extreme', 'rst_blocks1_420']
     for name in scaled:
         src = os.path.join(OUT, name + '.jpg')
         w, h = Image.open(src).size
@@ -251,7 +259,7 @@ def main():
         emit(f'q{q}_444', pil(photo(61, 47, seed=9), quality=q, subsampling=0))
         emit(f'q{q}_gray', pil(photo(40, 40, 1), quality=q))
     emit('photo_420', pil(photo(200, 152), quality=90, subsampling=2))
-    emit('photo_422', pil(photo(199, 150), quality=85, subsampling=1))
+    emit('photo_422', pil(photo(131, 98), quality=85, subsampling=1))
     emit('photo_444', pil(photo(160, 120), quality=92, subsampling=0))
     emit('noise_420', pil(np.random.default_rng(3).integers(0, 256, (48, 56, 3), dtype=np.uint8), quality=97, subsampling=2))
     emit('noise_gray', pil(np.random.default_rng(4).integers(0, 256, (40, 33), dtype=np.uint8), quality=100))

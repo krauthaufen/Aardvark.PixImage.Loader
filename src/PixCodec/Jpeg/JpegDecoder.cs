@@ -580,15 +580,19 @@ namespace PixCodec.JpegImpl
                 if (dcOnly) JpegDct.IdctDc(block[0] * c.Quant[0], dst, c.Stride);
                 else JpegDct.Idct(block, c.Quant, dst, c.Stride);
             }
-            else PutBlockGeneric(c, block, col, row);
+            else if (c.Plane != null && c.S == 4 && !dcOnly && JpegDct.HasIdct4)
+                JpegDct.Idct4(block, c.Quant, c.Plane + ((nint)row * c.Stride + col) * 4, c.Stride);
+            else PutBlockGeneric(c, block, dcOnly, col, row);
         }
 
         [SkipLocalsInit]
-        void PutBlockGeneric(JpegComponent c, short* block, int col, int row)
+        void PutBlockGeneric(JpegComponent c, short* block, bool dcOnly, int col, int row)
         {
             int* v = stackalloc int[64];
             int s = c.S;
-            JpegDct.IdctGeneric(block, c.Quant, s, Precision == 8 ? 2 : 1, v);
+            // a lone DC coefficient gives a flat block at every size
+            if (dcOnly) new Span<int>(v, s * s).Fill((block[0] * c.Quant[0] + 4) >> 3);
+            else JpegDct.IdctGeneric(block, c.Quant, s, Precision == 8 ? 2 : 1, v);
             int center = 1 << (Precision - 1), max = (1 << Precision) - 1;
             if (c.Plane != null)
             {
@@ -1035,6 +1039,38 @@ namespace PixCodec.JpegImpl
             // prediction restarts at the top of the scan and after every restart marker
             int topRow = 0, firstCol = 0;
             bool skip = false;
+
+            // the usual layout - one sample of every component per MCU, restarts (if any) at line starts - goes line by line
+            bool simple = ri % mcusX == 0;
+            foreach (var c in sc) simple &= single || (c.H == 1 && c.V == 1);
+            if (simple)
+            {
+                ushort** cur = stackalloc ushort*[4];
+                int** fast = stackalloc int*[4];
+                for (int my = 0; my < mcusY; my++)
+                {
+                    bool top = my == 0;
+                    if (ri != 0 && my != 0 && (long)my * mcusX % ri == 0)
+                    {
+                        skip = Restart(sc, ref br, ref expected);
+                        top = true;
+                    }
+                    if (skip) continue;
+                    for (int i = 0; i < ns; i++)
+                    {
+                        cur[i] = sc[i].Plane16 + (nint)my * sc[i].Stride;
+                        fast[i] = sc[i].Dc!.Fast;
+                    }
+                    DecodeLosslessLine(ref br, sc, cur, fast, mcusX, top ? 0 : predictor, initial);
+                    if (br.Overrun)
+                    {
+                        if (ri == 0) return;
+                        skip = true;
+                    }
+                }
+                return;
+            }
+
             for (int my = 0; my < mcusY; my++)
             {
                 for (int mx = 0; mx < mcusX; mx++)
@@ -1089,6 +1125,93 @@ namespace PixCodec.JpegImpl
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// One line of a lossless scan whose components are all sampled 1 x 1. <paramref name="predictor"/> 0 marks the
+        /// first line (of the scan or after a restart), which predicts from the left only.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        static void DecodeLosslessLine(ref JpegBitReader br, JpegComponent[] sc, ushort** cur, int** fast, int width, int predictor, int initial)
+        {
+            // bit reader state in locals, as in DecodeBlock
+            ulong buf = br.Buf;
+            int cnt = br.Cnt;
+            byte* p = br.P, end = br.End;
+            int ns = sc.Length;
+            for (int x = 0; x < width; x++)
+            {
+                for (int i = 0; i < ns; i++)
+                {
+                    if (cnt < 32)
+                    {
+                        if (end - p >= 8)
+                        {
+                            ulong w = System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<ulong>(p));
+                            if (((~w - 0x0101010101010101UL) & w & 0x8080808080808080UL) == 0)
+                            {
+                                buf |= w >> cnt;
+                                p += (63 - cnt) >> 3;
+                                cnt |= 56;
+                                goto filled;
+                            }
+                        }
+                        br.Buf = buf; br.Cnt = cnt; br.P = p;
+                        br.RefillSlow();
+                        buf = br.Buf; cnt = br.Cnt; p = br.P;
+                    }
+                filled:
+                    int e = fast[i][(int)(buf >> (64 - HuffDecodeTable.LookBits))], s, d;
+                    if (e != 0)
+                    {
+                        int n = e & 31;
+                        buf <<= n; cnt -= n;
+                        s = (e >> 9) & 15;
+                        d = e >> 16;
+                        // category 16 (a difference of 32768, no extra bits) looks like "run 1, size 0" to the table builder
+                        if ((e & HuffDecodeTable.NoValueFlag) != 0) d = (e & 0x1E0) != 0 ? 32768 : 0;
+                    }
+                    else
+                    {
+                        br.Buf = buf; br.Cnt = cnt; br.P = p;
+                        s = br.DecodeSymbol(sc[i].Dc!);
+                        buf = br.Buf; cnt = br.Cnt; p = br.P;
+                        d = 0;
+                        if (s >= 16) { s = 0; d = 32768; }
+                    }
+                    if (s != 0)
+                    {
+                        d = (int)(buf >> (64 - s));
+                        buf <<= s; cnt -= s;
+                        d += ((d - (1 << (s - 1))) >> 31) & (1 - (1 << s));
+                    }
+
+                    ushort* row = cur[i];
+                    int pred;
+                    if (predictor == 0) pred = x == 0 ? initial : row[x - 1];
+                    else
+                    {
+                        ushort* above = row - sc[i].Stride;
+                        if (x == 0) pred = above[0];
+                        else
+                        {
+                            int ra = row[x - 1], rb = above[x], rc = above[x - 1];
+                            pred = predictor switch
+                            {
+                                1 => ra,
+                                2 => rb,
+                                3 => rc,
+                                4 => ra + rb - rc,
+                                5 => ra + ((rb - rc) >> 1),
+                                6 => rb + ((ra - rc) >> 1),
+                                _ => (ra + rb) >> 1,
+                            };
+                        }
+                    }
+                    row[x] = (ushort)(pred + d);
+                }
+            }
+            br.Buf = buf; br.Cnt = cnt; br.P = p;
         }
 
         /// <summary>Undoes the point transform and blanks components no scan delivered.</summary>

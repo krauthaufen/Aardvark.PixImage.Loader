@@ -108,7 +108,7 @@ namespace PixCodec
         }
 
         /// <summary>Compresses a chunk given in the uncompressed line layout. Returns the bytes to store (raw if compression did not help).</summary>
-        public static byte[] Encode(ExrCompression comp, ReadOnlySpan<byte> raw, in ExrChunk chunk, ExrScratch s, int zipLevel)
+        public static byte[] Encode(ExrCompression comp, ReadOnlySpan<byte> raw, in ExrChunk chunk, ExrScratch s, int zipLevel, float dwaLevel)
         {
             ReadOnlySpan<byte> packed;
             switch (comp)
@@ -134,6 +134,8 @@ namespace PixCodec
                 case ExrCompression.Piz: packed = ExrPiz.Encode(raw, chunk, s); break;
                 case ExrCompression.B44:
                 case ExrCompression.B44A: packed = ExrB44.Encode(raw, chunk, s, comp == ExrCompression.B44A); break;
+                case ExrCompression.Dwaa:
+                case ExrCompression.Dwab: packed = ExrDwa.Encode(raw, chunk, s, dwaLevel); break;
                 default: throw new ImageNotSupportedException($"EXR compression {comp} is not supported for encoding");
             }
             // The format stores a chunk raw when compression does not shrink it; readers detect this by the size.
@@ -199,7 +201,7 @@ namespace PixCodec
         }
 
         /// <summary>Splits raw into even bytes followed by odd bytes and applies the delta predictor.</summary>
-        static void Predict(ReadOnlySpan<byte> raw, Span<byte> t)
+        internal static void Predict(ReadOnlySpan<byte> raw, Span<byte> t)
         {
             int n = raw.Length;
             if (n == 0) return;
@@ -246,7 +248,7 @@ namespace PixCodec
             if (o != dst.Length) throw new ImageFormatException("EXR RLE data is truncated");
         }
 
-        static int RleEncode(ReadOnlySpan<byte> src, Span<byte> dst)
+        internal static int RleEncode(ReadOnlySpan<byte> src, Span<byte> dst)
         {
             const int MaxRun = 127, MinRun = 3;
             int n = src.Length, i = 0, o = 0, litStart = 0;

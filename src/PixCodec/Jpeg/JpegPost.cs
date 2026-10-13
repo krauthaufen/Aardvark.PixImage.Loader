@@ -180,7 +180,7 @@ namespace PixCodec.JpegImpl
             }
         }
 
-        static bool UseVec => Vector.IsHardwareAccelerated && BitConverter.IsLittleEndian && !ForceScalar;
+        static bool UseVec => Vector.IsHardwareAccelerated && !ForceScalar;
 
         static void Widen(byte* src, ushort* sum, int n)
         {
@@ -324,7 +324,7 @@ namespace PixCodec.JpegImpl
                     Sse2.Store(dst + 36, p1.GetUpper());
                 }
             }
-            else if (Vector128.IsHardwareAccelerated && BitConverter.IsLittleEndian && !ForceScalar)
+            else if (Vector128.IsHardwareAccelerated && !ForceScalar)
             {
                 // portable variant: 4 pixels per step in 32 bit lanes; each step stores 16 bytes for 12
                 var half = Vector128.Create(32768);

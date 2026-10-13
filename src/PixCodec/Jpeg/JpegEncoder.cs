@@ -300,6 +300,7 @@ namespace PixCodec.JpegImpl
         readonly byte[][] _quant = new byte[2][];
         readonly int _restart;
         readonly bool _genericSampling;
+        readonly bool _bare, _rawColor; // TIFF strips: no application segments / no color transform
         readonly int _precision = 8;
         readonly int _maxAcSize = 10; // largest AC magnitude category the precision allows
 
@@ -325,9 +326,17 @@ namespace PixCodec.JpegImpl
                 throw new ImageNotSupportedException("JPEG encoding needs a gray or RGB image (lossless mode also takes up to 4 arbitrary channels)");
             if (options.Precision != 0 && options.Precision != (wide ? 12 : 8))
                 throw new ArgumentException(wide ? "UInt16 images are encoded with 12 bit precision (or lossless with up to 16)" : "UInt8 images are encoded with 8 bit precision");
-            var e = new JpegEncoder(image, output, options);
+            var e = new JpegEncoder(image, output, options, false, false);
             e.Run(image);
         }
+
+        /// <summary>
+        /// One strip or tile for a JPEG compressed TIFF: a complete baseline (12 bit: extended sequential) stream with its
+        /// own tables and nothing but SOI in front of them - the TIFF tags say what the components mean.
+        /// With <paramref name="rawColor"/> the three channels are stored as they are at full resolution.
+        /// </summary>
+        public static void EncodeForTiff(RawImage image, Stream output, JpegEncodeOptions options, bool rawColor)
+            => new JpegEncoder(image, output, options, true, rawColor).Run(image);
 
         /// <summary>Lossless mode: only the output machinery is used.</summary>
         JpegEncoder(Stream output, JpegEncodeOptions opt)
@@ -336,9 +345,10 @@ namespace PixCodec.JpegImpl
             _comps = Array.Empty<Comp>();
         }
 
-        JpegEncoder(RawImage image, Stream output, JpegEncodeOptions opt)
+        JpegEncoder(RawImage image, Stream output, JpegEncodeOptions opt, bool bare, bool rawColor)
         {
             _out = output; _opt = opt;
+            _bare = bare;
             _w = image.Width; _h = image.Height;
             _restart = Math.Clamp(opt.RestartInterval, 0, 65535);
             if (image.SampleType == SampleType.UInt16) { _precision = 12; _maxAcSize = 14; }
@@ -347,7 +357,13 @@ namespace PixCodec.JpegImpl
             var ss = opt.Subsampling;
             if (ss == JpegSubsampling.Auto) ss = quality >= 90 ? JpegSubsampling.Chroma444 : JpegSubsampling.Chroma420;
             int[] factors = gray ? [1, 1] : ss == JpegSubsampling.Chroma444 ? [1, 1, 1, 1, 1, 1] : ss == JpegSubsampling.Chroma422 ? [2, 1, 1, 1, 1, 1] : [2, 2, 1, 1, 1, 1];
-            if (opt.SamplingFactors != null && !gray)
+            if (rawColor && !gray)
+            {
+                factors = [1, 1, 1, 1, 1, 1];
+                _genericSampling = true;
+                _rawColor = true;
+            }
+            else if (opt.SamplingFactors != null && !gray)
             {
                 factors = opt.SamplingFactors;
                 if (factors.Length != 6 || factors.Any(f => f < 1 || f > 4)) throw new ArgumentException("SamplingFactors needs 6 values between 1 and 4");
@@ -475,6 +491,11 @@ namespace PixCodec.JpegImpl
                 if (nc == 1) { full[0][i] = (ushort)r; continue; }
                 int g = s8 != null ? s8[i * ch + 1] : s16![i * ch + 1], b = s8 != null ? s8[i * ch + 2] : s16![i * ch + 2];
                 if (g > max || b > max) throw new ArgumentException($"sample value {Math.Max(g, b)} exceeds the {_precision} bit range");
+                if (_rawColor)
+                {
+                    full[0][i] = (ushort)r; full[1][i] = (ushort)g; full[2][i] = (ushort)b;
+                    continue;
+                }
                 full[0][i] = (ushort)((19595 * r + 38470 * g + 7471 * b + 32768) >> 16);
                 full[1][i] = (ushort)((-11059 * r - 21709 * g + 32768 * b + (center << 16) + 32767) >> 16);
                 full[2][i] = (ushort)((32768 * r - 27439 * g - 5329 * b + (center << 16) + 32767) >> 16);
@@ -483,6 +504,28 @@ namespace PixCodec.JpegImpl
             {
                 var c = _comps[i];
                 int sw = (w * c.H + _hMax - 1) / _hMax, sh = (h * c.V + _vMax - 1) / _vMax;
+                if (_hMax % c.H == 0 && _vMax % c.V == 0)
+                {
+                    // whole-number ratios: plain averages over fx x fy samples (edge samples repeat)
+                    int fx = _hMax / c.H, fy = _vMax / c.V, area = fx * fy, planeRows = c.BlocksH * 8, st = c.Stride;
+                    var src = full[i];
+                    for (int y = 0; y < planeRows; y++)
+                    {
+                        int sy = Math.Min(y, sh - 1) * fy;
+                        for (int x = 0; x < st; x++)
+                        {
+                            int sx = Math.Min(x, sw - 1) * fx, sum = area >> 1;
+                            for (int j = 0; j < fy; j++)
+                            {
+                                int o = Math.Min(sy + j, h - 1) * w;
+                                for (int k = 0; k < fx; k++) sum += src[o + Math.Min(sx + k, w - 1)];
+                            }
+                            int v = area == 1 ? sum : sum / area;
+                            if (c.Plane16 != null) c.Plane16[y * st + x] = (ushort)v; else c.Plane[y * st + x] = (byte)v;
+                        }
+                    }
+                    continue;
+                }
                 // horizontal, then vertical box filter; source samples past the edge repeat the last one
                 var tmp = new long[sw * h];
                 for (int y = 0; y < h; y++) BoxFilter(full[i], y * w, 1, w, tmp, y * sw, 1, sw, c.H, _hMax);
@@ -548,7 +591,7 @@ namespace PixCodec.JpegImpl
             {
                 byte* b = a + fullW;
                 bool v2 = _vMax == 2;
-                if (Vector.IsHardwareAccelerated && BitConverter.IsLittleEndian)
+                if (Vector.IsHardwareAccelerated)
                 {
                     // each 16 bit lane holds a horizontal pair of samples; the rounding bias alternates between
                     // output columns (0,1 or 1,2) so flat areas do not drift
@@ -594,7 +637,7 @@ namespace PixCodec.JpegImpl
             {
                 byte* s = sp;
                 int x = 0;
-                if ((Ssse3.IsSupported || AdvSimd.Arm64.IsSupported) && BitConverter.IsLittleEndian)
+                if ((Ssse3.IsSupported || AdvSimd.Arm64.IsSupported))
                 {
                     // 4 pixels per step in 32 bit lanes; reads 16 source bytes, so stop while that stays inside the row
                     var spread = ch == 3
@@ -676,7 +719,7 @@ namespace PixCodec.JpegImpl
 
         void WriteHeaders(ImageMetadata? meta)
         {
-            WriteMetadata(meta, jfif: true);
+            WriteMetadata(_bare ? null : meta, jfif: !_bare);
             for (int t = 0; t < (_comps.Length == 1 ? 1 : 2); t++)
             {
                 Marker(0xDB); U16(67); Byte(t);

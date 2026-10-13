@@ -51,13 +51,29 @@ def jpeg_needs_turbo3(path):
 
 
 def decode_png(im):
+    """Default image of a PNG in the PixCodec mapping. A file named *.anim.png yields all composited animation
+    frames (RGBA) stacked vertically instead."""
     import struct
-    with open(im.filename, 'rb') as f:
-        depth, ctype = struct.unpack('>BB', f.read(26)[24:26])
+    import subprocess
+    path = im.filename
+    if path.lower().endswith('.anim.png'):
+        return decode_apng(path, im)
+    with open(path, 'rb') as f:
+        head = f.read(4096)
+    depth, ctype = struct.unpack('>BB', head[24:26])
+    if ctype in (0, 2) and b'tRNS' in head.split(b'IDAT')[0]:
+        # colour key: Pillow keeps it as metadata and OpenCV drops gray keys; ImageMagick applies it
+        w, h = im.size
+        raw = subprocess.run(['magick', path, '-depth', '16', 'RGBA:-'], capture_output=True, check=True).stdout
+        a = np.frombuffer(raw, '<u2').reshape(h, w, 4)
+        if depth < 16:
+            assert not np.any(a % 257)
+            a = (a // 257).astype(np.uint8)
+        return a[..., [0, 3]] if ctype == 0 else a
     if depth == 16 and ctype != 0:
         # Pillow reduces 16 bit color / gray+alpha to 8 bit, OpenCV (libpng) keeps it
         import cv2
-        a = cv2.imread(im.filename, cv2.IMREAD_UNCHANGED)
+        a = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         assert a is not None and a.dtype == np.uint16
         if ctype == 4:
             return a[..., [0, 3]]           # comes back as BGRA with B = G = R
@@ -69,6 +85,30 @@ def decode_png(im):
     elif im.mode in ('I', 'I;16', 'I;16B'):
         return np.asarray(im).astype(np.uint16)
     return np.asarray(im)
+
+
+def decode_apng(path, im):
+    """Composited frames by ffmpeg (which keeps 16 bit), cross-checked against Pillow for 8 bit files."""
+    import struct
+    import subprocess
+    with open(path, 'rb') as f:
+        depth = f.read(25)[24]
+    w, h = im.size
+    wide = depth == 16
+    raw = subprocess.run(['ffmpeg', '-v', 'error', '-i', path, '-fps_mode', 'passthrough', '-f', 'rawvideo',
+                          '-pix_fmt', 'rgba64le' if wide else 'rgba', '-'], capture_output=True, check=True).stdout
+    a = np.frombuffer(raw, '<u2' if wide else np.uint8).reshape(-1, h, w, 4)
+    n = getattr(im, 'n_frames', 1)
+    assert len(a) == n, f'ffmpeg decoded {len(a)} of {n} frames'
+    if not wide:
+        for i in range(n):
+            im.seek(i)
+            p = np.asarray(im.convert('RGBA')).astype(np.int16)
+            f = a[i].astype(np.int16)
+            p[p[..., 3] == 0] = 0
+            f[f[..., 3] == 0] = 0
+            assert np.array_equal(p, f), f'ffmpeg and Pillow disagree on frame {i}'
+    return a.reshape(-1, w, 4)
 
 
 def decode_gif(path, im):
@@ -112,19 +152,23 @@ def decode_tiff(path):
 
 
 def decode_exr(path):
-    """First part of an EXR file as float32 (uint32 if every channel is UINT), channels in R,G,B,A / Y,A order.
+    """A part of an EXR file as float32 (uint32 if every channel is UINT), channels in R,G,B,A / Y,A order.
 
-    Files named *.all.exr are returned with all channels in file (byte-wise alphabetical) order instead.
-    Uses the official OpenEXR python bindings when installed, otherwise OpenCV (colour channels only).
+    Tokens before the extension select what is returned: *.all.exr gives all channels in file (byte-wise
+    alphabetical) order, *.partN.exr part N instead of the first (both may be combined: *.part1.all.exr).
+    Subsampled channels are expanded by replication. Uses the official OpenEXR python bindings when installed,
+    otherwise OpenCV (colour channels of the first part only).
     """
-    want_all = path.lower().endswith('.all.exr')
+    tokens = os.path.basename(path).lower().split('.')[1:-1]
+    want_all = 'all' in tokens
+    part = next((int(t[4:]) for t in tokens if t.startswith('part') and t[4:].isdigit()), 0)
     try:
         import OpenEXR
     except ImportError:
         OpenEXR = None
     if OpenEXR is None:
-        if want_all:
-            raise RuntimeError('reading arbitrary EXR channels needs the OpenEXR python module')
+        if want_all or part:
+            raise RuntimeError('reading arbitrary EXR channels / parts needs the OpenEXR python module')
         os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
         import cv2
         im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -133,14 +177,21 @@ def decode_exr(path):
         if im.ndim == 3:
             im = im[..., [2, 1, 0, 3][:im.shape[2]]]
         return np.ascontiguousarray(im)
-    chans = OpenEXR.File(path, separate_channels=True).parts[0].channels
+    chans = OpenEXR.File(path, separate_channels=True).parts[part].channels
     names = sorted(chans.keys(), key=lambda n: n.encode())
     if not want_all:
         for pick in (['R', 'G', 'B'], ['Y']):
             if all(n in chans for n in pick):
                 names = pick + (['A'] if 'A' in chans else [])
                 break
-    arrs = [chans[n].pixels for n in names]
+    arrs = []
+    for n in names:
+        a = chans[n].pixels
+        if chans[n].ySampling > 1:
+            a = np.repeat(a, chans[n].ySampling, axis=0)
+        if chans[n].xSampling > 1:
+            a = np.repeat(a, chans[n].xSampling, axis=1)
+        arrs.append(a)
     dt = np.uint32 if all(a.dtype == np.uint32 for a in arrs) else np.float32
     return np.stack([a.astype(dt) for a in arrs], axis=-1)
 
