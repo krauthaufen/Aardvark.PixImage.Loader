@@ -18,6 +18,7 @@ namespace PixCodec
         /// <summary>The codeword is terminated after pass k (a segment ends there).</summary>
         public bool[] PassTerm = Array.Empty<bool>();
         public bool Ht;
+        public int Placeholders;             // HT: placeholder pass sets in front of the cleanup pass (test hook)
         // rate control
         public float Weight;                 // squared error in the image per unit of PassDist
         public int[] Hull = Array.Empty<int>();     // truncation points on the convex hull (pass counts), ascending

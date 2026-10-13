@@ -13,6 +13,17 @@ namespace PixCodec
         Cprl = 4,
     }
 
+    /// <summary>Where a JPEG 2000 codestream keeps its packet headers.</summary>
+    public enum Jp2PacketHeaders
+    {
+        /// <summary>In front of each packet's data (the usual layout).</summary>
+        InPackets = 0,
+        /// <summary>Collected in PPT marker segments of the tile-part header.</summary>
+        TileHeader = 1,
+        /// <summary>Collected in PPM marker segments of the main header.</summary>
+        MainHeader = 2,
+    }
+
     /// <summary>Code-block coding style switches of the classic (Part 1) block coder.</summary>
     [Flags]
     public enum Jp2BlockStyle
@@ -125,6 +136,8 @@ namespace PixCodec
         public int BitsPerSample { get; set; }
         /// <summary>Write SOP marker segments before and EPH markers after every packet header.</summary>
         public bool PacketMarkers { get; set; }
+        /// <summary>Where the packet headers go; packing them lets a reader see the structure of a tile without its data.</summary>
+        public Jp2PacketHeaders PacketHeaders { get; set; }
         /// <summary>Write a TLM (tile-part lengths) marker segment in the main header, which lets readers find tiles without scanning.</summary>
         public bool TileLengthMarkers { get; set; } = true;
         /// <summary>JP2 container: write ICC profile, EXIF block (or orientation) and resolution from <see cref="RawImage.Metadata"/>.</summary>

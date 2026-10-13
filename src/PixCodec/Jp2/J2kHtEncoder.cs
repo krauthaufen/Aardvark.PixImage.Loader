@@ -59,25 +59,44 @@ namespace PixCodec
             }
         }
 
-        /// <summary>Bit packer for the streams that are read backwards (VLC, MagRef); written forwards, reversed at the end.</summary>
+        /// <summary>
+        /// Bit packer for the streams that are read backwards (VLC, MagRef); written forwards, reversed at the end.
+        /// A byte whose low seven bits are all ones gets a 0 as its top bit when the byte before it is above 0x8F.
+        /// </summary>
         struct Backward
         {
             public byte* Buf;
             public int Pos, Bits;
-            public uint Tmp, Last;
+            public uint Last;
+            public ulong Acc;
 
+            /// <summary>The bits of the byte under construction (F.4: VLC_tmp / MR_tmp).</summary>
+            public uint Tmp
+            {
+                get => (uint)Acc;
+                set => Acc = value;
+            }
+
+            [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
             public void Emit(uint cwd, int len)
             {
-                for (; len > 0; len--, cwd >>= 1)
+                Acc |= (ulong)cwd << Bits;
+                Bits += len;
+                while (Bits >= 7)
                 {
-                    Tmp |= (cwd & 1) << Bits;
-                    Bits++;
-                    if (Last > 0x8F && Tmp == 0x7F) Bits++;
-                    if (Bits == 8)
+                    uint b = (uint)Acc & 0xFF;
+                    if (Last > 0x8F && (b & 0x7F) == 0x7F)
                     {
-                        Buf[Pos++] = (byte)Tmp;
-                        Last = Tmp; Tmp = 0; Bits = 0;
+                        // seven ones: the eighth bit is a stuffed 0
+                        Buf[Pos++] = 0x7F; Last = 0x7F;
+                        Acc >>= 7; Bits -= 7;
                     }
+                    else if (Bits >= 8)
+                    {
+                        Buf[Pos++] = (byte)b; Last = b;
+                        Acc >>= 8; Bits -= 8;
+                    }
+                    else break;
                 }
             }
         }
@@ -172,18 +191,18 @@ namespace PixCodec
             {
                 var ms = default(Forward); ms.Init(buf);
                 var mel = default(Mel); mel.Init(buf + msCap);
-                var vlc = new Backward { Buf = buf + msCap + melCap, Pos = 1, Bits = 4, Tmp = 15, Last = 255 };
+                var vlc = new Backward { Buf = buf + msCap + melCap, Pos = 1, Bits = 4, Acc = 15, Last = 255 };
                 vlc.Buf[0] = 255;
                 new Span<byte>(rhoRow, qw + 2).Clear();
                 new Span<byte>(expRow, 2 * qw + 3).Clear();
                 byte* rhoAbove = rhoRow + 1, expAbove = expRow + 1;
 
-                Span<int> rho = stackalloc int[2], U = stackalloc int[2], u = stackalloc int[2], emb = stackalloc int[2], ek = stackalloc int[2];
-                Span<int> eb0 = stackalloc int[2], eb1 = stackalloc int[2];
-                Span<ulong> v = stackalloc ulong[8];
-                Span<int> e = stackalloc int[8];
-                Span<uint> cw = stackalloc uint[2];
-                Span<int> cl = stackalloc int[2];
+                int* rho = stackalloc int[2], U = stackalloc int[2], u = stackalloc int[2], emb = stackalloc int[2], ek = stackalloc int[2];
+                int* eb0 = stackalloc int[2], eb1 = stackalloc int[2];
+                ulong* v = stackalloc ulong[8];
+                int* e = stackalloc int[8];
+                uint* cw = stackalloc uint[2];
+                int* cl = stackalloc int[2];
                 for (int qy = 0; qy < qh; qy++)
                 {
                     bool firstRow = qy == 0;
@@ -367,7 +386,7 @@ namespace PixCodec
             int typeBits = sizeof(T) * 8;
             T signBit = T.One << (typeBits - 1), magMask = signBit - T.One;
             var sp = default(Forward); sp.Init(dst);
-            var mr = new Backward { Buf = dst + cap, Pos = 0, Bits = 0, Tmp = 0, Last = 255 };
+            var mr = new Backward { Buf = dst + cap, Pos = 0, Bits = 0, Acc = 0, Last = 255 };
             fixed (byte* sig = s.Sig)
             {
                 new Span<byte>(sig, sigLen).Clear();

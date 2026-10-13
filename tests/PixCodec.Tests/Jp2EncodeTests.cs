@@ -380,6 +380,65 @@ public class Jp2EncodeTests
     }
 
     [Fact]
+    public void HtPlaceholderPasses()
+    {
+        // HT blocks whose first layers carry placeholder passes (empty contributions) before the cleanup pass arrives:
+        // the layout of transcoded codestreams. OpenJPEG and OpenJPH do not read such streams (nor the T.803 ones made
+        // this way, see Jp2ConformanceTests), so this checks writer against reader only.
+        try
+        {
+            foreach (int sets in new[] { 1, 2, 4 })
+                foreach (bool refine in new[] { false, true })
+                    foreach (var order in new[] { Jp2Progression.Lrcp, Jp2Progression.Rpcl })
+                    {
+                        J2kEncoder.HtPlaceholderSets = sets;
+                        J2kEncoder.HtRefinementPasses = refine;
+                        var img = Pattern(150, 97, ColorModel.Rgb, SampleType.UInt16, seed: sets);
+                        var bytes = Jp2.Encode(img, new Jp2EncodeOptions { HighThroughput = true, Layers = sets + 2, Progression = order, RawCodestream = true, CodeBlockWidth = 32, CodeBlockHeight = 32 });
+                        var back = Jp2.Decode(bytes);
+                        if (!refine) AssertEqual(img, back); else Assert.True(MaxDiff(img, back) <= 1);
+                        // nothing but placeholders in the first layers: a mid-gray image
+                        var first = Jp2.Decode(bytes, new Jp2DecodeOptions { MaxLayers = sets + 1 });
+                        Assert.All(first.GetData<ushort>(), v => Assert.Equal(32768, v));
+                        AssertEqual(back, Jp2.Decode(bytes, new Jp2DecodeOptions { Parallel = false, Region = (0, 0, 150, 97) }));
+                    }
+        }
+        finally { J2kEncoder.HtPlaceholderSets = 0; J2kEncoder.HtRefinementPasses = false; }
+    }
+
+    [Theory]
+    [InlineData(Jp2PacketHeaders.TileHeader), InlineData(Jp2PacketHeaders.MainHeader)]
+    public void PackedPacketHeaders(Jp2PacketHeaders where)
+    {
+        var img = Pattern(213, 171, ColorModel.Rgb);
+        foreach (var o in new[]
+        {
+            new Jp2EncodeOptions { PacketHeaders = where },
+            new Jp2EncodeOptions { PacketHeaders = where, TileWidth = 64, TileHeight = 64, Progression = Jp2Progression.Rpcl, PacketMarkers = true },
+            new Jp2EncodeOptions { PacketHeaders = where, TileWidth = 64, TileHeight = 50, Layers = 3, Progression = Jp2Progression.Cprl },
+            new Jp2EncodeOptions { PacketHeaders = where, TileWidth = 50, TileHeight = 50, Precincts = new[] { (32, 32) }, PacketMarkers = true },
+            new Jp2EncodeOptions { PacketHeaders = where, BlockStyle = Jp2BlockStyle.Bypass | Jp2BlockStyle.TerminateAll, Layers = 2 },
+        })
+        {
+            o.RawCodestream = true;
+            var bytes = RoundTrip(img, o);
+            // the marker segments are there
+            int marker = where == Jp2PacketHeaders.TileHeader ? 0x61 : 0x60;
+            bool found = false;
+            for (int i = 0; i + 1 < bytes.Length && !found; i++) found = bytes[i] == 0xFF && bytes[i + 1] == marker;
+            Assert.True(found);
+        }
+        // OpenJPH does not read packed headers; OpenJPEG decodes the HT blocks
+        var ht = Jp2.Encode(img, new Jp2EncodeOptions { PacketHeaders = where, HighThroughput = true, RawCodestream = true, TileWidth = 100, TileHeight = 100 });
+        AssertEqual(img, Jp2.Decode(ht));
+        // lossy with a size target: the packed headers count
+        var photo = Photo(256, 200);
+        var lossy = Jp2.Encode(photo, new Jp2EncodeOptions { PacketHeaders = where, Lossless = false, TargetBitsPerPixel = 1, RawCodestream = true });
+        Assert.InRange(lossy.Length * 8.0 / (256 * 200), 0.9, 1.0005);
+        Assert.True(Psnr(photo, Jp2.Decode(lossy), 255) > 35);
+    }
+
+    [Fact]
     public void RejectsWhatCannotBeStored()
     {
         Assert.Throws<ImageNotSupportedException>(() => Jp2.Encode(RawImage.Create(4, 4, ColorModel.Gray, SampleType.Float32)));

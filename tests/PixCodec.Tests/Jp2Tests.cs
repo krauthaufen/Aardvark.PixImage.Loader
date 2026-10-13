@@ -435,6 +435,33 @@ public class Jp2Tests
         }
     }
 
+    /// <summary>Components of 33 to 38 bit come out as 64 bit samples.</summary>
+    [Theory]
+    [InlineData(33, false), InlineData(38, false), InlineData(38, true), InlineData(34, true)]
+    public void DepthsAbove32Bit(int depth, bool ht)
+    {
+        // No encoder at hand writes such files. A reversible 32 bit codestream with the depth in SIZ raised is one:
+        // the coefficients are the same, only the level shift (2^(depth-1)) and the range change.
+        var img = Jp2TestUtil.Pattern(40, 31, ColorModel.Gray, SampleType.UInt32, seed: depth);
+        var data = Jp2.Encode(img, new Jp2EncodeOptions { RawCodestream = true, HighThroughput = ht });
+        Assert.Equal(31, data[42]);
+        data[42] = (byte)(depth - 1);
+        var info = Jp2.GetInfo(data);
+        Assert.Equal((SampleType.UInt64, depth, ColorModel.Gray), (info.SampleType, info.BitsPerSample, info.Color));
+        var back = Jp2.Decode(data);
+        var src = img.GetData<uint>(); var dst = back.GetData<ulong>();
+        for (int i = 0; i < src.Length; i++) Assert.Equal((ulong)((long)src[i] - (1L << 31) + (1L << (depth - 1))), dst[i]);
+        // signed: no level shift
+        data[42] = (byte)(depth - 1 | 0x80);
+        var signed = Jp2.Decode(data);
+        Assert.Equal(SampleType.Int64, signed.SampleType);
+        var sd = signed.GetData<long>();
+        for (int i = 0; i < src.Length; i++) Assert.Equal((long)src[i] - (1L << 31), sd[i]);
+        var planes = Jp2.DecodeCodestreamPlanes(data);
+        Assert.Null(planes.Planes[0].Data);
+        Assert.Equal(sd, planes.Planes[0].Data64);
+    }
+
     [Fact]
     public void AbsentTilesOfAClosedCodestreamAreZero()
     {
