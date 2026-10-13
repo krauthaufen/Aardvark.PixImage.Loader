@@ -84,7 +84,7 @@ namespace PixCodec
         public TiffCompression Compression { get; set; } = TiffCompression.Deflate;
 
         /// <summary>
-        /// Predictor applied before LZW / Deflate. Ignored for None and PackBits, where other readers (libtiff)
+        /// Predictor applied before LZW / Deflate / Zstd. Ignored for None and PackBits, where other readers (libtiff)
         /// would not undo it.
         /// </summary>
         public TiffPredictor Predictor { get; set; } = TiffPredictor.Auto;
@@ -127,8 +127,28 @@ namespace PixCodec
         /// </summary>
         public IList<TiffTag> ExtraTags { get; set; } = new List<TiffTag>();
 
+        /// <summary>
+        /// Append overviews to the image: reduced resolution pages (NewSubfileType 1), each half the size of the one
+        /// before (2 x 2 box average, alpha averaged like any other sample), until both sides are at most
+        /// <see cref="OverviewMinSize"/>. This is the pyramid layout GDAL and other GIS software read as overviews.
+        /// </summary>
+        public bool BuildOverviews { get; set; }
+
+        /// <summary>Overviews stop once width and height are both at most this many pixels (default 256).</summary>
+        public int OverviewMinSize { get; set; } = 256;
+
+        /// <summary>
+        /// Write a file laid out for range requests the way Cloud Optimized GeoTIFF asks for: tiled (512 x 512 unless
+        /// tile sizes are set), with overviews, all directories at the start of the file, then the tile data of the
+        /// smallest overview up to the full resolution image last. Single image only. The compressed data is held in
+        /// memory until the directories are written. Georeferencing tags go in through <see cref="ExtraTags"/>.
+        /// </summary>
+        public bool CloudOptimized { get; set; }
+
         /// <summary>Test seam: zero bytes inserted after the header, pushing every offset (also past 4 GB).</summary>
         internal long TestPadding;
+
+        internal TiffEncodeOptions Clone() => (TiffEncodeOptions)MemberwiseClone();
     }
 
     /// <summary>One image of a multi-page TIFF to write.</summary>
@@ -369,9 +389,14 @@ namespace PixCodec
         Lzw,
         Deflate,
         PackBits,
-        /// <summary>JPEG (compression 7), 8-bit Gray or Rgb only; Rgb is stored as YCbCr. Lossy.</summary>
+        /// <summary>
+        /// JPEG (compression 7): 8-bit Gray or Rgb, or 12-bit from UInt16 images whose samples are 0..4095.
+        /// Rgb is stored as YCbCr. Lossy.
+        /// </summary>
         Jpeg,
         /// <summary>CCITT Group 4 fax (compression 4): 1-bit bilevel output from an 8-bit Gray image.</summary>
         CcittGroup4,
+        /// <summary>Zstandard (compression 50000), with the same predictors as Deflate. Read by libtiff 4.0.10+ / GDAL.</summary>
+        Zstd,
     }
 }
