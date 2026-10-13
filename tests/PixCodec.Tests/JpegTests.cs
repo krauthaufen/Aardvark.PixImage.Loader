@@ -67,6 +67,22 @@ public class JpegTests
         Assert.Throws<ImageNotSupportedException>(() => Jpeg.Decode(data));
     }
 
+    /// <summary>
+    /// Large, almost flat arithmetic coded images: the long runs of identical decisions take the probability estimator
+    /// through its most skewed states, which ordinary pictures never reach. Compared against the oracle at run time.
+    /// </summary>
+    [Theory]
+    [InlineData("jpeg/misc/arith_sparse.jpg")]
+    [InlineData("jpeg/misc/arith_prog_sparse.jpg")]
+    public void ArithmeticExtremeProbabilityStates(string file)
+    {
+        var data = Load(file);
+        var img = Jpeg.Decode(data);
+        Assert.Equal((640, 640, 1), (img.Width, img.Height, img.Channels));
+        var oracle = TestUtil.OracleDecode(data, ".jpg");
+        if (oracle != null) TestUtil.AssertEqual(oracle, img, 0);
+    }
+
     [Fact]
     public void Metadata()
     {
