@@ -43,6 +43,8 @@ namespace PixCodec
         Webp,
         /// <summary>SGI LogL / LogLuv, converted to floats while decoding.</summary>
         LogLuv,
+        /// <summary>Pixar 11-bit log samples (deflate compressed, horizontally differenced), mapped to linear values while decoding.</summary>
+        PixarLog,
     }
 
     /// <summary>One IFD: parsed layout, and the strip/tile decoder for it.</summary>
@@ -74,7 +76,7 @@ namespace PixCodec
         readonly ulong[] _inMax;
         readonly ulong _outMax;
         readonly int _pixelBits;     // stored bits of one contiguous pixel
-        readonly bool _oldJpeg;
+        readonly bool _oldJpeg, _xyzPost;
         readonly int _storedStrips;
         readonly long _ifdOffset;
 
@@ -172,10 +174,17 @@ namespace PixCodec
             {
                 // The tags describe the caller side format of the writer; the stored data always is 16-bit log
                 // luminance (LogL) or a 32-bit LogLuv word per pixel.
-                if (Compression != 34676) throw new ImageNotSupportedException($"TIFF: LogLuv with compression {Compression} is not supported");
                 if (Spp != ColorSamples || Planar != 1) throw new ImageNotSupportedException("TIFF: LogLuv with extra samples is not supported");
                 RawType = SampleType.Float32;
-                Kind = TiffChunkKind.LogLuv;
+                if (Compression is 34676 or 34677) Kind = TiffChunkKind.LogLuv;
+                else
+                {
+                    // without the SGILOG codecs the samples are plain floats: luminance, or CIE XYZ
+                    if (Format != 3 || !UniformBits || Bits != 32)
+                        throw new ImageNotSupportedException("TIFF: LogLuv data without SGILOG compression needs 32-bit float samples");
+                    Kind = TiffChunkKind.Samples;
+                    _xyzPost = Photometric == 32845;
+                }
             }
             else
             {
@@ -195,7 +204,25 @@ namespace PixCodec
                     _ => throw new ImageNotSupportedException($"TIFF: {Bits}-bit samples of format {Format} are not supported"),
                 };
                 bool whole = UniformBits && Bits is 8 or 16 or 32 or 64;
-                if (IsJpeg) Kind = TiffChunkKind.Jpeg;
+                if (Compression == 32909)
+                {
+                    // PixarLog stores 11-bit log values whatever the tags say (libtiff even rewrites the tags to
+                    // "8 bit" when it closes a file); the tags, or the caller, pick the linear output format.
+                    Kind = TiffChunkKind.PixarLog;
+                    RawType = options.PixarLogOutput switch
+                    {
+                        TiffPixarLogOutput.UInt8 => SampleType.UInt8,
+                        TiffPixarLogOutput.UInt16 => SampleType.UInt16,
+                        TiffPixarLogOutput.Float32 => SampleType.Float32,
+                        _ => RawType switch
+                        {
+                            SampleType.UInt8 or SampleType.UInt16 or SampleType.Float32 when whole => RawType,
+                            SampleType.Int16 when whole => SampleType.UInt16,
+                            _ => throw new ImageNotSupportedException($"TIFF: PixarLog data tagged as {Bits}-bit samples of format {Format} is not supported"),
+                        },
+                    };
+                }
+                else if (IsJpeg) Kind = TiffChunkKind.Jpeg;
                 else if (Compression == 50001) Kind = TiffChunkKind.Webp;
                 else if (Format == 3 && Bits == 24) Kind = TiffChunkKind.Float24;
                 else Kind = whole ? TiffChunkKind.Samples : TiffChunkKind.Packed;
@@ -329,6 +356,7 @@ namespace PixCodec
         {
             TiffChunkKind.YccPacked => YccBlockRowBytes * ((ChunkH + SubV - 1) / SubV),
             TiffChunkKind.LogLuv => (long)ChunkW * ChunkH * 4,
+            TiffChunkKind.PixarLog => (long)ChunkW * ChunkH * Spp * Math.Max(2, Bps),
             TiffChunkKind.Jpeg or TiffChunkKind.Webp => (long)ChunkW * ChunkH * Spp * Bps,
             _ => RowBytes(ChunkW, 0) * ChunkH,
         };
@@ -338,13 +366,14 @@ namespace PixCodec
             switch (Compression)
             {
                 case 1: case 5: case 8: case 32946: case 32773: case 2: case 3: case 4: case 6: case 7:
-                case 50000: case 34925: case 50001:
+                case 50000: case 34925: case 50001: case 32909:
                     break;
                 case 34676:
                     if (!IsLogLuv) throw new ImageFormatException("TIFF: SGILOG compression needs a LogL / LogLuv photometric interpretation");
                     break;
-                case 34677: throw new ImageNotSupportedException("TIFF: 24-bit LogLuv (SGILOG24) is not supported");
-                case 32909: throw new ImageNotSupportedException("TIFF: PixarLog compression is not supported");
+                case 34677:
+                    if (Photometric != 32845) throw new ImageFormatException("TIFF: SGILOG24 compression needs the LogLuv photometric interpretation");
+                    break;
                 default: throw new ImageNotSupportedException($"TIFF: compression {Compression} is not supported");
             }
             bool plain = Kind is TiffChunkKind.Samples or TiffChunkKind.Float24 && !IsCcitt;
@@ -513,6 +542,11 @@ namespace PixCodec
                 else
                     for (int i = 0; i < n; i++) DecodeChunk(list[i]);
                 if (YccPlanar) YccInPlace(_dst, (long)rw * rh);
+                if (_xyzPost && ConvertToRgb)
+                {
+                    float* f = (float*)_dst;
+                    for (long i = 0, np = (long)rw * rh; i < np; i++, f += 3) TiffColor.XyzToLinearRgb(ref f[0], ref f[1], ref f[2]);
+                }
             }
             finally
             {
@@ -706,7 +740,8 @@ namespace PixCodec
                 case TiffChunkKind.LogLuv:
                 {
                     if (count > int.MaxValue) throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression");
-                    int bpp = Photometric == 32845 ? 4 : 2, rc = RawChannels;
+                    bool luv24 = Compression == 34677;
+                    int bpp = luv24 ? 3 : Photometric == 32845 ? 4 : 2, rc = RawChannels;
                     int need = iy1 - y0;
                     long enc = (long)ChunkW * need * bpp;
                     CheckPlausible(enc, count, need);
@@ -714,7 +749,14 @@ namespace PixCodec
                     byte* b = (byte*)NativeMemory.Alloc((nuint)(enc + (long)ChunkW * need * rc * 4));
                     try
                     {
-                        TiffSgiLog.Decode(File.Src.Get(offset, (int)count, ref srcRent), b, ChunkW, need, bpp);
+                        var src = File.Src.Get(offset, (int)count, ref srcRent);
+                        if (luv24)
+                        {
+                            // 24-bit LogLuv is stored as it is, three bytes per pixel
+                            if (src.Length < enc) throw new ImageFormatException("TIFF: LogLuv data is truncated");
+                            src.Slice(0, (int)enc).CopyTo(new Span<byte>(b, (int)enc));
+                        }
+                        else TiffSgiLog.Decode(src, b, ChunkW, need, bpp);
                         float* f = (float*)(b + enc);
                         long pixels = (long)ChunkW * need;
                         if (bpp == 2)
@@ -722,13 +764,45 @@ namespace PixCodec
                         else
                             for (long i = 0; i < pixels; i++)
                             {
-                                uint p = (uint)(b[i * 4] << 24 | b[i * 4 + 1] << 16 | b[i * 4 + 2] << 8 | b[i * 4 + 3]);
-                                TiffSgiLog.LogLuv32ToXyz(p, out float x, out float y, out float z);
+                                float x, y, z;
+                                if (luv24) TiffSgiLog.LogLuv24ToXyz((uint)(b[i * 3] << 16 | b[i * 3 + 1] << 8 | b[i * 3 + 2]), out x, out y, out z);
+                                else TiffSgiLog.LogLuv32ToXyz((uint)(b[i * 4] << 24 | b[i * 4 + 1] << 16 | b[i * 4 + 2] << 8 | b[i * 4 + 3]), out x, out y, out z);
                                 if (ConvertToRgb) TiffColor.XyzToLinearRgb(ref x, ref y, ref z);
                                 f[i * 3] = x; f[i * 3 + 1] = y; f[i * 3 + 2] = z;
                             }
                         g.Ps = rc;
                         Transfer((byte*)f, (long)ChunkW * rc * 4, g, TiffChunkKind.Samples);
+                    }
+                    finally
+                    {
+                        NativeMemory.Free(b);
+                        if (srcRent != null) ArrayPool<byte>.Shared.Return(srcRent);
+                    }
+                    return;
+                }
+                case TiffChunkKind.PixarLog:
+                {
+                    if (count > int.MaxValue) throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression");
+                    int need = iy1 - y0, perRow = ChunkW * ps;
+                    long enc = (long)need * perRow * 2, outRow = (long)perRow * Bps;
+                    if (enc > int.MaxValue) throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression");
+                    CheckPlausible(enc, count, need);
+                    byte[]? srcRent = null;
+                    byte* b = (byte*)NativeMemory.Alloc((nuint)(enc + need * outRow));
+                    try
+                    {
+                        int got;
+                        try { got = Zlib.Decompress(File.Src.Get(offset, (int)count, ref srcRent), new Span<byte>(b, (int)enc)); }
+                        catch (Exception ex) when (ex is InvalidDataException || ex is IOException)
+                        {
+                            throw new ImageFormatException("TIFF: corrupt PixarLog data", ex);
+                        }
+                        if (got < enc) throw new ImageFormatException("TIFF: PixarLog data is truncated");
+                        if (File.BigEndian) TiffPredict.SwapBytes(b, enc, 2);
+                        byte* o = b + enc;
+                        for (int y = 0; y < need; y++)
+                            TiffPixarLog.Row((ushort*)(b + (long)y * perRow * 2), o + y * outRow, perRow, ps, RawType);
+                        Transfer(o, outRow, g, TiffChunkKind.Samples);
                     }
                     finally
                     {
@@ -752,7 +826,7 @@ namespace PixCodec
                 if (rows > count * 8 + 8 || ChunkW > 1 << 22) throw new ImageFormatException("TIFF: strip/tile size inconsistent with its data size");
                 return;
             }
-            long ratio = Compression switch { 32773 => 64, 8 or 32946 => 1040, 50000 or 34925 => 1 << 17, _ => 4096 };
+            long ratio = Compression switch { 32773 => 64, 8 or 32946 or 32909 => 1040, 50000 or 34925 => 1 << 17, 34677 => 1, _ => 4096 };
             if (count < long.MaxValue / (1 << 18) && decoded > count * ratio + 4096)
                 throw new ImageFormatException("TIFF: strip/tile size inconsistent with its data size");
         }

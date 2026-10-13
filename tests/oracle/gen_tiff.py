@@ -46,6 +46,71 @@ NONE, LZW, DEFLATE, PACKBITS = 1, 5, 8, 32773
 
 # ----------------------------------------------------------------------------------------------- codecs
 
+# ----------------------------------------------------------------------------------------------- libtiff, directly
+
+class LibTiff:
+    """The system libtiff through ctypes: the only way to write (and read back in every user format) the codecs
+    that live in libtiff alone - SGI LogLuv / LogL, PixarLog."""
+    SGILOGDATAFMT, PIXARLOGDATAFMT = 65560, 65549
+
+    def __init__(self):
+        import ctypes
+        self.c = ctypes
+        lt = self.lt = ctypes.CDLL('libtiff.so.6')
+        lt.TIFFOpen.restype = ctypes.c_void_p
+        lt.TIFFOpen.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        for n in ('TIFFWriteEncodedStrip', 'TIFFReadEncodedStrip'):
+            getattr(lt, n).argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int64]
+            getattr(lt, n).restype = ctypes.c_int64
+        lt.TIFFClose.argtypes = [ctypes.c_void_p]
+        lt.TIFFStripSize64.argtypes = [ctypes.c_void_p]
+        lt.TIFFStripSize64.restype = ctypes.c_uint64
+        lt.TIFFNumberOfStrips.argtypes = [ctypes.c_void_p]
+        lt.TIFFNumberOfStrips.restype = ctypes.c_uint32
+
+    def _set(self, t, tag, value):
+        return self.lt.TIFFSetField(self.c.c_void_p(t), self.c.c_uint32(tag), self.c.c_int(value))
+
+    def write(self, path, arr, compression, photometric, pseudo=(), rps=None, big_endian=False, tags=()):
+        """arr: (H,W,C) in the user format the pseudo tag selects (floats for the log codecs)."""
+        h, w, c = arr.shape
+        t = self.lt.TIFFOpen(path.encode(), b'wb' if big_endian else b'wl')
+        assert t
+        for tag, v in ((256, w), (257, h), (277, c), (259, compression), (262, photometric), (284, 1),
+                       (258, arr.dtype.itemsize * 8), (339, {'u': 1, 'i': 2, 'f': 3}[arr.dtype.kind])) + tuple(tags):
+            if tag == 338:   # ExtraSamples takes a count and an array
+                one = (self.c.c_uint16 * 1)(v)
+                assert self.lt.TIFFSetField(self.c.c_void_p(t), self.c.c_uint32(tag), self.c.c_int(1), one)
+            else:
+                self._set(t, tag, v)
+        for tag, v in pseudo:
+            assert self._set(t, tag, v), tag
+        rps = rps or h
+        self._set(t, 278, rps)
+        for i, y in enumerate(range(0, h, rps)):
+            buf = np.ascontiguousarray(arr[y:y + rps])
+            n = self.lt.TIFFWriteEncodedStrip(t, i, buf.ctypes.data, buf.nbytes)
+            assert n == buf.nbytes, (path, n, buf.nbytes)
+        self.lt.TIFFClose(t)
+
+    def read(self, path, dtype, shape, pseudo=()):
+        """Decoded strips in the user format the pseudo tag selects (default: what the file's tags say)."""
+        t = self.lt.TIFFOpen(path.encode(), b'r')
+        assert t
+        for tag, v in pseudo:
+            assert self._set(t, tag, v), tag
+        out = np.zeros(shape, dtype)
+        flat = out.reshape(-1)
+        pos = 0
+        for i in range(self.lt.TIFFNumberOfStrips(t)):
+            n = self.lt.TIFFReadEncodedStrip(t, i, flat.ctypes.data + pos, min(flat.nbytes - pos, self.lt.TIFFStripSize64(t)))
+            assert n > 0, (path, n)
+            pos += n
+        self.lt.TIFFClose(t)
+        assert pos == flat.nbytes, (path, pos, flat.nbytes)
+        return out
+
+
 def lzw_encode(data, old_style=False):
     """TIFF LZW. old_style: the pre-6.0 variant (LSB-first codes, no early change)."""
     out = bytearray()
@@ -1257,30 +1322,113 @@ def gen_logluv():
         write_tol(path, 2e-3)
         SUMMARY.append(('logluv/' + name, [f'cv2 (libtiff SGILOG float + XYZ2BGR), written by cv2/libtiff, {desc}']))
 
-    # LogL: 16-bit log luminance per pixel, big endian byte planes, run length coded per row
-    y = np.abs(test_pattern(37, 21, 1, np.float32, 52))[:, :, 0] * 3 + 0.02
+    # The rest is written and read back by libtiff itself (ctypes): reading with SGILOGDATAFMT_FLOAT gives CIE XYZ
+    # (or luminance) floats, which is the `.raw.ref` (ConvertToRgb = false); the RGB reference is OpenCV's XYZ2RGB
+    # conversion of exactly these floats.
+    lib = LibTiff()
+    xyz = cv2.cvtColor(rgb, cv2.COLOR_RGB2XYZ)
+    fmt = [(LibTiff.SGILOGDATAFMT, 0)]
+
+    def luv(name, compression, tol, **kw):
+        path = os.path.join(d, name + '.tif')
+        lib.write(path, xyz, compression, 32845, pseudo=fmt if compression in (34676, 34677) else (), **kw)
+        got = lib.read(path, np.float32, xyz.shape, pseudo=fmt if compression in (34676, 34677) else ())
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            assert int(pg.compression) == compression and int(pg.photometric) == 32845
+            desc = f'{len(pg.dataoffsets)} strip(s), {t.byteorder}'
+        write_ref(path + '.ref', cv2.cvtColor(got, cv2.COLOR_XYZ2RGB))
+        write_ref(path + '.raw.ref', got)
+        write_tol(path, tol)
+        write_tol(path + '.raw', tol)
+        SUMMARY.append(('logluv/' + name, [f'libtiff float decoding (XYZ) + cv2 XYZ2RGB; written by libtiff, {desc}']))
+
+    luv('logluv24_strips', 34677, 2e-3, rps=5)
+    luv('logluv24_be', 34677, 2e-3, big_endian=True)
+    luv('logluv32_libtiff_be', 34676, 2e-3, rps=9, big_endian=True)
+    luv('logluv_float_uncompressed', 1, 1e-4, rps=6)        # plain XYZ floats under the LogLuv photometric
+    luv('logluv_float_lzw_be', 5, 1e-4, big_endian=True)
+
+    # LogL: 16-bit log luminance
+    y = np.abs(test_pattern(37, 21, 1, np.float32, 52)) * 3 + 0.02
     y[:3, :10] = 0
     y[3:6, :10] = 0.25
-    le = np.where(y > 0, np.floor(256 * (np.log2(np.maximum(y, 1e-30)) + 64)), 0).astype(np.uint16)
-    chunks = []
-    for r in range(0, 21, 8):
-        rows = []
-        for row in le[r:r + 8]:
-            rows += [bytes((row >> 8).astype(np.uint8)), bytes((row & 255).astype(np.uint8))]
-        chunks.append(sgilog_rle(rows))
-    # No installed decoder returns LogL as floats (OpenCV only switches libtiff to float output for LogLuv, ImageMagick
-    # maps it to display values), so this one is listed as unverified: the reference is the defining formula
-    # Y = 2^((Le + 0.5) / 256 - 64). The run length decoding and that formula are the ones the LogLuv fixtures verify.
-    d = os.path.join(OUT, 'unverified')
+    y[7, 3] = 5000.0
+    # (little endian only: libtiff does not read back its own big endian LogL files correctly)
+    for name, kw in [('logl16_strips', dict(rps=8)), ('logl16_strip', dict())]:
+        path = os.path.join(d, name + '.tif')
+        lib.write(path, y, 34676, 32844, pseudo=fmt, **kw)
+        got = lib.read(path, np.float32, y.shape, pseudo=fmt)
+        assert float(np.abs(got - y).max() / 5000) < 0.01
+        write_ref(path + '.ref', got)
+        write_tol(path, 1e-5)
+        SUMMARY.append(('logluv/' + name, ['libtiff float decoding; written by libtiff']))
+    path = os.path.join(d, 'logl_float_uncompressed.tif')
+    lib.write(path, y, 1, 32844)
+    write_ref(path + '.ref', lib.read(path, np.float32, y.shape))
+    SUMMARY.append(('logluv/logl_float_uncompressed', ['libtiff; written by libtiff']))
+
+
+def gen_pixarlog():
+    """PixarLog (compression 32909), written by libtiff from float data. libtiff tags every such file as 8-bit, so
+    the default reference is its 8-bit reading; `.u16.ref` / `.f32.ref` are its 16-bit and float readings
+    (PIXARLOGDATAFMT), matching TiffDecodeOptions.PixarLogOutput."""
+    lib = LibTiff()
+    d = os.path.join(OUT, 'pixarlog')
     os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, 'logl16.tif')
-    write_tiff(path, [dict(arr=np.zeros((21, 37, 1), np.int16), photometric=32844, compression=34676, rps=8, raw_chunks=chunks)])
-    ref = np.where(le > 0, np.exp2((le.astype(np.float64) + 0.5) / 256 - 64), 0).astype(np.float32)
-    write_ref(path + '.ref', ref)
-    write_tol(path, 1e-6)
-    reason = 'LogL (16-bit log luminance, photometric 32844): no decoder here returns it as floats'
-    UNVERIFIED.append(('logl16', reason))
-    SUMMARY.append(('unverified/logl16', ['UNVERIFIED: ' + reason]))
+    P = LibTiff.PIXARLOGDATAFMT
+    rgb = np.abs(test_pattern(41, 29, 3, np.float32, 71)).astype(np.float32) * 0.45
+    rgb[:3, :8] = 0
+    rgb[3:6, :8] = 1.0
+    rgb[6, :4] = [[24.0, 0.5, 2.0]] * 4          # far above white: the 8 and 16 bit readings clamp
+    rgba = np.concatenate([rgb, np.clip(np.abs(test_pattern(41, 29, 1, np.float32, 72)) * 0.4, 0, 1)], axis=2).astype(np.float32)
+    for name, arr, kw in [('pixarlog_rgb', rgb, dict()), ('pixarlog_rgb_strips', rgb, dict(rps=4)),
+                          # (no big endian file: libtiff on this little endian machine writes garbage for it)
+                          ('pixarlog_rgba', rgba, dict(rps=7, tags=((338, 2),)))]:
+        path = os.path.join(d, name + '.tif')
+        lib.write(path, arr, 32909, 2, pseudo=[(P, 5)], **kw)
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            assert int(pg.compression) == 32909 and pg.bitspersample == 8, (pg.compression, pg.bitspersample)
+            desc = f'{len(pg.dataoffsets)} strip(s), {t.byteorder}'
+        f = lib.read(path, np.float32, arr.shape, pseudo=[(P, 5)])
+        assert float(np.abs(f - arr).max()) < 0.06, name   # (1.004 per code step: 0.05 at the brightest pixel)
+        write_ref(path + '.ref', lib.read(path, np.uint8, arr.shape))
+        write_ref(path + '.u16.ref', lib.read(path, np.uint16, arr.shape, pseudo=[(P, 4)]))
+        write_ref(path + '.f32.ref', f)
+        SUMMARY.append(('pixarlog/' + name, [f'libtiff (8 bit, 16 bit and float readings); written by libtiff, {desc}']))
+
+    # libtiff 4.7 cannot decode its own single-channel PixarLog files (its reading is far from what was written),
+    # so the gray case has no usable reference decoder: the reference is the source rounded through the code table.
+    g = np.clip(np.abs(test_pattern(41, 29, 1, np.float32, 73)) * 0.45, 0, 2).astype(np.float32)
+    du = os.path.join(OUT, 'unverified')
+    os.makedirs(du, exist_ok=True)
+    path = os.path.join(du, 'pixarlog_gray.tif')
+    lib.write(path, g, 32909, 1, pseudo=[(P, 5)], rps=8)
+    bad = lib.read(path, np.float32, g.shape, pseudo=[(P, 5)])
+    assert float(np.abs(bad - g).max()) > 1, 'libtiff reads gray PixarLog correctly now: use it as the reference'
+    c = np.log(1.004)
+    nlin = int(1 / c)
+    c = 1.0 / nlin
+    b = np.exp(-c * 1250)
+    table = np.concatenate([np.arange(nlin) * (b * c * np.e), b * np.exp(c * np.arange(nlin, 2048))]).astype(np.float32)
+    with tifffile.TiffFile(path) as t:
+        pg = t.pages[0]
+        rows = []
+        with open(path, 'rb') as fh:
+            for o, n in zip(pg.dataoffsets, pg.databytecounts):
+                fh.seek(o)
+                codes = np.frombuffer(zlib.decompress(fh.read(n)), '<u2').astype(np.int64)
+                rows.append(np.cumsum(codes[:codes.size // 41 * 41].reshape(-1, 41), axis=1) & 0x7FF)
+    codes = np.concatenate(rows)[:29]
+    ref = table[codes][:, :, None]
+    assert float(np.abs(ref - g).max()) < 0.01
+    v = ref.astype(np.float64) * 255.0 + 0.5
+    write_ref(path + '.ref', np.where(v > 255, 255, v).astype(np.uint8))
+    write_ref(path + '.f32.ref', ref)
+    reason = 'single-channel PixarLog: libtiff 4.7 misreads its own file (stride 1), nothing else decodes PixarLog'
+    UNVERIFIED.append(('pixarlog_gray', reason))
+    SUMMARY.append(('unverified/pixarlog_gray', ['UNVERIFIED: ' + reason]))
 
 
 def gen_jpeg_deep():
@@ -1599,6 +1747,7 @@ def main():
     gen_more_codecs()
     gen_lab()
     gen_logluv()
+    gen_pixarlog()
     gen_ccitt()
     gen_ycbcr()
     gen_jpeg()

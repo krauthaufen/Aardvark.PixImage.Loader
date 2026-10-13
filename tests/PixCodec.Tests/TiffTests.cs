@@ -10,7 +10,7 @@ public class TiffTests
     // Fixture folders under tests/fixtures/tiff. The top level and most folders are bit exact against third-party
     // decoders; a fixture with a `.tol` sidecar allows that sample difference (YCbCr / Lab / LogLuv maths, lossy codecs).
     // `unverified` holds the few variants no installed decoder reads (see gen_tiff.py for the list).
-    static readonly string[] ActiveDirs = { "", "ycbcr", "lab", "logluv", "jpeg", "jpeg12", "jpegll", "ojpeg", "unverified" };
+    static readonly string[] ActiveDirs = { "", "ycbcr", "lab", "logluv", "pixarlog", "jpeg", "jpeg12", "jpegll", "ojpeg", "unverified" };
 
     static IEnumerable<object[]> Dirs(params string[] dirs) => dirs.SelectMany(d => TestUtil.Files(d.Length == 0 ? "tiff" : Path.Combine("tiff", d), ".tif"));
 
@@ -64,6 +64,8 @@ public class TiffTests
             (".none.ref", new TiffDecodeOptions { BitScaling = TiffBitScaling.None }),
             (".full.ref", new TiffDecodeOptions { BitScaling = TiffBitScaling.FullRange }),
             (".raw.ref", new TiffDecodeOptions { ConvertToRgb = false }),
+            (".u16.ref", new TiffDecodeOptions { PixarLogOutput = TiffPixarLogOutput.UInt16 }),
+            (".f32.ref", new TiffDecodeOptions { PixarLogOutput = TiffPixarLogOutput.Float32 }),
         })
             if (File.Exists(path + suffix))
             {

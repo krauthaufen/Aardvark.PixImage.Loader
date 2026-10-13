@@ -27,10 +27,28 @@ namespace PixCodec
         /// </summary>
         public bool ConvertToRgb { get; set; } = true;
 
+        /// <summary>Linear output format for PixarLog compressed files (their tags do not reliably say).</summary>
+        public TiffPixarLogOutput PixarLogOutput { get; set; } = TiffPixarLogOutput.Default;
+
         /// <summary>Decoded size in bytes from which <see cref="Parallel"/> kicks in.</summary>
         internal long ParallelThreshold = 512 * 1024;
 
         internal static readonly TiffDecodeOptions Default = new TiffDecodeOptions();
+    }
+
+    /// <summary>
+    /// PixarLog files hold 11-bit log encoded samples that decode to linear light. Files written by libtiff are
+    /// always tagged as 8-bit, whatever went in, so the wanted precision has to come from the caller.
+    /// </summary>
+    public enum TiffPixarLogOutput
+    {
+        /// <summary>As the file is tagged: 8-bit (the usual case), 16-bit or Float32.</summary>
+        Default,
+        UInt8,
+        /// <summary>Linear values scaled to 0..65535.</summary>
+        UInt16,
+        /// <summary>Linear values, 1.0 = white (values up to about 25 are representable).</summary>
+        Float32,
     }
 
     /// <summary>
