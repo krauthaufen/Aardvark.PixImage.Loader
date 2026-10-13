@@ -304,6 +304,41 @@ public class TiffTests
     }
 
     [Fact]
+    public void SubImages()
+    {
+        var path = TestUtil.Fixture(Path.Combine("tiff", "subifds_pyramid.tif"));
+        var bytes = File.ReadAllBytes(path);
+        Assert.Equal(2, Tiff.GetImageCount(bytes));             // sub-images are not pages
+        Assert.Equal(2, Tiff.GetSubImageCount(bytes));
+        Assert.Equal(1, Tiff.GetSubImageCount(bytes, 1));
+        Assert.Equal(0, Tiff.GetSubImageCount(bytes, 0, 0));    // no nesting in this file
+        using var fs = File.OpenRead(path);
+        foreach (var (page, sub, refName) in new[] { (0, 0, ".sub0.ref"), (0, 1, ".sub1.ref"), (1, 0, ".1.sub0.ref") })
+        {
+            var expected = TestUtil.LoadRef(path + refName);
+            var o = new TiffDecodeOptions { ImageIndex = page, SubImagePath = new[] { sub } };
+            var img = Tiff.Decode(bytes, o);
+            TestUtil.AssertEqual(expected, img);
+            TestUtil.AssertEqual(expected, Tiff.Decode(fs, o));
+            var info = Tiff.GetSubImageInfos(bytes, page)[sub];
+            Assert.Equal((img.Width, img.Height, img.Channels, img.SampleType, img.Color), (info.Width, info.Height, info.Channels, info.SampleType, info.Color));
+            Assert.Equal(info, Tiff.GetSubImageInfos(fs, page)[sub]);
+            var tags = Tiff.ReadTags(bytes, page, new[] { sub });
+            Assert.Equal(img.Width, tags.Single(t => t.Id == 256).AsIntegers()[0]);
+            Assert.Equal(1, tags.Single(t => t.Id == 254).AsIntegers()[0]);   // reduced resolution
+            Assert.Equal(tags.Length, Tiff.ReadTags(fs, page, new[] { sub }).Length);
+            TestUtil.AssertEqual(Crop(expected, 1, 1, expected.Width - 2, expected.Height - 2),
+                Tiff.DecodeRegion(bytes, 1, 1, expected.Width - 2, expected.Height - 2, o));
+        }
+        TestUtil.AssertEqual(TestUtil.LoadRef(path + ".1.ref"), Tiff.Decode(bytes, new TiffDecodeOptions { ImageIndex = 1 }));
+        Assert.ThrowsAny<ArgumentException>(() => Tiff.Decode(bytes, new TiffDecodeOptions { SubImagePath = new[] { 2 } }));
+        Assert.ThrowsAny<ArgumentException>(() => Tiff.Decode(bytes, new TiffDecodeOptions { SubImagePath = new[] { 0, 0 } }));
+        Assert.ThrowsAny<ArgumentException>(() => Tiff.GetSubImageInfos(bytes, 0, 5));
+        // an image without the tag has none
+        Assert.Empty(Tiff.GetSubImageInfos(File.ReadAllBytes(TestUtil.Fixture(Path.Combine("tiff", "u8_rgb_none.tif")))));
+    }
+
+    [Fact]
     public void ReadsMetadata()
     {
         var path = TestUtil.Fixture(Path.Combine("tiff", "meta_res_icc_orient.tif"));

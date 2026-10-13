@@ -10,6 +10,12 @@ namespace PixCodec
         /// <summary>Which image (IFD) of a multi-page / pyramid file to decode, 0 = first.</summary>
         public int ImageIndex { get; set; }
 
+        /// <summary>
+        /// Decode a sub-image instead of the image itself: indices into the SubIFDs of the image at
+        /// <see cref="ImageIndex"/>, one per nesting level (see <see cref="Tiff.GetSubImageInfos(ReadOnlySpan{byte}, int, int[])"/>).
+        /// </summary>
+        public int[]? SubImagePath { get; set; }
+
         /// <summary>Decode strips/tiles on several threads when the image is large enough to benefit.</summary>
         public bool Parallel { get; set; } = true;
 
@@ -307,6 +313,51 @@ namespace PixCodec
             return Guard(() => TagsCore(src, imageIndex), seekableStream, src.Origin);
         }
 
+        /// <summary>Tags of a sub-image (see <see cref="GetSubImageInfos(ReadOnlySpan{byte}, int, int[])"/>).</summary>
+        public static TiffTag[] ReadTags(ReadOnlySpan<byte> data, int imageIndex, int[] subImagePath)
+        {
+            fixed (byte* p = data)
+            {
+                var src = new TiffMemorySource(p, data.Length);
+                return Guard(() => TagsCore(src, imageIndex, subImagePath));
+            }
+        }
+
+        public static TiffTag[] ReadTags(Stream seekableStream, int imageIndex, int[] subImagePath)
+        {
+            var src = new TiffStreamSource(seekableStream);
+            return Guard(() => TagsCore(src, imageIndex, subImagePath), seekableStream, src.Origin);
+        }
+
+        /// <summary>
+        /// Sub-images of an image: the directories its SubIFDs tag (330) points to - reduced resolution versions in
+        /// pyramid files, the raw sensor data or previews in DNG. <paramref name="subImagePath"/> addresses a
+        /// sub-image whose own sub-images are wanted (empty: those of the image itself). The result is in file order;
+        /// decode one with <see cref="TiffDecodeOptions.SubImagePath"/> = path + its index. An entry with Channels = 0
+        /// is a directory this codec cannot decode (it is listed so that the indices stay valid).
+        /// </summary>
+        public static ImageInfo[] GetSubImageInfos(ReadOnlySpan<byte> data, int imageIndex = 0, params int[] subImagePath)
+        {
+            fixed (byte* p = data)
+            {
+                var src = new TiffMemorySource(p, data.Length);
+                return Guard(() => SubInfosCore(src, imageIndex, subImagePath));
+            }
+        }
+
+        public static ImageInfo[] GetSubImageInfos(Stream seekableStream, int imageIndex = 0, params int[] subImagePath)
+        {
+            var src = new TiffStreamSource(seekableStream);
+            return Guard(() => SubInfosCore(src, imageIndex, subImagePath), seekableStream, src.Origin);
+        }
+
+        /// <summary>Number of sub-images of an image (or of the sub-image at <paramref name="subImagePath"/>).</summary>
+        public static int GetSubImageCount(ReadOnlySpan<byte> data, int imageIndex = 0, params int[] subImagePath)
+            => GetSubImageInfos(data, imageIndex, subImagePath).Length;
+
+        public static int GetSubImageCount(Stream seekableStream, int imageIndex = 0, params int[] subImagePath)
+            => GetSubImageInfos(seekableStream, imageIndex, subImagePath).Length;
+
         /// <summary>Encodes an image as TIFF to the stream (which only needs to be writable, not seekable).</summary>
         public static void Encode(RawImage image, Stream output, TiffEncodeOptions? options = null)
             => TiffEncoder.Encode(new[] { new TiffPage(image ?? throw new ArgumentNullException(nameof(image))) }, output, options ?? new TiffEncodeOptions());
@@ -340,25 +391,59 @@ namespace PixCodec
             return r;
         }
 
-        static long Locate(TiffFile file, int index)
+        static long Locate(TiffFile file, int index, int[]? path = null)
         {
             if (index < 0) throw new TiffArgumentException("imageIndex", "TIFF: image index must not be negative");
             var offs = file.IfdOffsets(index + 1);
             if (index >= offs.Count) throw new TiffArgumentException("imageIndex", $"TIFF: the file has only {offs.Count} image(s)");
-            return offs[index];
+            long offset = offs[index];
+            if (path != null)
+                foreach (int k in path)
+                {
+                    var sub = SubOffsets(file, offset);
+                    if (k < 0 || k >= sub.Length) throw new TiffArgumentException("subImagePath", $"TIFF: the directory has only {sub.Length} sub-image(s)");
+                    offset = sub[k];
+                }
+            return offset;
         }
 
-        static TiffTag[] TagsCore(TiffSource src, int index)
+        /// <summary>Offsets of the SubIFDs (tag 330) of a directory; entries pointing outside of the file are dropped.</summary>
+        static long[] SubOffsets(TiffFile file, long ifdOffset)
+        {
+            var sub = file.Integers(file.ReadIfd(ifdOffset), 330) ?? Array.Empty<long>();
+            return Array.FindAll(sub, o => o >= 8 && o < file.Src.Length);
+        }
+
+        static TiffTag[] TagsCore(TiffSource src, int index, int[]? path = null)
         {
             var file = new TiffFile(src);
-            return file.ReadTags(file.ReadIfd(Locate(file, index)));
+            return file.ReadTags(file.ReadIfd(Locate(file, index, path)));
+        }
+
+        static ImageInfo[] SubInfosCore(TiffSource src, int index, int[] path)
+        {
+            var file = new TiffFile(src);
+            var offs = SubOffsets(file, Locate(file, index, path));
+            var r = new ImageInfo[offs.Length];
+            for (int i = 0; i < r.Length; i++)
+            {
+                try { r[i] = new TiffImage(file, offs[i]).Info(1); }
+                catch (Exception e) when (e is ImageNotSupportedException || e is ImageFormatException)
+                {
+                    // listed all the same, so that the indices stay usable: Channels 0 marks "cannot be decoded"
+                    var dir = file.ReadIfd(offs[i]);
+                    r[i] = new ImageInfo(ImageFormat.Tiff, (int)Math.Clamp(file.Integer(dir, 256, 0), 0, int.MaxValue),
+                        (int)Math.Clamp(file.Integer(dir, 257, 0), 0, int.MaxValue), 0, SampleType.UInt8, ColorModel.Other);
+                }
+            }
+            return r;
         }
 
         static RawImage DecodeCore(TiffSource src, TiffDecodeOptions? options, (int x, int y, int w, int h)? region)
         {
             options ??= new TiffDecodeOptions();
             var file = new TiffFile(src);
-            var img = new TiffImage(file, Locate(file, options.ImageIndex), options);
+            var img = new TiffImage(file, Locate(file, options.ImageIndex, options.SubImagePath), options);
             return region is var (x, y, w, h)
                 ? img.Decode(x, y, w, h, options)
                 : img.Decode(0, 0, img.Width, img.Height, options);

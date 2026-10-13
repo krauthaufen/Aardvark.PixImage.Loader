@@ -422,6 +422,20 @@ namespace PixCodec
             }
         }
 
+        /// <summary>Horizontal differencing on 3-byte samples (24-bit floats), added as 24-bit integers in the file byte order.</summary>
+        public static void UndoHorizontal24(byte* row, int count, int stride, bool bigEndian)
+        {
+            for (int i = stride; i < count; i++)
+            {
+                byte* a = row + (long)(i - stride) * 3, c = row + (long)i * 3;
+                int x = bigEndian ? a[0] << 16 | a[1] << 8 | a[2] : a[2] << 16 | a[1] << 8 | a[0];
+                int y = bigEndian ? c[0] << 16 | c[1] << 8 | c[2] : c[2] << 16 | c[1] << 8 | c[0];
+                int v = x + y;
+                if (bigEndian) { c[0] = (byte)(v >> 16); c[1] = (byte)(v >> 8); c[2] = (byte)v; }
+                else { c[2] = (byte)(v >> 16); c[1] = (byte)(v >> 8); c[0] = (byte)v; }
+            }
+        }
+
         public static void ApplyHorizontal(byte* row, int count, int stride, int bps)
         {
             switch (bps)

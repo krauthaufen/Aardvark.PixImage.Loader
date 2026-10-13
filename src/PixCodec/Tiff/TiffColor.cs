@@ -22,7 +22,7 @@ namespace PixCodec
                     break;
                 case 8: case 9: case 10:
                     if (!img.ConvertToRgb) return raw;
-                    raw = LabToRgb(raw, img.RawType, pixels, rc, img.HasAlpha, img.Photometric);
+                    raw = LabToRgb(raw, img.RawType, pixels, rc, img.OutChannels, img.Photometric);
                     break;
             }
             if (img.AssociatedAlpha) Unpremultiply(raw, img.RawType, img.OutChannels, img.SampleMax);
@@ -166,9 +166,9 @@ namespace PixCodec
         /// ICCLab (9): a/b offset by 128 (16 bit: L up to 0xFF00, a/b offset 0x8000 in 1/256 units);
         /// ITULab (10): a = (s - 128) * 170 / 255, b = (s - 96) * 200 / 255 (the T.42 default ranges).
         /// </summary>
-        static Array LabToRgb(Array raw, SampleType type, long pixels, int rc, bool alpha, int photometric)
+        static Array LabToRgb(Array raw, SampleType type, long pixels, int rc, int oc, int photometric)
         {
-            int oc = alpha ? 4 : 3;
+            // oc: 3, or more when alpha / other extra samples follow the colour (they are copied as they are)
             bool wide = type == SampleType.UInt16;
             var b8 = wide ? null : (byte[])raw;
             var b16 = wide ? (ushort[])raw : null;
@@ -210,14 +210,14 @@ namespace PixCodec
                     o8![di] = (byte)(SrgbEncode(r) * max + 0.5f);
                     o8[di + 1] = (byte)(SrgbEncode(g) * max + 0.5f);
                     o8[di + 2] = (byte)(SrgbEncode(bl) * max + 0.5f);
-                    if (alpha) o8[di + 3] = b8![si + 3];
+                    for (int k = 3; k < oc; k++) o8[di + k] = b8![si + k];
                 }
                 else
                 {
                     o16![di] = (ushort)(SrgbEncode(r) * max + 0.5f);
                     o16[di + 1] = (ushort)(SrgbEncode(g) * max + 0.5f);
                     o16[di + 2] = (ushort)(SrgbEncode(bl) * max + 0.5f);
-                    if (alpha) o16[di + 3] = b16![si + 3];
+                    for (int k = 3; k < oc; k++) o16[di + k] = b16![si + k];
                 }
             }
             return wide ? o16! : o8!;

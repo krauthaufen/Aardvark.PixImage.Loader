@@ -234,8 +234,15 @@ def encode_chunk(a, p, e, plane=None):
         if pred == 3:
             b = np.ascontiguousarray(b.transpose(0, 2, 1)).reshape(rows, -1).copy()
             b[:, s:] -= b[:, :-s].copy()
-        elif e == '<':
-            b = b[:, :, ::-1]
+        else:
+            if pred == 2:
+                # horizontal differencing of the samples taken as 24-bit integers
+                v = (b[:, :, 0].astype(np.int64) << 16 | b[:, :, 1].astype(np.int64) << 8 | b[:, :, 2]).reshape(rows, cols, s)
+                v[:, 1:, :] = (v[:, 1:, :] - v[:, :-1, :]) & 0xFFFFFF
+                v = v.reshape(rows, cols * s)
+                b = np.stack([v >> 16, v >> 8 & 255, v & 255], axis=-1).astype(np.uint8)
+            if e == '<':
+                b = b[:, :, ::-1]
         raw = np.ascontiguousarray(b).tobytes()
     elif any(w not in (8, 16, 32, 64) for w in widths) or len(set(widths)) > 1:
         assert pred in (1, 2)
@@ -431,7 +438,7 @@ def cmyk_to_rgb(a):
     return np.concatenate([rgb, a[:, :, 4:5]], axis=2) if a.shape[2] > 4 else rgb
 
 
-BASE_SAMPLES = {0: 1, 1: 1, 3: 1, 4: 1, 2: 3, 5: 4, 6: 3, 8: 3, 9: 3, 10: 3}
+BASE_SAMPLES = {0: 1, 1: 1, 3: 1, 4: 1, 2: 3, 5: 4, 6: 3, 8: 3, 9: 3, 10: 3, 32803: 1, 34892: 3, 32844: 1, 32845: 3}
 
 
 def expected(p, raw, scaling='default', convert=True):
@@ -1308,6 +1315,131 @@ def gen_ccitt_uncompressed():
     finish('ccitt_rle_uncompressed', a, [b''.join(to_bytes('000000001111' + urow(r)) for r in a)], 2, 292)
 
 
+def gen_structures():
+    """SubIFDs, complex samples, raw sensor photometrics, per-sample formats and other rarely seen layouts."""
+    rng = np.random.default_rng(91)
+    # SubIFDs, written by tifffile: two reduced levels below the first page and a second page with one sub-image
+    # (tifffile cannot write SubIFDs inside SubIFDs). References: tifffile's reading of the sub pages.
+    path = os.path.join(OUT, 'subifds_pyramid.tif')
+    base = pat(3, 'uint8', 64, 48)
+    lv1, lv2 = np.ascontiguousarray(base[::2, ::2]), pat(3, 'uint8', 16, 12, seed=4)
+    page2, sub2 = pat(1, 'float32', 20, 10), pat(1, 'float32', 10, 5, seed=6)
+    with tifffile.TiffWriter(path) as tw:
+        tw.write(base, photometric='rgb', subifds=2, metadata=None)
+        tw.write(lv1, photometric='rgb', subfiletype=1, compression='lzw', metadata=None)
+        tw.write(lv2, photometric='rgb', subfiletype=1, tile=(16, 16), metadata=None)
+        tw.write(page2[:, :, 0], subifds=1, compression='zlib', metadata=None)
+        tw.write(sub2[:, :, 0], subfiletype=1, metadata=None)
+    with tifffile.TiffFile(path) as t:
+        p0, p1 = t.pages[0], t.pages[1]
+        got = {'': p0.asarray(), '.sub0': p0.pages[0].asarray(), '.sub1': p0.pages[1].asarray(), '.1': p1.asarray(), '.1.sub0': p1.pages[0].asarray()}
+    want = {'': base, '.sub0': lv1, '.sub1': lv2, '.1': page2[:, :, 0], '.1.sub0': sub2[:, :, 0]}
+    for k, v in got.items():
+        assert np.array_equal(v, want[k], equal_nan=v.dtype.kind == 'f'), k
+        write_ref(path + k + '.ref', v)
+    SUMMARY.append(('subifds_pyramid', ['tifffile (written and read)']))
+
+    # complex samples: two parts (real, imaginary) per sample
+    for name, a, kw in [('complex64_gray', (pat(1, 'float32')[:, :, 0] + 1j * pat(1, 'float32', seed=3)[:, :, 0]).astype(np.complex64), dict()),
+                        ('complex128_lzw', (pat(1, 'float64')[:, :, 0] - 2j * pat(1, 'float64', seed=3)[:, :, 0]).astype(np.complex128), dict(compression='lzw')),
+                        ('be_complex64_rgb_deflate_tiled', (pat(3, 'float32', 40, 33) + 1j * pat(3, 'float32', 40, 33, seed=3)).astype(np.complex64),
+                         dict(compression='zlib', tile=(16, 16), byteorder='>', photometric='rgb'))]:
+        path = os.path.join(OUT, name + '.tif')
+        tifffile.imwrite(path, a, metadata=None, **kw)
+        got = tifffile.imread(path)
+        assert got.dtype == a.dtype and np.array_equal(got, a, equal_nan=True)
+        part = np.dtype(f'f{a.dtype.itemsize // 2}')
+        ref = np.ascontiguousarray(got).view(part).reshape(got.shape[0], got.shape[1], -1)
+        emit_external(name, path, ref, ['tifffile'])
+    try:
+        import rasterio
+        path = os.path.join(OUT, 'complex_int16_gdal.tif')
+        ci = (rng.integers(-3000, 3000, (17, 23)) + 1j * rng.integers(-3000, 3000, (17, 23))).astype(np.complex64)
+        with rasterio.open(path, 'w', driver='GTiff', width=23, height=17, count=1, dtype='complex_int16', compress='deflate') as ds:
+            ds.write(ci, 1)
+        with rasterio.open(path) as ds:
+            got = ds.read(1)
+        assert np.array_equal(got, ci)
+        emit_external('complex_int16_gdal', path, np.stack([got.real, got.imag], axis=-1).astype(np.int16), ['GDAL (rasterio), written by GDAL'])
+    except ImportError:
+        pass
+
+    # raw sensor photometrics (DNG): returned as stored
+    emit('cfa_u16', dict(arr=pat(1, 'uint16'), photometric=32803, compression=LZW, predictor=2))
+    emit('linearraw_u16_rgb', dict(arr=pat(3, 'uint16'), photometric=34892, tile=(16, 16)))
+    # Lab with an extra sample that is not alpha: colour converted, the extra carried along (see gen_lab for the colour)
+
+    # plain float "LogLuv": XYZ with an alpha sample, contiguous and planar. Samples: tifffile; colour: cv2 XYZ2RGB.
+    xyz = cv2.cvtColor(np.abs(test_pattern(31, 23, 3, np.float32, 51)).astype(np.float32) * 0.6 + 0.01, cv2.COLOR_RGB2XYZ)
+    al = np.clip(np.abs(test_pattern(31, 23, 1, np.float32, 53)), 0, 1).astype(np.float32)
+    for name, kw in [('logluv_float_alpha', dict(extrasamples=[2])), ('logluv_float_alpha_planar_lzw', dict(extrasamples=[2], planar=2, compression=LZW)),
+                     ('logluv_float_extra', dict(extrasamples=[0]))]:
+        def from_raw(raw):
+            return np.concatenate([cv2.cvtColor(np.ascontiguousarray(raw[:, :, :3]), cv2.COLOR_XYZ2RGB), raw[:, :, 3:]], axis=2)
+        pth = emit(name, dict(arr=np.concatenate([xyz, al], axis=2), photometric=32845, ref_from_raw=from_raw, **kw), subdir='logluv', variants=('raw',))
+        write_tol(pth, 1e-4)
+
+    # Per-sample formats (converted to Float64), the horizontal predictor on 24-bit floats and 16-bit YCbCr without
+    # JPEG: no decoder reads these the way the tags describe them (tifffile applies the first sample's format to all,
+    # libtiff's RGBA interface is 8-bit only), so they are listed as unverified.
+    def hand(name, page, ref, reason, byteorder='<'):
+        d = os.path.join(OUT, 'unverified')
+        os.makedirs(d, exist_ok=True)
+        pth = os.path.join(d, name + '.tif')
+        write_tiff(pth, [page], byteorder)
+        write_ref(pth + '.ref', ref)
+        UNVERIFIED.append((name, reason))
+        SUMMARY.append(('unverified/' + name, ['UNVERIFIED: ' + reason]))
+        return pth
+
+    why = 'differing SampleFormat per sample: tifffile applies the first format to all samples, libtiff readers refuse'
+    for bits, byteorder in ((32, '<'), (16, '>'), (64, '<')):
+        e = byteorder
+        dt = np.dtype([('u', f'{e}u{bits // 8}'), ('i', f'{e}i{bits // 8}'), ('f', f'{e}f{bits // 8}')])
+        rec = np.zeros((H, W), dt)
+        rec['u'] = pat(1, f'uint{bits}')[:, :, 0]
+        rec['i'] = pat(1, f'int{bits}', seed=2)[:, :, 0]
+        rec['f'] = np.nan_to_num(pat(1, f'float{bits}', seed=3)[:, :, 0])
+        ref = np.stack([rec['u'].astype(np.float64), rec['i'].astype(np.float64), rec['f'].astype(np.float64)], axis=-1)
+        chunks = [rec[y:y + 6].tobytes() for y in range(0, H, 6)]
+        hand(f'mixed_formats_{bits}bit', dict(arr=np.zeros((H, W, 3), f'uint{bits}'), photometric=1, extrasamples=[0, 0], rps=6, raw_chunks=chunks,
+                                             sampleformat=1, tags=[(339, 3, [1, 2, 3])]), ref, why, byteorder)
+
+    f24 = pat(3, 'float16').astype(np.float32)
+    hand('f24_rgb_lzw_pred2', dict(arr=f24, float24=True, sampleformat=3, compression=LZW, predictor=2), f24,
+         'horizontal predictor on 24-bit floats: tifffile and GDAL refuse it')
+    hand('be_f24_gray_deflate_pred2', dict(arr=f24[:, :, :1], float24=True, sampleformat=3, compression=DEFLATE, predictor=2, rps=5), f24[:, :, :1],
+         'horizontal predictor on 24-bit floats: tifffile and GDAL refuse it', '>')
+
+    # 16-bit YCbCr, packed 2x2 blocks and planar 2x1
+    rgb16 = test_pattern(24, 16, 3, np.uint16, 23).astype(np.float64)
+    y = 0.299 * rgb16[:, :, 0] + 0.587 * rgb16[:, :, 1] + 0.114 * rgb16[:, :, 2]
+    cb = (rgb16[:, :, 2] - y) / 1.772 + 32768
+    cr = (rgb16[:, :, 0] - y) / 1.402 + 32768
+    q = lambda a: np.clip(np.round(a), 0, 65535).astype(np.uint16)
+
+    def back(yy, cbb, crr):
+        yy, cbb, crr = yy.astype(np.float64) * 65535 / 65535, (cbb.astype(np.float64) - 32768) * 32767 / 32767, (crr.astype(np.float64) - 32768) * 32767 / 32767
+        r, b = yy + crr * 1.402, yy + cbb * 1.772
+        gg = yy - crr * 1.402 * 0.299 / 0.587 - cbb * 1.772 * 0.114 / 0.587
+        return np.clip(np.floor(np.stack([r, gg, b], axis=-1) + 0.5), 0, 65535).astype(np.uint16)
+
+    why = '16-bit YCbCr without JPEG: libtiff converts YCbCr only at 8 bits, tifffile returns the stored samples'
+    tags16 = [(532, 5, [(0, 1), (65535, 1), (32768, 1), (65535, 1), (32768, 1), (65535, 1)])]
+    cbs, crs = q(cb.reshape(8, 2, 12, 2).mean(axis=(1, 3))), q(cr.reshape(8, 2, 12, 2).mean(axis=(1, 3)))
+    blocks = np.concatenate([q(y).reshape(8, 2, 12, 2).transpose(0, 2, 1, 3).reshape(8, 12, 4), cbs[:, :, None], crs[:, :, None]], axis=2)
+    up = lambda pl, fh, fv: np.repeat(np.repeat(pl, fv, axis=0), fh, axis=1)
+    pth = hand('ycbcr16_2x2', dict(arr=np.zeros((16, 24, 3), np.uint16), photometric=6, rps=8, tags=tags16 + [(530, 3, [2, 2])],
+                                   raw_chunks=[blocks[:4].astype('<u2').tobytes(), blocks[4:].astype('<u2').tobytes()]),
+               back(q(y), up(cbs, 2, 2), up(crs, 2, 2)), why)
+    write_tol(pth, 1)
+    cbs, crs = q(cb.reshape(16, 1, 12, 2).mean(axis=(1, 3))), q(cr.reshape(16, 1, 12, 2).mean(axis=(1, 3)))
+    pth = hand('be_ycbcr16_planar_2x1', dict(arr=np.zeros((16, 24, 3), np.uint16), photometric=6, planar=2, rps=16, tags=tags16 + [(530, 3, [2, 1])],
+                                             raw_chunks=[q(y).astype('>u2').tobytes(), cbs.astype('>u2').tobytes(), crs.astype('>u2').tobytes()]),
+               back(q(y), up(cbs, 2, 1), up(crs, 2, 1)), why, '>')
+    write_tol(pth, 1)
+
+
 def gen_lab():
     """CIELab / ICCLab / ITULab. PixCodec converts to sRGB with the textbook D50 Lab -> XYZ -> (Bradford) sRGB maths;
     the reference is LittleCMS (through Pillow's ImageCms: Lab D50 profile -> sRGB profile) applied to the samples
@@ -1385,6 +1517,7 @@ def gen_lab():
     make('cielab8_lzw_planar', u8(L, A & 255, B & 255), 8, 2, compression=LZW, planar=2)
     make('cielab8_alpha', np.concatenate([u8(L, A & 255, B & 255), alpha8], axis=2), 8, 2, extrasamples=[2])
     make('icclab8', u8(L, A + 128, B + 128), 9, 2, compression=DEFLATE, predictor=2)
+    make('cielab8_extra_unspecified', np.concatenate([u8(L, A & 255, B & 255), alpha8], axis=2), 8, 2, extrasamples=[0])
     make('itulab8', u8(L, np.round(A * 255 / 170 + 128).clip(0, 255), np.round(B * 255 / 200 + 96).clip(0, 255)), 10, 12, tile=(16, 16))
     make('cielab16', u16(L * 257, (A * 256) & 0xFFFF, (B * 256) & 0xFFFF), 8, 400)
     make('be_cielab16_deflate', u16(L * 257 + 100, (A * 256 + 77) & 0xFFFF, (B * 256 - 90) & 0xFFFF).clip(0, 65535).astype(np.uint16),
@@ -1975,6 +2108,7 @@ def main():
     gen_lab()
     gen_logluv()
     gen_pixarlog()
+    gen_structures()
     gen_ccitt()
     gen_ccitt_uncompressed()
     gen_ycbcr()
