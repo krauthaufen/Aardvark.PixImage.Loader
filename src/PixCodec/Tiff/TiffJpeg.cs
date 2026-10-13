@@ -40,9 +40,12 @@ namespace PixCodec
                 frame.AsSpan((int)(y * rowSamples), (int)need).CopyTo(dst.Slice((int)(y * need), (int)need));
         }
 
-        /// <summary>Encodes 8-bit interleaved Gray (1) or Rgb (3) pixels as one self-contained JPEG stream (RGB is stored as YCbCr).</summary>
-        public static void Encode(byte[] pixels, int width, int height, int components, JpegEncodeOptions options, Stream output)
-            => Jpeg.Encode(new RawImage(width, height, components == 1 ? ColorModel.Gray : ColorModel.Rgb, pixels), output, options);
+        /// <summary>
+        /// Encodes 8-bit interleaved Gray (1) or Rgb (3) pixels as one self-contained JPEG stream without JFIF / Adobe
+        /// markers, RGB stored as YCbCr with the subsampling <see cref="Jpeg.ResolveSubsampling"/> reports.
+        /// </summary>
+        public static void Encode(ReadOnlySpan<byte> pixels, int width, int height, int components, JpegEncodeOptions options, Stream output)
+            => Jpeg.EncodeForTiff(pixels, width, height, components, options, true, output);
     }
 
     /// <summary>

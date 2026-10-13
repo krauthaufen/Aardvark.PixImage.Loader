@@ -66,10 +66,8 @@ namespace PixCodec
                 {
                     if (type != SampleType.UInt8 || !(image.Color is ColorModel.Gray or ColorModel.Rgb))
                         throw new ArgumentException("JPEG compressed TIFF output needs an 8-bit Gray or Rgb image");
-                    var sub = o.JpegSubsampling;
-                    if (sub == JpegSubsampling.Auto) sub = o.JpegQuality >= 90 ? JpegSubsampling.Chroma444 : JpegSubsampling.Chroma420;
-                    Jpeg = new JpegEncodeOptions { Quality = o.JpegQuality, Subsampling = sub, OptimizeHuffman = true };
-                    if (Spp == 3) (SubH, SubV) = sub switch { JpegSubsampling.Chroma420 => (2, 2), JpegSubsampling.Chroma422 => (2, 1), _ => (1, 1) };
+                    Jpeg = new JpegEncodeOptions { Quality = o.JpegQuality, Subsampling = o.JpegSubsampling, OptimizeHuffman = true };
+                    if (Spp == 3) (SubH, SubV) = PixCodec.Jpeg.ResolveSubsampling(Jpeg);
                 }
                 if (o.Predictor == TiffPredictor.FloatingPoint && !isFloat)
                     throw new ArgumentException("the floating point predictor needs float samples");
