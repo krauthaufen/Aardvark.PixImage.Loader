@@ -1134,9 +1134,7 @@ def read_chunks(path):
         if 'PNG:SubjectPixelWidth' in j and 'scal' in m:
             assert float(m['scal'][1]) == j['PNG:SubjectPixelWidth'], f'{path}: sCAL'
     m.pop('cicp_full_range', None)
-    if list(m) == ['tools']:
-        return {}
-    return m
+    return m   # always carries 'tools', so a caller can tell "chunk absent" from "no tool to look"
 
 
 def gen_meta():
