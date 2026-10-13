@@ -63,7 +63,6 @@ namespace PixCodec.JbigImpl
             public int Tx, Ty;      // adaptive pixel offset, (0, 0) = default position
             public int Lntp = 1;    // lowest layer typical prediction: "line not typical" of the previous line
             public bool Reset;      // the previous stripe ended with SDRST
-            public int NextStripe;
         }
 
         JbigHeader _h;
@@ -152,6 +151,10 @@ namespace PixCodec.JbigImpl
             };
             for (int i = 0; i < 3; i++) count[i] = roles[i] == 0 ? _stripes : roles[i] == 1 ? layers : h.P;
             index.Clear();
+            // First locate every stripe: the stream may bring high layers before the low ones they depend on (HITOLO).
+            var entries = new Sde[layers, h.P][];
+            for (int d = 0; d < layers; d++)
+                for (int p = 0; p < h.P; p++) entries[d, p] = new Sde[_stripes];
             for (long n = 0; n < total; n++)
             {
                 long s = 0; int d = 0, p = 0;
@@ -161,10 +164,23 @@ namespace PixCodec.JbigImpl
                     else if (roles[i] == 1) d = h.HiToLo ? h.D - (int)index[i] : h.DL + (int)index[i];
                     else p = (int)index[i];
                 }
-                pos = DecodeStripe(data, pos, s, d, p);
+                entries[d - h.DL, p][s] = LocateStripe(data, ref pos);
                 for (int i = 2; i >= 0 && ++index[i] == count[i]; i--) index[i] = 0;
             }
+            // then decode layer by layer, plane by plane, top to bottom
+            for (int d = h.DL; d <= h.D; d++)
+                for (int p = 0; p < h.P; p++)
+                    for (long s = 0; s < _stripes; s++)
+                        DecodeStripe(data, entries[d - h.DL, p][s], s, d, p);
             return pos;
+        }
+
+        /// <summary>One stripe data entity: where its coded data lies, how it ends, and the template moves announced in front of it.</summary>
+        struct Sde
+        {
+            public int Start, End;
+            public bool Reset;
+            public (long Line, int Tx, int Ty)[]? Moves;
         }
 
         /// <summary>A NEWLEN marker segment anywhere in the data replaces the image height of the header (T.82 6.2.6.2).</summary>
@@ -225,10 +241,10 @@ namespace PixCodec.JbigImpl
             }
         }
 
-        /// <summary>Reads the marker segments in front of the stripe and the stripe itself; returns the position after it.</summary>
-        int DecodeStripe(ReadOnlySpan<byte> data, int pos, long s, int d, int p)
+        /// <summary>Reads the marker segments in front of a stripe and finds the extent of the stripe itself; advances pos past it.</summary>
+        Sde LocateStripe(ReadOnlySpan<byte> data, ref int pos)
         {
-            _moves.Clear();
+            List<(long, int, int)>? moves = null;
             // floating marker segments
             while (pos + 1 < data.Length && data[pos] == Esc && data[pos + 1] != Stuff)
             {
@@ -237,8 +253,9 @@ namespace PixCodec.JbigImpl
                     case AtMove:
                         if (pos + 8 > data.Length) throw new ImageFormatException("truncated JBIG ATMOVE marker");
                         int tx = (sbyte)data[pos + 6], ty = data[pos + 7];
-                        if (Math.Abs(tx) > _h.MX || ty > _h.MY || (ty == 0 && tx < 0) || _moves.Count == 4) throw new ImageFormatException("invalid JBIG ATMOVE marker");
-                        _moves.Add((JbigHeader.U32(data, pos + 2), tx, ty));
+                        moves ??= new();
+                        if (Math.Abs(tx) > _h.MX || ty > _h.MY || (ty == 0 && tx < 0) || moves.Count == 4) throw new ImageFormatException("invalid JBIG ATMOVE marker");
+                        moves.Add((JbigHeader.U32(data, pos + 2), tx, ty));
                         pos += 8;
                         break;
                     case NewLen:
@@ -274,27 +291,28 @@ namespace PixCodec.JbigImpl
                 if (m == Abort) throw new ImageFormatException("JBIG stream was aborted by its encoder");
                 throw new ImageFormatException("unexpected JBIG marker inside a stripe");
             }
+            var sde = new Sde { Start = pos, End = end, Reset = data[end + 1] == SdRst, Moves = moves?.ToArray() };
+            pos = end + 2;
+            return sde;
+        }
 
+        void DecodeStripe(ReadOnlySpan<byte> data, Sde sde, long s, int d, int p)
+        {
+            _moves.Clear();
+            if (sde.Moves != null) _moves.AddRange(sde.Moves);
             var st = _states[d, p];
             var layer = _layers[d];
-            if (s != st.NextStripe) throw new ImageFormatException("JBIG stripes out of order");
             long y0 = s * layer.LinesPerStripe, y1 = Math.Min(layer.Height, y0 + layer.LinesPerStripe);
             if (y0 < layer.Height)
             {
                 fixed (byte* src = data)
                 {
-                    _coder.Start(src + pos, src + end);
+                    _coder.Start(src + sde.Start, src + sde.End);
                     if (d == 0) DecodeLowest(st, layer, (int)y0, (int)y1);
-                    else
-                    {
-                        var low = _states[d - 1, p];
-                        if (low.NextStripe <= s) throw new ImageFormatException("JBIG resolution layer coded before the layer below it");
-                        DecodeDifferential(st, layer, low, _layers[d - 1], (int)y0, (int)y1);
-                    }
+                    else DecodeDifferential(st, layer, _states[d - 1, p], _layers[d - 1], (int)y0, (int)y1);
                 }
             }
-            st.NextStripe++;
-            st.Reset = data[end + 1] == SdRst;
+            st.Reset = sde.Reset;
             if (st.Reset)
             {
                 // SDRST: the next stripe of this plane and layer starts like the top of an image
@@ -302,7 +320,6 @@ namespace PixCodec.JbigImpl
                 st.Tx = st.Ty = 0;
                 st.Lntp = 1;
             }
-            return end + 2;
         }
 
         /// <summary>Row y of a bitmap for reading; rows above the image, or above a stripe that follows a reset, read as background.</summary>

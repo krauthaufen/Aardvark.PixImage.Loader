@@ -17,6 +17,8 @@ def decode(path):
         return decode_tiff(path)
     if ext == '.exr':
         return decode_exr(path)
+    if ext == '.jbg':
+        return decode_jbig(path)
     if ext in ('.jpg', '.jpeg') and jpeg_needs_turbo3(path):
         import imagecodecs
         with open(path, 'rb') as f:
@@ -50,6 +52,16 @@ def jpeg_needs_turbo3(path):
             break
         i += 2 + ((d[i + 2] << 8) | d[i + 3]) if m not in (0xD8, 0x01, 0xFF) and not 0xD0 <= m <= 0xD7 else 2 if m != 0xFF else 1
     return False
+
+
+def decode_jbig(path):
+    """JBIG1 through jbigkit's jbgtopbm (optional tool, see gen_jbig.py); exit status 77 when it is not available."""
+    import gen_jbig
+    tool = os.path.join(gen_jbig.TOOLS, 'jbgtopbm')
+    if not os.path.exists(tool):
+        sys.exit(77)
+    with open(path, 'rb') as f:
+        return gen_jbig.decode(f.read())
 
 
 def decode_png(im):
