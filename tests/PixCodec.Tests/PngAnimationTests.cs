@@ -599,11 +599,20 @@ public class PngAnimationTests
             }
             if (!alpha) Assert.DoesNotContain(ops, o => o.Blend == PngBlend.Over);
 
-            // third-party decoders show the same frames
+            // third-party decoders show the same frames; 16 bit frames that blend are rendered by libjxl only,
+            // which is fetched by `gen_png.py --fetch-tools` and may be missing
+            if (type == SampleType.UInt16 && ops.Any(o => o.Blend == PngBlend.Over) && !HasLibjxl.Value) continue;
             var oracle = TestUtil.OracleDecode(png, ".anim.png");
             if (oracle != null) TestUtil.AssertEqual(StackVisible(images), oracle);
         }
     }
+
+    static readonly Lazy<bool> HasLibjxl = new(() =>
+    {
+        if (!TestUtil.PythonAvailable) return false;
+        var (exit, output) = TestUtil.RunPython("-c \"import gen_png; print('tool:' + str(bool(gen_png.tool('cjxl') and gen_png.tool('djxl'))))\"");
+        return exit == 0 && output.Contains("tool:True");
+    });
 
     [Fact]
     public void OptimizedFramesHandleTranslucentPixels()
