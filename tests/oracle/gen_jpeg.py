@@ -364,10 +364,112 @@ def round3():
     make('hier_dct2_arith', ['-q', '85', '-a', '-y', '2'], 6, ref='tool', raw=True)
     make('hier_dct2_prog', ['-q', '85', '-v', '-h', '-y', '2'], 6, ref='tool', raw=True)
     make('hier_dct2_arith_prog', ['-q', '85', '-v', '-a', '-y', '2'], 6, ref='tool', raw=True)
-    make('hier_dct2_p12', ['-q', '85', '-h', '-y', '2'], 60, ref='tool', raw=True, bits=12)
     make('hier_dct2_rst', ['-q', '85', '-h', '-y', '2', '-z', '2'], 6, ref='tool', raw=True)
-    # subsampled chroma: the reference decoder interpolates it differently, hence the wide tolerance
-    make('hier_dct2_420', ['-q', '85', '-h', '-y', '2', '-s', '1x1,2x2,2x2'], 40, ref='tool')
+
+    # --- exact references for DCT based hierarchical files, without relying on the reference software's inverse DCT:
+    # with a restart marker after every MCU the DC prediction of an ordinary frame never carries over, so each frame
+    # of the progression - differential ones relabelled as ordinary frames - is a stand-alone JPEG that libjpeg-turbo
+    # decodes. The reference is assembled from those decodes: expanded previous result + (difference frame - level shift).
+    def frame_segments(d):
+        i, segs = 2, []
+        while i < len(d):
+            m = d[i + 1]
+            if m == 0xD9:
+                break
+            e = i + 2 + struct.unpack('>H', d[i + 2:i + 4])[0]
+            if m == 0xDA:
+                while not (d[e] == 0xFF and d[e + 1] != 0 and not 0xD0 <= d[e + 1] <= 0xD7):
+                    e += 1
+            segs.append((m, d[i:e]))
+            i = e
+        return segs
+
+    def expand(src, h, w, eh, ev):
+        # T.82-style 2x expansion of T.81 J.1.1.2 as the reference software applies it: the truncated mean of the
+        # (up to four) nearest reference samples, edges repeated - verified exactly by the lossless files above
+        sh, sw = src.shape[:2]
+        ys, xs = np.arange(h), np.arange(w)
+        y0 = ys >> 1 if ev else ys
+        y1 = np.minimum(y0 + (ys & 1), sh - 1) if ev else y0
+        x0 = xs >> 1 if eh else xs
+        x1 = np.minimum(x0 + (xs & 1), sw - 1) if eh else x0
+        src = src.astype(np.int64)
+        return (src[y0][:, x0] + src[y0][:, x1] + src[y1][:, x0] + src[y1][:, x1]) >> 2
+
+    def hier_exact(name, args, c=3, bits=8, w=47, h=33, seed=5):
+        with tempfile.TemporaryDirectory() as t:
+            src, out = os.path.join(t, 'in.pnm'), os.path.join(t, 'o.jpg')
+            pnm(src, photo16(w, h, c, bits, seed), bits)
+            run([*args, '-z', '1', src, out])
+            with open(out, 'rb') as f:
+                data = f.read()
+        tables, frames, cur, pending = b'', [], None, (0, 0)
+        for m, b in frame_segments(data):
+            if m == 0xDE:
+                continue
+            if m == 0xDF:
+                pending = (b[4] >> 4, b[4] & 15)
+                continue
+            if m in (0xDB, 0xDD, 0xC4, 0xCC):
+                tables += b
+            if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):
+                if cur is not None:
+                    frames.append(cur)
+                cur, pending = [m, pending, b'\xff\xd8' + tables], (0, 0)
+                b = bytes([0xFF, {0xC5: 0xC1, 0xC6: 0xC2, 0xCD: 0xC9, 0xCE: 0xCA}.get(m, m)]) + b[2:]
+            if cur is not None:
+                cur[2] += b
+        frames.append(cur)
+        ref, maxv, center = None, (1 << bits) - 1, 1 << (bits - 1)
+        for m, (eh, ev), f in frames:
+            kw = {} if c == 1 else dict(colorspace='rgb', outcolorspace='rgb')  # components as stored
+            o = ic.jpeg8_decode(f + b'\xff\xd9', **kw).astype(np.int64)
+            if m in (0xC5, 0xC6, 0xCD, 0xCE):
+                # the stand-alone decode clamps difference + level shift to the sample range; real differences are small
+                assert not ((o == 0) | (o == maxv)).any(), name
+                ref = np.clip(expand(ref, o.shape[0], o.shape[1], eh, ev) + o - center, 0, maxv)
+            else:
+                ref = o
+        path = os.path.join(iso, f'{name}.t0.raw.jpg')
+        with open(path, 'wb') as f:
+            f.write(data)
+        write_ref(path + '.ref', ref.astype(np.uint16 if bits > 8 else np.uint8))
+
+    hier_exact('hier_exact_seq', ['-q', '85', '-h', '-y', '2'])
+    hier_exact('hier_exact_arith', ['-q', '85', '-a', '-y', '2'])
+    hier_exact('hier_exact_prog', ['-q', '85', '-v', '-h', '-y', '2'])
+    hier_exact('hier_exact_arith_prog', ['-q', '85', '-v', '-a', '-y', '2'])
+    hier_exact('hier_exact_3levels', ['-q', '85', '-h', '-y', '3'], w=90, h=61)
+    hier_exact('hier_exact_4levels', ['-q', '90', '-h', '-y', '4'], w=101, h=77)
+    hier_exact('hier_exact_p12', ['-q', '85', '-h', '-y', '2'], bits=12)
+    hier_exact('hier_exact_p12_arith', ['-q', '85', '-a', '-y', '3'], bits=12, w=64, h=48)
+    hier_exact('hier_exact_gray', ['-q', '60', '-h', '-y', '2'], c=1)
+    hier_exact('hier_exact_q30', ['-q', '30', '-h', '-y', '2'], w=64, h=64)
+
+    # --- subsampled components: compared plane by plane at component resolution (the reference software writes them
+    # with its -U switch), so no upsampling filter is involved. <name>.planes.t<N>.jpg + <name>...jpg.c<i>.ref
+    def planes(name, args, tol, bits=8, w=47, h=33, seed=5):
+        with tempfile.TemporaryDirectory() as t:
+            src, out, dec = os.path.join(t, 'in.pnm'), os.path.join(t, 'o.jpg'), os.path.join(t, 'u.pnm')
+            pnm(src, photo16(w, h, 3, bits, seed), bits)
+            run([*args, src, out])
+            run(['-c', '-U', out, dec])
+            path = os.path.join(iso, f'{name}.planes.t{tol}.jpg')
+            shutil.copyfile(out, path)
+            for i in range(3):
+                with open(f'{dec}_{i}.h') as f:
+                    fields = f.read().split()  # e.g. PG ML +8 47 33
+                pw, ph = int(fields[3]), int(fields[4])
+                with open(f'{dec}_{i}.raw', 'rb') as f:
+                    a = np.frombuffer(f.read(), dtype='>u2' if bits > 8 else np.uint8).reshape(ph, pw)
+                write_ref(f'{path}.c{i}.ref', a.astype(np.uint16 if bits > 8 else np.uint8))
+
+    planes('hier_ll_420', ['-p', '-c', '-h', '-y', '2', '-s', '1x1,2x2,2x2'], 0)
+    planes('hier_ll_422', ['-p', '-c', '-h', '-y', '2', '-s', '1x1,2x1,2x1'], 0, w=90, h=61)
+    planes('hier_ll_420_p12', ['-p', '-c', '-h', '-y', '2', '-s', '1x1,2x2,2x2'], 0, bits=12)
+    # DCT based: only the reference software's own inverse DCT differs (a few levels)
+    planes('hier_dct_420', ['-q', '85', '-h', '-y', '2', '-s', '1x1,2x2,2x2'], 4)
+    planes('hier_dct_422_arith', ['-q', '85', '-a', '-y', '2', '-s', '1x1,2x1,2x1'], 4)
 
     with open(os.path.join(iso, 'README.txt'), 'w') as f:
         f.write('These JPEG files were produced by tests/oracle/gen_jpeg.py (function round3) by running the ISO/IEC 10918\n'

@@ -10,7 +10,46 @@ public class JpegTests
     public static IEnumerable<object[]> MiscWithRef() => TestUtil.Files("jpeg/misc", ".jpg").Where(f => File.Exists(TestUtil.Fixture((string)f[0]) + ".ref"));
     public static IEnumerable<object[]> Unsupported() => TestUtil.Files("jpeg/unsupported", ".jpg");
 
-    public static IEnumerable<object[]> IsoFixtures() => TestUtil.Files("jpeg/iso", ".jpg");
+    public static IEnumerable<object[]> IsoFixtures() => TestUtil.Files("jpeg/iso", ".jpg").Where(f => !((string)f[0]).Contains(".planes."));
+    public static IEnumerable<object[]> IsoPlaneFixtures() => TestUtil.Files("jpeg/iso", ".jpg").Where(f => ((string)f[0]).Contains(".planes."));
+
+    /// <summary>
+    /// Hierarchical files with subsampled components, compared plane by plane at component resolution against the
+    /// planes the reference software writes: exact for lossless coding, within the inverse DCT difference otherwise.
+    /// (Comparing the final picture would mostly measure two different chroma interpolation filters.)
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(IsoPlaneFixtures))]
+    public unsafe void DecodeReferenceSoftwarePlanes(string file)
+    {
+        var parts = Path.GetFileName(file).Split('.');
+        int tolerance = int.Parse(parts.First(p => p.Length > 1 && p[0] == 't' && char.IsDigit(p[1]))[1..]);
+        var data = Load(file);
+        fixed (byte* p = data)
+        {
+            var d = new PixCodec.JpegImpl.JpegDecoder(p, data.Length);
+            d.Parse(headerOnly: false);
+            Assert.True(d.Hierarchical);
+            for (int i = 0; i < d.Comps.Length; i++)
+            {
+                var expected = TestUtil.LoadRef(TestUtil.Fixture(file) + $".c{i}.ref");
+                var c = d.Comps[i];
+                Assert.Equal((expected.Width, expected.Height), (c.SampledW, c.SampledH));
+                var actual = RawImage.Create(c.SampledW, c.SampledH, ColorModel.Gray, expected.SampleType);
+                for (int y = 0; y < c.SampledH; y++)
+                    for (int x = 0; x < c.SampledW; x++)
+                    {
+                        ushort v = c.Plane16Arr![y * c.Stride + x];
+                        if (expected.SampleType == SampleType.UInt8) actual.GetData<byte>()[y * c.SampledW + x] = (byte)v;
+                        else actual.GetData<ushort>()[y * c.SampledW + x] = v;
+                    }
+                TestUtil.AssertEqual(expected, actual, tolerance);
+            }
+        }
+        // and the public decode gives a picture of the full size
+        var img = Jpeg.Decode(data);
+        Assert.Equal(Jpeg.GetInfo(data).Width, img.Width);
+    }
 
     static byte[] Load(string file) => File.ReadAllBytes(TestUtil.Fixture(file));
 
