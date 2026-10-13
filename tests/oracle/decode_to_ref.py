@@ -64,41 +64,29 @@ def decode_gif(path, im):
     return a
 
 def decode_tiff(path):
-    """Stored samples of the first page as (H,W,C). tifffile reads every layout but, without the optional
-    `imagecodecs` package, neither LZW nor the floating point predictor; those go to libtiff via OpenCV
-    (1 and 3 channels, 4 channels except uint8 where it premultiplies) or Pillow (8-bit).
-    Exits with status 77 when no installed decoder can read the file."""
+    """Samples of one page as (H,W,C), decoded by tifffile + imagecodecs (which reads every sample type, layout and
+    compression PixCodec writes except CCITT). No photometric interpretation is applied, with two exceptions:
+    bilevel (1-bit) pages come from libtiff through ImageMagick as 0 / 255 "as displayed", and JPEG pages come out as
+    RGB. The page is the first one unless the file name ends in `.p<N>.tif`."""
+    import re
     import warnings
     warnings.filterwarnings('ignore')
     import tifffile
+    m = re.search(r'\.p(\d+)\.tiff?$', path)
+    page = int(m.group(1)) if m else 0
     with tifffile.TiffFile(path) as t:
-        pg = t.pages[0]
-        spp, dtype = pg.samplesperpixel, pg.dtype
-        try:
-            a = pg.asarray()
-            if pg.planarconfig == 2 and spp > 1:
-                a = np.moveaxis(a, 0, -1)
-            return a
-        except Exception:
-            pass
-    if spp in (1, 3) or (spp == 4 and dtype.itemsize > 1):
-        try:
-            os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
-            import cv2
-            a = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            if a is not None and a.dtype == dtype and (a.shape[2] if a.ndim == 3 else 1) == spp:
-                return a if spp == 1 else a[:, :, ::-1] if spp == 3 else a[:, :, [2, 1, 0, 3]]
-        except Exception:
-            pass
-    if dtype == np.uint8:
-        try:
-            from PIL import Image
-            im = Image.open(path)
-            if im.mode in ('L', 'LA', 'RGB', 'RGBA') and len(im.getbands()) == spp:
-                return np.asarray(im)
-        except Exception:
-            pass
-    sys.exit(77)
+        pg = t.pages[page]
+        if pg.bitspersample == 1:
+            # libtiff, via ImageMagick (Pillow 11 cannot open big endian BigTIFF, OpenCV stumbles over other pages)
+            import subprocess
+            r = subprocess.run(['magick', f'{path}[{page}]', '-depth', '8', 'gray:-'], capture_output=True)
+            if r.returncode != 0 or len(r.stdout) != pg.imagewidth * pg.imagelength:
+                raise ValueError('ImageMagick cannot read the bilevel page: ' + r.stderr.decode(errors='replace'))
+            return np.frombuffer(r.stdout, np.uint8).reshape(pg.imagelength, pg.imagewidth)
+        a = pg.asarray()
+        if pg.planarconfig == 2 and pg.samplesperpixel > 1:
+            a = np.moveaxis(a, 0, -1)
+        return a
 
 
 def decode_exr(path):

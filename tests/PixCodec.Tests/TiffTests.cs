@@ -364,7 +364,7 @@ public class TiffTests
     static readonly SampleType[] AllTypes =
     {
         SampleType.UInt8, SampleType.UInt16, SampleType.UInt32, SampleType.Int8, SampleType.Int16, SampleType.Int32,
-        SampleType.Float16, SampleType.Float32, SampleType.Float64,
+        SampleType.Float16, SampleType.Float32, SampleType.Float64, SampleType.UInt64, SampleType.Int64,
     };
 
     static readonly (ColorModel color, int channels)[] AllModels =
@@ -408,6 +408,8 @@ public class TiffTests
                 a[0] = float.NaN; if (n > 3) { a[1] = float.NegativeInfinity; a[2] = -0f; }
                 break;
             }
+            case SampleType.UInt64: { var a = (ulong[])img.Data; for (int i = 0; i < n; i++) a[i] = (ulong)(V(i) * uint.MaxValue) << 32 | (uint)rnd.Next(); a[0] = ulong.MaxValue; break; }
+            case SampleType.Int64: { var a = (long[])img.Data; for (int i = 0; i < n; i++) a[i] = (long)((ulong)(V(i) * uint.MaxValue) << 32 | (uint)rnd.Next()); a[0] = long.MinValue; break; }
             default:
             {
                 var a = (double[])img.Data;
@@ -461,6 +463,8 @@ public class TiffTests
                 ("nopred", new TiffEncodeOptions { Predictor = TiffPredictor.None, RowsPerStrip = 7 }),
                 ("hpred", new TiffEncodeOptions { Predictor = TiffPredictor.Horizontal, RowsPerStrip = 7 }),
                 ("serial", new TiffEncodeOptions { Parallel = false, RowsPerStrip = 2 }),
+                ("be", new TiffEncodeOptions { BigEndian = true, RowsPerStrip = 6 }),
+                ("bigbetile", new TiffEncodeOptions { BigEndian = true, BigTiff = true, TileWidth = 16, TileHeight = 16 }),
             };
             foreach (var (name, o) in layouts)
             {
@@ -468,7 +472,8 @@ public class TiffTests
                 var file = Encode(img, o);
                 string what = $"{type} {color}/{channels} {compression} {name}";
                 AssertRoundTrip(img, file, what);
-                Assert.Equal(name.StartsWith("big"), file[2] == 43);
+                Assert.Equal(name.StartsWith("big"), file[2] == 43 || file[3] == 43);
+                Assert.Equal(name.Contains("be") ? (byte)'M' : (byte)'I', file[0]);
 
                 // the same bytes must come out of a write-only, non-seekable stream
                 var ns = new ForwardOnlyStream();
@@ -548,20 +553,21 @@ public class TiffTests
                 }
     }
 
-    /// <summary>Runs tests/oracle/decode_to_ref.py; null when python is missing or no installed decoder reads this variant (exit 77).</summary>
-    static RawImage? Oracle(byte[] encoded, out string error)
+    /// <summary>
+    /// Decodes a file we wrote with the independent decoders of tests/oracle/decode_to_ref.py (tifffile + imagecodecs,
+    /// libtiff through Pillow for bilevel data). Null only when python is not available.
+    /// </summary>
+    static RawImage? Oracle(byte[] encoded, int page = 0)
     {
-        error = "";
         if (!TestUtil.PythonAvailable) return null;
         var tmp = Path.Combine(TestUtil.FixtureDir, "_tmp");
         Directory.CreateDirectory(tmp);
-        var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + ".tif");
+        var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + (page > 0 ? $".p{page}.tif" : ".tif"));
         try
         {
             File.WriteAllBytes(f, encoded);
             var (exit, output) = TestUtil.RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
-            if (exit == 77) return null;
-            if (exit != 0) { error = "oracle decode failed: " + output; return null; }
+            Assert.True(exit == 0, "oracle decode failed: " + output);
             return TestUtil.LoadRef(f + ".ref");
         }
         finally
@@ -570,45 +576,378 @@ public class TiffTests
         }
     }
 
+    /// <summary>Runs a python snippet on a file we wrote and returns what it prints (for tags and EXIF as other libraries see them).</summary>
+    static string? PythonOn(byte[] encoded, string code)
+    {
+        if (!TestUtil.PythonAvailable) return null;
+        var tmp = Path.Combine(TestUtil.FixtureDir, "_tmp");
+        Directory.CreateDirectory(tmp);
+        var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + ".tif");
+        var script = f + ".py";
+        try
+        {
+            File.WriteAllBytes(f, encoded);
+            File.WriteAllText(script, "import sys, warnings\nwarnings.filterwarnings('ignore')\nPATH = sys.argv[1]\n" + code);
+            var (exit, output) = TestUtil.RunPython($"\"{script}\" \"{f}\"");
+            Assert.True(exit == 0, "python failed: " + output);
+            return output.Replace("\r", "").Trim();
+        }
+        finally
+        {
+            File.Delete(f); File.Delete(script);
+        }
+    }
+
     [Fact]
     public void EncodedFilesDecodeWithReferenceDecoders()
     {
         if (!TestUtil.PythonAvailable) return;
+        // every sample type x compression x colour model, the layouts rotating through strips, tiles, BigTIFF,
+        // big endian and the predictor choices
         var cases = new List<(string what, RawImage img, TiffEncodeOptions o)>();
         int k = 0;
         foreach (var type in AllTypes)
             foreach (var comp in AllCompressions)
                 foreach (var (color, channels) in AllModels)
                 {
-                    // rotate through the layouts so that every type x compression x colour model is seen by the oracle
-                    var o = (k++ % 5) switch
+                    var o = (k++ % 7) switch
                     {
                         0 => new TiffEncodeOptions(),
                         1 => new TiffEncodeOptions { RowsPerStrip = 4 },
                         2 => new TiffEncodeOptions { TileWidth = 16, TileHeight = 16 },
                         3 => new TiffEncodeOptions { BigTiff = true, RowsPerStrip = 9 },
-                        _ => new TiffEncodeOptions { Predictor = k % 2 == 0 ? TiffPredictor.Horizontal : TiffPredictor.None, TileWidth = 32, TileHeight = 16, BigTiff = k % 3 == 0 },
+                        4 => new TiffEncodeOptions { Predictor = k % 2 == 0 ? TiffPredictor.Horizontal : TiffPredictor.None, TileWidth = 32, TileHeight = 16, BigTiff = k % 3 == 0 },
+                        5 => new TiffEncodeOptions { BigEndian = true, RowsPerStrip = 5 },
+                        _ => new TiffEncodeOptions { BigEndian = true, BigTiff = k % 2 == 0, TileWidth = 16, TileHeight = 32, Predictor = k % 3 == 0 ? TiffPredictor.Horizontal : TiffPredictor.Auto },
                     };
                     o.Compression = comp;
-                    cases.Add(($"{type} {color}/{channels} {comp} #{k % 5}", MakeImage(29, 19, color, type, channels), o));
+                    cases.Add(($"{type} {color}/{channels} {comp} #{k % 7}", MakeImage(29, 19, color, type, channels), o));
                 }
         var failures = new System.Collections.Concurrent.ConcurrentBag<string>();
-        int verified = 0, unreadable = 0;
-        Parallel.ForEach(cases, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(2, Environment.ProcessorCount / 2) }, c =>
+        int verified = 0;
+        Parallel.ForEach(cases, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(2, Environment.ProcessorCount) }, c =>
         {
-            var file = Encode(c.img, c.o);
-            var o = Oracle(file, out var error);
-            if (error.Length > 0) { failures.Add($"{c.what}: {error}"); return; }
-            if (o == null) { Interlocked.Increment(ref unreadable); return; }
-            Interlocked.Increment(ref verified);
-            if (o.SampleType != c.img.SampleType || (o.Width, o.Height, o.Channels) != (c.img.Width, c.img.Height, c.img.Channels))
-                failures.Add($"{c.what}: oracle sees {o.Width}x{o.Height}x{o.Channels} {o.SampleType}");
-            else if (!o.GetBytes().SequenceEqual(c.img.GetBytes()))
-                failures.Add($"{c.what}: oracle decodes different samples");
+            try
+            {
+                var o = Oracle(Encode(c.img, c.o))!;
+                Interlocked.Increment(ref verified);
+                if (o.SampleType != c.img.SampleType || (o.Width, o.Height, o.Channels) != (c.img.Width, c.img.Height, c.img.Channels))
+                    failures.Add($"{c.what}: oracle sees {o.Width}x{o.Height}x{o.Channels} {o.SampleType}");
+                else if (!o.GetBytes().SequenceEqual(c.img.GetBytes()))
+                    failures.Add($"{c.what}: oracle decodes different samples");
+            }
+            catch (Exception e) { failures.Add($"{c.what}: {e.Message}"); }
         });
-        Assert.True(failures.IsEmpty, string.Join("\n", failures.Take(20)));
-        // Most variants must really have been checked (the rest - e.g. LZW with 2 or 6 channels - has no reader here).
-        Assert.True(verified >= cases.Count * 6 / 10, $"only {verified} of {cases.Count} variants were readable by the oracle ({unreadable} skipped)");
+        Assert.True(failures.IsEmpty, $"{failures.Count} of {cases.Count} failed:\n" + string.Join("\n", failures.Take(20)));
+        Assert.Equal(cases.Count, verified); // every single variant was read back by an independent decoder
+    }
+
+    // ------------------------------------------------------------------------------------------ bilevel, CCITT, JPEG
+
+    /// <summary>A black on white page: text like blobs, long runs, thin lines.</summary>
+    static RawImage MakeBilevel(int w, int h, int seed)
+    {
+        var img = RawImage.Create(w, h, ColorModel.Gray, SampleType.UInt8);
+        var a = img.GetData<byte>();
+        Array.Fill(a, (byte)255);
+        var rnd = new Random(seed);
+        for (int i = 0; i < Math.Max(3, w * h / 300); i++)
+        {
+            int x = rnd.Next(w), y = rnd.Next(h), rw = 1 + rnd.Next(Math.Max(1, w / 6)), rh = 1 + rnd.Next(4);
+            for (int yy = y; yy < Math.Min(h, y + rh); yy++)
+                for (int xx = x; xx < Math.Min(w, x + rw); xx++) a[yy * w + xx] = 0;
+        }
+        for (int i = 0; i < w * h / 40; i++) a[rnd.Next(a.Length)] = (byte)(rnd.Next(2) * 255);
+        if (h > 4) for (int x = 0; x < w; x++) a[(h / 2) * w + x] = 0; // a full black row
+        return img;
+    }
+
+    [Theory]
+    [InlineData(TiffCompression.CcittGroup4)]
+    [InlineData(TiffCompression.None)]
+    [InlineData(TiffCompression.Lzw)]
+    [InlineData(TiffCompression.Deflate)]
+    [InlineData(TiffCompression.PackBits)]
+    public void EncodesBilevel(TiffCompression compression)
+    {
+        var sizes = new[] { (1, 1), (7, 3), (8, 8), (203, 61), (2700, 9), (331, 50), (64, 64) };
+        foreach (var (w, h) in sizes)
+            foreach (var layout in new[] { "strip", "strips", "tiles", "be" })
+            {
+                var img = MakeBilevel(w, h, w + h);
+                if (w == 8) Array.Fill(img.GetData<byte>(), (byte)0);          // all black
+                if (w == 64) Array.Fill(img.GetData<byte>(), (byte)255);       // all white
+                // gray input is thresholded at 128
+                var gray = MakeBilevel(w, h, w + h);
+                var g = gray.GetData<byte>();
+                if (w != 8 && w != 64) for (int i = 0; i < g.Length; i++) g[i] = (byte)(g[i] == 0 ? i % 128 : 128 + i % 128);
+                else g.AsSpan().Fill(img.GetData<byte>()[0]);
+                var o = new TiffEncodeOptions { Compression = compression, Bilevel = true };
+                if (layout == "strips") o.RowsPerStrip = 7;
+                if (layout == "tiles") { o.TileWidth = 32; o.TileHeight = 16; }
+                if (layout == "be") { o.BigEndian = true; o.BigTiff = true; }
+                var file = Encode(gray, o);
+                string what = $"{compression} {w}x{h} {layout}";
+                var tags = Tiff.ReadTags(file);
+                Assert.Equal(1, tags.Single(t => t.Id == 258).AsIntegers()[0]);
+                Assert.Equal(compression == TiffCompression.CcittGroup4 ? 0 : 1, tags.Single(t => t.Id == 262).AsIntegers()[0]);
+                var back = Tiff.Decode(file);
+                Assert.True(back.Color == ColorModel.Gray && back.SampleType == SampleType.UInt8, what);
+                Assert.True(img.GetData<byte>().AsSpan().SequenceEqual(back.GetData<byte>()), what + ": round trip differs");
+                var ns = new ForwardOnlyStream();
+                Tiff.Encode(gray, ns, o);
+                Assert.True(file.AsSpan().SequenceEqual(ns.ToArray()), what + ": non-seekable output differs");
+                if (layout == "strips" || w == 2700 || w == 1)
+                {
+                    // libtiff (through Pillow) shows the same picture
+                    var oracle = Oracle(file);
+                    if (oracle != null) Assert.True(img.GetData<byte>().AsSpan().SequenceEqual(oracle.GetData<byte>()), what + ": libtiff decodes a different picture");
+                }
+            }
+        // a 1-bit file is much smaller, and Group 4 smaller still
+        var page = MakeBilevel(800, 600, 5);
+        int bilevel = Encode(page, new TiffEncodeOptions { Compression = compression, Bilevel = true }).Length;
+        Assert.True(bilevel < 800 * 600 / 8 + 2000);
+        if (compression == TiffCompression.CcittGroup4) Assert.True(bilevel < 800 * 600 / 16);
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Rgb, SampleType.UInt8, 3), new TiffEncodeOptions { Compression = compression, Bilevel = true }));
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Gray, SampleType.UInt16, 1), new TiffEncodeOptions { Compression = compression, Bilevel = true }));
+    }
+
+    /// <summary>Smooth photo like content (JPEG is compared by PSNR).</summary>
+    static RawImage MakeSmooth(int w, int h, int channels)
+    {
+        var img = RawImage.Create(w, h, channels == 1 ? ColorModel.Gray : ColorModel.Rgb, SampleType.UInt8);
+        var a = img.GetData<byte>();
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                for (int c = 0; c < channels; c++)
+                    a[(y * w + x) * channels + c] = (byte)(128 + 100 * Math.Sin(x / (23.0 + 5 * c) + c) * Math.Cos(y / (19.0 + 3 * c)));
+        return img;
+    }
+
+    [Theory]
+    [InlineData(1, JpegSubsampling.Auto, 90, 0)]
+    [InlineData(1, JpegSubsampling.Auto, 60, 32)]
+    [InlineData(3, JpegSubsampling.Auto, 92, 0)]
+    [InlineData(3, JpegSubsampling.Auto, 75, 0)]
+    [InlineData(3, JpegSubsampling.Chroma444, 80, 64)]
+    [InlineData(3, JpegSubsampling.Chroma422, 85, 0)]
+    [InlineData(3, JpegSubsampling.Chroma420, 85, 48)]
+    public void EncodesJpegCompressed(int channels, JpegSubsampling subsampling, int quality, int tile)
+    {
+        var img = MakeSmooth(203, 131, channels);
+        var o = new TiffEncodeOptions { Compression = TiffCompression.Jpeg, JpegQuality = quality, JpegSubsampling = subsampling, TileWidth = tile, TileHeight = tile, RowsPerStrip = 40 };
+        var file = Encode(img, o);
+        var tags = Tiff.ReadTags(file);
+        long Tag(int id) => tags.Single(t => t.Id == id).AsIntegers()[0];
+        Assert.Equal(7, Tag(259));
+        Assert.Equal(channels == 3 ? 6 : 1, Tag(262));
+        if (channels == 3)
+        {
+            var expected = subsampling switch
+            {
+                JpegSubsampling.Chroma444 => new long[] { 1, 1 },
+                JpegSubsampling.Chroma422 => new long[] { 2, 1 },
+                JpegSubsampling.Chroma420 => new long[] { 2, 2 },
+                _ => quality >= 90 ? new long[] { 1, 1 } : new long[] { 2, 2 },
+            };
+            Assert.Equal(expected, tags.Single(t => t.Id == 530).AsIntegers());
+        }
+        if (tile == 0) Assert.Equal(0, Tag(278) % 16); // strips hold whole MCU rows
+        var back = Tiff.Decode(file);
+        Assert.Equal((img.Width, img.Height, img.Channels, img.Color), (back.Width, back.Height, back.Channels, back.Color));
+        Assert.True(TestUtil.Psnr(img, back, 255) > 34, $"PSNR {TestUtil.Psnr(img, back, 255):F1}");
+        TestUtil.AssertEqual(back, Tiff.Decode(file, ForcedParallel()));
+        Assert.True(file.Length < img.GetBytes().Length / 3);
+        var ns = new ForwardOnlyStream();
+        Tiff.Encode(img, ns, o);
+        Assert.True(file.AsSpan().SequenceEqual(ns.ToArray()));
+        // libjpeg-turbo (tifffile + imagecodecs) decodes our file to exactly the same samples as we do
+        var oracle = Oracle(file);
+        if (oracle != null) TestUtil.AssertEqual(oracle, back);
+
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(16, 16, ColorModel.Rgba, SampleType.UInt8, 4), o));
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(16, 16, ColorModel.Gray, SampleType.UInt16, 1), o));
+    }
+
+    // ------------------------------------------------------------------------------------------ multi-page, tags, EXIF
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void EncodesMultiPage(bool big, bool bigEndian)
+    {
+        var main = MakeImage(64, 48, ColorModel.Rgb, SampleType.UInt16, 3);
+        var pages = new List<TiffPage>
+        {
+            new(main),
+            new(MakeImage(32, 24, ColorModel.Rgb, SampleType.UInt16, 3, 2)) { ReducedResolution = true },
+            new(MakeImage(16, 12, ColorModel.Rgb, SampleType.UInt16, 3, 3), new TiffEncodeOptions { Compression = TiffCompression.Lzw, TileWidth = 16, TileHeight = 16 }) { ReducedResolution = true },
+            new(MakeImage(21, 13, ColorModel.Gray, SampleType.Float32, 1), new TiffEncodeOptions { Compression = TiffCompression.None }),
+            new(MakeBilevel(40, 30, 1), new TiffEncodeOptions { Compression = TiffCompression.CcittGroup4 }),
+            new(MakeImage(9, 7, ColorModel.Other, SampleType.Int64, 5), new TiffEncodeOptions { Compression = TiffCompression.PackBits }),
+        };
+        var o = new TiffEncodeOptions { BigTiff = big, BigEndian = bigEndian };
+        var ms = new MemoryStream();
+        Tiff.Encode(pages, ms, o);
+        var file = ms.ToArray();
+        Assert.Equal(bigEndian ? (byte)'M' : (byte)'I', file[0]);
+        Assert.Equal(pages.Count, Tiff.GetImageCount(file));
+        var infos = Tiff.GetInfos(file);
+        for (int i = 0; i < pages.Count; i++)
+        {
+            var src = pages[i].Image;
+            var back = Tiff.Decode(file, new TiffDecodeOptions { ImageIndex = i });
+            Assert.Equal((src.Width, src.Height, src.Channels, src.SampleType), (infos[i].Width, infos[i].Height, infos[i].Channels, infos[i].SampleType));
+            Assert.True(src.GetBytes().SequenceEqual(back.GetBytes()), $"page {i} differs");
+            var tags = Tiff.ReadTags(file, i);
+            Assert.Equal(pages[i].ReducedResolution, tags.Any(t => t.Id == 254 && t.AsIntegers()[0] == 1));
+            var oracle = Oracle(file, i);
+            if (oracle != null) Assert.True(src.GetBytes().SequenceEqual(oracle.GetBytes()), $"page {i}: independent decoder disagrees");
+        }
+        // same bytes on a non-seekable stream, and when the pages come from a lazy sequence
+        var ns = new ForwardOnlyStream();
+        Tiff.Encode(pages, ns, o);
+        Assert.True(file.AsSpan().SequenceEqual(ns.ToArray()));
+        int pulled = 0;
+        IEnumerable<TiffPage> Lazy() { foreach (var p in pages) { pulled++; yield return p; } }
+        var lazy = new MemoryStream();
+        Tiff.Encode(Lazy(), lazy, o);
+        Assert.Equal(pages.Count, pulled);
+        Assert.True(file.AsSpan().SequenceEqual(lazy.ToArray()));
+
+        // the RawImage overload, with automatic BigTIFF choice
+        var simple = new MemoryStream();
+        Tiff.Encode(pages.Take(2).Select(p => p.Image), simple, new TiffEncodeOptions { BigEndian = bigEndian });
+        Assert.Equal(2, Tiff.GetImageCount(simple.ToArray()));
+        Assert.Throws<ArgumentException>(() => Tiff.Encode(Array.Empty<TiffPage>(), new MemoryStream()));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void WritesExtraTags(bool big, bool bigEndian)
+    {
+        var img = MakeImage(40, 30, ColorModel.Gray, SampleType.Float32, 1);
+        img.Metadata = new ImageMetadata { DpiX = 96, DpiY = 96 };
+        var o = new TiffEncodeOptions { BigTiff = big, BigEndian = bigEndian, TileWidth = 16, TileHeight = 16 };
+        o.ExtraTags.Add(TiffTag.Doubles(33550, 0.5, 0.5, 0.0));                                   // ModelPixelScale
+        o.ExtraTags.Add(TiffTag.Doubles(33922, 0, 0, 0, 600000.0, 5300000.0, 0));                 // ModelTiepoint
+        o.ExtraTags.Add(TiffTag.Shorts(34735, 1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, 32633)); // GeoKeyDirectory
+        o.ExtraTags.Add(TiffTag.Ascii(42113, "-9999"));                                            // GDAL_NODATA
+        o.ExtraTags.Add(TiffTag.Ascii(305, "PixCodec test"));
+        o.ExtraTags.Add(TiffTag.Rationals(282, 72.5));                                             // overrides the metadata resolution
+        o.ExtraTags.Add(TiffTag.Longs(65000, 1, 2, 4000000000));
+        o.ExtraTags.Add(new TiffTag(65001, TiffTagType.SShort, new short[] { -3, 7 }));
+        o.ExtraTags.Add(new TiffTag(65002, TiffTagType.SRational, new[] { -0.25, 3.0 }));
+        o.ExtraTags.Add(new TiffTag(65003, TiffTagType.Float, new[] { 1.5f }));
+        o.ExtraTags.Add(TiffTag.Bytes(65004, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
+        o.ExtraTags.Add(new TiffTag(65005, TiffTagType.SLong, new[] { -70000 }));
+        o.ExtraTags.Add(new TiffTag(65006, TiffTagType.Byte, new byte[] { 200 }));
+        o.ExtraTags.Add(new TiffTag(65007, TiffTagType.SByte, new sbyte[] { -5, 5 }));
+        if (big) o.ExtraTags.Add(new TiffTag(65008, TiffTagType.Long8, new[] { 1UL << 40 }));
+        var file = Encode(img, o);
+        AssertRoundTrip(img, file, "tags");
+
+        var tags = Tiff.ReadTags(file);
+        TiffTag Get(int id) => tags.Single(t => t.Id == id);
+        Assert.Equal(new[] { 0.5, 0.5, 0.0 }, (double[])Get(33550).Value);
+        Assert.Equal(new[] { 0, 0, 0, 600000.0, 5300000.0, 0 }, Get(33922).AsDoubles());
+        Assert.Equal(32633, ((ushort[])Get(34735).Value)[15]);
+        Assert.Equal("-9999", Get(42113).AsString());
+        Assert.Equal("PixCodec test", Get(305).AsString());
+        Assert.Equal(72.5, Get(282).AsDoubles()[0]);
+        Assert.Equal(96, Get(283).AsDoubles()[0]);
+        Assert.Equal(new uint[] { 1, 2, 4000000000 }, (uint[])Get(65000).Value);
+        Assert.Equal(new short[] { -3, 7 }, (short[])Get(65001).Value);
+        Assert.Equal(new[] { -0.25, 3.0 }, (double[])Get(65002).Value);
+        Assert.Equal(1.5f, ((float[])Get(65003).Value)[0]);
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 }, Get(65004).AsBytes());
+        Assert.Equal(-70000, ((int[])Get(65005).Value)[0]);
+        Assert.Equal(new sbyte[] { -5, 5 }, (sbyte[])Get(65007).Value);
+        if (big) Assert.Equal(1UL << 40, ((ulong[])Get(65008).Value)[0]);
+        Assert.Equal(tags.Select(t => t.Id).OrderBy(i => i), tags.Select(t => t.Id)); // sorted, as the format demands
+
+        // tifffile sees the same GeoTIFF tags
+        var seen = PythonOn(file, "import tifffile\nt = tifffile.TiffFile(PATH).pages[0].tags\n" +
+            "print(list(t[33550].value), list(t[33922].value)[3:5], list(t[34735].value)[-1], t[42113].value, t[305].value, t[282].value, list(t[65002].value))");
+        if (seen != null) Assert.Equal("[0.5, 0.5, 0.0] [600000.0, 5300000.0] 32633 -9999 PixCodec test (145, 2) [-1, 4, 3, 1]", seen);
+
+        // tags that describe the pixel layout belong to the encoder
+        foreach (int id in new[] { 256, 258, 259, 273, 277, 322, 339 })
+        {
+            var bad = new TiffEncodeOptions();
+            bad.ExtraTags.Add(TiffTag.Longs(id, 1));
+            Assert.Throws<ArgumentException>(() => Encode(img, bad));
+        }
+        var needsBig = new TiffEncodeOptions { BigTiff = false };
+        needsBig.ExtraTags.Add(new TiffTag(65008, TiffTagType.Long8, new[] { 1UL }));
+        Assert.Throws<ArgumentException>(() => Encode(img, needsBig));
+        Assert.Throws<ArgumentException>(() => new TiffTag(1, TiffTagType.Short, new short[] { 1 }));
+        Assert.Throws<ArgumentException>(() => new TiffTag(1, TiffTagType.Byte, new sbyte[] { 1 }));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void ExifTravelsThroughTiff(bool big, bool bigEndian)
+    {
+        // EXIF made by Pillow: IFD0 tags, an Exif directory with rationals and an interoperability directory, GPS
+        var made = PythonOn(Array.Empty<byte>(), string.Join("\n",
+            "from PIL import Image",
+            "from PIL.TiffImagePlugin import IFDRational as R",
+            "e = Image.Exif()",
+            "e[0x010F] = 'PixCam'; e[0x0110] = 'Model X'; e[0x0132] = '2026:10:13 12:00:00'; e[0x0112] = 6",
+            "x = e.get_ifd(0x8769); x[0x829A] = R(1, 3); x[0x9003] = '2026:10:13 11:59:58'; x[0x8827] = 400; x[0x920A] = R(35, 1); x[0x9286] = b'ASCII\\x00\\x00\\x00hello'",
+            "g = e.get_ifd(0x8825); g[1] = 'N'; g[2] = (R(48, 1), R(12, 1), R(3099, 100)); g[3] = 'E'; g[4] = (R(16, 1), R(22, 1), R(0, 1))",
+            "sys.stdout.write(e.tobytes().hex())"));
+        if (made == null) return;
+        var exif = Convert.FromHexString(made);
+        if (exif.AsSpan(0, 4).SequenceEqual("Exif"u8)) exif = exif.AsSpan(6).ToArray();
+
+        var img = MakeImage(31, 17, ColorModel.Rgb, SampleType.UInt8, 3);
+        img.Metadata = new ImageMetadata { Exif = exif };
+        var file = Encode(img, new TiffEncodeOptions { BigTiff = big, BigEndian = bigEndian });
+        AssertRoundTrip(img, file, "exif");
+
+        // tifffile reads the EXIF and GPS directories of our TIFF, fractions intact
+        string dump = string.Join("\n",
+            "import tifffile",
+            "p = tifffile.TiffFile(PATH).pages[0]; x = p.tags[34665].value; g = p.tags[34853].value",
+            "print(p.tags[271].value, p.tags[272].value, p.tags[306].value, int(p.tags[274].value), x['ExposureTime'], x['DateTimeOriginal'], x['ISOSpeedRatings'], x['FocalLength'], x['UserComment'], g['GPSLatitudeRef'], g['GPSLatitude'], g['GPSLongitudeRef'], g['GPSLongitude'])");
+        var seen = PythonOn(file, dump);
+        Assert.Equal("PixCam Model X 2026:10:13 12:00:00 6 (1, 3) 2026:10:13 11:59:58 400 (35, 1) hello N (48, 1, 12, 1, 3099, 100) E (16, 1, 22, 1, 0, 1)", seen);
+        if (!big)
+        {
+            // so does Pillow (which cannot follow the directories of a BigTIFF)
+            var pil = PythonOn(file, "from PIL import Image\ne = Image.open(PATH).getexif(); x = e.get_ifd(0x8769); g = e.get_ifd(0x8825)\n" +
+                "print(e[0x010F], e[0x0112], float(x[0x829A]), x[0x8827], g[1], [float(v) for v in g[2]])");
+            Assert.Equal("PixCam 6 0.3333333333333333 400 N [48.0, 12.0, 30.99]", pil);
+        }
+
+        // and it comes back as an EXIF blob: orientation in the metadata, the directories intact
+        var back = Tiff.Decode(file);
+        Assert.Equal(6, back.Metadata!.Orientation);
+        var blob = back.Metadata.Exif!;
+        Assert.NotNull(blob);
+        var ifd0 = Tiff.ReadTags(blob);
+        Assert.Equal("PixCam", ifd0.Single(t => t.Id == 0x010F).AsString());
+        Assert.Equal("2026:10:13 12:00:00", ifd0.Single(t => t.Id == 0x0132).AsString());
+        Assert.Contains(ifd0, t => t.Id == 34665);
+        Assert.Contains(ifd0, t => t.Id == 34853);
+        // through a second generation (TIFF -> EXIF blob -> TIFF) Pillow still sees everything
+        img.Metadata = new ImageMetadata { Exif = blob };
+        Assert.Equal(seen, PythonOn(Encode(img, new TiffEncodeOptions { Compression = TiffCompression.Lzw }), dump));
+
+        // an image without EXIF directories has no EXIF blob
+        Assert.Null(Tiff.Decode(Encode(MakeImage(4, 4, ColorModel.Gray, SampleType.UInt8, 1))).Metadata!.Exif);
+        // a broken blob is ignored rather than failing the encode
+        img.Metadata = new ImageMetadata { Exif = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 } };
+        AssertRoundTrip(img, Encode(img), "broken exif");
     }
 
     sealed class ForwardOnlyStream : Stream

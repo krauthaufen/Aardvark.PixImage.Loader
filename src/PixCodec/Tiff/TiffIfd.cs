@@ -49,6 +49,9 @@ namespace PixCodec
             while (den < 1_000_000_000 && Math.Abs(v) * den * 10 <= limit && Math.Abs(v * den - Math.Round(v * den)) > 1e-9 * Math.Max(1, Math.Abs(v * den))) den *= 10;
             if (Math.Abs(v) * den > limit) { num = (long)(Math.Sign(v) * limit); den = 1; return; }
             num = (long)Math.Round(v * den);
+            long a = Math.Abs(num), b = den;
+            while (b != 0) (a, b) = (b, a % b);
+            if (a > 1) { num /= a; den /= a; }
         }
 
         /// <summary>Converts a caller supplied tag. Types that only exist in BigTIFF are refused for classic files.</summary>
