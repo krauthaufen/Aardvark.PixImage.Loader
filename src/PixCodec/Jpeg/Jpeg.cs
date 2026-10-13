@@ -323,6 +323,39 @@ namespace PixCodec
             DecodeForTiff(tables, stream, width, height, components, convertYCbCrToRgb, destination);
         }
 
+        /// <summary>
+        /// Encodes one strip or tile for a JPEG compressed TIFF: width x height pixels with 1 or 3 interleaved 8 bit
+        /// components become a complete, self-contained baseline stream (own DQT / DHT, no JFIF, Adobe or EXIF segments,
+        /// component ids 1, 2, 3). Quality, Subsampling, OptimizeHuffman and RestartInterval of the options apply;
+        /// Progressive, Lossless and Precision are ignored. With <paramref name="rgbToYCbCr"/> three components are
+        /// converted to YCbCr and subsampled as <see cref="ResolveSubsampling"/> says; without, they are stored as they
+        /// are at full resolution. Thread safe.
+        /// </summary>
+        internal static void EncodeForTiff(ReadOnlySpan<byte> pixels, int width, int height, int components, JpegEncodeOptions options, bool rgbToYCbCr, Stream output)
+            => JpegEncoder.EncodeForTiff(TiffImage(pixels.ToArray(), pixels.Length, width, height, components), output, TiffOptions(options), !rgbToYCbCr);
+
+        /// <summary>The 12 bit variant: samples 0..4095, written as an extended sequential (SOF1) stream with optimized tables.</summary>
+        internal static void EncodeForTiff(ReadOnlySpan<ushort> pixels, int width, int height, int components, JpegEncodeOptions options, bool rgbToYCbCr, Stream output)
+            => JpegEncoder.EncodeForTiff(TiffImage(pixels.ToArray(), pixels.Length, width, height, components), output, TiffOptions(options), !rgbToYCbCr);
+
+        /// <summary>Horizontal and vertical chroma subsampling a color encode with these options uses (what Auto resolves to).</summary>
+        internal static (int H, int V) ResolveSubsampling(JpegEncodeOptions options)
+        {
+            var ss = options.Subsampling;
+            if (ss == JpegSubsampling.Auto) ss = Math.Clamp(options.Quality, 1, 100) >= 90 ? JpegSubsampling.Chroma444 : JpegSubsampling.Chroma420;
+            return ss == JpegSubsampling.Chroma444 ? (1, 1) : ss == JpegSubsampling.Chroma422 ? (2, 1) : (2, 2);
+        }
+
+        static RawImage TiffImage(Array pixels, int length, int width, int height, int components)
+        {
+            if (components != 1 && components != 3) throw new ArgumentException("JPEG in TIFF is encoded from 1 or 3 components");
+            if (width <= 0 || height <= 0 || length != (long)width * height * components) throw new ArgumentException("pixels do not match width x height x components");
+            return new RawImage(width, height, components == 1 ? ColorModel.Gray : ColorModel.Rgb, pixels);
+        }
+
+        static JpegEncodeOptions TiffOptions(JpegEncodeOptions o)
+            => new JpegEncodeOptions { Quality = o.Quality, Subsampling = o.Subsampling, OptimizeHuffman = o.OptimizeHuffman, RestartInterval = o.RestartInterval };
+
         /// <summary>Encodes an image as JPEG to the stream (which only needs to be writable, not seekable).</summary>
         public static void Encode(RawImage image, Stream output, JpegEncodeOptions? options = null)
             => JpegEncoder.Encode(image, output, options ?? new JpegEncodeOptions());

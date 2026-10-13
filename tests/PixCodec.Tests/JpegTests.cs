@@ -476,6 +476,77 @@ public class JpegTests
         });
     }
 
+    /// <summary>Strips for TiffCompression.Jpeg: bare self-contained streams, YCbCr or untransformed, 8 and 12 bit.</summary>
+    [Theory]
+    [InlineData(1, true, JpegSubsampling.Auto, 85, true, 0)]
+    [InlineData(3, true, JpegSubsampling.Auto, 85, true, 0)]
+    [InlineData(3, true, JpegSubsampling.Auto, 95, false, 4)]
+    [InlineData(3, true, JpegSubsampling.Chroma422, 80, false, 0)]
+    [InlineData(3, true, JpegSubsampling.Chroma444, 80, true, 2)]
+    [InlineData(3, false, JpegSubsampling.Chroma420, 90, true, 0)]
+    [InlineData(3, false, JpegSubsampling.Auto, 60, false, 3)]
+    public void EncodeForTiff(int components, bool ycc, JpegSubsampling ss, int quality, bool optimize, int restart)
+    {
+        var opt = new JpegEncodeOptions { Quality = quality, Subsampling = ss, OptimizeHuffman = optimize, RestartInterval = restart, Progressive = true, Lossless = true };
+        var expectedSub = ss == JpegSubsampling.Chroma444 || (ss == JpegSubsampling.Auto && quality >= 90) ? (1, 1) : ss == JpegSubsampling.Chroma422 ? (2, 1) : (2, 2);
+        Assert.Equal(expectedSub, Jpeg.ResolveSubsampling(opt));
+        foreach (var (w, h) in new[] { (67, 45), (16, 16), (1, 1), (130, 9) })
+        {
+            var src = Synthetic(w, h, components == 1 ? ColorModel.Gray : ColorModel.Rgb, seed: w + quality);
+            var px = src.GetData<byte>();
+            using var ms = new MemoryStream();
+            Jpeg.EncodeForTiff(px, w, h, components, opt, ycc, ms);
+            var bytes = ms.ToArray();
+
+            // baseline, no application segments, the declared sampling
+            var info = Jpeg.GetTiffStreamInfo(bytes);
+            Assert.Equal((w, h, components, 8, false), info);
+            Assert.True(bytes.AsSpan(0, 4).SequenceEqual(new byte[] { 0xFF, 0xD8, 0xFF, 0xDB }));
+            int sof = bytes.AsSpan().IndexOf(new byte[] { 0xFF, 0xC0 });
+            Assert.True(sof > 0);
+            if (components == 3)
+            {
+                var (sh, sv) = ycc ? expectedSub : (1, 1);
+                Assert.Equal(new byte[] { 1, (byte)(sh << 4 | sv), 2, 0x11, 3, 0x11 }, new[] { bytes[sof + 10], bytes[sof + 11], bytes[sof + 13], bytes[sof + 14], bytes[sof + 16], bytes[sof + 17] });
+            }
+
+            var back = new byte[px.Length];
+            Jpeg.DecodeForTiff((JpegTiffTables?)null, bytes, w, h, components, ycc && components == 3, back);
+            var decoded = new RawImage(w, h, src.Color, back);
+            if (w >= 16 && h >= 16) Assert.True(TestUtil.Psnr(src, decoded, 255) > (ycc && expectedSub != (1, 1) ? 23 : 27), $"{w}x{h}: {TestUtil.Psnr(src, decoded, 255):F1} dB");
+
+            // an independent decoder sees the same samples; without markers it takes 3 components for YCbCr
+            var oracle = TestUtil.OracleDecode(bytes, ".jpg");
+            if (oracle == null) continue;
+            var asYcc = new byte[px.Length];
+            Jpeg.DecodeForTiff((JpegTiffTables?)null, bytes, w, h, components, components == 3, asYcc);
+            Assert.Equal(oracle.GetData<byte>(), asYcc);
+        }
+
+        // 12 bit strips
+        var wide = Synthetic16(40, 24, components == 1 ? ColorModel.Gray : ColorModel.Rgb, 12, seed: quality);
+        using var ms12 = new MemoryStream();
+        Jpeg.EncodeForTiff(wide.GetData<ushort>(), 40, 24, components, opt, ycc, ms12);
+        Assert.Equal((40, 24, components, 12, false), Jpeg.GetTiffStreamInfo(ms12.ToArray()));
+        var back12 = new ushort[40 * 24 * components];
+        Jpeg.DecodeForTiff(null, ms12.ToArray(), 40, 24, components, ycc && components == 3, back12);
+        Assert.True(TestUtil.Psnr(wide, new RawImage(40, 24, wide.Color, back12), 4095) > 23);
+
+        Assert.Throws<ArgumentException>(() => Jpeg.EncodeForTiff(new byte[10], 2, 2, 2, opt, false, new MemoryStream()));
+        Assert.Throws<ArgumentException>(() => Jpeg.EncodeForTiff(new byte[10], 2, 2, 3, opt, false, new MemoryStream()));
+
+        // concurrent strips
+        var strip = Synthetic(64, 16, components == 1 ? ColorModel.Gray : ColorModel.Rgb).GetData<byte>();
+        using var first = new MemoryStream();
+        Jpeg.EncodeForTiff(strip, 64, 16, components, opt, ycc, first);
+        Parallel.For(0, 32, _ =>
+        {
+            using var m = new MemoryStream();
+            Jpeg.EncodeForTiff(strip, 64, 16, components, opt, ycc, m);
+            Assert.Equal(first.ToArray(), m.ToArray());
+        });
+    }
+
     // ------------------------------------------------------------------ robustness
 
     static void DecodeDamaged(ReadOnlySpan<byte> data, string what)
