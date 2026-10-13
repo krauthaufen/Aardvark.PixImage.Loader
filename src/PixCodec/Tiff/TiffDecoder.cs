@@ -746,7 +746,9 @@ namespace PixCodec
             }
         }
 
-        /// <summary>Decompresses the first <paramref name="expected"/> bytes of a chunk.</summary>
+        /// <summary>
+        /// Decompresses the first <paramref name="expected"/> bytes of a chunk (whole rows of <paramref name="rowBytes"/>).
+        /// </summary>
         void Decompress(long offset, long count, byte* dst, long expected, long rowBytes)
         {
             if (Compression == 1)
@@ -778,7 +780,24 @@ namespace PixCodec
                         var d = new Span<byte>(dst, (int)expected);
                         try
                         {
-                            got = Compression == 50000 ? Zstd.Decompress(src, d) : Compression == 34925 ? Xz.Decompress(src, d) : Zlib.Decompress(src, d);
+                            if (Compression is 8 or 32946) got = Zlib.Decompress(src, d);
+                            else
+                            {
+                                // These decoders want room for everything the stream holds, which can be more than
+                                // asked for: a region stops early, and a last strip may be stored with all its rows.
+                                long capacity = rowBytes * ((Kind == TiffChunkKind.YccPacked ? (ChunkH + SubV - 1) / SubV : ChunkH) + 1L);
+                                capacity = Math.Max(expected, Math.Min(capacity, count * (1L << 17) + 4096)); // no more than the data can expand to
+                                if (capacity > int.MaxValue)
+                                    throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression");
+                                byte* t = (byte*)NativeMemory.Alloc((nuint)capacity);
+                                try
+                                {
+                                    var all = new Span<byte>(t, (int)capacity);
+                                    got = Compression == 50000 ? Zstd.Decompress(src, all) : Xz.Decompress(src, all);
+                                    all.Slice(0, (int)Math.Min(got, expected)).CopyTo(d);
+                                }
+                                finally { NativeMemory.Free(t); }
+                            }
                         }
                         catch (Exception ex) when (ex is InvalidDataException || ex is IOException)
                         {
