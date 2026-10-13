@@ -169,13 +169,17 @@ def decode_gif(path, im):
 
 def decode_tiff(path):
     """Samples of one page as (H,W,C), decoded by tifffile + imagecodecs (which reads every sample type, layout and
-    compression PixCodec writes except CCITT). No photometric interpretation is applied, with two exceptions:
+    compression PixCodec writes except CCITT and JBIG). No photometric interpretation is applied, with two exceptions:
     bilevel (1-bit) pages come from libtiff through ImageMagick as 0 / 255 "as displayed", and JPEG pages come out as
-    RGB. The page is the first one unless the file name ends in `.p<N>.tif`."""
+    RGB. The page is the first one unless the file name ends in `.p<N>.tif`. Exits with status 77 when a decoder
+    this needs (tifffile, imagecodecs, ImageMagick) is not installed: the file cannot be verified here."""
     import re
     import warnings
     warnings.filterwarnings('ignore')
-    import tifffile
+    try:
+        import tifffile
+    except ImportError:
+        sys.exit(77)
     m = re.search(r'\.p(\d+)\.tiff?$', path)
     page = int(m.group(1)) if m else 0
     with tifffile.TiffFile(path) as t:
@@ -183,11 +187,23 @@ def decode_tiff(path):
         if pg.bitspersample == 1:
             # libtiff, via ImageMagick (Pillow 11 cannot open big endian BigTIFF, OpenCV stumbles over other pages)
             import subprocess
-            r = subprocess.run(['magick', f'{path}[{page}]', '-depth', '8', 'gray:-'], capture_output=True)
+            try:
+                r = subprocess.run(['magick', f'{path}[{page}]', '-depth', '8', 'gray:-'], capture_output=True)
+            except FileNotFoundError:
+                sys.exit(77)
+            if r.returncode == 127:
+                sys.exit(77)
             if r.returncode != 0 or len(r.stdout) != pg.imagewidth * pg.imagelength:
                 raise ValueError('ImageMagick cannot read the bilevel page: ' + r.stderr.decode(errors='replace'))
             return np.frombuffer(r.stdout, np.uint8).reshape(pg.imagelength, pg.imagewidth)
-        a = pg.asarray()
+        try:
+            a = pg.asarray()
+        except Exception:
+            try:
+                import imagecodecs  # noqa: F401
+            except ImportError:
+                sys.exit(77)    # tifffile without imagecodecs reads little more than uncompressed whole-byte data
+            raise
         if pg.planarconfig == 2 and pg.samplesperpixel > 1:
             a = np.moveaxis(a, 0, -1)
         return a

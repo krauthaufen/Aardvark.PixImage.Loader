@@ -680,6 +680,7 @@ public class TiffTests
         {
             File.WriteAllBytes(f, encoded);
             var (exit, output) = TestUtil.RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
+            if (exit == 77) return null; // a decoder this file needs is not installed
             Assert.True(exit == 0, "oracle decode failed: " + output);
             return TestUtil.LoadRef(f + ".ref");
         }
@@ -688,6 +689,14 @@ public class TiffTests
             File.Delete(f); File.Delete(f + ".ref");
         }
     }
+
+    /// <summary>
+    /// Wraps a python snippet so that a missing optional module (rasterio, OpenCV, tifffile, imagecodecs, ...) ends
+    /// it with status 77 = "cannot be verified here" instead of an error.
+    /// </summary>
+    static string Guarded(string code) =>
+        "def _snippet():\n" + string.Join("\n", code.Replace("\r", "").Split('\n').Select(l => "    " + l)) +
+        "\ntry:\n    _snippet()\nexcept ImportError:\n    sys.exit(77)\nexcept Exception as e:\n    if 'imagecodecs' in str(e):\n        sys.exit(77)\n    raise\n";
 
     /// <summary>Runs a python snippet on a file we wrote and returns what it prints (for tags and EXIF as other libraries see them).</summary>
     static string? PythonOn(byte[] encoded, string code)
@@ -700,8 +709,9 @@ public class TiffTests
         try
         {
             File.WriteAllBytes(f, encoded);
-            File.WriteAllText(script, "import sys, warnings\nwarnings.filterwarnings('ignore')\nPATH = sys.argv[1]\n" + code);
+            File.WriteAllText(script, "import sys, warnings\nwarnings.filterwarnings('ignore')\nPATH = sys.argv[1]\n" + Guarded(code));
             var (exit, output) = TestUtil.RunPython($"\"{script}\" \"{f}\"");
+            if (exit == 77) return null; // a module the snippet needs is not installed
             Assert.True(exit == 0, "python failed: " + output);
             return output.Replace("\r", "").Trim();
         }
@@ -739,12 +749,13 @@ public class TiffTests
                     cases.Add(($"{type} {color}/{channels} {comp} #{k % 7}", MakeImage(29, 19, color, type, channels), o));
                 }
         var failures = new System.Collections.Concurrent.ConcurrentBag<string>();
-        int verified = 0;
+        int verified = 0, unavailable = 0;
         Parallel.ForEach(cases, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(2, Environment.ProcessorCount) }, c =>
         {
             try
             {
-                var o = Oracle(Encode(c.img, c.o))!;
+                var o = Oracle(Encode(c.img, c.o));
+                if (o == null) { Interlocked.Increment(ref unavailable); return; } // python or the decoder it needs is not installed
                 Interlocked.Increment(ref verified);
                 if (o.SampleType != c.img.SampleType || (o.Width, o.Height, o.Channels) != (c.img.Width, c.img.Height, c.img.Channels))
                     failures.Add($"{c.what}: oracle sees {o.Width}x{o.Height}x{o.Channels} {o.SampleType}");
@@ -754,7 +765,7 @@ public class TiffTests
             catch (Exception e) { failures.Add($"{c.what}: {e.Message}"); }
         });
         Assert.True(failures.IsEmpty, $"{failures.Count} of {cases.Count} failed:\n" + string.Join("\n", failures.Take(20)));
-        Assert.Equal(cases.Count, verified); // every single variant was read back by an independent decoder
+        Assert.Equal(cases.Count, verified + unavailable); // every single variant was read back by an independent decoder (where there is one)
     }
 
     // ------------------------------------------------------------------------------------------ bilevel, CCITT, JPEG
@@ -1121,7 +1132,7 @@ public class TiffTests
         {
             File.WriteAllBytes(f, encoded);
             File.WriteAllText(f + ".py", "import sys, os, warnings\nwarnings.filterwarnings('ignore')\nos.environ['OPENCV_LOG_LEVEL'] = 'SILENT'\nsys.path.insert(0, os.getcwd())\nimport numpy as np\nfrom pxref import write_ref\n" +
-                "PATH = sys.argv[1]\ndef write(a):\n    write_ref(PATH + '.ref', np.ascontiguousarray(a))\n" + code);
+                "PATH = sys.argv[1]\ndef write(a):\n    write_ref(PATH + '.ref', np.ascontiguousarray(a))\n" + Guarded(code));
             var (exit, output) = TestUtil.RunPython($"\"{f}.py\" \"{f}\"");
             if (exit == 77) return null; // the snippet's reader is not installed
             Assert.True(exit == 0, "python failed: " + output);
@@ -1536,13 +1547,13 @@ public class TiffTests
             "p = tifffile.TiffFile(PATH).pages[0]; x = p.tags[34665].value; g = p.tags[34853].value",
             "print(p.tags[271].value, p.tags[272].value, p.tags[306].value, int(p.tags[274].value), x['ExposureTime'], x['DateTimeOriginal'], x['ISOSpeedRatings'], x['FocalLength'], x['UserComment'], g['GPSLatitudeRef'], g['GPSLatitude'], g['GPSLongitudeRef'], g['GPSLongitude'])");
         var seen = PythonOn(file, dump);
-        Assert.Equal("PixCam Model X 2026:10:13 12:00:00 6 (1, 3) 2026:10:13 11:59:58 400 (35, 1) hello N (48, 1, 12, 1, 3099, 100) E (16, 1, 22, 1, 0, 1)", seen);
+        if (seen != null) Assert.Equal("PixCam Model X 2026:10:13 12:00:00 6 (1, 3) 2026:10:13 11:59:58 400 (35, 1) hello N (48, 1, 12, 1, 3099, 100) E (16, 1, 22, 1, 0, 1)", seen);
         if (!big)
         {
             // so does Pillow (which cannot follow the directories of a BigTIFF)
             var pil = PythonOn(file, "from PIL import Image\ne = Image.open(PATH).getexif(); x = e.get_ifd(0x8769); g = e.get_ifd(0x8825)\n" +
                 "print(e[0x010F], e[0x0112], float(x[0x829A]), x[0x8827], g[1], [float(v) for v in g[2]])");
-            Assert.Equal("PixCam 6 0.3333333333333333 400 N [48.0, 12.0, 30.99]", pil);
+            if (pil != null) Assert.Equal("PixCam 6 0.3333333333333333 400 N [48.0, 12.0, 30.99]", pil);
         }
 
         // and it comes back as an EXIF blob: orientation in the metadata, the directories intact

@@ -1382,9 +1382,10 @@ def gen_foreign():
 
 
 def gen_ccitt_uncompressed():
-    """CCITT "uncompressed mode" (T.4 / T.6 extension). No encoder writes it and no decoder at hand reads it (libtiff:
-    "uncompressed data (not supported)", and with it OpenCV, Pillow, GDAL, libvips; tifffile has no CCITT codec),
-    so these files are packed by hand from the recommendation and listed as unverified."""
+    """CCITT "uncompressed mode" (T.4 / T.6 extension). No encoder writes it and libtiff does not read it ("uncompressed
+    data (not supported)", and with it OpenCV, Pillow, GDAL, libvips; tifffile has no CCITT codec), so these files are
+    packed by hand from the recommendation. FFmpeg's independent decoder reads them and provides the reference; without
+    FFmpeg they are listed as unverified."""
     rng = np.random.default_rng(81)
     w, h = 61, 24
     a = (rng.random((h, w)) < 0.35).astype(np.uint8)       # 1 = black
@@ -1412,21 +1413,36 @@ def gen_ccitt_uncompressed():
         return [x for x in range(len(row)) if row[x] != (row[x - 1] if x else 0)]
 
     def finish(name, img, data, comp, tag, rps=None):
-        d = os.path.join(OUT, 'unverified')
-        os.makedirs(d, exist_ok=True)
-        path = os.path.join(d, name + '.tif')
         page = dict(arr=img[:, :, None], bits=1, photometric=0, compression=comp, raw_chunks=data, rps=rps or img.shape[0], tags=[(tag, 4, [2])])
-        write_tiff(path, [page])
-        for reader in (lambda: ref_cv2(path), lambda: np.asarray(Image.open(path).convert('L'))):
+        tmp = os.path.join(OUT, name + '.tif')
+        write_tiff(tmp, [page])
+        for reader in (lambda: ref_cv2(tmp), lambda: np.asarray(Image.open(tmp).convert('L'))):
             try:
                 got = reader()
-                assert not np.array_equal(got.reshape(img.shape) > 0, img == 0), f'{name}: a reference decoder reads this now - use it'
+                assert not np.array_equal(got.reshape(img.shape) > 0, img == 0), f'{name}: a libtiff based decoder reads this now - use it'
             except AssertionError:
                 raise
             except Exception:
                 pass
+        # FFmpeg's own TIFF / fax decoder (libavcodec, not libtiff) implements the uncompressed mode
+        got = None
+        try:
+            r = subprocess.run(['ffmpeg', '-v', 'error', '-i', tmp, '-pix_fmt', 'gray', '-f', 'rawvideo', '-'], capture_output=True)
+            if r.returncode == 0 and len(r.stdout) == img.size:
+                got = np.frombuffer(r.stdout, np.uint8).reshape(img.shape)
+        except FileNotFoundError:
+            pass
+        if got is not None:
+            assert np.array_equal(got, ((1 - img) * 255).astype(np.uint8)), f'{name}: FFmpeg decodes another picture'
+            write_ref(tmp + '.ref', got[:, :, None])
+            SUMMARY.append((name, ['ffmpeg (libavcodec)']))
+            return
+        d = os.path.join(OUT, 'unverified')
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name + '.tif')
+        os.replace(tmp, path)
         write_ref(path + '.ref', ((1 - img) * 255).astype(np.uint8))
-        reason = 'CCITT uncompressed mode: libtiff (and so OpenCV, Pillow, GDAL, libvips) rejects it, nothing writes it'
+        reason = 'CCITT uncompressed mode: libtiff (and so OpenCV, Pillow, GDAL, libvips) rejects it, nothing writes it; FFmpeg is not installed'
         UNVERIFIED.append((name, reason))
         SUMMARY.append(('unverified/' + name, ['UNVERIFIED: ' + reason]))
 
