@@ -21,6 +21,7 @@ namespace PixCodec.JpegImpl
             public int BlocksW, BlocksH;         // whole MCUs
             public int ScanBlocksW, ScanBlocksH; // blocks covering the image, for non-interleaved scans
             public int Stride;
+            public int StatBlocksW, StatBlocksH; // blocks a sequential scan actually codes
             public byte[] Plane = null!;
             public ushort[]? Plane16; // 12 bit samples
             public short[] Coefs = null!;
@@ -33,6 +34,8 @@ namespace PixCodec.JpegImpl
             public readonly int[] Freq = new int[257];
             /// <summary>code &lt;&lt; 8 | length per symbol (pinned, so the block coder can index it without bounds checks).</summary>
             public readonly uint[] Packed = GC.AllocateArray<uint>(256, pinned: true);
+            /// <summary>For run/size symbols: code &lt;&lt; (8 + size) | (length + size), ready to take the value bits.</summary>
+            public readonly ulong[] Extended = GC.AllocateArray<ulong>(256, pinned: true);
             /// <summary>Which of the two tables of a progressive scan this is.</summary>
             public uint Slot;
             public byte[] Counts = new byte[16];
@@ -50,11 +53,16 @@ namespace PixCodec.JpegImpl
             void AssignCodes()
             {
                 Array.Clear(Packed);
+                Array.Clear(Extended);
                 uint code = 0;
                 int k = 0;
                 for (int len = 1; len <= 16; len++, code <<= 1)
                     for (int i = 0; i < Counts[len - 1]; i++, k++)
-                        Packed[Values[k]] = code++ << 8 | (uint)len;
+                    {
+                        int sym = Values[k], size = sym & 15;
+                        Extended[sym] = (ulong)code << (8 + size) | (uint)(len + size);
+                        Packed[sym] = code++ << 8 | (uint)len;
+                    }
             }
 
             /// <summary>Builds length limited (16 bit) Huffman codes from <see cref="Freq"/> following T.81 Annex K.2.</summary>
@@ -362,6 +370,9 @@ namespace PixCodec.JpegImpl
                 c.ScanBlocksW = ((_w * c.H + _hMax - 1) / _hMax + 7) / 8;
                 c.ScanBlocksH = ((_h * c.V + _vMax - 1) / _vMax + 7) / 8;
                 c.Stride = c.BlocksW * 8;
+                // a lone component is coded without MCU padding
+                c.StatBlocksW = _comps.Length == 1 ? c.ScanBlocksW : c.BlocksW;
+                c.StatBlocksH = _comps.Length == 1 ? c.ScanBlocksH : c.BlocksH;
                 long size = (long)c.Stride * c.BlocksH * 8;
                 if (size > Array.MaxLength) throw new ImageNotSupportedException("image is too large to encode");
                 if (_precision == 8) c.Plane = GC.AllocateUninitializedArray<byte>((int)size);
@@ -384,6 +395,7 @@ namespace PixCodec.JpegImpl
         {
             if (_precision != 8 || _genericSampling) FillPlanesGeneric(image);
             else FillPlanes(image);
+            if (!_opt.Progressive) SetupBaselineTables();
             Transform();
             WriteHeaders(image.Metadata);
             if (_opt.Progressive) WriteProgressive();
@@ -627,9 +639,12 @@ namespace PixCodec.JpegImpl
                 var q = _quant[c.Tq];
                 // the quantizers want the divisors transposed and scaled by the DCT's factor of 8
                 for (int i = 0; i < 64; i++) recip[(i & 7) * 8 + (i >> 3)] = 1f / (8 * q[i]);
+                // statistics for optimized tables are taken while the block is still in the cache
+                int[]? stats = OptimizedBaseline ? c.Ac.Freq : null;
                 fixed (byte* plane = c.Plane)
                 fixed (ushort* plane16 = c.Plane16)
                 fixed (short* coefs = c.Coefs)
+                fixed (int* freq = stats)
                 {
                     short* o = coefs;
                     for (int by = 0; by < c.BlocksH; by++)
@@ -638,7 +653,10 @@ namespace PixCodec.JpegImpl
                         {
                             byte* row = plane + (nint)by * 8 * c.Stride;
                             for (int bx = 0; bx < c.BlocksW; bx++, o += 64)
+                            {
                                 JpegDct.FdctQuantize(row + bx * 8, c.Stride, recip, o);
+                                if (freq != null && bx < c.StatBlocksW && by < c.StatBlocksH) GatherAc(o, freq, _maxAcSize);
+                            }
                             continue;
                         }
                         for (int bx = 0; bx < c.BlocksW; bx++, o += 64)
@@ -647,6 +665,7 @@ namespace PixCodec.JpegImpl
                             for (int y = 0; y < 8; y++, src += c.Stride)
                                 for (int x = 0; x < 8; x++) m[y * 8 + x] = src[x] - (1 << (_precision - 1));
                             JpegDct.FdctQuantizeGeneric(m, 1, recip, o);
+                            if (freq != null && bx < c.StatBlocksW && by < c.StatBlocksH) GatherAc(o, freq, _maxAcSize);
                         }
                     }
                 }
@@ -730,28 +749,30 @@ namespace PixCodec.JpegImpl
 
         // ---------------------------------------------------------------- scans
 
-        void WriteBaseline()
+        bool OptimizedBaseline => !_opt.Progressive && (_opt.OptimizeHuffman || _precision != 8);
+
+        /// <summary>The standard tables, or empty ones to be built from the image's statistics (always beyond 8 bit: the standard tables stop at 8 bit magnitudes).</summary>
+        void SetupBaselineTables()
         {
-            bool color = _comps.Length == 3;
-            HuffEnc dc0, ac0, dc1, ac1;
-            if (_opt.OptimizeHuffman || _precision != 8)
-            {
-                dc0 = new HuffEnc(); ac0 = new HuffEnc(); dc1 = new HuffEnc(); ac1 = new HuffEnc();
-            }
-            else
-            {
-                dc0 = new HuffEnc(JpegTables.DcLumaCounts, JpegTables.DcValues);
-                ac0 = new HuffEnc(JpegTables.AcLumaCounts, JpegTables.AcLumaValues);
-                dc1 = new HuffEnc(JpegTables.DcChromaCounts, JpegTables.DcValues);
-                ac1 = new HuffEnc(JpegTables.AcChromaCounts, JpegTables.AcChromaValues);
-            }
+            bool optimize = OptimizedBaseline;
+            var dc0 = optimize ? new HuffEnc() : new HuffEnc(JpegTables.DcLumaCounts, JpegTables.DcValues);
+            var ac0 = optimize ? new HuffEnc() : new HuffEnc(JpegTables.AcLumaCounts, JpegTables.AcLumaValues);
+            var dc1 = optimize ? new HuffEnc() : new HuffEnc(JpegTables.DcChromaCounts, JpegTables.DcValues);
+            var ac1 = optimize ? new HuffEnc() : new HuffEnc(JpegTables.AcChromaCounts, JpegTables.AcChromaValues);
             for (int i = 0; i < _comps.Length; i++)
             {
                 _comps[i].Dc = i == 0 ? dc0 : dc1;
                 _comps[i].Ac = i == 0 ? ac0 : ac1;
             }
-            if (_opt.OptimizeHuffman || _precision != 8)
+        }
+
+        void WriteBaseline()
+        {
+            bool color = _comps.Length == 3;
+            HuffEnc dc0 = _comps[0].Dc, ac0 = _comps[0].Ac, dc1 = _comps[^1].Dc, ac1 = _comps[^1].Ac;
+            if (OptimizedBaseline)
             {
+                // the AC statistics were collected while transforming; the DC differences depend on the scan order
                 _gather = true;
                 EncodeScan(_comps, 0, 63, 0, 0);
                 _gather = false;
@@ -898,35 +919,37 @@ namespace PixCodec.JpegImpl
 
         void EncodeBlock(short* blk, Comp c)
         {
-            if (_gather) GatherBlock(blk, c, _maxAcSize);
-            else fixed (byte* buf = _buf) fixed (uint* dc = c.Dc.Packed, ac = c.Ac.Packed) EmitBlock(blk, c, buf, dc, ac);
+            if (_gather) GatherDc(blk, c);
+            else fixed (byte* buf = _buf) fixed (uint* dc = c.Dc.Packed, ac = c.Ac.Packed) fixed (ulong* acx = c.Ac.Extended) EmitBlock(blk, c, buf, dc, ac, acx);
         }
 
-        /// <summary>Statistics pass of the sequential block coder: counts the symbols <see cref="EmitBlock"/> would write.</summary>
-        static void GatherBlock(short* blk, Comp c, int maxSize)
+        /// <summary>Statistics for optimized tables, DC part: counts the difference categories in scan order.</summary>
+        static void GatherDc(short* blk, Comp c)
         {
             int diff = blk[0] - c.Pred;
             c.Pred = blk[0];
             c.Dc.Freq[BitLength(Math.Abs(diff))]++;
-            fixed (int* freq = c.Ac.Freq)
+        }
+
+        /// <summary>Statistics for optimized tables, AC part: counts the run/size symbols <see cref="EmitBlock"/> would write for the block.</summary>
+        static void GatherAc(short* blk, int* freq, int maxSize)
+        {
+            ulong mask = JpegTables.NonZeroMask(blk) & ~1UL;
+            int prev = 0;
+            while (mask != 0)
             {
-                ulong mask = JpegTables.NonZeroMask(blk) & ~1UL;
-                int prev = 0;
-                while (mask != 0)
-                {
-                    int k = BitOperations.TrailingZeroCount(mask);
-                    mask &= mask - 1;
-                    int run = k - prev - 1;
-                    prev = k;
-                    if (run > 15) { freq[0xF0] += run >> 4; run &= 15; }
-                    freq[run << 4 | Math.Min(maxSize, BitLength(Math.Abs((int)blk[k])))]++;
-                }
-                if (prev != 63) freq[0]++;
+                int k = BitOperations.TrailingZeroCount(mask);
+                mask &= mask - 1;
+                int run = k - prev - 1;
+                prev = k;
+                if (run > 15) { freq[0xF0] += run >> 4; run &= 15; }
+                freq[run << 4 | Math.Min(maxSize, BitLength(Math.Abs((int)blk[k])))]++;
             }
+            if (prev != 63) freq[0]++;
         }
 
         /// <summary>Sequential block coder. The bit accumulator and output pointer live in locals for the duration of the block.</summary>
-        void EmitBlock(short* blk, Comp c, byte* buf, uint* dc, uint* ac)
+        void EmitBlock(short* blk, Comp c, byte* buf, uint* dc, uint* ac, ulong* acx)
         {
             ulong acc = _acc;
             int n = _accBits;
@@ -944,6 +967,7 @@ namespace PixCodec.JpegImpl
 
             ulong mask = JpegTables.NonZeroMask(blk) & ~1UL;
             int prev = 0; // index of the previous nonzero coefficient
+            int maxSize = _maxAcSize;
             uint zrl = ac[0xF0];
             while (mask != 0)
             {
@@ -960,11 +984,12 @@ namespace PixCodec.JpegImpl
                     run -= 16;
                 }
                 v = blk[k];
-                s = BitLength(Math.Abs(v));
-                if (s > _maxAcSize) { s = _maxAcSize; v = v < 0 ? -((1 << s) - 1) : (1 << s) - 1; } // cannot happen for real DCT output, but keep the stream legal
-                e = ac[run << 4 | s];
-                len = (int)(e & 255) + s;
-                acc = acc << len | (e >> 8) << s | ((uint)(v + (v >> 31)) & ((1u << s) - 1));
+                int sign = v >> 31;
+                s = BitLength((v ^ sign) - sign);
+                if (s > maxSize) { s = maxSize; v = ((1 << s) - 1 ^ sign) - sign; } // cannot happen for real DCT output, but keep the stream legal
+                ulong x = acx[run << 4 | s]; // code already shifted up by s, total length in the low byte
+                len = (int)x & 63;
+                acc = acc << len | x >> 8 | ((uint)(v + sign) & ~(uint.MaxValue << s));
                 n += len;
                 if (n >= 32) { n -= 32; o = Write32(o, (uint)(acc >> n)); }
             }
