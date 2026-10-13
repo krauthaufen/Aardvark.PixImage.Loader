@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace PixCodec
 {
@@ -29,6 +30,8 @@ namespace PixCodec
         public static readonly ushort[] Qe = new ushort[94];
         public static readonly byte[] Nmps = new byte[94];
         public static readonly byte[] Nlps = new byte[94];
+        /// <summary>The three of them in one entry: Qe | Nmps &lt;&lt; 16 | Nlps &lt;&lt; 24 (one load per decision).</summary>
+        public static readonly uint[] States = new uint[94];
 
         public const int CtxRun = 17, CtxUni = 18, NumCtx = 19;
 
@@ -50,6 +53,7 @@ namespace PixCodec
                     Nmps[2 * i + m] = (byte)(2 * NmpsTable[i] + m);
                     bool sw = i == 0 || i == 6 || i == 14;
                     Nlps[2 * i + m] = (byte)(2 * NlpsTable[i] + (sw ? 1 - m : m));
+                    States[2 * i + m] = Qe[2 * i + m] | (uint)Nmps[2 * i + m] << 16 | (uint)Nlps[2 * i + m] << 24;
                 }
             for (int o = 0; o < 4; o++)
                 for (int f = 0; f < 256; f++)
@@ -123,13 +127,14 @@ namespace PixCodec
         public int Decode(ref byte cx)
         {
             int s = cx;
-            uint qe = J2kT1.Qe[s];
+            uint e = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(J2kT1.States), s);
+            uint qe = e & 0xFFFF;
             int d = s & 1;
             _a -= qe;
             if ((_c >> 16) < qe)
             {
-                if (_a < qe) cx = J2kT1.Nmps[s];
-                else { d ^= 1; cx = J2kT1.Nlps[s]; }
+                if (_a < qe) cx = (byte)(e >> 16);
+                else { d ^= 1; cx = (byte)(e >> 24); }
                 _a = qe;
                 Renorm();
             }
@@ -138,8 +143,8 @@ namespace PixCodec
                 _c -= qe << 16;
                 if ((_a & 0x8000) == 0)
                 {
-                    if (_a < qe) { d ^= 1; cx = J2kT1.Nlps[s]; }
-                    else cx = J2kT1.Nmps[s];
+                    if (_a < qe) { d ^= 1; cx = (byte)(e >> 24); }
+                    else cx = (byte)(e >> 16);
                     Renorm();
                 }
             }
@@ -149,11 +154,24 @@ namespace PixCodec
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         void Renorm()
         {
+            // all the shifts that bring A back to 0x8000 at once, fetching a byte whenever the counter runs out
+            int n = System.Numerics.BitOperations.LeadingZeroCount(_a) - 16;
+            if (n <= _ct)
+            {
+                _a <<= n; _c <<= n; _ct -= n;
+                return;
+            }
+            RenormSlow(n);
+        }
+
+        void RenormSlow(int n)
+        {
             do
             {
                 if (_ct == 0) ByteIn();
-                _a <<= 1; _c <<= 1; _ct--;
-            } while ((_a & 0x8000) == 0);
+                int k = Math.Min(n, _ct);
+                _a <<= k; _c <<= k; _ct -= k; n -= k;
+            } while (n > 0);
         }
     }
 
@@ -201,14 +219,15 @@ namespace PixCodec
         public void Encode(ref byte cx, int d)
         {
             int s = cx;
-            uint qe = J2kT1.Qe[s];
+            uint e = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(J2kT1.States), s);
+            uint qe = e & 0xFFFF;
             _a -= qe;
             if (d == (s & 1))
             {
                 if ((_a & 0x8000) == 0)
                 {
                     if (_a < qe) _a = qe; else _c += qe;
-                    cx = J2kT1.Nmps[s];
+                    cx = (byte)(e >> 16);
                     Renorm();
                 }
                 else _c += qe;
@@ -216,7 +235,7 @@ namespace PixCodec
             else
             {
                 if (_a < qe) _c += qe; else _a = qe;
-                cx = J2kT1.Nlps[s];
+                cx = (byte)(e >> 24);
                 Renorm();
             }
         }

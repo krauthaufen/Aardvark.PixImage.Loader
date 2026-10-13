@@ -273,7 +273,6 @@ namespace PixCodec
         /// <summary>Reads one packet. False when the tile's data is used up.</summary>
         bool Packet(int layer, int r, int c, int k)
         {
-            if (Environment.GetEnvironmentVariable("J2K_DEBUG") == "2") Console.Error.WriteLine($"packet l={layer} r={r} c={c} k={k} body={(_part < 0 ? -1 : _body - _cs.Data)} end={(_part < 0 ? -1 : _bodyEnd - _cs.Data)}");
             var tc = _tile.Comps[c];
             var res = tc.Res[r];
             if (res.LayersDone == null)
@@ -370,7 +369,6 @@ namespace PixCodec
                                     int bits = b->Lblock + BitOperations.Log2((uint)m);
                                     if (bits > 31) throw Bad("bad code-block length");
                                     int len = br.Bits(bits);
-                                    if (Environment.GetEnvironmentVariable("J2K_DEBUG") == "3") Console.Error.WriteLine($"  blk l={layer} r={r} c={c} i={i} first={first} pass={pass} m={m} bits={bits} len={len} Lblock={b->Lblock} zbp={b->Zbp} phld={b->Phld}");
                                     AddPending(pb, i, m, len);
                                     passes -= m; pass += m;
                                 }

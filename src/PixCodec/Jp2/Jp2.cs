@@ -207,9 +207,7 @@ namespace PixCodec
         {
             options ??= new Jp2DecodeOptions();
             var hdr = Jp2Header.Parse(data, false);
-            var planes = DecodePlanes(data.Slice(hdr.CodestreamStart, hdr.CodestreamLength), options, out var siz);
-            var layout = Jp2Layout.Create(hdr, siz, options.RawComponents || options.Components != null, options.Components);
-            var img = layout.Assemble(planes, hdr);
+            var img = DecodeImage(data.Slice(hdr.CodestreamStart, hdr.CodestreamLength), options, hdr, options.RawComponents || options.Components != null);
             if (hdr.Icc != null || hdr.Exif != null || hdr.DpiX > 0 || hdr.Orientation != 0)
                 img.Metadata = new ImageMetadata { IccProfile = hdr.Icc, Exif = hdr.Exif, DpiX = hdr.DpiX, DpiY = hdr.DpiY, Orientation = hdr.Orientation };
             return img;
@@ -218,21 +216,48 @@ namespace PixCodec
         /// <summary>The XMP packet of a JP2 file (uuid box or xml box holding one), null if there is none.</summary>
         public static byte[]? GetXmp(ReadOnlySpan<byte> data) => Jp2Header.Parse(data, false).Xmp;
 
-        static J2kPlanes DecodePlanes(ReadOnlySpan<byte> codestream, Jp2DecodeOptions options, out J2kSiz siz)
+        static RawImage DecodeImage(ReadOnlySpan<byte> codestream, Jp2DecodeOptions options, Jp2Header hdr, bool raw)
         {
             try
             {
                 fixed (byte* p = codestream)
                 {
                     var cs = new J2kCodestream(p, codestream.Length);
-                    var planes = J2kDecoder.Decode(cs, options, options.Components);
-                    siz = cs.Siz;
-                    return planes;
+                    cs.Parse();
+                    var layout = Jp2Layout.Create(hdr, cs.Siz, raw, options.Components);
+                    var sink = layout.TrySink(cs.Siz);
+                    var planes = J2kDecoder.Decode(cs, options, options.Components, sink);
+                    return layout.Assemble(planes, hdr, sink);
                 }
             }
-            catch (AggregateException e) when (e.InnerException is ImageFormatException or ImageNotSupportedException or ArgumentException)
+            catch (AggregateException e) when (Unwrap(e) is ImageFormatException or ImageNotSupportedException or ArgumentException)
             {
-                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerException!).Throw();
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(Unwrap(e)).Throw();
+                throw;
+            }
+        }
+
+        static Exception Unwrap(AggregateException e)
+        {
+            Exception inner = e;
+            while (inner is AggregateException a && a.InnerException != null) inner = a.InnerException;
+            return inner;
+        }
+
+        static J2kPlanes DecodePlanes(ReadOnlySpan<byte> codestream, Jp2DecodeOptions options)
+        {
+            try
+            {
+                fixed (byte* p = codestream)
+                {
+                    var cs = new J2kCodestream(p, codestream.Length);
+                    cs.Parse();
+                    return J2kDecoder.Decode(cs, options, options.Components);
+                }
+            }
+            catch (AggregateException e) when (Unwrap(e) is ImageFormatException or ImageNotSupportedException or ArgumentException)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(Unwrap(e)).Throw();
                 throw;
             }
         }
@@ -253,7 +278,7 @@ namespace PixCodec
 
         // ---- internal entry points for other codecs (JPEG 2000 in TIFF, HTJ2K in OpenEXR) ----
 
-        static ReadOnlySpan<byte> Unwrap(ReadOnlySpan<byte> data)
+        static ReadOnlySpan<byte> Codestream(ReadOnlySpan<byte> data)
         {
             if (data.Length >= 2 && data[0] == 0xFF && data[1] == 0x4F) return data;
             var hdr = Jp2Header.Parse(data, false);
@@ -267,7 +292,7 @@ namespace PixCodec
         /// Region, Components (others have no Data), Parallel, MaxPixels and AllowTruncated of the options.
         /// </summary>
         internal static J2kPlanes DecodeCodestreamPlanes(ReadOnlySpan<byte> codestream, Jp2DecodeOptions? options = null)
-            => DecodePlanes(Unwrap(codestream), options ?? new Jp2DecodeOptions(), out _);
+            => DecodePlanes(Codestream(codestream), options ?? new Jp2DecodeOptions());
 
         /// <summary>
         /// Decodes a raw codestream to interleaved samples without any colour guessing: Gray for one component,
@@ -277,9 +302,7 @@ namespace PixCodec
         /// </summary>
         internal static RawImage DecodeCodestream(ReadOnlySpan<byte> codestream, Jp2DecodeOptions? options = null)
         {
-            options ??= new Jp2DecodeOptions();
-            var planes = DecodePlanes(Unwrap(codestream), options, out var siz);
-            return Jp2Layout.Create(new Jp2Header(), siz, true, options.Components).Assemble(planes, new Jp2Header());
+            return DecodeImage(Codestream(codestream), options ?? new Jp2DecodeOptions(), new Jp2Header(), true);
         }
 
         /// <summary>

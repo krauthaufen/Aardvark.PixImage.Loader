@@ -180,10 +180,30 @@ namespace PixCodec
             return l;
         }
 
+        /// <summary>
+        /// The direct destination for the decoder if the components are simply the channels: same size, 8 or 16 bit
+        /// unsigned, no palette, conversion or scaling. Null otherwise (then the planes are assembled afterwards).
+        /// </summary>
+        public J2kSink? TrySink(J2kSiz siz)
+        {
+            if (Conversion != 0 || Alpha == 2 || Scale || (Type != SampleType.UInt8 && Type != SampleType.UInt16)) return null;
+            if (Channels.Length != siz.NumComps || OutChannels != Channels.Length) return null;
+            var map = new int[siz.NumComps];
+            Array.Fill(map, -1);
+            for (int i = 0; i < Channels.Length; i++)
+            {
+                var c = Channels[i];
+                if (c.PalCol >= 0 || c.Signed || siz.Dx[c.Comp] != 1 || siz.Dy[c.Comp] != 1 || map[c.Comp] >= 0) return null;
+                map[c.Comp] = i;
+            }
+            return new J2kSink { Type = Type, Channels = OutChannels, ChannelOf = map };
+        }
+
         /// <summary>Interleaves the decoded planes into the output image.</summary>
-        public unsafe RawImage Assemble(J2kPlanes planes, Jp2Header h)
+        public unsafe RawImage Assemble(J2kPlanes planes, Jp2Header h, J2kSink? sink = null)
         {
             int w = planes.Width, hgt = planes.Height;
+            if (sink?.Data != null) return new RawImage(w, hgt, Color, sink.Data, OutChannels);
             int n = Channels.Length;
             if ((long)w * hgt * OutChannels > Array.MaxLength) throw new ImageNotSupportedException("JPEG 2000 image too large for one array");
             var data = RawImage.CreateArray(Type, w * hgt * OutChannels);

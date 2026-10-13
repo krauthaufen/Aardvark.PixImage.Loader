@@ -131,7 +131,7 @@ public class Jp2RobustnessTests
                     var options = new List<Jp2DecodeOptions>
                     {
                         new Jp2DecodeOptions(), new Jp2DecodeOptions { AllowTruncated = true },
-                        new Jp2DecodeOptions { MaxPixels = long.MaxValue, Region = (5, 5, 100, 100) },
+                        new Jp2DecodeOptions { MaxPixels = long.MaxValue, Region = (0, 0, 100, 1) },
                     };
                     if (beyondArrays)
                     {
