@@ -346,7 +346,7 @@ namespace PixCodec
                 var buffer = new byte[size + 1];
                 int got;
                 try { got = Zlib.Decompress(z, buffer); }
-                catch (Exception e) when (e is InvalidDataException or IOException) { return null; }
+                catch (Exception e) when (e is InvalidDataException or IOException or ImageFormatException) { return null; }
                 if (got <= size) return buffer.AsSpan(0, got).ToArray();
                 if (size == MaxInflatedAncillary) return null;
                 size *= 8;

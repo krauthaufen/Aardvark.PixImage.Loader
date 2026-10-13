@@ -107,11 +107,11 @@ public class TiffTests
 
     // The three codecs below are implemented by other owners (PixCodec.Compression.Zstd / Xz, PixCodec.Webp) and are
     // stubs in this branch. The TIFF side is complete: remove the Skip once the real implementations are merged.
-    [Theory(Skip = "needs PixCodec.Compression.Zstd.Decompress (stub in this branch)")]
+    [Theory]
     [MemberData(nameof(ZstdFixtures))]
     public void DecodesZstdFixture(string file) => CheckFixture(file);
 
-    [Theory(Skip = "needs PixCodec.Compression.Xz.Decompress (stub in this branch)")]
+    [Theory]
     [MemberData(nameof(LzmaFixtures))]
     public void DecodesLzmaFixture(string file) => CheckFixture(file);
 
