@@ -306,8 +306,12 @@ namespace PixCodec
                     // the last HT set that has a cleanup segment
                     int set = -1;
                     for (int s = 0; 2 * s < nseg; s++) if (segLen[2 * s] > 0) set = s;
-                    bool ok = false;
-                    if (set >= 0)
+                    bool ok = set < 0;   // nothing but placeholder passes: the block is zero
+                    if (ok)
+                    {
+                        if (wide) new Span<ulong>(d64, w * h).Clear(); else new Span<uint>(d32, w * h).Clear();
+                    }
+                    else
                     {
                         int cup = 2 * set, refi = cup + 1;
                         int lref = refi < nseg ? segLen[refi] : 0;

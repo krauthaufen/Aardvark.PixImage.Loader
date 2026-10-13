@@ -335,27 +335,42 @@ namespace PixCodec
                                     if (++b->Lblock > 32) throw Bad("bad code-block length indicator");
                                 int pass = b->Passes;
                                 b->Passes += passes;
-                                bool ht = (style & J2kCod.Ht) != 0;
-                                int lead = -1;
-                                if (ht && (style & J2kCod.HtMixed) != 0)
+                                bool ht = (style & J2kCod.Ht) != 0 && b->Phld != 255;
+                                if (ht && !b->HtStarted)
                                 {
-                                    // T.814 A.4: an HT block is announced by Lblock > 3 and a 0 as first bit of its first length
-                                    if (pass == 0)
+                                    // T.814 Annex B. Until its first HT cleanup segment arrives a block contributes
+                                    // placeholder passes only: one empty codeword segment per packet. A contribution
+                                    // read that way comes out non-zero exactly if it does hold the cleanup pass (whose
+                                    // length field lies inside the bits read and is at least 2); then the passes are
+                                    // split after the last cleanup position, which fixes the number of placeholders.
+                                    int bits = b->Lblock + BitOperations.Log2((uint)passes);
+                                    if (bits > 31) throw Bad("bad code-block length");
+                                    var saved = br;
+                                    int len = br.Bits(bits);
+                                    if (len == 0)
                                     {
-                                        if (b->Lblock > 3) { lead = br.Bit(); b->Phld = (byte)(lead == 0 ? 0 : 255); }
-                                        else b->Phld = 255;
+                                        AddPending(pb, i, passes, 0);
+                                        continue;
                                     }
-                                    ht = b->Phld != 255;
+                                    if ((style & J2kCod.HtMixed) != 0 && !(b->Lblock > 3 && len >> (bits - 1) == 0))
+                                    {
+                                        // mixed mode (A.4): an HT block announces itself by Lblock > 3 and a leading
+                                        // 0 in its first length; this one is a Part 1 block with a single segment
+                                        b->Phld = 255;
+                                        AddPending(pb, i, passes, len);
+                                        continue;
+                                    }
+                                    br = saved;
+                                    b->Phld = (byte)Math.Min((pass + passes - 1) / 3, 250);
+                                    b->HtStarted = true;
                                 }
-                                if (ht && pass == 0) b->Phld = (byte)Math.Min((passes - 1) / 3, 100);
                                 while (passes > 0)
                                 {
                                     int m = Math.Min(passes, ht ? HtSegmentPasses(b->Phld, pass) : J2kBlockCoder.SegmentPasses(style & 63, pass));
                                     int bits = b->Lblock + BitOperations.Log2((uint)m);
                                     if (bits > 31) throw Bad("bad code-block length");
-                                    int len;
-                                    if (lead >= 0) { len = lead << (bits - 1) | br.Bits(bits - 1); lead = -1; }
-                                    else len = br.Bits(bits);
+                                    int len = br.Bits(bits);
+                                    if (Environment.GetEnvironmentVariable("J2K_DEBUG") == "3") Console.Error.WriteLine($"  blk l={layer} r={r} c={c} i={i} first={first} pass={pass} m={m} bits={bits} len={len} Lblock={b->Lblock} zbp={b->Zbp} phld={b->Phld}");
                                     AddPending(pb, i, m, len);
                                     passes -= m; pass += m;
                                 }

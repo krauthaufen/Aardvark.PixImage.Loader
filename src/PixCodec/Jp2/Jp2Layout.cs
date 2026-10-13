@@ -143,10 +143,11 @@ namespace PixCodec
                 bool uniform = true;
                 for (int i = 0; i < colours; i++) uniform &= !ordered[i].Signed && ordered[i].Depth == ordered[0].Depth;
                 if (colours == 3 && (cs == Jp2Header.CsSycc || cs == Jp2Header.CsEsycc || cs == 1 || cs == 3 || cs == 4) && uniform) l.Conversion = 1;
-                // Subsampled second and third components under a full resolution first one are luma and chroma even
-                // if nothing (a raw codestream) or the wrong thing (sRGB) is declared; OpenJPEG decides the same way.
+                // Second and third components subsampled 2 x 1 or 2 x 2 under a full resolution first one are luma and
+                // chroma even if nothing (a raw codestream) or the wrong thing (sRGB) is declared; OpenJPEG decides the
+                // same way, and like there other subsampling layouts are left alone.
                 if (colours == 3 && (cs < 0 || cs == Jp2Header.CsSrgb) && h.ColorMethod != 2 && uniform
-                    && siz.Dx[ordered[0].Comp] == 1 && siz.Dy[ordered[0].Comp] == 1 && (siz.Dx[ordered[1].Comp] != 1 || siz.Dy[ordered[1].Comp] != 1)
+                    && siz.Dx[ordered[0].Comp] == 1 && siz.Dy[ordered[0].Comp] == 1 && siz.Dx[ordered[1].Comp] == 2 && siz.Dy[ordered[1].Comp] <= 2
                     && siz.Dx[ordered[1].Comp] == siz.Dx[ordered[2].Comp] && siz.Dy[ordered[1].Comp] == siz.Dy[ordered[2].Comp]
                     && ordered[0].PalCol < 0) l.Conversion = 1;
                 if (colours == 4)
@@ -259,15 +260,15 @@ namespace PixCodec
                 }
                 if (Conversion == 1)
                 {
-                    // as OpenJPEG's sycc to rgb: float products truncated toward zero
+                    // as OpenJPEG's sycc to rgb: products truncated toward zero
                     long[] ry = rows[0], rcb = rows[1], rcr = rows[2];
                     int off = 1 << (OutDepth - 1);
                     for (int x = 0; x < w; x++)
                     {
                         int yy = (int)ry[x], cb = (int)rcb[x] - off, cr = (int)rcr[x] - off;
-                        ry[x] = Math.Clamp(yy + (int)(1.402f * cr), 0, outMax);
-                        rcb[x] = Math.Clamp(yy - (int)(0.344f * cb + 0.714f * cr), 0, outMax);
-                        rcr[x] = Math.Clamp(yy + (int)(1.772f * cb), 0, outMax);
+                        ry[x] = Math.Clamp(yy + (int)(1.402 * cr), 0, outMax);
+                        rcb[x] = Math.Clamp(yy - (int)(0.344 * cb + 0.714 * cr), 0, outMax);
+                        rcr[x] = Math.Clamp(yy + (int)(1.772 * cb), 0, outMax);
                     }
                 }
                 else if (Conversion == 2)

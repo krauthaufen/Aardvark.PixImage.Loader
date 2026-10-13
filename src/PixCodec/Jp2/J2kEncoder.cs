@@ -166,7 +166,7 @@ namespace PixCodec
             bool rgb = image.Color == ColorModel.Rgb || image.Color == ColorModel.Rgba;
             var enc = new J2kEncoder(planes, o, rgb && o.ColorTransform);
             long extra = 0;
-            int colours = image.Color == ColorModel.Gray || image.Color == ColorModel.GrayAlpha ? 1 : rgb ? 3 : n >= 3 ? 3 : 1;
+            int colours = image.Color == ColorModel.Gray || image.Color == ColorModel.GrayAlpha || n == 1 ? 1 : rgb ? 3 : 0;
             var meta = o.WriteMetadata ? image.Metadata : null;
             if (!o.RawCodestream)
             {
@@ -702,20 +702,23 @@ namespace PixCodec
             long all = 0;
             foreach (var b in blocks) all += b.Passes > 0 ? b.PassLen[b.Passes - 1] : 0;
             // every hull step, steepest first
-            var steps = new List<(float slope, int bytes)>();
-            foreach (var b in blocks)
+            var steps = new List<(float slope, int bytes, int block, int point)>();
+            for (int bi = 0; bi < blocks.Count; bi++)
             {
+                var b = blocks[bi];
                 int prev = 0;
                 for (int i = 0; i < b.Hull.Length; i++)
                 {
                     int len = b.PassLen[b.Hull[i] - 1];
-                    steps.Add((b.Slope[i], len - prev));
+                    steps.Add((b.Slope[i], len - prev, bi, i));
                     prev = len;
                 }
             }
-            steps.Sort((x, y) => y.slope.CompareTo(x.slope));
+            steps.Sort((x, y) => y.slope != x.slope ? y.slope.CompareTo(x.slope) : x.block != y.block ? x.block.CompareTo(y.block) : x.point.CompareTo(y.point));
             bool everythingLast = lastLayerBytes <= 0;
             double last = everythingLast ? all : lastLayerBytes;
+            var taken = new int[blocks.Count];      // hull points included so far
+            var closed = new bool[blocks.Count];
             for (int l = 0; l < _layers; l++)
             {
                 if (l == _layers - 1 && everythingLast)
@@ -723,23 +726,22 @@ namespace PixCodec
                     foreach (var b in blocks) b.LayerPasses[l] = b.Passes;
                     break;
                 }
+                // The steepest steps first; a step that does not fit closes its block for this layer (the steps of
+                // a block come in order), smaller steps of other blocks may still use what is left.
                 double budget = last * Math.Pow(2, l + 1 - _layers);
-                float threshold = float.MaxValue;
                 double sum = 0;
-                bool cut = false;
+                Array.Clear(taken); Array.Clear(closed);
                 foreach (var s in steps)
                 {
-                    if (sum + s.bytes > budget) { cut = true; break; }
+                    if (closed[s.block]) continue;
+                    if (sum + s.bytes > budget) { closed[s.block] = true; continue; }
                     sum += s.bytes;
-                    threshold = s.slope;
+                    taken[s.block] = s.point + 1;
                 }
-                if (!cut) threshold = 0;
-                foreach (var b in blocks)
+                for (int bi = 0; bi < blocks.Count; bi++)
                 {
-                    int passes = 0;
-                    for (int i = 0; i < b.Hull.Length; i++)
-                        if (b.Slope[i] >= threshold && threshold < float.MaxValue) passes = b.Hull[i]; else break;
-                    if (!cut) passes = Math.Max(passes, b.Hull.Length > 0 ? b.Hull[^1] : 0);
+                    var b = blocks[bi];
+                    int passes = taken[bi] > 0 ? b.Hull[taken[bi] - 1] : 0;
                     b.LayerPasses[l] = Math.Max(passes, l > 0 ? b.LayerPasses[l - 1] : 0);
                 }
             }
