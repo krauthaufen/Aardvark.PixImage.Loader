@@ -232,6 +232,29 @@ namespace PixCodec.Compression
             return (v >> shift) & ((1UL << count) - 1);
         }
 
+        // The next (up to 57) unread bits, first one in the top bit. Bits before the start of the stream read as zero.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static ulong LoadBack(byte* start, int length, long bit)
+        {
+            if (bit >= 64)
+            {
+                int i = (int)((bit + 7) >> 3) - 8;
+                return Unsafe.ReadUnaligned<ulong>(start + i) << (int)(64 - (bit - (long)i * 8));
+            }
+            if (bit <= 0) return 0;
+            ulong v = 0;
+            for (int k = 0; k < 8 && k < length; k++) v |= (ulong)start[k] << (8 * k);
+            return v << (int)(64 - bit);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static uint Take(ref ulong c, int count)
+        {
+            uint v = (uint)((c >> 1) >> (63 - count));
+            c <<= count;
+            return v;
+        }
+
         static long InitBack(byte* start, int length)
         {
             if (length == 0 || start[length - 1] == 0) throw Bad("bad bit stream end");
@@ -323,38 +346,67 @@ namespace PixCodec.Compression
             hufSet = true;
         }
 
+        // Five symbols from one 8 byte window that ends at the read position (needs bit >= 64; 5 * 11 <= 57).
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void Decode5(ushort* t, byte* src, ref long bit, byte* dst, int shift)
+        {
+            int i = (int)((bit + 7) >> 3) - 8;
+            ulong c = Unsafe.ReadUnaligned<ulong>(src + i) << (int)(64 - (bit - (long)i * 8));
+            uint e = t[c >> shift]; dst[0] = (byte)e; int n = (int)(e >> 8); c <<= n; int used = n;
+            e = t[c >> shift]; dst[1] = (byte)e; n = (int)(e >> 8); c <<= n; used += n;
+            e = t[c >> shift]; dst[2] = (byte)e; n = (int)(e >> 8); c <<= n; used += n;
+            e = t[c >> shift]; dst[3] = (byte)e; n = (int)(e >> 8); c <<= n; used += n;
+            e = t[c >> shift]; dst[4] = (byte)e; used += (int)(e >> 8);
+            bit -= used;
+        }
+
+        // The rest of a stream, symbol by symbol, with the end checks.
+        void FinishHuffmanStream(ushort* t, byte* src, int length, long bit, byte* dst, byte* end)
+        {
+            int log = hufLog, shift = 64 - log;
+            while (bit >= 64 && end - dst >= 5) { Decode5(t, src, ref bit, dst, shift); dst += 5; }
+            while (dst < end)
+            {
+                uint index;
+                if (bit >= log) { long b = bit; index = (uint)ReadBack(src, length, ref b, log); }
+                else { long b = bit; index = (uint)ReadBack(src, length, ref b, (int)bit) << (int)(log - bit); }
+                uint e = t[index];
+                *dst++ = (byte)e;
+                bit -= e >> 8;
+                if (bit < 0) throw Bad("Huffman stream overrun");
+            }
+            if (bit != 0) throw Bad("Huffman stream not fully consumed");
+        }
+
         void DecodeHuffmanStream(byte* src, int length, byte* dst, int count)
         {
             long bit = InitBack(src, length);
-            int log = hufLog;
-            byte* end = dst + count;
+            fixed (ushort* t = huf) FinishHuffmanStream(t, src, length, bit, dst, dst + count);
+        }
+
+        /// <summary>Four streams side by side: they are independent, so the CPU overlaps their table lookups.</summary>
+        void DecodeHuffman4(byte* s0, int n0, byte* s1, int n1, byte* s2, int n2, byte* s3, int n3, byte* dst, int per, int last)
+        {
+            long b0 = InitBack(s0, n0), b1 = InitBack(s1, n1), b2 = InitBack(s2, n2), b3 = InitBack(s3, n3);
+            byte* o0 = dst, o1 = dst + per, o2 = dst + 2 * per, o3 = dst + 3 * per;
+            byte* e0 = o1, e3 = o3 + last;
+            int shift = 64 - hufLog;
             fixed (ushort* t = huf)
             {
-                // four symbols per refill while a full 8 byte window is available below the read position
-                while (bit >= 64 && end - dst >= 4)
+                // the first three streams have the same length, so one output check covers them
+                while (b0 >= 64 && b1 >= 64 && b2 >= 64 && b3 >= 64 && e0 - o0 >= 5 && e3 - o3 >= 5)
                 {
-                    int i = (int)((bit + 7) >> 3) - 8;
-                    ulong c = Unsafe.ReadUnaligned<ulong>(src + i) << (int)(64 - (bit - (long)i * 8));
-                    int shift = 64 - log;
-                    uint e = t[c >> shift]; dst[0] = (byte)e; int n = (int)(e >> 8); c <<= n; int used = n;
-                    e = t[c >> shift]; dst[1] = (byte)e; n = (int)(e >> 8); c <<= n; used += n;
-                    e = t[c >> shift]; dst[2] = (byte)e; n = (int)(e >> 8); c <<= n; used += n;
-                    e = t[c >> shift]; dst[3] = (byte)e; used += (int)(e >> 8);
-                    dst += 4;
-                    bit -= used;
+                    Decode5(t, s0, ref b0, o0, shift);
+                    Decode5(t, s1, ref b1, o1, shift);
+                    Decode5(t, s2, ref b2, o2, shift);
+                    Decode5(t, s3, ref b3, o3, shift);
+                    o0 += 5; o1 += 5; o2 += 5; o3 += 5;
                 }
-                while (dst < end)
-                {
-                    uint index;
-                    if (bit >= log) { long b = bit; index = (uint)ReadBack(src, length, ref b, log); }
-                    else { long b = bit; index = (uint)ReadBack(src, length, ref b, (int)bit) << (int)(log - bit); }
-                    uint e = t[index];
-                    *dst++ = (byte)e;
-                    bit -= e >> 8;
-                    if (bit < 0) throw Bad("Huffman stream overrun");
-                }
+                FinishHuffmanStream(t, s0, n0, b0, o0, dst + per);
+                FinishHuffmanStream(t, s1, n1, b1, o1, dst + 2 * per);
+                FinishHuffmanStream(t, s2, n2, b2, o2, dst + 3 * per);
+                FinishHuffmanStream(t, s3, n3, b3, o3, e3);
             }
-            if (bit != 0) throw Bad("Huffman stream not fully consumed");
         }
 
         // ------------------------------------------------------------------------------------------- blocks
@@ -415,10 +467,7 @@ namespace PixCodec.Compression
                         int n4 = end - pos - n1 - n2 - n3;
                         int per = (regen + 3) / 4, last = regen - 3 * per;
                         if (n4 < 0 || last < 0) throw Bad("invalid literal streams");
-                        DecodeHuffmanStream(src + pos, n1, l, per);
-                        DecodeHuffmanStream(src + pos + n1, n2, l + per, per);
-                        DecodeHuffmanStream(src + pos + n1 + n2, n3, l + 2 * per, per);
-                        DecodeHuffmanStream(src + pos + n1 + n2 + n3, n4, l + 3 * per, last);
+                        DecodeHuffman4(src + pos, n1, src + pos + n1, n2, src + pos + n1 + n2, n3, src + pos + n1 + n2 + n3, n4, l, per, last);
                     }
                     pos = end;
                 }
@@ -511,14 +560,21 @@ namespace PixCodec.Compression
                         for (int i = 0; i < nseq; i++)
                         {
                             Entry ll = llT[llState], of = ofT[ofState], ml = mlT[mlState];
-                            uint offValue = of.Value + (uint)ReadBack(s, n, ref bit, of.ExtraBits);
-                            uint matchLen = ml.Value + (uint)ReadBack(s, n, ref bit, ml.ExtraBits);
-                            uint litLen = ll.Value + (uint)ReadBack(s, n, ref bit, ll.ExtraBits);
+                            // one 57 bit window serves the three extra bit fields (two for huge offsets), a second one the states
+                            ulong c = LoadBack(s, n, bit);
+                            uint offValue = of.Value + Take(ref c, of.ExtraBits);
+                            bit -= of.ExtraBits;
+                            if (of.ExtraBits + ml.ExtraBits + ll.ExtraBits > 56) c = LoadBack(s, n, bit);
+                            uint matchLen = ml.Value + Take(ref c, ml.ExtraBits);
+                            uint litLen = ll.Value + Take(ref c, ll.ExtraBits);
+                            bit -= ml.ExtraBits + ll.ExtraBits;
                             if (i != nseq - 1)
                             {
-                                llState = ll.NextBase + (uint)ReadBack(s, n, ref bit, ll.NextBits);
-                                mlState = ml.NextBase + (uint)ReadBack(s, n, ref bit, ml.NextBits);
-                                ofState = of.NextBase + (uint)ReadBack(s, n, ref bit, of.NextBits);
+                                c = LoadBack(s, n, bit);
+                                llState = ll.NextBase + Take(ref c, ll.NextBits);
+                                mlState = ml.NextBase + Take(ref c, ml.NextBits);
+                                ofState = of.NextBase + Take(ref c, of.NextBits);
+                                bit -= ll.NextBits + ml.NextBits + of.NextBits;
                             }
                             if (bit < 0) throw Bad("sequence stream overrun");
 

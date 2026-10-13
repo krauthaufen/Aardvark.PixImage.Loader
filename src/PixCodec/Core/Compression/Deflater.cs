@@ -6,8 +6,7 @@ using System.Runtime.CompilerServices;
 namespace PixCodec.Compression
 {
     /// <summary>
-    /// DEFLATE (RFC 1951) compressor: hash chain match finder (4 byte hash, plus a one-slot 3 byte hash on the
-    /// lazy levels), greedy parsing on levels 1..3 and lazy parsing on 4..9, dynamic Huffman blocks that are split
+    /// DEFLATE (RFC 1951) compressor: hash chain match finder over a 5 byte hash, greedy parsing on levels 1..3 and lazy parsing on 4..9, dynamic Huffman blocks that are split
     /// where the symbol statistics change, with fixed and stored blocks used whenever they are smaller.
     /// The same instance serves one-shot compression of a span and the streaming wrapper.
     /// </summary>
@@ -19,20 +18,28 @@ namespace PixCodec.Compression
         const int SymCapacity = 1 << 16, SymLimit = SymCapacity - 300; // one parse step adds fewer than 300 symbols
         const int SplitCheck = 1024, SplitMinSyms = 4096;
         const int Classes = 20;
+        // A four byte match far away costs more bits than the literals it replaces on typical image data.
+        // Short matches are only taken when the previous block's code lengths say they beat literals by this many bits.
+        const int CostMaxLen = 12, CostMargin = 2, UnusedCost = 13;
+        // Lazy levels below 8: the chain budget is halved for every 2^MissShift positions in a row without a match
+        // (at most MissCap times), and after SkipStart such positions some are passed over without a search.
+        const int MissShift = 5, MissCap = 4, SkipStart = 128, SkipShift = 6, AdaptMaxLevel = 7;
+        // Block split threshold: total variation (in percent of its maximum of 200) between the recent symbols and the block so far.
+        const int SplitPercent = 70;
 
         // good length, max lazy, nice length, max chain
         static readonly int[] Config =
         {
             0, 0, 0, 0,
             0, 0, 32, 1,       // 1: single probe, greedy
-            0, 0, 32, 4,       // 2: greedy
-            0, 0, 64, 12,      // 3: greedy
-            4, 4, 16, 16,      // 4: lazy from here on
-            8, 16, 32, 32,
-            8, 16, 128, 128,
-            8, 32, 128, 256,
-            32, 128, 258, 1024,
-            32, 258, 258, 4096,
+            0, 0, 32, 3,       // 2: greedy
+            0, 0, 48, 8,       // 3: greedy
+            4, 8, 32, 10,      // 4: lazy from here on
+            6, 12, 64, 24,
+            8, 16, 96, 40,
+            8, 16, 128, 80,
+            16, 64, 258, 256,
+            32, 258, 258, 1500,
         };
 
         static readonly ushort[] LenBase = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
@@ -68,12 +75,13 @@ namespace PixCodec.Compression
         readonly int level, goodLen, lazyMax, niceLen, chainMax, hashBits;
         readonly bool zlib;
         readonly int[] head = Array.Empty<int>();
-        readonly int[]? head3;
         readonly ushort[] prev = Array.Empty<ushort>();
         readonly uint[] syms = Array.Empty<uint>();
         readonly uint[] litFreq = new uint[288], distFreq = new uint[32];
         readonly uint[] classPrev = new uint[Classes];
         readonly byte[] litLens = new byte[288], distLens = new byte[32];
+        // estimated bit costs of literals, match lengths (index: length - 3) and distance symbols, from the last block
+        readonly byte[] litCost = new byte[256], lenCost = new byte[256], distCost = new byte[32];
         readonly ushort[] litCodes = new ushort[288], distCodes = new ushort[32];
 
         int symCount, pos, blockStart;
@@ -96,9 +104,11 @@ namespace PixCodec.Compression
                 hashBits = level <= 3 ? 15 : 16;
                 head = new int[1 << hashBits];
                 prev = new ushort[WindowSize];
-                if (level >= 4) head3 = new int[1 << 15];
                 syms = new uint[SymCapacity];
                 ResetTables();
+                // before the first block: the fixed code
+                for (int i = 0; i < 256; i++) { litCost[i] = 8; lenCost[i] = (byte)(7 + LenExtra[LenCode[i]]); }
+                for (int i = 0; i < 30; i++) distCost[i] = (byte)(5 + (i < 4 ? 0 : (i >> 1) - 1));
             }
             if (zlibWrapper)
             {
@@ -111,7 +121,6 @@ namespace PixCodec.Compression
         void ResetTables()
         {
             head.AsSpan().Fill(NoPos);
-            head3?.AsSpan().Fill(NoPos);
         }
 
         public byte[] OutputBuffer => outBuf;
@@ -273,6 +282,17 @@ namespace PixCodec.Compression
                 lf[256] = 1;
                 BuildLengths(lf, 286, 15, ll);
                 BuildLengths(df, 30, 15, dl);
+                if (count >= 512)
+                {
+                    // what this block's symbols cost is the estimate for judging short matches in the next one
+                    for (int i = 0; i < 256; i++)
+                    {
+                        litCost[i] = ll[i] != 0 ? ll[i] : (byte)UnusedCost;
+                        int c = lenCode[i];
+                        lenCost[i] = (byte)((ll[257 + c] != 0 ? ll[257 + c] : UnusedCost) + LenExtra[c]);
+                    }
+                    for (int i = 0; i < 30; i++) distCost[i] = (byte)((dl[i] != 0 ? dl[i] : UnusedCost) + (i < 4 ? 0 : (i >> 1) - 1));
+                }
 
                 long extraBits = 0, dynBits = 0, fixedBits = 0;
                 for (int i = 0; i < 286; i++)
@@ -446,7 +466,7 @@ namespace PixCodec.Compression
                     long x = (long)(cur[i] - classPrev[i]) * oldTotal - (long)classPrev[i] * newTotal;
                     diff += (ulong)Math.Abs(x);
                 }
-                if (diff * 100 > (ulong)oldTotal * newTotal * 28)
+                if (diff * 100 > (ulong)oldTotal * newTotal * SplitPercent)
                 {
                     EmitBlock(window, checkSym, checkPos, false);
                     return true;
@@ -472,6 +492,20 @@ namespace PixCodec.Compression
             return len;
         }
 
+        // Hash of the next five bytes: chains of four byte repeats are long on image data and rarely pay off.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static uint Hash(byte* p, int shift)
+            => (uint)(((Unsafe.ReadUnaligned<ulong>(p) << 24) * 0x9E3779B185EBCA87UL) >> (32 + shift));
+
+        /// <summary>True if coding the match is estimated to take fewer bits than coding its bytes as literals.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static bool Worth(byte* at, int len, int dist, byte* litCost, byte* lenCost, byte* distCost)
+        {
+            int bits = 0;
+            for (int i = 0; i < len; i++) bits += litCost[at[i]];
+            return lenCost[len - 3] + distCost[DistCode(dist)] + CostMargin < bits;
+        }
+
         /// <summary>Walks the hash chain from <paramref name="cand"/>; returns the best length above <paramref name="bestLen"/> (or bestLen).</summary>
         static int Find(byte* w, int p, int cand, ushort* prev, int maxLen, int bestLen, int chain, int nice, ref int bestDist)
         {
@@ -485,7 +519,8 @@ namespace PixCodec.Compression
                 // at distance 32768 the chain slot is the one position p itself just took
                 if (dist >= WindowSize) break;
                 byte* c = w + cand;
-                if (c[bestLen] == cur[bestLen] && Unsafe.ReadUnaligned<uint>(c) == first)
+                // a longer match must agree on the four bytes that end at index bestLen, and on the first four
+                if (Unsafe.ReadUnaligned<uint>(c + bestLen - 3) == Unsafe.ReadUnaligned<uint>(cur + bestLen - 3) && Unsafe.ReadUnaligned<uint>(c) == first)
                 {
                     int len = Extend(c, cur, 4, maxLen);
                     if (len > bestLen)
@@ -516,12 +551,14 @@ namespace PixCodec.Compression
             bool lazy = level >= 4;
             int chainMax = this.chainMax, niceLen = this.niceLen, lazyMax = this.lazyMax, goodLen = this.goodLen;
             int count = symCount;
-            int hashEnd = end - 3; // positions below this have four readable bytes
-            fixed (int* hd = head, hd3 = head3)
+            int misses = this.misses; // consecutive positions without a usable match
+            int hashEnd = end - 7; // positions below this have eight readable bytes
+            fixed (int* hd = head)
             fixed (ushort* pv = prev)
             fixed (uint* sy = syms, lf = litFreq, df = distFreq)
-            fixed (byte* lenCode = LenCode)
+            fixed (byte* lenCode = LenCode, lc = litCost, nc = lenCost, dc = distCost)
             {
+                bool adapt = lazy && level <= AdaptMaxLevel;
                 while (p < limit)
                 {
                     if (count >= SymLimit || count - checkSym >= SplitCheck)
@@ -537,14 +574,14 @@ namespace PixCodec.Compression
                         continue;
                     }
                     int maxLen = Math.Min(258, end - p);
-                    uint v = Unsafe.ReadUnaligned<uint>(window + p);
-                    uint h = (v * 2654435761u) >> hashShift;
+                    uint h = Hash(window + p, hashShift);
                     int cand = hd[h];
                     hd[h] = p;
                     uint delta = (uint)(p - cand);
                     pv[p & WindowMask] = delta < WindowSize ? (ushort)delta : (ushort)0;
                     int dist = 0, len = 3;
-                    if (delta < WindowSize) len = Find(window, p, cand, pv, maxLen, 3, chainMax, niceLen, ref dist);
+                    if (delta < WindowSize) len = Find(window, p, cand, pv, maxLen, 3, adapt ? Math.Max(chainMax >> Math.Min(misses >> MissShift, MissCap), 2) : chainMax, niceLen, ref dist);
+                    if (len >= 4 && len <= CostMaxLen && !Worth(window + p, len, dist, lc, nc, dc)) len = 3;
 
                     if (!lazy)
                     {
@@ -565,7 +602,7 @@ namespace PixCodec.Compression
                         int q2 = len <= 32 ? p + 1 : p + len - 8;
                         for (; q2 < stop; q2++)
                         {
-                            uint hq = (Unsafe.ReadUnaligned<uint>(window + q2) * 2654435761u) >> hashShift;
+                            uint hq = Hash(window + q2, hashShift);
                             uint dq = (uint)(q2 - hd[hq]);
                             hd[hq] = q2;
                             pv[q2 & WindowMask] = dq < WindowSize ? (ushort)dq : (ushort)0;
@@ -574,36 +611,33 @@ namespace PixCodec.Compression
                         continue;
                     }
 
-                    // lazy levels: also remember the most recent position of every three byte string
-                    uint h3 = ((v & 0xFFFFFF) * 2654435761u) >> 17;
-                    int cand3 = hd3[h3];
-                    hd3[h3] = p;
                     if (len < 4)
                     {
-                        uint d3 = (uint)(p - cand3);
-                        if (d3 <= 4096 && ((Unsafe.ReadUnaligned<uint>(window + cand3) ^ v) & 0xFFFFFF) == 0) { len = 3; dist = (int)d3; }
-                        else
+                        sy[count++] = window[p]; lf[window[p]]++; p++;
+                        misses++;
+                        if (adapt && misses > SkipStart)
                         {
-                            sy[count++] = window[p]; lf[window[p]]++; p++;
-                            continue;
+                            // a long stretch without any match: look at fewer positions
+                            int extra = Math.Min((misses - SkipStart) >> SkipShift, 7);
+                            for (; extra > 0 && p < limit; extra--) { sy[count++] = window[p]; lf[window[p]]++; p++; }
                         }
+                        continue;
                     }
+                    misses = 0;
                     int inserted = p;
                     while (len < lazyMax && p + 1 < hashEnd)
                     {
                         int q = p + 1;
-                        uint vq = Unsafe.ReadUnaligned<uint>(window + q);
-                        uint hq = (vq * 2654435761u) >> hashShift;
+                        uint hq = Hash(window + q, hashShift);
                         int cq = hd[hq];
                         hd[hq] = q;
                         uint dq = (uint)(q - cq);
                         pv[q & WindowMask] = dq < WindowSize ? (ushort)dq : (ushort)0;
-                        hd3[((vq & 0xFFFFFF) * 2654435761u) >> 17] = q;
                         inserted = q;
                         if (dq >= WindowSize) break;
                         int dist2 = 0;
                         int len2 = Find(window, q, cq, pv, Math.Min(258, end - q), len, len >= goodLen ? chainMax >> 2 : chainMax, niceLen, ref dist2);
-                        if (len2 <= len) break;
+                        if (len2 <= len || len2 <= CostMaxLen && !Worth(window + q, len2, dist2, lc, nc, dc)) break;
                         sy[count++] = window[p]; lf[window[p]]++;
                         p = q; len = len2; dist = dist2;
                     }
@@ -613,12 +647,10 @@ namespace PixCodec.Compression
                         int stop = Math.Min(p + len, hashEnd);
                         for (int q = inserted + 1; q < stop; q++)
                         {
-                            uint vq = Unsafe.ReadUnaligned<uint>(window + q);
-                            uint hq = (vq * 2654435761u) >> hashShift;
+                            uint hq = Hash(window + q, hashShift);
                             uint dq = (uint)(q - hd[hq]);
                             hd[hq] = q;
                             pv[q & WindowMask] = dq < WindowSize ? (ushort)dq : (ushort)0;
-                            hd3[((vq & 0xFFFFFF) * 2654435761u) >> 17] = q;
                         }
                     }
                     p += len;
@@ -626,6 +658,7 @@ namespace PixCodec.Compression
             }
             symCount = count;
             pos = p;
+            this.misses = misses;
         }
 
         /// <summary>Ends the current block at the parse position.</summary>
@@ -662,7 +695,6 @@ namespace PixCodec.Compression
             pos -= shift; blockStart -= shift; checkPos -= shift;
             if (level == 0) return;
             foreach (ref int x in head.AsSpan()) x = Math.Max(x - shift, NoPos);
-            if (head3 != null) foreach (ref int x in head3.AsSpan()) x = Math.Max(x - shift, NoPos);
         }
 
         public static byte[] Compress(ReadOnlySpan<byte> source, int level, bool zlibWrapper)

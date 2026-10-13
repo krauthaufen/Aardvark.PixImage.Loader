@@ -41,20 +41,20 @@ namespace PixCodec.Compression
             probs.AsSpan(0, Literal + (0x300 << (lc + lp))).Fill(1024);
         }
 
+        // One binary decision. Branch free: on image data the bits are close to unpredictable.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static uint Bit(ushort* prob, ref uint range, ref uint code, ref byte* p)
         {
             if (range < 1u << 24) { range <<= 8; code = (code << 8) | *p++; }
-            uint v = *prob, bound = (range >> 11) * v;
-            if (code < bound)
-            {
-                range = bound;
-                *prob = (ushort)(v + ((2048 - v) >> 5));
-                return 0;
-            }
-            range -= bound; code -= bound;
-            *prob = (ushort)(v - (v >> 5));
-            return 1;
+            int v = *prob;
+            uint bound = (range >> 11) * (uint)v;
+            uint zero = code < bound ? 1u : 0u;
+            uint mask = 0 - zero; // all ones for a 0 bit
+            range = (bound & mask) | ((range - bound) & ~mask);
+            code -= bound & ~mask;
+            // 0: v += (2048 - v) >> 5, 1: v -= v >> 5
+            *prob = (ushort)(v - ((v + (int)(mask & unchecked((uint)(31 - 2048)))) >> 5));
+            return 1 - zero;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
