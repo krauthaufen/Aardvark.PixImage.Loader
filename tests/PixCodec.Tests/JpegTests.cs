@@ -995,6 +995,67 @@ public class JpegTests
             }
     }
 
+    public static IEnumerable<object[]> ArithmeticEncodeCases()
+    {
+        foreach (bool progressive in new[] { false, true })
+        {
+            foreach (var color in new[] { ColorModel.Gray, ColorModel.Rgb })
+                foreach (var ss in color == ColorModel.Gray ? new[] { JpegSubsampling.Auto } : new[] { JpegSubsampling.Chroma444, JpegSubsampling.Chroma422, JpegSubsampling.Chroma420 })
+                {
+                    foreach (var (w, h) in new[] { (1, 1), (7, 5), (17, 33), (64, 48), (131, 97) })
+                        yield return new object[] { color, 8, w, h, 85, ss, progressive, 0 };
+                    foreach (int q in new[] { 2, 30, 97, 100 })
+                        yield return new object[] { color, 8, 67, 45, q, ss, progressive, 0 };
+                    foreach (int restart in new[] { 1, 3, 50 })
+                        yield return new object[] { color, 8, 70, 50, 80, ss, progressive, restart };
+                    yield return new object[] { color, 12, 67, 45, 90, ss, progressive, 0 };
+                    yield return new object[] { color, 12, 40, 31, 100, ss, progressive, 2 };
+                }
+        }
+    }
+
+    /// <summary>
+    /// Arithmetic coded output (sequential and progressive, 8 and 12 bit): libjpeg-turbo 3 reads it to the same pixels as
+    /// our decoder, and those are the pixels of the Huffman coded file with the same settings (only the entropy coding differs).
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ArithmeticEncodeCases))]
+    public void EncodeArithmeticRoundTrips(ColorModel color, int bits, int w, int h, int quality, JpegSubsampling ss, bool progressive, int restart)
+    {
+        var src = bits == 8 ? Synthetic(w, h, color, seed: w + quality) : Synthetic16(w, h, color, 12, seed: w + quality);
+        var opt = new JpegEncodeOptions { Quality = quality, Subsampling = ss, Progressive = progressive, RestartInterval = restart, Arithmetic = true };
+        var bytes = Encode(src, opt);
+        Assert.True(bytes.AsSpan().IndexOf(new byte[] { 0xFF, (byte)(progressive ? 0xCA : 0xC9) }) > 0);
+        Assert.True(bytes.AsSpan().IndexOf(new byte[] { 0xFF, 0xC4 }) < 0, "no Huffman tables in an arithmetic coded file");
+        var back = Jpeg.Decode(bytes);
+        var huffman = Encode(src, new JpegEncodeOptions { Quality = quality, Subsampling = ss, Progressive = progressive, RestartInterval = restart });
+        TestUtil.AssertEqual(Jpeg.Decode(huffman), back, 0);
+        if (w * h > 3000 && restart == 0) Assert.True(bytes.Length < huffman.Length, $"arithmetic {bytes.Length} >= Huffman {huffman.Length}");
+        // imagecodecs (libjpeg-turbo 3 with arithmetic and 12 bit support) is the independent reader here
+        var oracle = OracleDecodeTurbo(bytes);
+        if (oracle != null) TestUtil.AssertEqual(oracle, back, 0);
+    }
+
+    /// <summary>Decodes with imagecodecs' libjpeg-turbo 3 regardless of the file type (Pillow cannot feed arithmetic decoding).</summary>
+    static RawImage? OracleDecodeTurbo(byte[] jpeg)
+    {
+        if (!TestUtil.PythonAvailable) return null;
+        var tmp = Path.Combine(TestUtil.FixtureDir, "_tmp");
+        Directory.CreateDirectory(tmp);
+        var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + ".jpg");
+        try
+        {
+            File.WriteAllBytes(f, jpeg);
+            var (exit, output) = TestUtil.RunPython($"-c \"import sys, imagecodecs; from pxref import write_ref; write_ref(sys.argv[2], imagecodecs.jpeg8_decode(open(sys.argv[1], 'rb').read()))\" \"{f}\" \"{f}.ref\"");
+            Assert.True(exit == 0, "oracle decode failed: " + output);
+            return TestUtil.LoadRef(f + ".ref");
+        }
+        finally
+        {
+            File.Delete(f); File.Delete(f + ".ref");
+        }
+    }
+
     [Fact]
     public void EncodeQualityOrdersSizeAndFidelity()
     {

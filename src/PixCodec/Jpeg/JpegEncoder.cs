@@ -26,6 +26,7 @@ namespace PixCodec.JpegImpl
             public ushort[]? Plane16; // 12 bit samples
             public short[] Coefs = null!;
             public int Pred;
+            public int ArithContext, ArithTable; // arithmetic coding: DC conditioning state, statistics table (0 luma, 1 chroma)
             public HuffEnc Dc = null!, Ac = null!;
         }
 
@@ -727,7 +728,7 @@ namespace PixCodec.JpegImpl
             }
 
             // baseline, extended sequential (needed beyond 8 bit) or progressive
-            Marker(_opt.Progressive ? 0xC2 : _precision == 8 ? 0xC0 : 0xC1);
+            Marker(_opt.Arithmetic ? (_opt.Progressive ? 0xCA : 0xC9) : _opt.Progressive ? 0xC2 : _precision == 8 ? 0xC0 : 0xC1);
             U16(8 + 3 * _comps.Length); Byte(_precision); U16(_h); U16(_w); Byte(_comps.Length);
             foreach (var c in _comps) { Byte(c.Id); Byte(c.H << 4 | c.V); Byte(c.Tq); }
 
@@ -792,7 +793,7 @@ namespace PixCodec.JpegImpl
 
         // ---------------------------------------------------------------- scans
 
-        bool OptimizedBaseline => !_opt.Progressive && (_opt.OptimizeHuffman || _precision != 8);
+        bool OptimizedBaseline => !_opt.Progressive && !_opt.Arithmetic && (_opt.OptimizeHuffman || _precision != 8);
 
         /// <summary>The standard tables, or empty ones to be built from the image's statistics (always beyond 8 bit: the standard tables stop at 8 bit magnitudes).</summary>
         void SetupBaselineTables()
@@ -809,8 +810,83 @@ namespace PixCodec.JpegImpl
             }
         }
 
+        JpegArithEncoder? _arith;
+
+        /// <summary>
+        /// One scan with arithmetic coding: a single pass (the coder adapts, there are no tables to prepare), for
+        /// sequential (ss = 0, se = 63) and progressive scans alike.
+        /// </summary>
+        void EncodeScanArithmetic(Comp[] comps, int ss, int se, int ah, int al)
+        {
+            var coder = _arith ??= new JpegArithEncoder();
+            for (int i = 0; i < _comps.Length; i++) _comps[i].ArithTable = i == 0 ? 0 : 1;
+            var ids = new int[comps.Length];
+            for (int i = 0; i < comps.Length; i++) ids[i] = comps[i].ArithTable;
+            WriteScanHeader(comps, ids, ids, ss, se, ah, al);
+
+            bool single = comps.Length == 1, sequential = !_opt.Progressive;
+            int mcusX = single ? comps[0].ScanBlocksW : _mcusX, mcusY = single ? comps[0].ScanBlocksH : _mcusY;
+            int todo = _restart, rst = 0;
+            foreach (var c in comps) { c.Pred = 0; c.ArithContext = 0; }
+            coder.Start();
+            for (int my = 0; my < mcusY; my++)
+            {
+                for (int mx = 0; mx < mcusX; mx++)
+                {
+                    if (_restart != 0)
+                    {
+                        if (todo == 0)
+                        {
+                            coder.Finish();
+                            Bytes(coder.Buffer.AsSpan(0, coder.Length));
+                            Marker(0xD0 + rst);
+                            rst = (rst + 1) & 7;
+                            todo = _restart;
+                            foreach (var c in comps) { c.Pred = 0; c.ArithContext = 0; }
+                            coder.Start();
+                        }
+                        todo--;
+                    }
+                    foreach (var c in comps)
+                    {
+                        int h = single ? 1 : c.H, v = single ? 1 : c.V;
+                        fixed (short* coefs = c.Coefs)
+                        {
+                            for (int by = 0; by < v; by++)
+                            {
+                                short* blk = coefs + ((nint)(my * v + by) * c.BlocksW + mx * h) * 64;
+                                for (int bx = 0; bx < h; bx++, blk += 64)
+                                {
+                                    if (ss == 0)
+                                    {
+                                        if (ah != 0) coder.EncodeDcRefine(blk[0] >> al);
+                                        else
+                                        {
+                                            int value = blk[0] >> al;
+                                            coder.EncodeDc(c.ArithTable, ref c.ArithContext, value - c.Pred);
+                                            c.Pred = value;
+                                        }
+                                        if (sequential) coder.EncodeAc(c.ArithTable, blk, 1, 63, 0);
+                                    }
+                                    else if (ah == 0) coder.EncodeAc(c.ArithTable, blk, ss, se, al);
+                                    else coder.EncodeAcRefine(c.ArithTable, blk, ss, se, ah, al);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            coder.Finish();
+            Bytes(coder.Buffer.AsSpan(0, coder.Length));
+        }
+
         void WriteBaseline()
         {
+            if (_opt.Arithmetic)
+            {
+                EncodeScanArithmetic(_comps, 0, 63, 0, 0);
+                return;
+            }
             bool color = _comps.Length == 3;
             HuffEnc dc0 = _comps[0].Dc, ac0 = _comps[0].Ac, dc1 = _comps[^1].Dc, ac1 = _comps[^1].Ac;
             if (OptimizedBaseline)
@@ -858,6 +934,11 @@ namespace PixCodec.JpegImpl
 
         void ProgressiveScan(Comp[] comps, int ss, int se, int ah, int al)
         {
+            if (_opt.Arithmetic)
+            {
+                EncodeScanArithmetic(comps, ss, se, ah, al);
+                return;
+            }
             var ids = new int[comps.Length];
             var slots = new HuffEnc?[2];
             bool dcRefine = ss == 0 && ah != 0; // raw bits only, no table

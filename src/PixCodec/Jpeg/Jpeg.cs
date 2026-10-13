@@ -64,6 +64,13 @@ namespace PixCodec
         public bool Progressive { get; set; }
 
         /// <summary>
+        /// Use arithmetic coding instead of Huffman coding (sequential or, with <see cref="Progressive"/>, progressive):
+        /// 5 to 10 percent smaller files, slower to write and read, and not supported by every decoder (browsers, for
+        /// instance). <see cref="OptimizeHuffman"/> has no meaning then. Not available for <see cref="Lossless"/>.
+        /// </summary>
+        public bool Arithmetic { get; set; }
+
+        /// <summary>
         /// Emit a restart marker every this many MCUs (0 = none, at most 65535). In lossless mode the interval is
         /// rounded up to whole lines.
         /// </summary>
@@ -369,7 +376,7 @@ namespace PixCodec
         }
 
         static JpegEncodeOptions TiffOptions(JpegEncodeOptions o)
-            => new JpegEncodeOptions { Quality = o.Quality, Subsampling = o.Subsampling, OptimizeHuffman = o.OptimizeHuffman, RestartInterval = o.RestartInterval };
+            => new JpegEncodeOptions { Quality = o.Quality, Subsampling = o.Subsampling, OptimizeHuffman = o.OptimizeHuffman, RestartInterval = o.RestartInterval, Arithmetic = o.Arithmetic };
 
         /// <summary>Encodes an image as JPEG to the stream (which only needs to be writable, not seekable).</summary>
         public static void Encode(RawImage image, Stream output, JpegEncodeOptions? options = null)
