@@ -106,24 +106,15 @@ namespace PixCodec
             uint r = range;
             uint split = (r * (uint)prob) >> 8;
             uint v = (uint)(value >> bits);
-            int bit;
-            if (v > split)
-            {
-                r -= split + 1;
-                value -= (ulong)(split + 1) << bits;
-                bit = 1;
-            }
-            else
-            {
-                r = split;
-                bit = 0;
-            }
-            if (r < 127)
-            {
-                int shift = BitOperations.LeadingZeroCount(r + 1) - 24;
-                r = ((r + 1) << shift) - 1;
-                bits -= shift;
-            }
+            // Without branches: the caller branches on the result anyway, and a second unpredictable branch here
+            // (plus one for the normalization) would cost more than the arithmetic.
+            uint mask = (uint)((int)(split - v) >> 31);         // all ones for a 1
+            int bit = (int)(mask & 1);
+            value -= (ulong)((split + 1) & mask) << bits;
+            r = split + (mask & (r - 2 * split - 1));           // 1: r - split - 1, 0: split
+            int shift = BitOperations.LeadingZeroCount(r + 1) - 24;
+            r = ((r + 1) << shift) - 1;
+            bits -= shift;
             range = r;
             return bit;
         }

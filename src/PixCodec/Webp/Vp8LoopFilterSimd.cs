@@ -146,9 +146,11 @@ namespace PixCodec
             return f1;
         }
 
-        static void Simple(Vector128<byte> p1, ref Vector128<byte> p0, ref Vector128<byte> q0, Vector128<byte> q1, int limit)
+        // The filters return false when no position of the edge passes the thresholds: nothing to write back then.
+        static bool Simple(Vector128<byte> p1, ref Vector128<byte> p0, ref Vector128<byte> q0, Vector128<byte> q1, int limit)
         {
             var mask = EdgeMask(p1, p0, q0, q1, Vector128.Create((byte)limit)).AsSByte();
+            if (mask == Vector128<sbyte>.Zero) return false;
             var sp1 = (p1 ^ Sign).AsSByte(); var sq1 = (q1 ^ Sign).AsSByte();
             var sp0 = (p0 ^ Sign).AsSByte(); var sq0 = (q0 ^ Sign).AsSByte();
             var d = SubS(sq0, sp0);
@@ -156,6 +158,7 @@ namespace PixCodec
             Adjust(a, ref sp0, ref sq0);
             p0 = sp0.AsByte() ^ Sign;
             q0 = sq0.AsByte() ^ Sign;
+            return true;
         }
 
         /// <summary>Filter mask and high edge variance mask of the normal filters.</summary>
@@ -171,10 +174,11 @@ namespace PixCodec
         }
 
         /// <summary>The filter for edges between sub-blocks: changes p1, p0, q0, q1.</summary>
-        static void Inner(Vector128<byte> p3, Vector128<byte> p2, ref Vector128<byte> p1, ref Vector128<byte> p0, ref Vector128<byte> q0, ref Vector128<byte> q1,
+        static bool Inner(Vector128<byte> p3, Vector128<byte> p2, ref Vector128<byte> p1, ref Vector128<byte> p0, ref Vector128<byte> q0, ref Vector128<byte> q1,
             Vector128<byte> q2, Vector128<byte> q3, int limit, int interior, int hevThresh)
         {
             Masks(p3, p2, p1, p0, q0, q1, q2, q3, limit, interior, hevThresh, out var mask, out var hev);
+            if (mask == Vector128<sbyte>.Zero) return false;
             var sp1 = (p1 ^ Sign).AsSByte(); var sq1 = (q1 ^ Sign).AsSByte();
             var sp0 = (p0 ^ Sign).AsSByte(); var sq0 = (q0 ^ Sign).AsSByte();
             var d = SubS(sq0, sp0);
@@ -187,6 +191,7 @@ namespace PixCodec
             sp1 = AddS(sp1, half);
             p1 = sp1.AsByte() ^ Sign; p0 = sp0.AsByte() ^ Sign;
             q0 = sq0.AsByte() ^ Sign; q1 = sq1.AsByte() ^ Sign;
+            return true;
         }
 
         /// <summary>(k * w + 63) >> 7 on sixteen signed bytes.</summary>
@@ -200,10 +205,11 @@ namespace PixCodec
         }
 
         /// <summary>The filter for edges between macroblocks: changes p2 .. q2.</summary>
-        static void Macroblock(Vector128<byte> p3, ref Vector128<byte> p2, ref Vector128<byte> p1, ref Vector128<byte> p0, ref Vector128<byte> q0,
+        static bool Macroblock(Vector128<byte> p3, ref Vector128<byte> p2, ref Vector128<byte> p1, ref Vector128<byte> p0, ref Vector128<byte> q0,
             ref Vector128<byte> q1, ref Vector128<byte> q2, Vector128<byte> q3, int limit, int interior, int hevThresh)
         {
             Masks(p3, p2, p1, p0, q0, q1, q2, q3, limit, interior, hevThresh, out var mask, out var hev);
+            if (mask == Vector128<sbyte>.Zero) return false;
             var sp2 = (p2 ^ Sign).AsSByte(); var sq2 = (q2 ^ Sign).AsSByte();
             var sp1 = (p1 ^ Sign).AsSByte(); var sq1 = (q1 ^ Sign).AsSByte();
             var sp0 = (p0 ^ Sign).AsSByte(); var sq0 = (q0 ^ Sign).AsSByte();
@@ -222,6 +228,7 @@ namespace PixCodec
             sq2 = SubS(sq2, a); sp2 = AddS(sp2, a);
             p2 = sp2.AsByte() ^ Sign; p1 = sp1.AsByte() ^ Sign; p0 = sp0.AsByte() ^ Sign;
             q0 = sq0.AsByte() ^ Sign; q1 = sq1.AsByte() ^ Sign; q2 = sq2.AsByte() ^ Sign;
+            return true;
         }
 
         // ---- getting at the pixels
@@ -288,16 +295,19 @@ namespace PixCodec
             var q0 = Vector128.Load(p); var q1 = Vector128.Load(p + stride);
             if (kind == 0)
             {
-                Simple(p1, ref p0, ref q0, q1, limit);
+                if (!Simple(p1, ref p0, ref q0, q1, limit)) return;
                 p0.Store(p - stride); q0.Store(p);
                 return;
             }
             var p3 = Vector128.Load(p - 4 * stride); var p2 = Vector128.Load(p - 3 * stride);
             var q2 = Vector128.Load(p + 2 * stride); var q3 = Vector128.Load(p + 3 * stride);
-            if (kind == 1) Inner(p3, p2, ref p1, ref p0, ref q0, ref q1, q2, q3, limit, interior, hev);
+            if (kind == 1)
+            {
+                if (!Inner(p3, p2, ref p1, ref p0, ref q0, ref q1, q2, q3, limit, interior, hev)) return;
+            }
             else
             {
-                Macroblock(p3, ref p2, ref p1, ref p0, ref q0, ref q1, ref q2, q3, limit, interior, hev);
+                if (!Macroblock(p3, ref p2, ref p1, ref p0, ref q0, ref q1, ref q2, q3, limit, interior, hev)) return;
                 p2.Store(p - 3 * stride); q2.Store(p + 2 * stride);
             }
             p1.Store(p - 2 * stride); p0.Store(p - stride); q0.Store(p); q1.Store(p + stride);
@@ -310,10 +320,13 @@ namespace PixCodec
             var p1 = Pair(u - 2 * stride, v - 2 * stride); var p0 = Pair(u - stride, v - stride);
             var q0 = Pair(u, v); var q1 = Pair(u + stride, v + stride);
             var q2 = Pair(u + 2 * stride, v + 2 * stride); var q3 = Pair(u + 3 * stride, v + 3 * stride);
-            if (kind == 1) Inner(p3, p2, ref p1, ref p0, ref q0, ref q1, q2, q3, limit, interior, hev);
+            if (kind == 1)
+            {
+                if (!Inner(p3, p2, ref p1, ref p0, ref q0, ref q1, q2, q3, limit, interior, hev)) return;
+            }
             else
             {
-                Macroblock(p3, ref p2, ref p1, ref p0, ref q0, ref q1, ref q2, q3, limit, interior, hev);
+                if (!Macroblock(p3, ref p2, ref p1, ref p0, ref q0, ref q1, ref q2, q3, limit, interior, hev)) return;
                 StorePair(p2, u - 3 * stride, v - 3 * stride); StorePair(q2, u + 2 * stride, v + 2 * stride);
             }
             StorePair(p1, u - 2 * stride, v - 2 * stride); StorePair(p0, u - stride, v - stride);
@@ -325,10 +338,10 @@ namespace PixCodec
         public static void VerticalEdge(byte* a, byte* b, int stride, int kind, int limit, int interior, int hev)
         {
             LoadColumns(a - 4, b - 4, stride, out var p3, out var p2, out var p1, out var p0, out var q0, out var q1, out var q2, out var q3);
-            if (kind == 0) Simple(p1, ref p0, ref q0, q1, limit);
-            else if (kind == 1) Inner(p3, p2, ref p1, ref p0, ref q0, ref q1, q2, q3, limit, interior, hev);
-            else Macroblock(p3, ref p2, ref p1, ref p0, ref q0, ref q1, ref q2, q3, limit, interior, hev);
-            StoreColumns(a - 4, b - 4, stride, p3, p2, p1, p0, q0, q1, q2, q3);
+            bool any = kind == 0 ? Simple(p1, ref p0, ref q0, q1, limit)
+                : kind == 1 ? Inner(p3, p2, ref p1, ref p0, ref q0, ref q1, q2, q3, limit, interior, hev)
+                : Macroblock(p3, ref p2, ref p1, ref p0, ref q0, ref q1, ref q2, q3, limit, interior, hev);
+            if (any) StoreColumns(a - 4, b - 4, stride, p3, p2, p1, p0, q0, q1, q2, q3);
         }
     }
 }
