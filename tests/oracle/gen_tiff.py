@@ -1239,6 +1239,75 @@ def gen_more_codecs():
             write_tol(path, 4)
 
 
+def gen_ccitt_uncompressed():
+    """CCITT "uncompressed mode" (T.4 / T.6 extension). No encoder writes it and no decoder at hand reads it (libtiff:
+    "uncompressed data (not supported)", and with it OpenCV, Pillow, GDAL, libvips; tifffile has no CCITT codec),
+    so these files are packed by hand from the recommendation and listed as unverified."""
+    rng = np.random.default_rng(81)
+    w, h = 61, 24
+    a = (rng.random((h, w)) < 0.35).astype(np.uint8)       # 1 = black
+    a[3] = 0
+    a[4] = 1
+    a[5, :30] = 0
+    a[6, 7:] = 0
+
+    def urow(row, t=0):
+        out, whites = '', 0
+        for v in row:
+            if v == 0:
+                whites += 1
+                if whites == 5:
+                    out, whites = out + '000001', 0
+            else:
+                out, whites = out + '0' * whites + '1', 0
+        return out + '0' * (6 + whites) + '1' + str(t)       # exit code, then the colour of the next coded run
+
+    def to_bytes(bits):
+        bits += '0' * (-len(bits) % 8)
+        return bytes(int(bits[i:i + 8], 2) for i in range(0, len(bits), 8))
+
+    def changes(row):
+        return [x for x in range(len(row)) if row[x] != (row[x - 1] if x else 0)]
+
+    def finish(name, img, data, comp, tag, rps=None):
+        d = os.path.join(OUT, 'unverified')
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name + '.tif')
+        page = dict(arr=img[:, :, None], bits=1, photometric=0, compression=comp, raw_chunks=data, rps=rps or img.shape[0], tags=[(tag, 4, [2])])
+        write_tiff(path, [page])
+        for reader in (lambda: ref_cv2(path), lambda: np.asarray(Image.open(path).convert('L'))):
+            try:
+                got = reader()
+                assert not np.array_equal(got.reshape(img.shape) > 0, img == 0), f'{name}: a reference decoder reads this now - use it'
+            except AssertionError:
+                raise
+            except Exception:
+                pass
+        write_ref(path + '.ref', ((1 - img) * 255).astype(np.uint8))
+        reason = 'CCITT uncompressed mode: libtiff (and so OpenCV, Pillow, GDAL, libvips) rejects it, nothing writes it'
+        UNVERIFIED.append((name, reason))
+        SUMMARY.append(('unverified/' + name, ['UNVERIFIED: ' + reason]))
+
+    # Group 4, every row in uncompressed mode
+    bits = ''.join('0000001111' + urow(r) for r in a) + '000000000001' * 2
+    finish('ccitt_g4_uncompressed', a, [to_bytes(bits)], 4, 293)
+
+    # Group 4, mixed: uncompressed rows, rows identical to the one above coded with vertical codes only, and a row
+    # that leaves uncompressed mode half way (the rest is white: one V0 against the white reference row)
+    b = a.copy()
+    b[0, 25:] = 0
+    b[2::2] = b[1:-1:2]
+    bits = '0000001111' + urow(b[0, :25]) + '1'
+    for y in range(1, h):
+        bits += '0000001111' + urow(b[y]) if y % 2 else '1' * (len(changes(b[y])) + 1)
+    finish('ccitt_g4_uncompressed_mixed', b, [to_bytes(bits + '000000000001' * 2)], 4, 293)
+
+    # Group 3 one-dimensional (EOL before every row) in two strips, and modified Huffman (rows byte aligned)
+    strips = [to_bytes(''.join('000000000001' + '000000001111' + urow(r) for r in a[y:y + 12])) for y in range(0, h, 12)]
+    finish('ccitt_g3_uncompressed', a, strips, 3, 292, rps=12)
+    finish('ccitt_rle_uncompressed', a, [b''.join(to_bytes('000000001111' + urow(r)) for r in a)], 2, 292)
+
+
 def gen_lab():
     """CIELab / ICCLab / ITULab. PixCodec converts to sRGB with the textbook D50 Lab -> XYZ -> (Bradford) sRGB maths;
     the reference is LittleCMS (through Pillow's ImageCms: Lab D50 profile -> sRGB profile) applied to the samples
@@ -1907,6 +1976,7 @@ def main():
     gen_logluv()
     gen_pixarlog()
     gen_ccitt()
+    gen_ccitt_uncompressed()
     gen_ycbcr()
     gen_jpeg()
     gen_jpeg_deep()

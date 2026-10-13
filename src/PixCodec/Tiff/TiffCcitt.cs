@@ -5,7 +5,7 @@ namespace PixCodec
     /// <summary>
     /// CCITT T.4 / T.6 bilevel decoding: compression 2 (modified Huffman, byte aligned rows), 3 (Group 3, one or two
     /// dimensional, with EOL codes) and 4 (Group 4). Produces packed rows, 1 bits for black runs.
-    /// The "uncompressed mode" extension is not implemented.
+    /// The "uncompressed mode" extension is decoded as well.
     /// </summary>
     internal static unsafe class TiffCcitt
     {
@@ -149,7 +149,6 @@ namespace PixCodec
         /// </summary>
         public static void Decode(ReadOnlySpan<byte> src, byte* dst, int width, int rows, int compression, long options)
         {
-            if ((options & 2) != 0) throw new ImageNotSupportedException("TIFF: CCITT uncompressed mode is not supported");
             int rowBytes = (width + 7) / 8;
             new Span<byte>(dst, rowBytes * rows).Clear();
             // changing elements of the reference and the current row, each terminated by sentinels at `width`
@@ -186,12 +185,63 @@ namespace PixCodec
             }
         }
 
+        /// <summary>Appends a run to the list of changing elements (which starts white and alternates).</summary>
+        static void Emit(int[] cur, ref int n, int x, bool black)
+        {
+            if (((n & 1) == 1) == black) return; // the run continues
+            if (n >= cur.Length) throw new ImageFormatException("TIFF: corrupt CCITT data");
+            cur[n++] = x;
+        }
+
+        /// <summary>
+        /// "Uncompressed mode" (an optional extension of T.4 / T.6): the pixels follow literally, 1 for black and
+        /// 0 for white, except that a 1 is stuffed after five zeros (000001 = five white pixels) so that the exit
+        /// code - six or more zeros, a 1, and a bit giving the colour of the next coded run - stays unique. The zeros
+        /// beyond six in the exit code are white pixels. Returns the position reached.
+        /// </summary>
+        static int ReadUncompressed(ref Bits b, int[] cur, ref int n, int x, int width, out bool nextBlack)
+        {
+            while (true)
+            {
+                int z = 0;
+                while (b.PeekBits(1) == 0)
+                {
+                    b.Skip(1);
+                    if (++z > 10 || b.Overrun) throw new ImageFormatException("TIFF: corrupt CCITT data (uncompressed mode)");
+                }
+                b.Skip(1);
+                int white = z <= 5 ? z : z - 6;
+                if (white > width - x) throw new ImageFormatException("TIFF: corrupt CCITT data (uncompressed mode exceeds the row)");
+                if (white > 0) { Emit(cur, ref n, x, false); x += white; }
+                if (z >= 6)
+                {
+                    nextBlack = b.PeekBits(1) == 1;
+                    b.Skip(1);
+                    if (b.Overrun) throw new ImageFormatException("TIFF: CCITT data is truncated");
+                    return x;
+                }
+                if (z <= 4)
+                {
+                    if (x >= width) throw new ImageFormatException("TIFF: corrupt CCITT data (uncompressed mode exceeds the row)");
+                    Emit(cur, ref n, x, true);
+                    x++;
+                }
+            }
+        }
+
         static int Decode1D(ref Bits b, int[] cur, int width)
         {
             int a0 = 0, n = 0;
             bool black = false;
             while (a0 < width)
             {
+                if (b.PeekBits(12) == 0x00F) // 000000001111: uncompressed mode follows
+                {
+                    b.Skip(12);
+                    a0 = ReadUncompressed(ref b, cur, ref n, a0, width, out black);
+                    Emit(cur, ref n, a0, black); // the coded runs go on in the colour the exit code names
+                    continue;
+                }
                 a0 += ReadRun(ref b, black ? Black : White, width - a0);
                 if (n >= cur.Length) throw new ImageFormatException("TIFF: corrupt CCITT data"); // endless zero length runs
                 cur[n++] = a0;
@@ -242,6 +292,14 @@ namespace PixCodec
                 else if (code >= 0x04) { b.Skip(6); a1 = b1 - 2; }          // 000010   VL2
                 else if (code == 0x03) { b.Skip(7); a1 = b1 + 3; }          // 0000011  VR3
                 else if (code == 0x02) { b.Skip(7); a1 = b1 - 3; }          // 0000010  VL3
+                else if (b.PeekBits(10) == 0x00F)                           // 0000001111: uncompressed mode follows
+                {
+                    b.Skip(10);
+                    a0 = ReadUncompressed(ref b, cur, ref n, Math.Max(a0, 0), width, out black);
+                    Emit(cur, ref n, a0, black); // the coded runs go on in the colour the exit code names
+                    if (a0 == 0 && !black) a0 = -1;
+                    continue;
+                }
                 else throw new ImageFormatException(b.Overrun || b.AtEnd ? "TIFF: CCITT data is truncated" : "TIFF: corrupt or unsupported CCITT data");
 
                 if (a1 > width) a1 = width;
