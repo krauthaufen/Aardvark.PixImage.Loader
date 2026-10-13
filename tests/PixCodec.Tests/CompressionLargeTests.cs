@@ -99,7 +99,7 @@ public class CompressionLargeTests
         Assert.Throws<IOException>(() => Deflater.Compress(data, 0, true));
         Assert.Throws<IOException>(() => Deflater.Compress(data, 1, true));
         // zstd and xz reach across the gigabyte? Not with these windows, so they must refuse as well - or succeed and round trip
-        foreach (var compress in new Func<byte[]>[] { () => Zstd.Compress(data, 1), () => Xz.Compress(data, 0, 0, XzCheck.None) })
+        foreach (var compress in Mode >= 2 ? new Func<byte[]>[] { () => Zstd.Compress(data, 1), () => Xz.Compress(data, 0, 0, XzCheck.None) } : new Func<byte[]>[] { () => Zstd.Compress(data, 1) })
         {
             try
             {

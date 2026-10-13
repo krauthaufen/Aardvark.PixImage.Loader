@@ -777,8 +777,8 @@ namespace PixCodec.Compression
                         if (type != 2 && size > blockMax) throw Bad("block too large");
                         if (grow && capacity - outPos < produced + Slack)
                         {
-                            long need = (long)outPos + produced + Slack;
-                            if (need > Array.MaxLength) throw Bad("output too large");
+                            // (near the array size limit the head room shrinks; every write is checked against the capacity)
+                            long need = Math.Min((long)outPos + produced + Slack, Array.MaxLength);
                             long want = Math.Max(need, (long)capacity * 2);
                             if (contentSize != ulong.MaxValue)
                             {
@@ -787,7 +787,7 @@ namespace PixCodec.Compression
                                 if (target > want && target <= trusted) want = target;
                                 else if (target < want) want = Math.Max(need, target);
                             }
-                            Array.Resize(ref growable, (int)Math.Min(want, Array.MaxLength));
+                            if (Math.Min(want, Array.MaxLength) > capacity) Array.Resize(ref growable, (int)Math.Min(want, Array.MaxLength));
                             capacity = growable!.Length;
                         }
                         Span<byte> output = grow ? growable : destination;

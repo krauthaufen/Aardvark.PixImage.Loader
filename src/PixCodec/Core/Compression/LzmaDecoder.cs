@@ -276,12 +276,10 @@ namespace PixCodec.Compression
                 if (need > destination.Length - outPos) throw new ImageFormatException("corrupt LZMA data: output does not fit the destination");
                 return destination;
             }
-            long want = outPos + need + Wild;
+            if (outPos + need > Array.MaxLength) throw Bad("output too large");
+            long want = Math.Min(outPos + need + Wild, Array.MaxLength); // no room for the copy overshoot at the very limit: the copies check
             if (want > growable.Length)
-            {
-                if (want > Array.MaxLength) throw Bad("output too large");
                 Array.Resize(ref growable, (int)Math.Min(Math.Max(want, (long)growable.Length * 2), Array.MaxLength));
-            }
             return growable;
         }
 
