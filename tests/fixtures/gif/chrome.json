@@ -396,7 +396,7 @@
    30
   ],
   "repetitions": 0,
-  "previousReference": "identical"
+  "previousReference": "differed: size 10x8 -> 15x11"
  },
  "hand_anim_gif87a.gif": {
   "givenAllData": "3 frames",
@@ -576,7 +576,7 @@
   "framesGivenAllData": 6,
   "playback": {
    "storedDelayCs": 10,
-   "measuredMsPerFrame": 99,
+   "measuredMsPerFrame": 100,
    "clampedTo100ms": false
   },
   "source": "chromium",
@@ -601,7 +601,7 @@
   "framesGivenAllData": 6,
   "playback": {
    "storedDelayCs": 1,
-   "measuredMsPerFrame": 100,
+   "measuredMsPerFrame": 99,
    "clampedTo100ms": true
   },
   "source": "chromium",
@@ -626,7 +626,7 @@
   "framesGivenAllData": 6,
   "playback": {
    "storedDelayCs": 20,
-   "measuredMsPerFrame": 198,
+   "measuredMsPerFrame": 199,
    "clampedTo100ms": false
   },
   "source": "chromium",
@@ -651,7 +651,7 @@
   "framesGivenAllData": 6,
   "playback": {
    "storedDelayCs": 2,
-   "measuredMsPerFrame": 17,
+   "measuredMsPerFrame": 15,
    "clampedTo100ms": false
   },
   "source": "chromium",
@@ -701,7 +701,7 @@
   "framesGivenAllData": 6,
   "playback": {
    "storedDelayCs": 5,
-   "measuredMsPerFrame": 50,
+   "measuredMsPerFrame": 46,
    "clampedTo100ms": false
   },
   "source": "chromium",
@@ -764,7 +764,7 @@
    0
   ],
   "repetitions": "infinite",
-  "previousReference": "identical"
+  "previousReference": "differed: size 10x8 -> 15x13"
  },
  "hand_frame_beyond_screen.gif": {
   "givenAllData": "1 frames",
@@ -779,7 +779,7 @@
    0
   ],
   "repetitions": "infinite",
-  "previousReference": "identical"
+  "previousReference": "differed: size 10x8 -> 15x11"
  },
  "hand_frame_larger_than_screen.gif": {
   "givenAllData": "1 frames",
@@ -794,7 +794,7 @@
    0
   ],
   "repetitions": "infinite",
-  "previousReference": "identical"
+  "previousReference": "differed: size 6x5 -> 11x9"
  },
  "hand_frame_outside_screen.gif": {
   "givenAllData": "1 frames",
@@ -809,7 +809,7 @@
    0
   ],
   "repetitions": "infinite",
-  "previousReference": "identical"
+  "previousReference": "differed: size 10x8 -> 23x33"
  },
  "hand_gce_no_transparency.gif": {
   "givenAllData": "1 frames",
@@ -1410,7 +1410,7 @@
    20
   ],
   "repetitions": 0,
-  "previousReference": "identical"
+  "previousReference": "differed: frames 1"
  },
  "hand_truncated_interlaced_second_90.gif": {
   "givenAllData": "1 of 2 frames, then RangeError: Unexpected end of image. Request for frame index 1 can't be satisfied.",
@@ -1743,7 +1743,7 @@
    200
   ],
   "repetitions": "infinite",
-  "previousReference": "identical"
+  "previousReference": "differed: frames 2,3"
  },
  "pil_anim_local_palettes.gif": {
   "givenAllData": "3 frames",

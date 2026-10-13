@@ -596,6 +596,56 @@ public class GifTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>
+    /// The global palette statistics book only the pixels that change from frame to frame (weighted by the frames that
+    /// remain). That must give exactly the palette that counting every pixel of every frame gives.
+    /// </summary>
+    [Fact]
+    public void GlobalPaletteStatisticsFromChanges()
+    {
+        var frames = Movie(7, 64, 40, 256, true);
+        static uint[] Pixels(RawImage f)
+        {
+            var d = f.GetData<byte>();
+            var px = new uint[f.Width * f.Height];
+            for (int i = 0; i < px.Length; i++)
+                px[i] = d[i * 4 + 3] < 128 ? 0 : d[i * 4] | (uint)d[i * 4 + 1] << 8 | (uint)d[i * 4 + 2] << 16 | 0xFF000000u;
+            return px;
+        }
+        var all = new GifQuantizer();
+        foreach (var f in frames) all.Add(Pixels(f));
+        var expected = all.BuildPalette(255, 3);
+
+        var weighted = new GifQuantizer();
+        weighted.Add(Pixels(frames[0]), 5);
+        weighted.Add(Pixels(frames[0]), -4);
+        for (int k = 1; k < frames.Count; k++) weighted.Add(Pixels(frames[k]), 1);
+        Assert.Equal(expected, weighted.BuildPalette(255, 3));
+
+        // and through the encoder: the palette in the file is that palette (plus the transparent slot)
+        var gif = Gif.EncodeAnimation(frames.Select(f => new GifInputFrame(f, 50)), new GifEncodeOptions { Dither = GifDither.None });
+        var table = Gif.GetAnimationInfo(gif).GlobalPalette!;
+        for (int i = 0; i < expected.Length; i++)
+            Assert.Equal(expected[i] & 0xFFFFFF, (uint)(table[i * 3] | table[i * 3 + 1] << 8 | table[i * 3 + 2] << 16));
+
+        // frames handed over in different layouts are compared pixel by pixel instead of byte by byte: same file
+        var mixed = frames.Select((f, i) => i % 2 == 0 || HasTransparency(f) ? f : DropAlpha(f)).ToList();
+        Assert.Contains(mixed, f => f.Color == ColorModel.Rgb);
+        Assert.Equal(gif, Gif.EncodeAnimation(mixed.Select(f => new GifInputFrame(f, 50)), new GifEncodeOptions { Dither = GifDither.None }));
+        // the same for a palette that needs no quantizing
+        var few = Movie(6, 40, 30, 4, false);
+        var fewMixed = few.Select((f, i) => i % 2 == 0 ? f : DropAlpha(f)).ToList();
+        Assert.Equal(Gif.EncodeAnimation(few.Select(f => new GifInputFrame(f, 50))), Gif.EncodeAnimation(fewMixed.Select(f => new GifInputFrame(f, 50))));
+    }
+
+    static RawImage DropAlpha(RawImage rgba)
+    {
+        var d = rgba.GetData<byte>();
+        var rgb = new byte[rgba.Width * rgba.Height * 3];
+        for (int i = 0; i < rgba.Width * rgba.Height; i++) d.AsSpan(i * 4, 3).CopyTo(rgb.AsSpan(i * 3));
+        return new RawImage(rgba.Width, rgba.Height, ColorModel.Rgb, rgb);
+    }
+
     [Fact]
     public void PerFramePaletteEncoderIsLazy()
     {
