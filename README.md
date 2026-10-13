@@ -16,7 +16,7 @@ Pure managed image loading and saving for .NET 8. No native binaries, no third-p
 using PixCodec;
 
 RawImage img = ImageCodec.Decode("photo.jpg");      // format is sniffed from the content
-ImageInfo info = ImageCodec.GetInfo("scan.tif");    // header only
+ImageInfo info = ImageCodec.GetInfo("scan.tif");    // format, size, channels, sample type, frames - reads only the headers
 ImageCodec.Encode(img, "out.png");                  // format from the extension
 
 Jpeg.Encode(img, stream, new JpegEncodeOptions { Quality = 85, Progressive = true });
