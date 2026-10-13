@@ -7,85 +7,80 @@ namespace PixCodec.Tests;
 
 public class TiffTests
 {
-    public static IEnumerable<object[]> Fixtures => TestUtil.Files("tiff", ".tif");
+    // Fixture folders under tests/fixtures/tiff. The top level and most folders are bit exact against third-party
+    // decoders; a fixture with a `.tol` sidecar allows that sample difference (YCbCr / Lab / LogLuv maths, lossy codecs).
+    // `unverified` holds the few variants no installed decoder reads (see gen_tiff.py for the list).
+    static readonly string[] ActiveDirs = { "", "ycbcr", "lab", "logluv", "jpeg", "jpeg12", "jpegll", "ojpeg", "unverified" };
 
-    /// <summary>YCbCr without JPEG: converted with float math here, fixed point in the references - small tolerance.</summary>
-    public static IEnumerable<object[]> YccFixtures => TestUtil.Files(Path.Combine("tiff", "ycbcr"), ".tif");
+    static IEnumerable<object[]> Dirs(params string[] dirs) => dirs.SelectMany(d => TestUtil.Files(d.Length == 0 ? "tiff" : Path.Combine("tiff", d), ".tif"));
 
-    public static IEnumerable<object[]> JpegFixtures => TestUtil.Files(Path.Combine("tiff", "jpeg"), ".tif");
+    public static IEnumerable<object[]> Fixtures => Dirs(ActiveDirs);
+    public static IEnumerable<object[]> ZstdFixtures => Dirs("zstd");
+    public static IEnumerable<object[]> LzmaFixtures => Dirs("lzma");
+    public static IEnumerable<object[]> WebpFixtures => Dirs("webp");
+    public static IEnumerable<object[]> JpegFixtures => Dirs("jpeg");
 
     static readonly TiffDecodeOptions Serial = new() { Parallel = false };
     static TiffDecodeOptions ForcedParallel(int index = 0) => new() { ParallelThreshold = 0, ImageIndex = index };
 
+    static double Tolerance(string file)
+    {
+        var t = TestUtil.Fixture(file) + ".tol";
+        return File.Exists(t) ? double.Parse(File.ReadAllText(t), System.Globalization.CultureInfo.InvariantCulture) : 0;
+    }
+
     // ------------------------------------------------------------------------------------------ decoding
 
-    [Theory]
-    [MemberData(nameof(Fixtures))]
-    public void DecodesFixture(string file)
+    static void CheckFixture(string file)
     {
-        var bytes = File.ReadAllBytes(TestUtil.Fixture(file));
-        var expected = TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref");
+        var path = TestUtil.Fixture(file);
+        var bytes = File.ReadAllBytes(path);
+        var expected = TestUtil.LoadRef(path + ".ref");
+        double tol = Tolerance(file);
         Assert.True(Tiff.IsMatch(bytes));
 
         var img = Tiff.Decode(bytes, Serial);
-        TestUtil.AssertEqual(expected, img);
+        TestUtil.AssertEqual(expected, img, tol);
 
         var info = Tiff.GetInfo(bytes);
         Assert.Equal((img.Width, img.Height, img.Channels, img.SampleType, img.Color),
             (info.Width, info.Height, info.Channels, info.SampleType, info.Color));
         Assert.Equal(ImageFormat.Tiff, info.Format);
 
-        // strips/tiles decoded on several threads
-        TestUtil.AssertEqual(expected, Tiff.Decode(bytes, ForcedParallel()));
-    }
+        // strips/tiles decoded on several threads give the very same samples
+        TestUtil.AssertEqual(img, Tiff.Decode(bytes, ForcedParallel()));
 
-    [Fact]
-    public void GenericEntryPoints()
-    {
-        var bytes = File.ReadAllBytes(TestUtil.Fixture(Path.Combine("tiff", "u16_rgb_lzw_pred2.tif")));
-        var expected = TestUtil.LoadRef(TestUtil.Fixture(Path.Combine("tiff", "u16_rgb_lzw_pred2.tif.ref")));
-        Assert.Equal(ImageFormat.Tiff, ImageCodec.FormatFromExtension("a.TIF"));
-        try
+        // references for other decode options, where the generator wrote them
+        foreach (var (suffix, options) in new[]
         {
-            Assert.Equal(ImageFormat.Tiff, ImageCodec.DetectFormat(bytes));
-            TestUtil.AssertEqual(expected, ImageCodec.Decode(bytes));
-            Assert.Equal(expected.Width, ImageCodec.GetInfo(bytes).Width);
-        }
-        catch (NotImplementedException)
+            (".none.ref", new TiffDecodeOptions { BitScaling = TiffBitScaling.None }),
+            (".full.ref", new TiffDecodeOptions { BitScaling = TiffBitScaling.FullRange }),
+            (".raw.ref", new TiffDecodeOptions { ConvertToRgb = false }),
+        })
+            if (File.Exists(path + suffix))
+            {
+                var o = Tiff.Decode(bytes, options);
+                TestUtil.AssertEqual(TestUtil.LoadRef(path + suffix), o, suffix == ".raw.ref" ? Tolerance(file + ".raw") : 0);
+                if (suffix == ".raw.ref" && o.Channels > 2) Assert.Equal(ColorModel.Other, o.Color);
+            }
+
+        // through a stream, also embedded at an offset inside a larger stream
+        using (var fs = File.OpenRead(path))
         {
-            // format sniffing asks the other codecs first; they are stubs until the branches are integrated
+            TestUtil.AssertEqual(img, Tiff.Decode(fs, Serial));
+            Assert.Equal(0, fs.Position);
+            TestUtil.AssertEqual(img, Tiff.Decode(fs, ForcedParallel()));
+            var si = Tiff.GetInfo(fs);
+            Assert.Equal((img.Width, img.Height, img.Channels), (si.Width, si.Height, si.Channels));
         }
-    }
-
-    [Theory]
-    [MemberData(nameof(Fixtures))]
-    public void DecodesFixtureFromStream(string file)
-    {
-        var expected = TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref");
-        using var fs = File.OpenRead(TestUtil.Fixture(file));
-        TestUtil.AssertEqual(expected, Tiff.Decode(fs, Serial));
-        fs.Position = 0;
-        TestUtil.AssertEqual(expected, Tiff.Decode(fs, ForcedParallel()));
-        fs.Position = 0;
-        var info = Tiff.GetInfo(fs);
-        Assert.Equal((expected.Width, expected.Height, expected.Channels), (info.Width, info.Height, info.Channels));
-
-        // a TIFF embedded at an offset inside a larger stream
-        var bytes = File.ReadAllBytes(TestUtil.Fixture(file));
         var ms = new MemoryStream();
         ms.Write(new byte[13]);
         ms.Write(bytes);
         ms.Position = 13;
-        TestUtil.AssertEqual(expected, Tiff.Decode(ms));
-    }
+        TestUtil.AssertEqual(img, Tiff.Decode(ms));
 
-    [Theory]
-    [MemberData(nameof(Fixtures))]
-    public void DecodesRegions(string file)
-    {
-        var bytes = File.ReadAllBytes(TestUtil.Fixture(file));
-        var full = TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref");
-        int w = full.Width, h = full.Height;
+        // regions: exactly the corresponding part of the full decode
+        int w = img.Width, h = img.Height;
         var rnd = new Random(file.Length * 7919 + w);
         var regions = new List<(int x, int y, int w, int h)> { (0, 0, w, h), (w - 1, h - 1, 1, 1), (0, h / 2, w, h - h / 2) };
         if (w > 2 && h > 2) regions.Add((1, 1, w - 2, h - 2));
@@ -94,16 +89,62 @@ public class TiffTests
             int x = rnd.Next(w), y = rnd.Next(h);
             regions.Add((x, y, 1 + rnd.Next(w - x), 1 + rnd.Next(h - y)));
         }
-        using var ms = new MemoryStream(bytes);
+        using var rs = new MemoryStream(bytes);
         foreach (var r in regions)
         {
-            var expected = Crop(full, r.x, r.y, r.w, r.h);
-            TestUtil.AssertEqual(expected, Tiff.DecodeRegion(bytes, r.x, r.y, r.w, r.h, Serial));
-            TestUtil.AssertEqual(expected, Tiff.DecodeRegion(ms, r.x, r.y, r.w, r.h, ForcedParallel()));
+            var crop = Crop(img, r.x, r.y, r.w, r.h);
+            TestUtil.AssertEqual(crop, Tiff.DecodeRegion(bytes, r.x, r.y, r.w, r.h, Serial));
+            TestUtil.AssertEqual(crop, Tiff.DecodeRegion(rs, r.x, r.y, r.w, r.h, ForcedParallel()));
         }
         Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, 0, 0, w + 1, h));
         Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, -1, 0, 1, 1));
         Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, 0, h, 1, 1));
+    }
+
+    [Theory]
+    [MemberData(nameof(Fixtures))]
+    public void DecodesFixture(string file) => CheckFixture(file);
+
+    // The three codecs below are implemented by other owners (PixCodec.Compression.Zstd / Xz, PixCodec.Webp) and are
+    // stubs in this branch. The TIFF side is complete: remove the Skip once the real implementations are merged.
+    [Theory(Skip = "needs PixCodec.Compression.Zstd.Decompress (stub in this branch)")]
+    [MemberData(nameof(ZstdFixtures))]
+    public void DecodesZstdFixture(string file) => CheckFixture(file);
+
+    [Theory(Skip = "needs PixCodec.Compression.Xz.Decompress (stub in this branch)")]
+    [MemberData(nameof(LzmaFixtures))]
+    public void DecodesLzmaFixture(string file) => CheckFixture(file);
+
+    [Theory(Skip = "needs PixCodec.Webp.Decode (stub in this branch)")]
+    [MemberData(nameof(WebpFixtures))]
+    public void DecodesWebpFixture(string file) => CheckFixture(file);
+
+    [Fact]
+    public void PendingCodecsReportInfoAndFailCleanly()
+    {
+        // header level access must work without the codec; decoding either works or says "not supported"
+        foreach (var row in ZstdFixtures.Concat(LzmaFixtures).Concat(WebpFixtures))
+        {
+            var file = (string)row[0];
+            var bytes = File.ReadAllBytes(TestUtil.Fixture(file));
+            var expected = TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref");
+            var info = Tiff.GetInfo(bytes);
+            Assert.Equal((expected.Width, expected.Height, expected.Channels, expected.SampleType), (info.Width, info.Height, info.Channels, info.SampleType));
+            Assert.NotEmpty(Tiff.ReadTags(bytes));
+            try { TestUtil.AssertEqual(expected, Tiff.Decode(bytes), Tolerance(file)); }
+            catch (ImageNotSupportedException) { }
+        }
+    }
+
+    [Fact]
+    public void GenericEntryPoints()
+    {
+        var bytes = File.ReadAllBytes(TestUtil.Fixture(Path.Combine("tiff", "u16_rgb_lzw_pred2.tif")));
+        var expected = TestUtil.LoadRef(TestUtil.Fixture(Path.Combine("tiff", "u16_rgb_lzw_pred2.tif.ref")));
+        Assert.Equal(ImageFormat.Tiff, ImageCodec.FormatFromExtension("a.TIF"));
+        Assert.Equal(ImageFormat.Tiff, ImageCodec.DetectFormat(bytes));
+        TestUtil.AssertEqual(expected, ImageCodec.Decode(bytes));
+        Assert.Equal(expected.Width, ImageCodec.GetInfo(bytes).Width);
     }
 
     static RawImage Crop(RawImage src, int x, int y, int w, int h)
@@ -116,53 +157,16 @@ public class TiffTests
         return dst;
     }
 
-    [Theory]
-    [MemberData(nameof(YccFixtures))]
-    public void DecodesYCbCr(string file)
-    {
-        var bytes = File.ReadAllBytes(TestUtil.Fixture(file));
-        var expected = TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref");
-        var img = Tiff.Decode(bytes);
-        Assert.Equal(ColorModel.Rgb, img.Color);
-        TestUtil.AssertEqual(expected, img, 2);
-        TestUtil.AssertEqual(Crop(img, 3, 2, img.Width - 5, img.Height - 3), Tiff.DecodeRegion(bytes, 3, 2, img.Width - 5, img.Height - 3));
-    }
-
-    /// <summary>
-    /// JPEG-in-TIFF (compression 7). The references were produced by libtiff/libjpeg, hence the tolerance.
-    /// </summary>
-    [Theory]
-    [MemberData(nameof(JpegFixtures))]
-    public void DecodesJpegCompressed(string file)
-    {
-        var bytes = File.ReadAllBytes(TestUtil.Fixture(file));
-        var expected = TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref");
-        TestUtil.AssertEqual(expected, Tiff.Decode(bytes), 3);
-        TestUtil.AssertEqual(expected, Tiff.Decode(bytes, ForcedParallel()), 3);
-    }
-
-    [Theory]
-    [MemberData(nameof(JpegFixtures))]
-    public void JpegCompressedReportsInfoAndIsRejectedWithoutHook(string file)
-    {
-        var bytes = File.ReadAllBytes(TestUtil.Fixture(file));
-        var expected = TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref");
-        var info = Tiff.GetInfo(bytes);
-        Assert.Equal((expected.Width, expected.Height, expected.Channels, SampleType.UInt8), (info.Width, info.Height, info.Channels, info.SampleType));
-        if (Tiff.JpegDecoder == null) Assert.Throws<ImageNotSupportedException>(() => Tiff.Decode(bytes));
-    }
-
     [Fact]
-    public void JpegHookReceivesStripsAndTables()
+    public void JpegHookReplacesBuiltInDecoder()
     {
-        // The hook contract, exercised with a fake decoder that paints a constant per call.
-        var dir = Path.Combine(TestUtil.FixtureDir, "tiff", "jpeg");
-        if (!Directory.Exists(dir)) return;
+        // Tiff.JpegDecoder is a test seam: a fake decoder that paints a constant shows what the TIFF side hands over.
         var saved = Tiff.JpegDecoder;
         try
         {
-            foreach (var f in Directory.GetFiles(dir, "*.tif"))
+            foreach (var row in JpegFixtures)
             {
+                var f = TestUtil.Fixture((string)row[0]);
                 var bytes = File.ReadAllBytes(f);
                 var info = Tiff.GetInfo(bytes);
                 int calls = 0;
@@ -640,7 +644,7 @@ public class TiffTests
         Run(() => Tiff.ReadTags(data));
     }
 
-    public static IEnumerable<object[]> AllFixtures => Fixtures.Concat(YccFixtures).Concat(JpegFixtures);
+    public static IEnumerable<object[]> AllFixtures => Fixtures.Concat(ZstdFixtures).Concat(LzmaFixtures).Concat(WebpFixtures);
 
     [Theory]
     [MemberData(nameof(AllFixtures))]
