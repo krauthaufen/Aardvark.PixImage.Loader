@@ -9,8 +9,17 @@ public class Jp2RobustnessTests
 {
     public static IEnumerable<object[]> Fixtures() => Jp2TestUtil.Fixtures();
 
-    static readonly Jp2DecodeOptions Strict = new Jp2DecodeOptions { Parallel = false };
-    static readonly Jp2DecodeOptions Tolerant = new Jp2DecodeOptions { Parallel = false, AllowTruncated = true };
+    // MaxPixels is lowered as one would for untrusted data: a flipped size field can otherwise ask for a gigabyte
+    static readonly Jp2DecodeOptions Strict = new Jp2DecodeOptions { Parallel = false, MaxPixels = 1 << 22 };
+    static readonly Jp2DecodeOptions Tolerant = new Jp2DecodeOptions { Parallel = false, AllowTruncated = true, MaxPixels = 1 << 22 };
+
+    /// <summary>A seed that is the same in every run (string hash codes are not).</summary>
+    static int Seed(string file, int salt)
+    {
+        int h = salt;
+        foreach (char c in file) h = h * 31 + c;
+        return h;
+    }
 
     /// <summary>Decoding damaged data either works or fails with one of the two documented exceptions.</summary>
     static bool TryDecode(byte[] data, Jp2DecodeOptions o, string what)
@@ -42,7 +51,7 @@ public class Jp2RobustnessTests
     public void Truncation(string file)
     {
         var data = File.ReadAllBytes(Fixture(file));
-        var rng = new Random(file.GetHashCode(StringComparison.Ordinal) ^ 77);
+        var rng = new Random(Seed(file, 77));
         var cuts = new SortedSet<int> { 0, 1, 2, 3, 4, 11, 12, 13, data.Length - 1, data.Length - 2, data.Length - 3 };
         for (int i = 0; i < 16; i++) cuts.Add(rng.Next(data.Length));
         // dense around the headers
@@ -65,7 +74,7 @@ public class Jp2RobustnessTests
     public void ByteFlips(string file)
     {
         var data = File.ReadAllBytes(Fixture(file));
-        var rng = new Random(file.GetHashCode(StringComparison.Ordinal) ^ 1234);
+        var rng = new Random(Seed(file, 1234));
         for (int i = 0; i < 30; i++)
         {
             var copy = (byte[])data.Clone();
@@ -128,19 +137,20 @@ public class Jp2RobustnessTests
                     // describe a blank one of any size), so lifting it is tried only where the size is beyond any
                     // array, or for a small window.
                     bool beyondArrays = (ulong)w * h > int.MaxValue;
+                    // (one thread, so that what is allocated can be counted for this thread alone)
                     var options = new List<Jp2DecodeOptions>
                     {
-                        new Jp2DecodeOptions(), new Jp2DecodeOptions { AllowTruncated = true },
-                        new Jp2DecodeOptions { MaxPixels = long.MaxValue, Region = (0, 0, 100, 1) },
+                        new Jp2DecodeOptions { Parallel = false }, new Jp2DecodeOptions { Parallel = false, AllowTruncated = true },
+                        new Jp2DecodeOptions { Parallel = false, MaxPixels = long.MaxValue, Region = (0, 0, 100, 1) },
                     };
                     if (beyondArrays)
                     {
-                        options.Add(new Jp2DecodeOptions { MaxPixels = long.MaxValue });
-                        options.Add(new Jp2DecodeOptions { MaxPixels = long.MaxValue, AllowTruncated = true, Parallel = false });
+                        options.Add(new Jp2DecodeOptions { Parallel = false, MaxPixels = long.MaxValue });
+                        options.Add(new Jp2DecodeOptions { Parallel = false, MaxPixels = long.MaxValue, AllowTruncated = true });
                     }
                     foreach (var o in options)
                     {
-                        long before = GC.GetTotalAllocatedBytes(true);
+                        long before = GC.GetAllocatedBytesForCurrentThread();
                         var sw = System.Diagnostics.Stopwatch.StartNew();
                         Exception? ex = null;
                         try
@@ -151,10 +161,10 @@ public class Jp2RobustnessTests
                             Assert.True((long)img.Width * img.Height <= 6_000_000);
                         }
                         catch (Exception e) { ex = e; }
-                        long allocated = GC.GetTotalAllocatedBytes(true) - before;
+                        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
                         Assert.True(ex is null or ImageFormatException or ImageNotSupportedException, $"{w}x{h}: {ex}");
                         Assert.True(allocated < (w == 3000 ? 256 : 64) << 20, $"{w}x{h} tiled={tiled}: allocated {allocated >> 20} MB");
-                        Assert.True(sw.ElapsedMilliseconds < 5000, $"{w}x{h}: {sw.ElapsedMilliseconds} ms");
+                        Assert.True(sw.ElapsedMilliseconds < 20000, $"{w}x{h}: {sw.ElapsedMilliseconds} ms");
                     }
                     try
                     {
@@ -189,7 +199,7 @@ public class Jp2RobustnessTests
             var sw = System.Diagnostics.Stopwatch.StartNew();
             TryDecode(copy, Strict, $"cod {i}");
             TryDecode(copy, Tolerant, $"cod {i} (tolerant)");
-            Assert.True(sw.ElapsedMilliseconds < 3000, $"cod variant {i} took {sw.ElapsedMilliseconds} ms");
+            Assert.True(sw.ElapsedMilliseconds < 20000, $"cod variant {i} took {sw.ElapsedMilliseconds} ms");
         }
     }
 

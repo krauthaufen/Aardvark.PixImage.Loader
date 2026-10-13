@@ -353,30 +353,25 @@ public class Jp2EncodeTests
         // The encoder normally writes one HT cleanup pass. With this hook it codes the cleanup one bit plane up and
         // adds SigProp and MagRef passes, which is what transcoders and rate controlled HT encoders produce; the
         // result has to decode the same here and in OpenJPEG / OpenJPH.
-        J2kEncoder.HtRefinementPasses = true;
-        try
-        {
-            foreach (var style in new[] { Jp2BlockStyle.None, Jp2BlockStyle.VerticalCausal })
-                foreach (var (w, h, color) in new[] { (64, 64, ColorModel.Gray), (200, 150, ColorModel.Rgb), (37, 53, ColorModel.Gray), (5, 3, ColorModel.Gray), (130, 97, ColorModel.Rgb) })
+        foreach (var style in new[] { Jp2BlockStyle.None, Jp2BlockStyle.VerticalCausal })
+            foreach (var (w, h, color) in new[] { (64, 64, ColorModel.Gray), (200, 150, ColorModel.Rgb), (37, 53, ColorModel.Gray), (5, 3, ColorModel.Gray), (130, 97, ColorModel.Rgb) })
+            {
+                var img = Pattern(w, h, color, seed: w);
+                foreach (var o in new[]
                 {
-                    var img = Pattern(w, h, color, seed: w);
-                    foreach (var o in new[]
-                    {
-                        new Jp2EncodeOptions { HighThroughput = true, RawCodestream = true, BlockStyle = style },
-                        new Jp2EncodeOptions { HighThroughput = true, RawCodestream = true, BlockStyle = style, TileWidth = 64, TileHeight = 64, CodeBlockWidth = 16, CodeBlockHeight = 16 },
-                        new Jp2EncodeOptions { HighThroughput = true, RawCodestream = true, BlockStyle = style, Lossless = false, Quality = 60 },
-                    })
-                    {
-                        var bytes = Jp2.Encode(img, o);
-                        var back = Jp2.Decode(bytes);
-                        // the bit plane below the cleanup is only coded where the refinement passes reach
-                        Assert.True(MaxDiff(img, back) <= (o.Lossless ? 1 : 60));
-                        var oracle = Oracle(bytes, ".jhc");
-                        if (oracle != null) Assert.True(MaxDiff(oracle, back) <= (o.Lossless ? 0 : 1), $"{w}x{h} {style}");
-                    }
+                    new Jp2EncodeOptions { HtRefinementPasses = true, HighThroughput = true, RawCodestream = true, BlockStyle = style },
+                    new Jp2EncodeOptions { HtRefinementPasses = true, HighThroughput = true, RawCodestream = true, BlockStyle = style, TileWidth = 64, TileHeight = 64, CodeBlockWidth = 16, CodeBlockHeight = 16 },
+                    new Jp2EncodeOptions { HtRefinementPasses = true, HighThroughput = true, RawCodestream = true, BlockStyle = style, Lossless = false, Quality = 60 },
+                })
+                {
+                    var bytes = Jp2.Encode(img, o);
+                    var back = Jp2.Decode(bytes);
+                    // the bit plane below the cleanup is only coded where the refinement passes reach
+                    Assert.True(MaxDiff(img, back) <= (o.Lossless ? 1 : 60));
+                    var oracle = Oracle(bytes, ".jhc");
+                    if (oracle != null) Assert.True(MaxDiff(oracle, back) <= (o.Lossless ? 0 : 1), $"{w}x{h} {style}");
                 }
-        }
-        finally { J2kEncoder.HtRefinementPasses = false; }
+            }
     }
 
     [Fact]
@@ -385,25 +380,19 @@ public class Jp2EncodeTests
         // HT blocks whose first layers carry placeholder passes (empty contributions) before the cleanup pass arrives:
         // the layout of transcoded codestreams. OpenJPEG and OpenJPH do not read such streams (nor the T.803 ones made
         // this way, see Jp2ConformanceTests), so this checks writer against reader only.
-        try
-        {
-            foreach (int sets in new[] { 1, 2, 4 })
-                foreach (bool refine in new[] { false, true })
-                    foreach (var order in new[] { Jp2Progression.Lrcp, Jp2Progression.Rpcl })
-                    {
-                        J2kEncoder.HtPlaceholderSets = sets;
-                        J2kEncoder.HtRefinementPasses = refine;
-                        var img = Pattern(150, 97, ColorModel.Rgb, SampleType.UInt16, seed: sets);
-                        var bytes = Jp2.Encode(img, new Jp2EncodeOptions { HighThroughput = true, Layers = sets + 2, Progression = order, RawCodestream = true, CodeBlockWidth = 32, CodeBlockHeight = 32 });
-                        var back = Jp2.Decode(bytes);
-                        if (!refine) AssertEqual(img, back); else Assert.True(MaxDiff(img, back) <= 1);
-                        // nothing but placeholders in the first layers: a mid-gray image
-                        var first = Jp2.Decode(bytes, new Jp2DecodeOptions { MaxLayers = sets + 1 });
-                        Assert.All(first.GetData<ushort>(), v => Assert.Equal(32768, v));
-                        AssertEqual(back, Jp2.Decode(bytes, new Jp2DecodeOptions { Parallel = false, Region = (0, 0, 150, 97) }));
-                    }
-        }
-        finally { J2kEncoder.HtPlaceholderSets = 0; J2kEncoder.HtRefinementPasses = false; }
+        foreach (int sets in new[] { 1, 2, 4 })
+            foreach (bool refine in new[] { false, true })
+                foreach (var order in new[] { Jp2Progression.Lrcp, Jp2Progression.Rpcl })
+                {
+                    var img = Pattern(150, 97, ColorModel.Rgb, SampleType.UInt16, seed: sets);
+                    var bytes = Jp2.Encode(img, new Jp2EncodeOptions { HtPlaceholderSets = sets, HtRefinementPasses = refine, HighThroughput = true, Layers = sets + 2, Progression = order, RawCodestream = true, CodeBlockWidth = 32, CodeBlockHeight = 32 });
+                    var back = Jp2.Decode(bytes);
+                    if (!refine) AssertEqual(img, back); else Assert.True(MaxDiff(img, back) <= 1);
+                    // nothing but placeholders in the first layers: a mid-gray image
+                    var first = Jp2.Decode(bytes, new Jp2DecodeOptions { MaxLayers = sets + 1 });
+                    Assert.All(first.GetData<ushort>(), v => Assert.Equal(32768, v));
+                    AssertEqual(back, Jp2.Decode(bytes, new Jp2DecodeOptions { Parallel = false, Region = (0, 0, 150, 97) }));
+                }
     }
 
     [Theory]
