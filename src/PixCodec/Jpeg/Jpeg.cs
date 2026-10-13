@@ -4,6 +4,12 @@ using PixCodec.JpegImpl;
 
 namespace PixCodec
 {
+    /// <summary>
+    /// Decoder settings. Independent of these: files whose components have sampling factors in a non-integer ratio
+    /// (for instance 3:2), which the standard permits but libjpeg, libjpeg-turbo and the ISO reference software all
+    /// refuse to decode, are decoded by bilinear interpolation of the smaller components. No conformance reference
+    /// exists for such files; the result is a faithful picture, not a bit pattern any other decoder defines.
+    /// </summary>
     public sealed class JpegDecodeOptions
     {
         /// <summary>

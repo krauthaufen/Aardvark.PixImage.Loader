@@ -921,8 +921,8 @@ namespace PixCodec.JpegImpl
                                 {
                                     JpegDct.FdctQuantizeTransposed(src + bx * 8, stride, recips + (i == 0 ? 0 : 64), blk);
                                     ulong mask = JpegTables.TransposedMaskToZigZag(JpegTables.NonZeroMask(blk));
-                                    if (i == 0) EmitBlock(blk, JpegTables.ZigZagTransposed, mask, c, buf, dc0, ac0, acx0);
-                                    else EmitBlock(blk, JpegTables.ZigZagTransposed, mask, c, buf, dc1, ac1, acx1);
+                                    if (i == 0) EmitBlockFast(blk, mask, c, buf, dc0, ac0, acx0);
+                                    else EmitBlockFast(blk, mask, c, buf, dc1, ac1, acx1);
                                 }
                         }
                     }
@@ -1250,6 +1250,118 @@ namespace PixCodec.JpegImpl
                 if (n >= 32) { n -= 32; o = Write32(o, (uint)(acc >> n)); }
             }
             _acc = acc; _accBits = n; _pos = (int)(o - buf);
+        }
+
+        // 8 bit AC coefficient -> magnitude category | value bits << 4 (index: the low 11 bits of the value)
+        static readonly ushort[] s_valueBits = BuildValueBits();
+        static readonly ushort* s_valueBitsPtr;
+
+        static ushort[] BuildValueBits()
+        {
+            var t = GC.AllocateArray<ushort>(2048, pinned: true);
+            for (int v = -1023; v <= 1023; v++)
+            {
+                int size = BitLength(Math.Abs(v));
+                // negative values are sent as the low bits of (value - 1)
+                t[v & 2047] = (ushort)(size | ((v < 0 ? v - 1 : v) & ((1 << size) - 1)) << 4);
+            }
+            return t;
+        }
+
+        static JpegEncoder()
+        {
+            fixed (ushort* p = s_valueBits) s_valueBitsPtr = p;
+        }
+
+        /// <summary>
+        /// Block coder of the single pass path (8 bit samples, coefficients in transposed order): symbol and value
+        /// bits come from two table lookups, and the 64 bit accumulator is emptied only when the next symbol would
+        /// not fit - 4 to 8 bytes at a time with one test for 0xFF bytes. Uses the accumulator differently from
+        /// <see cref="EmitBlock"/> (up to 64 pending bits), so the two must not be mixed within a scan.
+        /// </summary>
+        void EmitBlockFast(short* blk, ulong mask, Comp c, byte* buf, uint* dc, uint* ac, ulong* acx)
+        {
+            ulong acc = _acc;
+            int n = _accBits;
+            byte* o = buf + _pos;
+            byte* order = JpegTables.ZigZagTransposed;
+            ushort* valueBits = s_valueBitsPtr;
+
+            int v = blk[0] - c.Pred;
+            c.Pred = blk[0];
+            int sign = v >> 31;
+            int s = BitLength((v ^ sign) - sign);
+            uint e = dc[s];
+            int len = (int)(e & 255) + s;
+            if (n + len > 64) { o = Drain(o, acc, n); n &= 7; }
+            acc = acc << len | (e >> 8) << s | ((uint)(v + sign) & ~(uint.MaxValue << s));
+            n += len;
+
+            mask &= ~1UL;
+            int prev = 0; // zigzag index of the previous nonzero coefficient
+            while (mask != 0)
+            {
+                int k = BitOperations.TrailingZeroCount(mask);
+                mask &= mask - 1;
+                uint run = (uint)(k - prev - 1);
+                prev = k;
+                if (run > 15)
+                {
+                    uint zrl = ac[0xF0];
+                    len = (int)(zrl & 255);
+                    do
+                    {
+                        if (n + len > 64) { o = Drain(o, acc, n); n &= 7; }
+                        acc = acc << len | (zrl >> 8);
+                        n += len;
+                        run -= 16;
+                    } while (run > 15);
+                }
+                // the DCT of 8 bit samples cannot produce a quantized AC value beyond +-1023; the mask keeps a wild one harmless
+                uint t = valueBits[(nuint)blk[order[(nuint)k]] & 2047];
+                ulong x = acx[(nuint)(run << 4 | (t & 15))]; // code already shifted up by the size, total length in the low byte
+                len = (int)x & 63;
+                if (n + len > 64) { o = Drain(o, acc, n); n &= 7; }
+                acc = acc << len | x >> 8 | (t >> 4);
+                n += len;
+            }
+            if (prev != 63)
+            {
+                e = ac[0];
+                len = (int)(e & 255);
+                if (n + len > 64) { o = Drain(o, acc, n); n &= 7; }
+                acc = acc << len | (e >> 8);
+                n += len;
+            }
+            _acc = acc; _accBits = n; _pos = (int)(o - buf);
+        }
+
+        /// <summary>
+        /// Writes the whole bytes among the n pending bits (at least 39 of them when called from the block coder);
+        /// the caller keeps the remaining n &amp; 7 bits.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static byte* Drain(byte* o, ulong acc, int n)
+        {
+            ulong top = acc << (64 - n);
+            int bytes = n >> 3;
+            // one test for 0xFF among the bytes going out; only then they are written one by one with stuffing
+            ulong flushed = top & (ulong.MaxValue << ((8 - bytes) * 8)); // (bytes is 4..8 here)
+            if (((~flushed - 0x0101010101010101UL) & flushed & 0x8080808080808080UL) != 0) return DrainStuffed(o, top, bytes);
+            Unsafe.WriteUnaligned(o, System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(top));
+            return o + bytes;
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static byte* DrainStuffed(byte* o, ulong top, int bytes)
+        {
+            for (int i = 0; i < bytes; i++)
+            {
+                byte b = (byte)(top >> (56 - 8 * i));
+                *o++ = b;
+                if (b == 0xFF) *o++ = 0;
+            }
+            return o;
         }
 
         void FlushEobRun()
