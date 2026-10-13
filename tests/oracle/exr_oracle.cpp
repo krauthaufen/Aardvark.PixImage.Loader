@@ -365,7 +365,8 @@ static int cmdFlatten (int argc, char** argv)
     return 0;
 }
 
-// write-deep <out> <scan|tile|multi> <w> <h> <compression> <variant> <seed>
+// write-deep <out> <scan|tile|multi|tilemip|tilerip> <w> <h> <compression> <variant> <seed>
+// (tilemip / tilerip: a deep tiled part with all mip / rip levels, each level with its own samples)
 // variants: plain (A,Z + R,G,B,id; unsorted), sorted (same, front to back), zback (adds ZBack, sorted non overlapping
 //           volumes), overlap (unsorted overlapping volumes), noalpha (Z,R only). "multi" writes a flat part, a deep scan line part and a deep tiled part.
 struct DeepData
@@ -471,7 +472,7 @@ static int cmdWriteDeep (int argc, char** argv)
         flat.setName ("flat");
         headers.push_back (flat);
     }
-    if (kind != "tile")
+    if (kind == "scan" || kind == "multi")
     {
         Header hd (disp, dw);
         deepHeader (hd, variant);
@@ -487,7 +488,8 @@ static int cmdWriteDeep (int argc, char** argv)
         hd.compression () = comp;
         hd.setType (DEEPTILE);
         hd.setName ("deeptile");
-        hd.setTileDescription (TileDescription (8, 5, ONE_LEVEL));
+        hd.setTileDescription (TileDescription (8, 5, kind == "tilemip" ? MIPMAP_LEVELS : kind == "tilerip" ? RIPMAP_LEVELS : ONE_LEVEL,
+                                                kind == "tilerip" ? ROUND_UP : ROUND_DOWN));
         headers.push_back (hd);
     }
     MultiPartOutputFile mp (argv[2], headers.data (), (int) headers.size ());
@@ -503,7 +505,7 @@ static int cmdWriteDeep (int argc, char** argv)
         out.setFrameBuffer (fb);
         out.writePixels (h);
     }
-    if (kind != "tile")
+    if (kind == "scan" || kind == "multi")
     {
         DeepData d;
         makeDeep (d, w, h, variant, seed);
@@ -515,13 +517,20 @@ static int cmdWriteDeep (int argc, char** argv)
     }
     if (kind != "scan")
     {
-        DeepData d;
-        makeDeep (d, w, h, variant, seed + (kind == "multi" ? 1 : 0));
-        DeepFrameBuffer fb;
-        deepFrameBuffer (fb, d, headers[part], dw);
-        DeepTiledOutputPart out (mp, part++);
-        out.setFrameBuffer (fb);
-        out.writeTiles (0, out.numXTiles (0) - 1, 0, out.numYTiles (0) - 1, 0, 0);
+        DeepTiledOutputPart out (mp, part);
+        for (int ly = 0; ly < out.numYLevels (); ly++)
+            for (int lx = 0; lx < out.numXLevels (); lx++)
+            {
+                if (kind != "tilerip" && lx != ly) continue;
+                Box2i ldw = out.dataWindowForLevel (lx, ly);
+                DeepData d;
+                makeDeep (d, ldw.max.x - ldw.min.x + 1, ldw.max.y - ldw.min.y + 1, variant, seed + (kind == "multi" ? 1 : 0) + 7 * lx + 13 * ly);
+                DeepFrameBuffer fb;
+                deepFrameBuffer (fb, d, headers[part], ldw);
+                out.setFrameBuffer (fb);
+                out.writeTiles (0, out.numXTiles (lx) - 1, 0, out.numYTiles (ly) - 1, lx, ly);
+            }
+        part++;
     }
     return 0;
 }

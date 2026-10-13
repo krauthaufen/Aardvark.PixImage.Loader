@@ -80,7 +80,7 @@ namespace PixCodec
         /// custom attributes ...), add <see cref="ExrHeader.GetDescriptiveAttributes"/> of its header here; RawImage
         /// itself has no place for them.
         /// </summary>
-        public IList<ExrAttribute> Attributes { get; } = new List<ExrAttribute>();
+        public IList<ExrAttribute> Attributes { get; private set; } = new List<ExrAttribute>();
 
         /// <summary>Compress chunks on multiple threads when the image is large enough (default true).</summary>
         public bool Parallel { get; set; } = true;
@@ -95,9 +95,15 @@ namespace PixCodec
 
         /// <summary>
         /// Resolution levels of a tiled part: OneLevel (default), MipMap or RipMap. The lower levels are generated with a
-        /// 2x2 (or 2x1 / 1x2) box filter, sizes rounded down; UINT channels take the top left sample instead.
+        /// 2x2 (or 2x1 / 1x2) box filter; UINT channels take the top left sample instead. See <see cref="LevelRoundUp"/>.
         /// </summary>
         public ExrLevelMode LevelMode { get; set; } = ExrLevelMode.OneLevel;
+
+        /// <summary>
+        /// Level sizes: false (default) rounds down (ROUND_DOWN: 5 -> 2 -> 1), true rounds up (ROUND_UP: 5 -> 3 -> 2 -> 1;
+        /// the last pixel of an odd sized level then covers one sample instead of two in that direction).
+        /// </summary>
+        public bool LevelRoundUp { get; set; }
 
         /// <summary>
         /// Store an Rgb / Rgba image as luminance Y plus 2x2 subsampled chroma RY, BY (and A), like the reference
@@ -119,6 +125,13 @@ namespace PixCodec
         /// coefficients grows with this value; 0 quantizes nothing, larger values give smaller files.
         /// </summary>
         public float DwaCompressionLevel { get; set; } = 45f;
+
+        internal ExrEncodeOptions Clone()
+        {
+            var c = (ExrEncodeOptions)MemberwiseClone();
+            c.Attributes = new List<ExrAttribute>(Attributes);
+            return c;
+        }
     }
 
     /// <summary>One part for <see cref="Exr.EncodeParts"/>.</summary>
@@ -131,10 +144,25 @@ namespace PixCodec
         public IReadOnlyList<ExrChannelData> Channels { get; }
         public ExrEncodeOptions Options { get; }
 
+        /// <summary>The samples of a deep part (then <see cref="Channels"/> is empty).</summary>
+        public ExrDeepImage? Deep { get; }
+
         public ExrPart(string? name, int width, int height, IReadOnlyList<ExrChannelData> channels, ExrEncodeOptions? options = null)
         {
             Name = name; Width = width; Height = height;
             Channels = channels ?? throw new ArgumentNullException(nameof(channels));
+            Options = options ?? new ExrEncodeOptions();
+        }
+
+        /// <summary>
+        /// A deep part: deep scan line, or deep tiled when the options have a tile size. Deep data can be stored with
+        /// None, Rle or Zips compression (the default Zip is taken as Zips) and has a single resolution level.
+        /// </summary>
+        public ExrPart(string? name, ExrDeepImage deep, ExrEncodeOptions? options = null)
+        {
+            Deep = deep ?? throw new ArgumentNullException(nameof(deep));
+            Name = name; Width = deep.Width; Height = deep.Height;
+            Channels = Array.Empty<ExrChannelData>();
             Options = options ?? new ExrEncodeOptions();
         }
 
@@ -145,6 +173,15 @@ namespace PixCodec
             options ??= new ExrEncodeOptions();
             if (image.SampleType != SampleType.Float32 && image.SampleType != SampleType.Float16 && image.SampleType != SampleType.UInt32)
                 throw new ImageNotSupportedException($"OpenEXR cannot store {image.SampleType} samples; convert to Float32, Float16 or UInt32");
+            if (image.Metadata is { DpiX: > 0 } md && !HasAttribute(options, "xDensity"))
+            {
+                // resolution travels as xDensity, with the pixel aspect ratio giving the vertical one
+                var o2 = options.Clone();
+                o2.Attributes.Add(ExrAttribute.Float("xDensity", (float)md.DpiX));
+                if (md.DpiY > 0 && md.DpiY != md.DpiX && !HasAttribute(options, "pixelAspectRatio"))
+                    o2.Attributes.Add(ExrAttribute.Float("pixelAspectRatio", (float)(md.DpiY / md.DpiX)));
+                options = o2;
+            }
             if (options.LuminanceChroma) return LuminanceChromaPart(name, image, options);
             IReadOnlyList<string>? names = options.ChannelNames;
             if (names == null)
@@ -162,6 +199,12 @@ namespace PixCodec
             for (int i = 0; i < chans.Length; i++)
                 chans[i] = new ExrChannelData(names[i], image.Data, options.PixelType, i, image.Channels);
             return new ExrPart(name, image.Width, image.Height, chans, options);
+        }
+
+        static bool HasAttribute(ExrEncodeOptions o, string name)
+        {
+            foreach (var a in o.Attributes) if (a.Name == name) return true;
+            return false;
         }
 
         static ExrPart LuminanceChromaPart(string? name, RawImage image, ExrEncodeOptions options)
@@ -252,7 +295,15 @@ namespace PixCodec
         /// <summary>Returns whether the data starts with a OpenEXR signature (needs at most 16 bytes).</summary>
         public static bool IsMatch(ReadOnlySpan<byte> header) => ExrFileStructure.IsMatch(header);
 
-        /// <summary>Reads header level information without decoding pixel data (first part, default channel selection).</summary>
+        /// <summary>
+        /// Reads header level information without decoding pixel data; needs only the headers, and throws
+        /// <see cref="ImageFormatException"/> if the data ends inside them. Size, channels, sample type and color model
+        /// are those <see cref="Decode"/> returns for the first part with default options. BitsPerSample is 16 if all
+        /// those channels are HALF, else 32 (FLOAT, UINT). DpiX is the "xDensity" attribute and DpiY is
+        /// xDensity * pixelAspectRatio (0 without xDensity), the same values Decode puts into the image metadata.
+        /// Orientation is always 0 and HasIccProfile false (OpenEXR has neither). FrameCount is the number of parts of
+        /// the file (1 for ordinary files); parts are independent images, not animation frames.
+        /// </summary>
         public static ImageInfo GetInfo(ReadOnlySpan<byte> data)
         {
             var file = ExrFileStructure.Parse(data);
@@ -260,7 +311,31 @@ namespace PixCodec
             var (idx, color, yca) = SelectDefault(part, null);
             int channels = yca ? RawImage.ChannelCount(color) : idx.Length;
             var type = part.IsDeep || yca ? SampleType.Float32 : OutputType(part, idx, true);
-            return new ImageInfo(ImageFormat.Exr, part.Width, part.Height, channels, type, color);
+            int bits = 16;
+            foreach (int i in idx)
+                if (i >= 0 && part.Channels[i].PixelType != ExrPixelType.Half) bits = 32;
+            var (dpiX, dpiY) = Density(part);
+            return new ImageInfo(ImageFormat.Exr, part.Width, part.Height, channels, type, color, file.Parts.Length)
+            {
+                BitsPerSample = bits, DpiX = dpiX, DpiY = dpiY,
+            };
+        }
+
+        /// <summary>Pixels per inch from the "xDensity" attribute (horizontal; vertical is xDensity * pixelAspectRatio), 0 if absent.</summary>
+        static (double X, double Y) Density(ExrHeader part)
+        {
+            var a = part.FindAttribute("xDensity");
+            if (a == null || a.Value.Length < 4) return (0, 0);
+            float x = a.AsFloat();
+            if (!(x > 0) || float.IsInfinity(x)) return (0, 0);
+            return (x, (double)x * part.PixelAspectRatio);
+        }
+
+        static RawImage WithMetadata(RawImage image, ExrHeader part)
+        {
+            var (x, y) = Density(part);
+            if (x > 0) image.Metadata = new ImageMetadata { DpiX = x, DpiY = y };
+            return image;
         }
 
         /// <summary>Parses the headers of all parts (one for ordinary files). Does not touch pixel data.</summary>
@@ -311,10 +386,10 @@ namespace PixCodec
                     if (i >= 0 && !need.Contains(i)) need.Add(i);
                 }
                 var flat = ExrDeepDecoder.Decode(data, file, options.PartIndex, need.ToArray(), options).Flatten(names, options.DeepSortByDepth, options.DeepTidy);
-                return new RawImage(flat.Width, flat.Height, yca ? ColorModel.Other : color, flat.Data, flat.Channels);
+                return WithMetadata(new RawImage(flat.Width, flat.Height, yca ? ColorModel.Other : color, flat.Data, flat.Channels), part);
             }
-            if (yca) return DecodeYca(data, file, part, idx, options);
-            return ExrDecoder.Decode(data, file, options.PartIndex, idx, color, options);
+            if (yca) return WithMetadata(DecodeYca(data, file, part, idx, options), part);
+            return WithMetadata(ExrDecoder.Decode(data, file, options.PartIndex, idx, color, options), part);
         }
 
         static RawImage DecodeYca(ReadOnlySpan<byte> data, ExrFileStructure file, ExrHeader part, int[] idx, ExrDecodeOptions options)
@@ -407,7 +482,7 @@ namespace PixCodec
             var file = ExrFileStructure.Parse(data);
             var part = GetPart(file, options.PartIndex);
             var idx = ChannelIndices(part, channelNames);
-            return ExrDecoder.Decode(data, file, options.PartIndex, idx, NaturalModel(channelNames), options);
+            return WithMetadata(ExrDecoder.Decode(data, file, options.PartIndex, idx, NaturalModel(channelNames), options), part);
         }
 
         /// <summary>
@@ -436,6 +511,15 @@ namespace PixCodec
         /// and pixel aspect ratio, as the format requires.
         /// </summary>
         public static void EncodeParts(IReadOnlyList<ExrPart> parts, Stream output) => ExrEncoder.Encode(parts, output, true);
+
+        /// <summary>
+        /// Writes a deep image as a single-part deep scan line file, or a deep tiled one when
+        /// <see cref="ExrEncodeOptions.TileWidth"/> / TileHeight are set. Compression None, Rle or Zips (the default Zip
+        /// is taken as Zips); samples are written in the order given, HALF channels rounded like in <see cref="Encode"/>.
+        /// For deep parts next to others use <see cref="EncodeParts"/> with <see cref="ExrPart(string, ExrDeepImage, ExrEncodeOptions)"/>.
+        /// </summary>
+        public static void EncodeDeep(ExrDeepImage image, Stream output, ExrEncodeOptions? options = null)
+            => ExrEncoder.Encode(new[] { new ExrPart(null, image, options) }, output, false);
 
         static ExrHeader GetPart(ExrFileStructure file, int index)
         {

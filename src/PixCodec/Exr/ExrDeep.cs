@@ -11,7 +11,8 @@ namespace PixCodec
     /// </summary>
     public sealed class ExrDeepImage
     {
-        public ExrHeader Header { get; }
+        /// <summary>Header of the part the image was decoded from; null for images built in memory.</summary>
+        public ExrHeader? Header { get; }
         public int Width { get; }
         public int Height { get; }
         /// <summary>Samples per pixel, row major, top row first.</summary>
@@ -22,10 +23,52 @@ namespace PixCodec
         public IReadOnlyList<string> ChannelNames { get; }
         /// <summary>One array of TotalSamples elements per channel: float[] for HALF and FLOAT channels, uint[] for UINT channels.</summary>
         public IReadOnlyList<Array> ChannelData { get; }
+        /// <summary>The type each channel has in the file (decoded images) or will be stored with (<see cref="Exr.EncodeDeep"/>).</summary>
+        public IReadOnlyList<ExrPixelType> ChannelTypes { get; }
 
-        internal ExrDeepImage(ExrHeader header, int width, int height, int[] counts, int[] offsets, string[] names, Array[] data)
+        internal ExrDeepImage(ExrHeader header, int width, int height, int[] counts, int[] offsets, string[] names, Array[] data, ExrPixelType[] types)
         {
             Header = header; Width = width; Height = height; SampleCounts = counts; SampleOffsets = offsets; ChannelNames = names; ChannelData = data;
+            ChannelTypes = types;
+        }
+
+        /// <summary>
+        /// Builds a deep image for <see cref="Exr.EncodeDeep"/> or <see cref="Flatten"/>.
+        /// </summary>
+        /// <param name="width">Image width.</param>
+        /// <param name="height">Image height.</param>
+        /// <param name="sampleCounts">Samples per pixel, width * height entries, row major.</param>
+        /// <param name="channelNames">Channel names; the deep data conventions are A (alpha), Z and ZBack (depth), colour premultiplied.</param>
+        /// <param name="channelData">Per channel a float[] (stored as HALF or FLOAT) or uint[] (UINT) with one element per sample, pixel after pixel.</param>
+        /// <param name="channelTypes">Stored types; null stores uint[] as UINT, Z and ZBack as FLOAT and other float[] channels as HALF.</param>
+        public ExrDeepImage(int width, int height, int[] sampleCounts, IReadOnlyList<string> channelNames, IReadOnlyList<Array> channelData, IReadOnlyList<ExrPixelType>? channelTypes = null)
+        {
+            if (width <= 0 || height <= 0) throw new ArgumentException("image dimensions must be positive");
+            if (sampleCounts == null || sampleCounts.LongLength != (long)width * height) throw new ArgumentException("sampleCounts must have width * height entries");
+            if (channelNames == null || channelData == null || channelNames.Count == 0 || channelNames.Count != channelData.Count
+                || (channelTypes != null && channelTypes.Count != channelNames.Count))
+                throw new ArgumentException("channel names, data and types must have the same, non zero, count");
+            var offsets = new int[sampleCounts.Length + 1];
+            long total = 0;
+            for (int i = 0; i < sampleCounts.Length; i++)
+            {
+                if (sampleCounts[i] < 0) throw new ArgumentException("negative sample count");
+                total += sampleCounts[i];
+                if (total > 0x7FFFFFC7) throw new ArgumentException("too many samples");
+                offsets[i + 1] = (int)total;
+            }
+            var types = new ExrPixelType[channelNames.Count];
+            for (int k = 0; k < types.Length; k++)
+            {
+                var et = channelData[k]?.GetType().GetElementType();
+                bool isUInt = et == typeof(uint);
+                if (!isUInt && et != typeof(float)) throw new ArgumentException($"channel '{channelNames[k]}': deep samples must be float[] or uint[]");
+                if (channelData[k].LongLength != total) throw new ArgumentException($"channel '{channelNames[k]}' has {channelData[k].LongLength} samples, expected {total}");
+                types[k] = channelTypes != null ? channelTypes[k] : isUInt ? ExrPixelType.UInt : channelNames[k] is "Z" or "ZBack" ? ExrPixelType.Float : ExrPixelType.Half;
+                if (isUInt != (types[k] == ExrPixelType.UInt)) throw new ArgumentException($"channel '{channelNames[k]}': cannot store {(isUInt ? "uint" : "float")} samples as {types[k]}");
+            }
+            Width = width; Height = height; SampleCounts = sampleCounts; SampleOffsets = offsets;
+            ChannelNames = new List<string>(channelNames).ToArray(); ChannelData = new List<Array>(channelData).ToArray(); ChannelTypes = types;
         }
 
         int IndexOf(string name)
@@ -66,11 +109,13 @@ namespace PixCodec
         /// and for any file when sortByDepth and tidy are false.
         /// </para>
         /// <para>
-        /// Volume samples (ZBack > Z) that overlap other samples of the pixel are first made "tidy" as described in
-        /// "Interpreting OpenEXR Deep Pixels" when <paramref name="tidy"/> is true (default): each volume sample is split
-        /// at the depths of the samples inside it (alpha' = 1 - (1 - alpha)^(part / length), colours scaled by
-        /// alpha' / alpha, or by part / length if alpha is 0) and coinciding volume samples are merged. With tidy false
-        /// overlapping samples are composited as they are.
+        /// Pixels whose samples overlap are first made "tidy" as described in "Interpreting OpenEXR Deep Pixels" when
+        /// <paramref name="tidy"/> is true (default): each volume sample (ZBack > Z) is split at the depths of the
+        /// samples inside it (alpha' = 1 - (1 - alpha)^(part / length), colours scaled by alpha' / alpha, or by
+        /// part / length if alpha is 0), and samples that then cover the same interval - including point samples at
+        /// the same depth - are merged into one, which makes the result independent of their order in the file. With
+        /// tidy false overlapping samples are composited as they are. OpenImageIO's DeepData sort / split /
+        /// merge_overlaps followed by "over" gives the same result (to float rounding).
         /// </para>
         /// </summary>
         public RawImage Flatten(IReadOnlyList<string> channels, bool sortByDepth = true, bool tidy = true)
@@ -111,9 +156,9 @@ namespace PixCodec
                     });
                 Array.Clear(acc);
                 float a = 0;
-                if (tidy && sortByDepth && z != null && zb != null && NeedsTidy(order, z, zb))
+                if (tidy && sortByDepth && z != null && n > 1 && NeedsTidy(order, z, zb ?? z))
                 {
-                    Tidy(order, z, zb, alpha, src, work);
+                    Tidy(order, z, zb ?? z, alpha, src, work);
                     foreach (var s in work)
                     {
                         if (a >= 1) break;
@@ -145,11 +190,13 @@ namespace PixCodec
 
         static bool NeedsTidy(List<int> order, float[] z, float[] zb)
         {
-            // sorted by Z: a volume sample overlaps if the next sample starts before it ends
+            // sorted by Z, ZBack: a volume sample overlaps if the next sample starts before it ends, and two samples
+            // coincide if they cover the same interval (or are point samples at the same depth)
             for (int i = 0; i + 1 < order.Count; i++)
             {
-                int s = order[i];
-                if (zb[s] > z[s] && z[order[i + 1]] < zb[s]) return true;
+                int s = order[i], t = order[i + 1];
+                if (zb[s] > z[s] && z[t] < zb[s]) return true;
+                if (z[t] == z[s] && Math.Max(zb[t], z[t]) == Math.Max(zb[s], z[s])) return true;
             }
             return false;
         }
@@ -184,11 +231,11 @@ namespace PixCodec
                 int c = p.Z.CompareTo(q.Z);
                 return c != 0 ? c : p.ZBack.CompareTo(q.ZBack);
             });
-            // merge volume samples that now cover exactly the same interval
+            // merge samples that now cover exactly the same interval, point samples at the same depth included
             for (int i = 0; i + 1 < work.Count;)
             {
                 var p = work[i]; var q = work[i + 1];
-                if (p.ZBack > p.Z && p.Z == q.Z && p.ZBack == q.ZBack)
+                if (p.Z == q.Z && p.ZBack == q.ZBack)
                 {
                     Merge(p, q);
                     work.RemoveAt(i + 1);
@@ -385,7 +432,9 @@ namespace PixCodec
                     }
                 }
             }
-            return new ExrDeepImage(part, w, h, counts, sampleOffsets, names, arrays);
+            var types = new ExrPixelType[sel.Length];
+            for (int k = 0; k < sel.Length; k++) types[k] = (ExrPixelType)chans[sel[k]].Type;
+            return new ExrDeepImage(part, w, h, counts, sampleOffsets, names, arrays, types);
         }
     }
 }
