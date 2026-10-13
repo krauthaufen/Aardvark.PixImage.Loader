@@ -27,7 +27,7 @@ namespace PixCodec
         }
 
         const string TooBig = "TIFF: the output exceeds 4 GB, which needs BigTiff (leave BigTiff unset or set it to true)";
-        const int None = 1, Ccitt4 = 4, Lzw = 5, JpegComp = 7, Deflate = 8, PackBits = 32773;
+        const int None = 1, Ccitt4 = 4, Lzw = 5, JpegComp = 7, Deflate = 8, PackBits = 32773, ZstdComp = 50000;
 
         /// <summary>Everything derived from one image and its options before a byte is written.</summary>
         sealed class Layout
@@ -35,9 +35,9 @@ namespace PixCodec
             public RawImage Image = null!;
             public TiffEncodeOptions Options = null!;
             public int W, H, Spp, Bps, Comp, Pred, Cw, Ch, Across, Down, N;
-            public bool Tiled, Bilevel, Direct;
+            public bool Tiled, Bilevel, Direct, Streamed;
             public long RowBytes, ChunkRowBytes, RawTotal;
-            public int SubH = 1, SubV = 1;
+            public int SubH = 1, SubV = 1, StoredBits;
             public JpegEncodeOptions? Jpeg;
             public long[] Offsets = Array.Empty<long>(), Counts = Array.Empty<long>();
 
@@ -57,6 +57,7 @@ namespace PixCodec
                     TiffCompression.PackBits => PackBits,
                     TiffCompression.Jpeg => JpegComp,
                     TiffCompression.CcittGroup4 => Ccitt4,
+                    TiffCompression.Zstd => ZstdComp,
                     _ => throw new ArgumentException("unknown TIFF compression"),
                 };
                 Bilevel = o.Bilevel || Comp == Ccitt4;
@@ -64,8 +65,9 @@ namespace PixCodec
                     throw new ArgumentException("bilevel TIFF output needs an 8-bit single channel image");
                 if (Comp == JpegComp)
                 {
-                    if (type != SampleType.UInt8 || !(image.Color is ColorModel.Gray or ColorModel.Rgb))
-                        throw new ArgumentException("JPEG compressed TIFF output needs an 8-bit Gray or Rgb image");
+                    if (!(type is SampleType.UInt8 or SampleType.UInt16) || !(image.Color is ColorModel.Gray or ColorModel.Rgb))
+                        throw new ArgumentException("JPEG compressed TIFF output needs an 8-bit (or 12-bit in UInt16) Gray or Rgb image");
+                    StoredBits = type == SampleType.UInt16 ? 12 : 8;
                     Jpeg = new JpegEncodeOptions { Quality = o.JpegQuality, Subsampling = o.JpegSubsampling, OptimizeHuffman = true };
                     if (Spp == 3) (SubH, SubV) = PixCodec.Jpeg.ResolveSubsampling(Jpeg);
                 }
@@ -73,7 +75,7 @@ namespace PixCodec
                     throw new ArgumentException("the floating point predictor needs float samples");
                 // libtiff implements predictors only for LZW and Deflate and ignores the tag otherwise, so a predictor
                 // combined with PackBits or no compression would make files that most readers show as garbage.
-                Pred = (Comp != Lzw && Comp != Deflate) || Bilevel ? 1 : o.Predictor switch
+                Pred = (Comp != Lzw && Comp != Deflate && Comp != ZstdComp) || Bilevel ? 1 : o.Predictor switch
                 {
                     TiffPredictor.None => 1,
                     TiffPredictor.Horizontal => 2,
@@ -98,8 +100,10 @@ namespace PixCodec
                 ChunkRowBytes = Bilevel ? (Cw + 7) / 8 : (long)Cw * Spp * Bps;
                 // the pixel array already is the file content
                 Direct = Comp == None && !Tiled && !Bilevel && (!bigEndian || Bps == 1);
-                // (strips written straight from the pixel array may be of any size)
-                if (!Direct && ChunkRowBytes * Ch > int.MaxValue / 2)
+                // Strips written straight from the pixel array may be of any size; LZW, Deflate and PackBits strips beyond
+                // 1 GB are compressed row by row into the (then necessarily seekable) output.
+                Streamed = !Direct && !Tiled && !Bilevel && ChunkRowBytes * Ch > int.MaxValue / 2 && Comp is Lzw or Deflate or PackBits;
+                if (!Direct && !Streamed && ChunkRowBytes * Ch > int.MaxValue / 2)
                     throw new ArgumentException("TIFF: strip/tile size too large, use smaller strips or tiles");
                 Across = (W + Cw - 1) / Cw; Down = (H + Ch - 1) / Ch;
                 N = checked(Across * Down);
@@ -125,6 +129,12 @@ namespace PixCodec
             if (output == null) throw new ArgumentNullException(nameof(output));
             bool be = o.BigEndian;
             bool big;
+            pages = WithOverviews(pages, o);
+            if (o.CloudOptimized)
+            {
+                WriteCloudOptimized(pages.ToList(), output, o);
+                return;
+            }
             if (o.BigTiff.HasValue) big = o.BigTiff.Value;
             else
             {
@@ -158,6 +168,99 @@ namespace PixCodec
                 if (!big && pos > uint.MaxValue) throw new InvalidOperationException(TooBig);
                 if (!more) break;
                 cur = e.Current;
+            }
+        }
+
+        /// <summary>Inserts the overview pages (and, for cloud optimized output, the tiling) the options ask for.</summary>
+        static IEnumerable<TiffPage> WithOverviews(IEnumerable<TiffPage> pages, TiffEncodeOptions o)
+        {
+            foreach (var page in pages)
+            {
+                if (page?.Image == null) throw new ArgumentException("TIFF: page without an image");
+                var po = page.Options ?? o;
+                bool cog = o.CloudOptimized;
+                if (!cog && !po.BuildOverviews) { yield return page; continue; }
+                if (cog && po.TileWidth <= 0 || cog && po.TileHeight <= 0)
+                {
+                    po = po.Clone();
+                    po.TileWidth = po.TileHeight = 512;
+                }
+                yield return new TiffPage(page.Image, po) { ReducedResolution = page.ReducedResolution };
+                // overviews carry the pixel layout options but not the tags that describe the full resolution image
+                var oo = po.Clone();
+                oo.ExtraTags = new List<TiffTag>();
+                int min = Math.Max(1, po.OverviewMinSize);
+                if (cog) min = Math.Max(min, Math.Min((po.TileWidth + 15) / 16 * 16, (po.TileHeight + 15) / 16 * 16));
+                var img = page.Image;
+                while (img.Width > min || img.Height > min)
+                {
+                    img = TiffOverview.Halve(img);
+                    yield return new TiffPage(img, oo) { ReducedResolution = true };
+                }
+            }
+        }
+
+        /// <summary>
+        /// Cloud optimized layout: header, the directories of the image and its overviews in that order, then the tile
+        /// data from the smallest overview to the full resolution image. Everything is compressed before the first
+        /// byte goes out, so no seeking is needed.
+        /// </summary>
+        static void WriteCloudOptimized(List<TiffPage> pages, Stream output, TiffEncodeOptions o)
+        {
+            if (pages.Count == 0) throw new ArgumentException("TIFF: no image to write");
+            if (pages.Skip(1).Any(p => !p.ReducedResolution)) throw new ArgumentException("TIFF: cloud optimized output takes a single image (its overviews are generated)");
+            bool be = o.BigEndian;
+            int n = pages.Count;
+            var layouts = new Layout[n];
+            var data = new Chunk[n][];
+            double worst = 64;
+            for (int i = 0; i < n; i++)
+            {
+                layouts[i] = new Layout(pages[i].Image, pages[i].Options ?? o, be);
+                worst += layouts[i].WorstCase();
+            }
+            bool big = o.BigTiff ?? worst > uint.MaxValue - 65536.0;
+            var nodes = new TiffIfdNode[n];
+            var dirAt = new long[n];
+            long pos = big ? 16 : 8;
+            for (int i = 0; i < n; i++)
+            {
+                var l = layouts[i];
+                var pin = GCHandle.Alloc(l.Image.Data, GCHandleType.Pinned);
+                try
+                {
+                    var ctx = new Context { L = l, Pixels = (byte*)pin.AddrOfPinnedObject(), BigEndian = be };
+                    var chunks = data[i] = new Chunk[l.N];
+                    if (l.Options.Parallel && l.N > 1) Parallel.For(0, l.N, k => chunks[k] = ctx.Compress(k));
+                    else for (int k = 0; k < l.N; k++) chunks[k] = ctx.Compress(k);
+                }
+                finally { pin.Free(); }
+                nodes[i] = BuildDirectory(l, pages[i], big);
+                dirAt[i] = pos;
+                pos += nodes[i].Size(big);
+            }
+            for (int i = n - 1; i >= 0; i--)
+            {
+                for (int k = 0; k < data[i].Length; k++)
+                {
+                    layouts[i].Offsets[k] = pos; layouts[i].Counts[k] = data[i][k].Len;
+                    pos += data[i][k].Len;
+                }
+                pos += pos & 1;
+            }
+            if (!big && pos > uint.MaxValue) throw new InvalidOperationException(TooBig);
+            output.Write(Header(big, be, dirAt[0]));
+            for (int i = 0; i < n; i++) output.Write(Finish(nodes[i], layouts[i], dirAt[i], i + 1 < n ? dirAt[i + 1] : 0, big, be));
+            long written = 0;
+            for (int i = n - 1; i >= 0; i--)
+            {
+                foreach (var c in data[i])
+                {
+                    output.Write(c.Buf, 0, c.Len);
+                    written += c.Len;
+                    if (c.Pooled) ArrayPool<byte>.Shared.Return(c.Buf);
+                }
+                if ((written & 1) != 0) { output.WriteByte(0); written++; }
             }
         }
 
@@ -223,6 +326,27 @@ namespace PixCodec
                         }
                     if ((p & 1) != 0) output.WriteByte(0);
                     return end;
+                }
+
+                if (l.Streamed)
+                {
+                    if (!output.CanSeek) throw new ArgumentException("TIFF: strips larger than 1 GB can only be compressed into a seekable stream");
+                    output.Write(new byte[dirSize]);
+                    long at = dataStart;
+                    for (int i = 0; i < l.N; i++)
+                    {
+                        long before = output.Position;
+                        ctx.CompressStreamed(i, output);
+                        l.Offsets[i] = at; l.Counts[i] = output.Position - before;
+                        at += l.Counts[i];
+                    }
+                    long last = at + (at & 1);
+                    if (!big && last > uint.MaxValue) throw new InvalidOperationException(TooBig);
+                    if ((at & 1) != 0) output.WriteByte(0);
+                    output.Position = origin + start;
+                    output.Write(Finish(node, l, start, more ? last : 0, big, be));
+                    output.Position = origin + last;
+                    return last;
                 }
 
                 bool buffered = !output.CanSeek;
@@ -306,7 +430,7 @@ namespace PixCodec
             var o = l.Options;
             int spp = l.Spp;
             var type = image.SampleType;
-            int bits = l.Bilevel ? 1 : l.Bps * 8;
+            int bits = l.Bilevel ? 1 : l.StoredBits > 0 ? l.StoredBits : l.Bps * 8;
             int format = type switch
             {
                 SampleType.UInt8 or SampleType.UInt16 or SampleType.UInt32 or SampleType.UInt64 => 1,
@@ -472,6 +596,11 @@ namespace PixCodec
                             var z = Zlib.Compress(src, l.Options.CompressionLevel);
                             return new Chunk { Buf = z, Len = z.Length };
                         }
+                        case ZstdComp:
+                        {
+                            var z = Zstd.Compress(src);
+                            return new Chunk { Buf = z, Len = z.Length };
+                        }
                         default:
                             keepRaw = true;
                             return new Chunk { Buf = raw, Len = size, Pooled = true };
@@ -483,25 +612,52 @@ namespace PixCodec
                 }
             }
 
+            /// <summary>Compresses one (huge) strip row by row straight into the output.</summary>
+            public void CompressStreamed(int index, Stream output)
+            {
+                var l = L;
+                int y0 = index * l.Ch, rows = Math.Min(l.Ch, l.H - y0);
+                int rowBytes = (int)l.RowBytes;
+                var row = new byte[rowBytes];
+                var tmp = l.Pred == 3 ? new byte[rowBytes] : null;
+                var packed = l.Comp == PackBits ? new byte[TiffPackBits.MaxEncodedSize(rowBytes, rowBytes)] : null;
+                TiffLzwWriter? lzw = l.Comp == Lzw ? new TiffLzwWriter(output) : null;
+                using Stream? z = l.Comp == Deflate ? Zlib.CreateCompressor(output, l.Options.CompressionLevel) : null;
+                fixed (byte* r = row)
+                fixed (byte* t = tmp)
+                    for (int y = 0; y < rows; y++)
+                    {
+                        Buffer.MemoryCopy(Pixels + (long)(y0 + y) * rowBytes, r, rowBytes, rowBytes);
+                        if (l.Pred == 2) TiffPredict.ApplyHorizontal(r, l.W * l.Spp, l.Spp, l.Bps);
+                        else if (l.Pred == 3) TiffPredict.ApplyFloat(r, l.W * l.Spp, l.Spp, l.Bps, t);
+                        if (BigEndian && l.Bps > 1 && l.Pred != 3) TiffPredict.SwapBytes(r, rowBytes, l.Bps);
+                        if (lzw != null) lzw.Write(row);
+                        else if (z != null) z.Write(row);
+                        else output.Write(packed!, 0, TiffPackBits.Encode(row, rowBytes, packed));
+                    }
+                lzw?.Finish();
+            }
+
             /// <summary>One strip/tile as a complete JPEG stream. Tiles are padded by repeating the edge pixels.</summary>
             Chunk CompressJpeg(int x0, int y0, int rows, int copyCols, int copyRows)
             {
                 var l = L;
-                int spp = l.Spp;
-                var px = new byte[(long)l.Cw * rows * spp];
+                int pix = l.Spp * l.Bps;
+                var px = new byte[(long)l.Cw * rows * pix];
                 fixed (byte* d0 = px)
                 {
                     for (int y = 0; y < rows; y++)
                     {
-                        byte* d = d0 + (long)y * l.Cw * spp;
-                        byte* s = Pixels + ((long)(y0 + Math.Min(y, copyRows - 1)) * l.W + x0) * spp;
-                        Buffer.MemoryCopy(s, d, (long)copyCols * spp, (long)copyCols * spp);
+                        byte* d = d0 + (long)y * l.Cw * pix;
+                        byte* s = Pixels + ((long)(y0 + Math.Min(y, copyRows - 1)) * l.W + x0) * pix;
+                        Buffer.MemoryCopy(s, d, (long)copyCols * pix, (long)copyCols * pix);
                         for (int x = copyCols; x < l.Cw; x++)
-                            for (int c = 0; c < spp; c++) d[x * spp + c] = d[(copyCols - 1) * spp + c];
+                            for (int c = 0; c < pix; c++) d[x * pix + c] = d[(copyCols - 1) * pix + c];
                     }
                 }
                 var ms = new MemoryStream();
-                TiffJpegBridge.Encode(px, l.Cw, rows, spp, l.Jpeg!, ms);
+                if (l.Bps == 1) Jpeg.EncodeForTiff(px, l.Cw, rows, l.Spp, l.Jpeg!, true, ms);
+                else Jpeg.EncodeForTiff(MemoryMarshal.Cast<byte, ushort>(px), l.Cw, rows, l.Spp, l.Jpeg!, true, ms);
                 return new Chunk { Buf = ms.GetBuffer(), Len = (int)ms.Length };
             }
         }

@@ -46,6 +46,71 @@ NONE, LZW, DEFLATE, PACKBITS = 1, 5, 8, 32773
 
 # ----------------------------------------------------------------------------------------------- codecs
 
+# ----------------------------------------------------------------------------------------------- libtiff, directly
+
+class LibTiff:
+    """The system libtiff through ctypes: the only way to write (and read back in every user format) the codecs
+    that live in libtiff alone - SGI LogLuv / LogL, PixarLog."""
+    SGILOGDATAFMT, PIXARLOGDATAFMT = 65560, 65549
+
+    def __init__(self):
+        import ctypes
+        self.c = ctypes
+        lt = self.lt = ctypes.CDLL('libtiff.so.6')
+        lt.TIFFOpen.restype = ctypes.c_void_p
+        lt.TIFFOpen.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        for n in ('TIFFWriteEncodedStrip', 'TIFFReadEncodedStrip'):
+            getattr(lt, n).argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int64]
+            getattr(lt, n).restype = ctypes.c_int64
+        lt.TIFFClose.argtypes = [ctypes.c_void_p]
+        lt.TIFFStripSize64.argtypes = [ctypes.c_void_p]
+        lt.TIFFStripSize64.restype = ctypes.c_uint64
+        lt.TIFFNumberOfStrips.argtypes = [ctypes.c_void_p]
+        lt.TIFFNumberOfStrips.restype = ctypes.c_uint32
+
+    def _set(self, t, tag, value):
+        return self.lt.TIFFSetField(self.c.c_void_p(t), self.c.c_uint32(tag), self.c.c_int(value))
+
+    def write(self, path, arr, compression, photometric, pseudo=(), rps=None, big_endian=False, tags=()):
+        """arr: (H,W,C) in the user format the pseudo tag selects (floats for the log codecs)."""
+        h, w, c = arr.shape
+        t = self.lt.TIFFOpen(path.encode(), b'wb' if big_endian else b'wl')
+        assert t
+        for tag, v in ((256, w), (257, h), (277, c), (259, compression), (262, photometric), (284, 1),
+                       (258, arr.dtype.itemsize * 8), (339, {'u': 1, 'i': 2, 'f': 3}[arr.dtype.kind])) + tuple(tags):
+            if tag == 338:   # ExtraSamples takes a count and an array
+                one = (self.c.c_uint16 * 1)(v)
+                assert self.lt.TIFFSetField(self.c.c_void_p(t), self.c.c_uint32(tag), self.c.c_int(1), one)
+            else:
+                self._set(t, tag, v)
+        for tag, v in pseudo:
+            assert self._set(t, tag, v), tag
+        rps = rps or h
+        self._set(t, 278, rps)
+        for i, y in enumerate(range(0, h, rps)):
+            buf = np.ascontiguousarray(arr[y:y + rps])
+            n = self.lt.TIFFWriteEncodedStrip(t, i, buf.ctypes.data, buf.nbytes)
+            assert n == buf.nbytes, (path, n, buf.nbytes)
+        self.lt.TIFFClose(t)
+
+    def read(self, path, dtype, shape, pseudo=()):
+        """Decoded strips in the user format the pseudo tag selects (default: what the file's tags say)."""
+        t = self.lt.TIFFOpen(path.encode(), b'r')
+        assert t
+        for tag, v in pseudo:
+            assert self._set(t, tag, v), tag
+        out = np.zeros(shape, dtype)
+        flat = out.reshape(-1)
+        pos = 0
+        for i in range(self.lt.TIFFNumberOfStrips(t)):
+            n = self.lt.TIFFReadEncodedStrip(t, i, flat.ctypes.data + pos, min(flat.nbytes - pos, self.lt.TIFFStripSize64(t)))
+            assert n > 0, (path, n)
+            pos += n
+        self.lt.TIFFClose(t)
+        assert pos == flat.nbytes, (path, pos, flat.nbytes)
+        return out
+
+
 def lzw_encode(data, old_style=False):
     """TIFF LZW. old_style: the pre-6.0 variant (LSB-first codes, no early change)."""
     out = bytearray()
@@ -173,7 +238,13 @@ def encode_chunk(a, p, e, plane=None):
             b = b[:, :, ::-1]
         raw = np.ascontiguousarray(b).tobytes()
     elif any(w not in (8, 16, 32, 64) for w in widths) or len(set(widths)) > 1:
-        assert pred == 1
+        assert pred in (1, 2)
+        if pred == 2:
+            # differences between neighbouring pixels, modulo 2^bits per sample
+            v = a.astype(np.int64).astype(np.uint64)
+            m = np.array([(1 << w) - 1 for w in widths], np.uint64)
+            v[:, 1:, :] = (v[:, 1:, :] - v[:, :-1, :]) & m
+            a = v
         raw = pack_bits_rows(a.reshape(rows, cols * s), widths * cols)
         row_bytes = raw.shape[1]
         raw = raw.tobytes()
@@ -467,7 +538,13 @@ def third_party(name, path, p, page=0):
         except Exception:
             t = None
         if t is not None and t.size:
-            note('tifffile', t)
+            who = 'tifffile'
+            if p.get('predictor', 1) == 2 and not whole and t.dtype.kind == 'u' and len(set(widths)) == 1:
+                # tifffile undoes the predictor on the unpacked integers without wrapping at the sample depth:
+                # its sums are right modulo 2^bits
+                t = t & t.dtype.type((1 << widths[0]) - 1)
+                who = 'tifffile (masked to the sample depth)'
+            note(who, t)
     # libtiff ignores the Predictor tag for PackBits (tifffile honours it, as does PixCodec), so skip that combination.
     libtiff_ok = not (p.get('compression') == PACKBITS and p.get('predictor', 1) != 1) and p.get('compression', 1) < 34000
     simple = page == 0 and whole and pm in (1, 2) and src.shape[2] in (1, 3) and 'extrasamples' not in p
@@ -1083,12 +1160,46 @@ def gen_depths():
     emit('f24_gray_deflate_tiled', dict(arr=np.tile(f24[:, :, :1], (3, 2, 1))[:37, :41], float24=True, sampleformat=3,
                                        compression=DEFLATE, tile=(16, 16)))
 
-    # no installed decoder reads these: listed, kept apart
-    emit('i12_gray', dict(arr=rnd(12, signed=True), bits=12, unverified='signed 12-bit packed samples (tifffile returns nothing, libtiff readers refuse)'))
-    emit('i5_rgb_lzw', dict(arr=rnd(5, 3, signed=True), bits=5, compression=LZW, unverified='signed 5-bit packed samples'))
-    emit('i20_gray_be', dict(arr=rnd(20, signed=True), bits=20, unverified='signed 20-bit packed samples'), byteorder='>')
-    emit('f24_gray_deflate_pred3', dict(arr=f24[:, :, :1], float24=True, sampleformat=3, compression=DEFLATE, predictor=3,
-                                       unverified='floating point predictor on 24-bit floats (tifffile: "unpredicting float24 not supported")'))
+    # Integers of 33..63 bits and the horizontal predictor on packed samples: nothing reads these. Tried: tifffile
+    # (returns an empty array), imagecodecs.packints_decode ("bitspersample out of range"), GDAL ("Unsupported TIFF
+    # configuration"), libtiff via OpenCV / Pillow / libvips (no unpacking of odd depths, "predictor not supported").
+    why = 'no decoder unpacks integers wider than 32 bits that are not 64 bits (tifffile, imagecodecs, GDAL, libtiff, libvips tried)'
+    emit('u40_gray', dict(arr=rnd(40), bits=40, rps=5, unverified=why))
+    emit('be_u48_rgb_lzw', dict(arr=rnd(48, 3), bits=48, compression=LZW, unverified=why), byteorder='>')
+    emit('u63_gray_planar2_deflate', dict(arr=rnd(63, 2), bits=63, compression=DEFLATE, planar=2, extrasamples=[0], photometric=1, unverified=why))
+    emit('i36_gray', dict(arr=rnd(36, signed=True), bits=36, unverified=why))
+    # Horizontal predictor on packed samples (differences modulo 2^bits): libtiff and GDAL refuse the combination,
+    # tifffile reads the unsigned cases.
+    emit('gray12bit_lzw_pred2', dict(arr=rnd(12), bits=12, compression=LZW, predictor=2, rps=6))
+    emit('rgb5bit_deflate_pred2_tiled', dict(arr=rnd(5, 3, 41, 37), bits=5, compression=DEFLATE, predictor=2, tile=(16, 16)))
+    emit('be_rgb10bit_planar_lzw_pred2', dict(arr=rnd(10, 3), bits=10, compression=LZW, predictor=2, planar=2), byteorder='>')
+    why = 'horizontal predictor on signed / 1-bit packed samples: tifffile, GDAL and libtiff all refuse it'
+    emit('i12_rgb_planar_lzw_pred2', dict(arr=rnd(12, 3, signed=True), bits=12, compression=LZW, predictor=2, planar=2, unverified=why))
+    emit('gray1_deflate_pred2', dict(arr=rnd(1, 1, 37, 21), bits=1, compression=DEFLATE, predictor=2, unverified=why))
+
+    # Signed samples of odd depths and the float predictor on 24-bit floats: tifffile and the libtiff front ends refuse
+    # them, GDAL (rasterio) reads them. GDAL unpacks the bits without looking at the sign (it reports unsigned data),
+    # so the sign extension PixCodec documents is applied to what it returns.
+    def gdal(bits=None):
+        def read(path):
+            import rasterio
+            with rasterio.open(path) as ds:
+                a = np.moveaxis(ds.read(), 0, -1)
+            if bits:
+                assert a.dtype.kind == 'u', a.dtype
+                v = a.astype(np.int64)
+                a = np.where(v >= 1 << (bits - 1), v - (1 << bits), v).astype(a.dtype.name[1:])
+            return 'GDAL (rasterio)' + (', sign extended' if bits else ''), a
+        return read
+
+    emit('i12_gray', dict(arr=rnd(12, signed=True), bits=12, raw_decode=gdal(12)))
+    emit('i5_rgb_lzw', dict(arr=rnd(5, 3, signed=True), bits=5, compression=LZW, raw_decode=gdal(5)))
+    emit('be_i20_gray', dict(arr=rnd(20, signed=True), bits=20, raw_decode=gdal(20)), byteorder='>')
+    emit('i12_rgb_planar_deflate_tiled', dict(arr=rnd(12, 3, 41, 37, signed=True), bits=12, compression=DEFLATE, planar=2, tile=(16, 16),
+                                             raw_decode=gdal(12)))
+    emit('f24_gray_deflate_pred3', dict(arr=f24[:, :, :1], float24=True, sampleformat=3, compression=DEFLATE, predictor=3, raw_decode=gdal()))
+    emit('be_f24_rgb_lzw_pred3', dict(arr=f24, float24=True, sampleformat=3, compression=LZW, predictor=3, rps=5, raw_decode=gdal()),
+         byteorder='>')
 
 
 def gen_more_codecs():
@@ -1126,6 +1237,75 @@ def gen_more_codecs():
         emit_external('webp/' + name, path, ref_tifffile(path), ['tifffile (libwebp)'])
         if 'lossy' in name:
             write_tol(path, 4)
+
+
+def gen_ccitt_uncompressed():
+    """CCITT "uncompressed mode" (T.4 / T.6 extension). No encoder writes it and no decoder at hand reads it (libtiff:
+    "uncompressed data (not supported)", and with it OpenCV, Pillow, GDAL, libvips; tifffile has no CCITT codec),
+    so these files are packed by hand from the recommendation and listed as unverified."""
+    rng = np.random.default_rng(81)
+    w, h = 61, 24
+    a = (rng.random((h, w)) < 0.35).astype(np.uint8)       # 1 = black
+    a[3] = 0
+    a[4] = 1
+    a[5, :30] = 0
+    a[6, 7:] = 0
+
+    def urow(row, t=0):
+        out, whites = '', 0
+        for v in row:
+            if v == 0:
+                whites += 1
+                if whites == 5:
+                    out, whites = out + '000001', 0
+            else:
+                out, whites = out + '0' * whites + '1', 0
+        return out + '0' * (6 + whites) + '1' + str(t)       # exit code, then the colour of the next coded run
+
+    def to_bytes(bits):
+        bits += '0' * (-len(bits) % 8)
+        return bytes(int(bits[i:i + 8], 2) for i in range(0, len(bits), 8))
+
+    def changes(row):
+        return [x for x in range(len(row)) if row[x] != (row[x - 1] if x else 0)]
+
+    def finish(name, img, data, comp, tag, rps=None):
+        d = os.path.join(OUT, 'unverified')
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name + '.tif')
+        page = dict(arr=img[:, :, None], bits=1, photometric=0, compression=comp, raw_chunks=data, rps=rps or img.shape[0], tags=[(tag, 4, [2])])
+        write_tiff(path, [page])
+        for reader in (lambda: ref_cv2(path), lambda: np.asarray(Image.open(path).convert('L'))):
+            try:
+                got = reader()
+                assert not np.array_equal(got.reshape(img.shape) > 0, img == 0), f'{name}: a reference decoder reads this now - use it'
+            except AssertionError:
+                raise
+            except Exception:
+                pass
+        write_ref(path + '.ref', ((1 - img) * 255).astype(np.uint8))
+        reason = 'CCITT uncompressed mode: libtiff (and so OpenCV, Pillow, GDAL, libvips) rejects it, nothing writes it'
+        UNVERIFIED.append((name, reason))
+        SUMMARY.append(('unverified/' + name, ['UNVERIFIED: ' + reason]))
+
+    # Group 4, every row in uncompressed mode
+    bits = ''.join('0000001111' + urow(r) for r in a) + '000000000001' * 2
+    finish('ccitt_g4_uncompressed', a, [to_bytes(bits)], 4, 293)
+
+    # Group 4, mixed: uncompressed rows, rows identical to the one above coded with vertical codes only, and a row
+    # that leaves uncompressed mode half way (the rest is white: one V0 against the white reference row)
+    b = a.copy()
+    b[0, 25:] = 0
+    b[2::2] = b[1:-1:2]
+    bits = '0000001111' + urow(b[0, :25]) + '1'
+    for y in range(1, h):
+        bits += '0000001111' + urow(b[y]) if y % 2 else '1' * (len(changes(b[y])) + 1)
+    finish('ccitt_g4_uncompressed_mixed', b, [to_bytes(bits + '000000000001' * 2)], 4, 293)
+
+    # Group 3 one-dimensional (EOL before every row) in two strips, and modified Huffman (rows byte aligned)
+    strips = [to_bytes(''.join('000000000001' + '000000001111' + urow(r) for r in a[y:y + 12])) for y in range(0, h, 12)]
+    finish('ccitt_g3_uncompressed', a, strips, 3, 292, rps=12)
+    finish('ccitt_rle_uncompressed', a, [b''.join(to_bytes('000000001111' + urow(r)) for r in a)], 2, 292)
 
 
 def gen_lab():
@@ -1257,30 +1437,113 @@ def gen_logluv():
         write_tol(path, 2e-3)
         SUMMARY.append(('logluv/' + name, [f'cv2 (libtiff SGILOG float + XYZ2BGR), written by cv2/libtiff, {desc}']))
 
-    # LogL: 16-bit log luminance per pixel, big endian byte planes, run length coded per row
-    y = np.abs(test_pattern(37, 21, 1, np.float32, 52))[:, :, 0] * 3 + 0.02
+    # The rest is written and read back by libtiff itself (ctypes): reading with SGILOGDATAFMT_FLOAT gives CIE XYZ
+    # (or luminance) floats, which is the `.raw.ref` (ConvertToRgb = false); the RGB reference is OpenCV's XYZ2RGB
+    # conversion of exactly these floats.
+    lib = LibTiff()
+    xyz = cv2.cvtColor(rgb, cv2.COLOR_RGB2XYZ)
+    fmt = [(LibTiff.SGILOGDATAFMT, 0)]
+
+    def luv(name, compression, tol, **kw):
+        path = os.path.join(d, name + '.tif')
+        lib.write(path, xyz, compression, 32845, pseudo=fmt if compression in (34676, 34677) else (), **kw)
+        got = lib.read(path, np.float32, xyz.shape, pseudo=fmt if compression in (34676, 34677) else ())
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            assert int(pg.compression) == compression and int(pg.photometric) == 32845
+            desc = f'{len(pg.dataoffsets)} strip(s), {t.byteorder}'
+        write_ref(path + '.ref', cv2.cvtColor(got, cv2.COLOR_XYZ2RGB))
+        write_ref(path + '.raw.ref', got)
+        write_tol(path, tol)
+        write_tol(path + '.raw', tol)
+        SUMMARY.append(('logluv/' + name, [f'libtiff float decoding (XYZ) + cv2 XYZ2RGB; written by libtiff, {desc}']))
+
+    luv('logluv24_strips', 34677, 2e-3, rps=5)
+    luv('logluv24_be', 34677, 2e-3, big_endian=True)
+    luv('logluv32_libtiff_be', 34676, 2e-3, rps=9, big_endian=True)
+    luv('logluv_float_uncompressed', 1, 1e-4, rps=6)        # plain XYZ floats under the LogLuv photometric
+    luv('logluv_float_lzw_be', 5, 1e-4, big_endian=True)
+
+    # LogL: 16-bit log luminance
+    y = np.abs(test_pattern(37, 21, 1, np.float32, 52)) * 3 + 0.02
     y[:3, :10] = 0
     y[3:6, :10] = 0.25
-    le = np.where(y > 0, np.floor(256 * (np.log2(np.maximum(y, 1e-30)) + 64)), 0).astype(np.uint16)
-    chunks = []
-    for r in range(0, 21, 8):
-        rows = []
-        for row in le[r:r + 8]:
-            rows += [bytes((row >> 8).astype(np.uint8)), bytes((row & 255).astype(np.uint8))]
-        chunks.append(sgilog_rle(rows))
-    # No installed decoder returns LogL as floats (OpenCV only switches libtiff to float output for LogLuv, ImageMagick
-    # maps it to display values), so this one is listed as unverified: the reference is the defining formula
-    # Y = 2^((Le + 0.5) / 256 - 64). The run length decoding and that formula are the ones the LogLuv fixtures verify.
-    d = os.path.join(OUT, 'unverified')
+    y[7, 3] = 5000.0
+    # (little endian only: libtiff does not read back its own big endian LogL files correctly)
+    for name, kw in [('logl16_strips', dict(rps=8)), ('logl16_strip', dict())]:
+        path = os.path.join(d, name + '.tif')
+        lib.write(path, y, 34676, 32844, pseudo=fmt, **kw)
+        got = lib.read(path, np.float32, y.shape, pseudo=fmt)
+        assert float(np.abs(got - y).max() / 5000) < 0.01
+        write_ref(path + '.ref', got)
+        write_tol(path, 1e-5)
+        SUMMARY.append(('logluv/' + name, ['libtiff float decoding; written by libtiff']))
+    path = os.path.join(d, 'logl_float_uncompressed.tif')
+    lib.write(path, y, 1, 32844)
+    write_ref(path + '.ref', lib.read(path, np.float32, y.shape))
+    SUMMARY.append(('logluv/logl_float_uncompressed', ['libtiff; written by libtiff']))
+
+
+def gen_pixarlog():
+    """PixarLog (compression 32909), written by libtiff from float data. libtiff tags every such file as 8-bit, so
+    the default reference is its 8-bit reading; `.u16.ref` / `.f32.ref` are its 16-bit and float readings
+    (PIXARLOGDATAFMT), matching TiffDecodeOptions.PixarLogOutput."""
+    lib = LibTiff()
+    d = os.path.join(OUT, 'pixarlog')
     os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, 'logl16.tif')
-    write_tiff(path, [dict(arr=np.zeros((21, 37, 1), np.int16), photometric=32844, compression=34676, rps=8, raw_chunks=chunks)])
-    ref = np.where(le > 0, np.exp2((le.astype(np.float64) + 0.5) / 256 - 64), 0).astype(np.float32)
-    write_ref(path + '.ref', ref)
-    write_tol(path, 1e-6)
-    reason = 'LogL (16-bit log luminance, photometric 32844): no decoder here returns it as floats'
-    UNVERIFIED.append(('logl16', reason))
-    SUMMARY.append(('unverified/logl16', ['UNVERIFIED: ' + reason]))
+    P = LibTiff.PIXARLOGDATAFMT
+    rgb = np.abs(test_pattern(41, 29, 3, np.float32, 71)).astype(np.float32) * 0.45
+    rgb[:3, :8] = 0
+    rgb[3:6, :8] = 1.0
+    rgb[6, :4] = [[24.0, 0.5, 2.0]] * 4          # far above white: the 8 and 16 bit readings clamp
+    rgba = np.concatenate([rgb, np.clip(np.abs(test_pattern(41, 29, 1, np.float32, 72)) * 0.4, 0, 1)], axis=2).astype(np.float32)
+    for name, arr, kw in [('pixarlog_rgb', rgb, dict()), ('pixarlog_rgb_strips', rgb, dict(rps=4)),
+                          # (no big endian file: libtiff on this little endian machine writes garbage for it)
+                          ('pixarlog_rgba', rgba, dict(rps=7, tags=((338, 2),)))]:
+        path = os.path.join(d, name + '.tif')
+        lib.write(path, arr, 32909, 2, pseudo=[(P, 5)], **kw)
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            assert int(pg.compression) == 32909 and pg.bitspersample == 8, (pg.compression, pg.bitspersample)
+            desc = f'{len(pg.dataoffsets)} strip(s), {t.byteorder}'
+        f = lib.read(path, np.float32, arr.shape, pseudo=[(P, 5)])
+        assert float(np.abs(f - arr).max()) < 0.06, name   # (1.004 per code step: 0.05 at the brightest pixel)
+        write_ref(path + '.ref', lib.read(path, np.uint8, arr.shape))
+        write_ref(path + '.u16.ref', lib.read(path, np.uint16, arr.shape, pseudo=[(P, 4)]))
+        write_ref(path + '.f32.ref', f)
+        SUMMARY.append(('pixarlog/' + name, [f'libtiff (8 bit, 16 bit and float readings); written by libtiff, {desc}']))
+
+    # libtiff 4.7 cannot decode its own single-channel PixarLog files (its reading is far from what was written),
+    # so the gray case has no usable reference decoder: the reference is the source rounded through the code table.
+    g = np.clip(np.abs(test_pattern(41, 29, 1, np.float32, 73)) * 0.45, 0, 2).astype(np.float32)
+    du = os.path.join(OUT, 'unverified')
+    os.makedirs(du, exist_ok=True)
+    path = os.path.join(du, 'pixarlog_gray.tif')
+    lib.write(path, g, 32909, 1, pseudo=[(P, 5)], rps=8)
+    bad = lib.read(path, np.float32, g.shape, pseudo=[(P, 5)])
+    assert float(np.abs(bad - g).max()) > 1, 'libtiff reads gray PixarLog correctly now: use it as the reference'
+    c = np.log(1.004)
+    nlin = int(1 / c)
+    c = 1.0 / nlin
+    b = np.exp(-c * 1250)
+    table = np.concatenate([np.arange(nlin) * (b * c * np.e), b * np.exp(c * np.arange(nlin, 2048))]).astype(np.float32)
+    with tifffile.TiffFile(path) as t:
+        pg = t.pages[0]
+        rows = []
+        with open(path, 'rb') as fh:
+            for o, n in zip(pg.dataoffsets, pg.databytecounts):
+                fh.seek(o)
+                codes = np.frombuffer(zlib.decompress(fh.read(n)), '<u2').astype(np.int64)
+                rows.append(np.cumsum(codes[:codes.size // 41 * 41].reshape(-1, 41), axis=1) & 0x7FF)
+    codes = np.concatenate(rows)[:29]
+    ref = table[codes][:, :, None]
+    assert float(np.abs(ref - g).max()) < 0.01
+    v = ref.astype(np.float64) * 255.0 + 0.5
+    write_ref(path + '.ref', np.where(v > 255, 255, v).astype(np.uint8))
+    write_ref(path + '.f32.ref', ref)
+    reason = 'single-channel PixarLog: libtiff 4.7 misreads its own file (stride 1), nothing else decodes PixarLog'
+    UNVERIFIED.append(('pixarlog_gray', reason))
+    SUMMARY.append(('unverified/pixarlog_gray', ['UNVERIFIED: ' + reason]))
 
 
 def gen_jpeg_deep():
@@ -1400,14 +1663,16 @@ def parse_jpeg(b):
                 k = sum(seg[i + 1:i + 17])
                 (dc if seg[i] >> 4 == 0 else ac)[seg[i] & 15] = seg[i + 1:i + 17 + k]
                 i += 17 + k
-        elif m == 0xC0:
+        elif m in (0xC0, 0xC3):
             h, w, k = struct.unpack('>HHB', seg[1:6])
             sof = (h, w, [(seg[6 + 3 * c], seg[7 + 3 * c], seg[8 + 3 * c]) for c in range(k)])
         elif m == 0xDD:
             dri = struct.unpack('>H', seg)[0]
         elif m == 0xDA:
             sos = {seg[1 + 2 * c]: seg[2 + 2 * c] for c in range(seg[0])}
-            return dict(q=q, dc=dc, ac=ac, sof=sof, sos=sos, dri=dri, scan_start=p + 2 + n, scan_end=b.rindex(b'\xff\xd9'))
+            k = 1 + 2 * seg[0]
+            return dict(q=q, dc=dc, ac=ac, sof=sof, sos=sos, dri=dri, scan_start=p + 2 + n, scan_end=b.rindex(b'\xff\xd9'),
+                        ss=seg[k], al=seg[k + 2] & 15)
         p += 2 + n
 
 
@@ -1498,6 +1763,116 @@ def gen_ojpeg():
                          ('ojpeg_tables_gray_restart_strips', jpg(gray, restart_marker_rows=1), True)]:
         page, exp = tables_page(j, per)
         finish(name, page, j, exp)
+
+    def libtiff_note(path, exp):
+        try:
+            lib = np.asarray(Image.open(path).convert('RGB' if exp.ndim == 3 and exp.shape[2] == 3 else 'L'))
+            dist = int(np.abs(lib.astype(int) - exp.reshape(lib.shape).astype(int)).max())
+            return f'libtiff (Pillow) reads the file: max {dist} away' if dist <= 40 else \
+                f'libtiff (Pillow) opens the file but does not decode this layout correctly (max {dist} away)'
+        except Exception as ex:
+            return f'libtiff (Pillow) does not read this layout ({str(ex)[:40]})'
+
+    def raw_file(name, page, exp, who, tol=0):
+        dd = os.path.join(OUT, 'ojpeg')
+        path = os.path.join(dd, name + '.tif')
+        write_tiff(path, [page])
+        write_ref(path + '.ref', exp)
+        if tol:
+            write_tol(path, tol)
+        SUMMARY.append(('ojpeg/' + name, [who + '; ' + libtiff_note(path, exp)]))
+
+    # 4. tiles: every tile is a frame of its own, sharing the tables in the tags
+    for name, sub, tw in [('ojpeg_tables_tiled_444', 0, 32), ('ojpeg_tables_tiled_420', 2, 48)]:
+        th = 32
+        h, w = rgb.shape[:2]
+        parts, infos = [], []
+        exp = np.zeros_like(rgb)
+        for y in range(0, h, th):
+            for x in range(0, w, tw):
+                blk = rgb[y:y + th, x:x + tw]
+                blk = np.pad(blk, ((0, th - blk.shape[0]), (0, tw - blk.shape[1]), (0, 0)), mode='edge')
+                j = jpg(np.ascontiguousarray(blk), subsampling=sub)
+                info = parse_jpeg(j)
+                infos.append(info)
+                parts.append(j[info['scan_start']:info['scan_end']])
+                dec = np.asarray(Image.open(io.BytesIO(j)))
+                exp[y:y + th, x:x + tw] = dec[:h - y, :w - x]
+        assert all(i['q'] == infos[0]['q'] and i['dc'] == infos[0]['dc'] and i['ac'] == infos[0]['ac'] for i in infos)
+        info = infos[0]
+        comps = info['sof'][2]
+        blobs, pos, offs = [], 8, {519: [], 520: [], 521: []}
+        for tag, pick in ((519, lambda c: info['q'][c[2]]), (520, lambda c: info['dc'][info['sos'][c[0]] >> 4]),
+                          (521, lambda c: info['ac'][info['sos'][c[0]] & 15])):
+            for c in comps:
+                offs[tag].append(pos)
+                blobs.append(pick(c))
+                pos += len(blobs[-1])
+        hv = comps[0][1]
+        page = dict(arr=np.zeros((h, w, 3), np.uint8), photometric=6, compression=6, tile=(tw, th), prefix=b''.join(blobs), raw_chunks=parts,
+                    tags=[(512, 3, [1]), (530, 3, [hv >> 4, hv & 15])] + [(t, 4, o) for t, o in offs.items()])
+        raw_file(name, page, exp, 'libjpeg-turbo on the per-tile streams')
+
+    # 5. PlanarConfiguration 2: one single-component frame per plane (Y, Cb, Cr), each with the tables of its index.
+    #    Reference: Pillow decodes the three plane streams and converts YCbCr to RGB (PixCodec uses the TIFF
+    #    coefficient maths in floats, hence the tolerance).
+    ycc = np.asarray(Image.fromarray(rgb).convert('YCbCr'))
+    for name, per in [('ojpeg_planar_444', False), ('ojpeg_planar_444_restart_strips', True)]:
+        h, w = rgb.shape[:2]
+        streams = [jpg(np.ascontiguousarray(ycc[:, :, c]), **(dict(restart_marker_rows=1) if per else {})) for c in range(3)]
+        infos = [parse_jpeg(j) for j in streams]
+        dec = np.stack([np.asarray(Image.open(io.BytesIO(j))) for j in streams], axis=-1)
+        exp = np.asarray(Image.fromarray(dec, 'YCbCr').convert('RGB'))
+        blobs, pos, offs = [], 8, {519: [], 520: [], 521: []}
+        for tag, key in ((519, 'q'), (520, 'dc'), (521, 'ac')):
+            for i in infos:
+                offs[tag].append(pos)
+                blobs.append(i[key][0])
+                pos += len(blobs[-1])
+        parts = []
+        for j, i in zip(streams, infos):
+            scan = j[i['scan_start']:i['scan_end']]
+            if per:
+                start = k = 0
+                while k < len(scan) - 1:
+                    if scan[k] == 0xFF and 0xD0 <= scan[k + 1] <= 0xD7:
+                        parts.append(scan[start:k])
+                        start = k = k + 2
+                    else:
+                        k += 1
+                parts.append(scan[start:])
+            else:
+                parts.append(scan)
+        tags = [(512, 3, [1]), (530, 3, [1, 1])] + [(t, 4, o) for t, o in offs.items()]
+        if per:
+            tags.append((515, 3, [infos[0]['dri']]))
+        page = dict(arr=np.zeros((h, w, 3), np.uint8), photometric=6, compression=6, planar=2, rps=8 if per else h, prefix=b''.join(blobs),
+                    raw_chunks=parts, tags=tags)
+        raw_file(name, page, exp, 'libjpeg-turbo on the per-plane streams + Pillow YCbCr to RGB', tol=2)
+
+    # 6. lossless (JPEGProc 14): predictor and point transform in tags, DC tables only
+    g16 = test_pattern(70, 52, 1, np.uint16, 39)[:, :, 0]
+    for name, a, bits, pm in [('ojpeg_lossless_gray8', gray, 8, 1), ('ojpeg_lossless_gray16', g16, 16, 1), ('ojpeg_lossless_gray12', g16 >> 4, 12, 1),
+                              ('ojpeg_lossless_rgb8', rgb, 8, 2)]:
+        c3 = a.ndim == 3
+        j = imagecodecs.jpeg8_encode(np.ascontiguousarray(a), lossless=True, bitspersample=bits, colorspace='rgb' if c3 else None,
+                                     outcolorspace='rgb' if c3 else None)
+        info = parse_jpeg(j)
+        h, w, comps = info['sof']
+        exp = imagecodecs.jpeg8_decode(j)
+        assert np.array_equal(exp, a)
+        blobs, pos, dcs = [], 8, []
+        for c in comps:
+            dcs.append(pos)
+            blobs.append(info['dc'][info['sos'][c[0]] >> 4])
+            pos += len(blobs[-1])
+        arr = a if c3 else a[:, :, None]
+        page = dict(arr=np.zeros_like(arr), photometric=pm, compression=6, rps=h, prefix=b''.join(blobs),
+                    raw_chunks=[j[info['scan_start']:info['scan_end']]],
+                    tags=[(512, 3, [14]), (517, 3, [info['ss']] * len(comps)), (518, 3, [info['al']] * len(comps)), (520, 4, dcs)])
+        if bits not in (8, 16):
+            page['bits'] = [bits] * len(comps)
+        raw_file(name, page, exp if c3 else exp[:, :, None], 'imagecodecs (libjpeg-turbo) on the embedded lossless stream')
 
     # 3. JPEGInterchangeFormat holds only the header with the tables; the strip is the scan data stored elsewhere
     j = jpg(rgb, subsampling=2)
@@ -1599,7 +1974,9 @@ def main():
     gen_more_codecs()
     gen_lab()
     gen_logluv()
+    gen_pixarlog()
     gen_ccitt()
+    gen_ccitt_uncompressed()
     gen_ycbcr()
     gen_jpeg()
     gen_jpeg_deep()

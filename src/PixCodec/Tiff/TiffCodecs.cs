@@ -205,6 +205,88 @@ namespace PixCodec
         }
     }
 
+    /// <summary>
+    /// The LZW encoder as a stream filter, for strips too large to hold in one buffer: write the data in pieces,
+    /// then <see cref="Finish"/>. Produces the same codes as <see cref="TiffLzw.Encode"/>.
+    /// </summary>
+    internal sealed class TiffLzwWriter
+    {
+        const int Clear = 256, Eoi = 257, First = 258, MaxCodes = 4096, HashBits = 13, HashSize = 1 << HashBits;
+        readonly System.IO.Stream _out;
+        readonly int[] _keys = new int[HashSize];
+        readonly ushort[] _vals = new ushort[HashSize];
+        readonly byte[] _buf = new byte[1 << 16];
+        int _n, _nbits, _width = 9, _next = First, _prefix = -1;
+        ulong _acc;
+
+        public TiffLzwWriter(System.IO.Stream output)
+        {
+            _out = output;
+            Array.Fill(_keys, -1);
+            Put(Clear);
+        }
+
+        void Put(int code)
+        {
+            _acc = (_acc << _width) | (uint)code; _nbits += _width;
+            while (_nbits >= 8)
+            {
+                _nbits -= 8;
+                if (_n == _buf.Length) { _out.Write(_buf, 0, _n); _n = 0; }
+                _buf[_n++] = (byte)(_acc >> _nbits);
+            }
+        }
+
+        public void Write(ReadOnlySpan<byte> src)
+        {
+            int i = 0;
+            if (_prefix < 0 && src.Length > 0) _prefix = src[i++];
+            int prefix = _prefix;
+            for (; i < src.Length; i++)
+            {
+                int c = src[i];
+                int key = (prefix << 8) | c;
+                int h = (int)(((uint)key * 0x9E3779B1u) >> (32 - HashBits));
+                while (true)
+                {
+                    int k = _keys[h];
+                    if (k == key) { prefix = _vals[h]; break; }
+                    if (k < 0)
+                    {
+                        Put(prefix);
+                        _keys[h] = key; _vals[h] = (ushort)_next;
+                        _next++;
+                        if (_next == 1 << _width && _width < 12) _width++;
+                        if (_next >= MaxCodes - 2)
+                        {
+                            Put(Clear);
+                            Array.Fill(_keys, -1);
+                            _width = 9; _next = First;
+                        }
+                        prefix = c;
+                        break;
+                    }
+                    h = (h + 1) & (HashSize - 1);
+                }
+            }
+            _prefix = prefix;
+        }
+
+        public void Finish()
+        {
+            if (_prefix >= 0)
+            {
+                Put(_prefix);
+                _next++;
+                if (_next == 1 << _width && _width < 12) _width++;
+            }
+            Put(Eoi);
+            if (_nbits > 0) { if (_n == _buf.Length) { _out.Write(_buf, 0, _n); _n = 0; } _buf[_n++] = (byte)(_acc << (8 - _nbits)); }
+            _out.Write(_buf, 0, _n);
+            _n = 0;
+        }
+    }
+
     /// <summary>Apple PackBits (compression 32773).</summary>
     internal static unsafe class TiffPackBits
     {
@@ -505,6 +587,76 @@ namespace PixCodec
             double s = 1 / (6 * u - 16 * v + 12);
             double cx = 9 * u * s, cy = 4 * v * s;
             x = (float)(cx / cy * l); y = (float)l; z = (float)((1 - cx - cy) / cy * l);
+        }
+
+        /// <summary>Luminance of the 10-bit log value of 24-bit LogLuv: a log2 scaled by 64 and offset by 12 stops.</summary>
+        public static double LogL10ToY(int p) => p == 0 ? 0 : Math.Exp(Math.Log(2) / 64 * (p + 0.5) - Math.Log(2) * 12);
+
+        /// <summary>
+        /// CIE XYZ of a 24-bit LogLuv pixel: 10 bits of log luminance and a 14-bit index into the squares that tile
+        /// the visible part of the (u', v') plane (see <see cref="TiffLogLuvTable"/>). Indices outside of the table
+        /// decode to the neutral chromaticity.
+        /// </summary>
+        public static void LogLuv24ToXyz(uint p, out float x, out float y, out float z)
+        {
+            double l = LogL10ToY((int)(p >> 14 & 0x3FF));
+            if (l <= 0) { x = y = z = 0; return; }
+            int c = (int)(p & 0x3FFF);
+            double u = 0.210526316, v = 0.473684211;
+            if (c < TiffLogLuvTable.Squares)
+            {
+                var first = TiffLogLuvTable.First;
+                int lo = 0, hi = TiffLogLuvTable.Rows - 1;
+                while (lo < hi) // last row whose first square is not beyond c
+                {
+                    int mid = (lo + hi + 1) >> 1;
+                    if (first[mid] <= c) lo = mid; else hi = mid - 1;
+                }
+                u = TiffLogLuvTable.UStart[lo] + (c - first[lo] + 0.5) * TiffLogLuvTable.UvSquare;
+                v = TiffLogLuvTable.VStart + (lo + 0.5) * TiffLogLuvTable.UvSquare;
+            }
+            double s = 1 / (6 * u - 16 * v + 12);
+            double cx = 9 * u * s, cy = 4 * v * s;
+            x = (float)(cx / cy * l); y = (float)l; z = (float)((1 - cx - cy) / cy * l);
+        }
+    }
+
+    /// <summary>
+    /// PixarLog (compression 32909): samples are 11-bit codes on a curve that is linear near black and logarithmic
+    /// above (ratio 1.004 per step, code 1250 = 1.0), horizontally differenced modulo 2048 and deflated as 16-bit
+    /// words. Decoding maps the codes back to linear floats, or to 8 / 16 bit integers of them.
+    /// </summary>
+    internal static unsafe class TiffPixarLog
+    {
+        const int Codes = 2048, One = 1250;
+        static readonly float[] ToFloat = BuildFloat();
+        static readonly ushort[] To16 = Array.ConvertAll(ToFloat, f => { double v = f * 65535.0 + 0.5; return v > 65535 ? (ushort)65535 : (ushort)v; });
+        static readonly byte[] To8 = Array.ConvertAll(ToFloat, f => { double v = f * 255.0 + 0.5; return v > 255 ? (byte)255 : (byte)v; });
+
+        static float[] BuildFloat()
+        {
+            double c = Math.Log(1.004);
+            int nlin = (int)(1 / c);           // number of linear steps: where the log curve's slope takes over
+            c = 1.0 / nlin;
+            double b = Math.Exp(-c * One);     // so that b * exp(c * One) = 1
+            double linstep = b * c * Math.E;
+            var t = new float[Codes];
+            for (int i = 0; i < nlin; i++) t[i] = (float)(i * linstep);
+            for (int i = nlin; i < Codes; i++) t[i] = (float)(b * Math.Exp(c * i));
+            return t;
+        }
+
+        /// <summary>Undoes the differencing of one row of n codes and writes the linear values in the given sample type.</summary>
+        public static void Row(ushort* src, byte* dst, int n, int stride, SampleType type)
+        {
+            for (int i = stride; i < n; i++) src[i] = (ushort)((src[i] + src[i - stride]) & (Codes - 1));
+            for (int i = 0; i < Math.Min(stride, n); i++) src[i] &= Codes - 1;
+            switch (type)
+            {
+                case SampleType.UInt8: { var t = To8; for (int i = 0; i < n; i++) dst[i] = t[src[i]]; break; }
+                case SampleType.UInt16: { var t = To16; var d = (ushort*)dst; for (int i = 0; i < n; i++) d[i] = t[src[i]]; break; }
+                default: { var t = ToFloat; var d = (float*)dst; for (int i = 0; i < n; i++) d[i] = t[src[i]]; break; }
+            }
         }
     }
 }
