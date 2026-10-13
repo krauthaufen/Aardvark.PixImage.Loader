@@ -450,11 +450,14 @@ public class JpegTests
     static RawImage Opaque(RawImage img)
     {
         if (!img.HasAlpha) return img;
-        int ch = img.Channels - 1;
-        var o = RawImage.Create(img.Width, img.Height, ch == 1 ? ColorModel.Gray : ColorModel.Rgb, SampleType.UInt8);
-        var s = img.GetData<byte>(); var d = o.GetData<byte>();
-        for (int i = 0, n = img.Width * img.Height; i < n; i++)
-            for (int c = 0; c < ch; c++) d[i * ch + c] = s[i * img.Channels + c];
+        int ch = img.Channels - 1, n = img.Width * img.Height;
+        var o = RawImage.Create(img.Width, img.Height, ch == 1 ? ColorModel.Gray : ColorModel.Rgb, img.SampleType);
+        for (int i = 0; i < n; i++)
+            for (int c = 0; c < ch; c++)
+            {
+                if (img.SampleType == SampleType.UInt8) o.GetData<byte>()[i * ch + c] = img.GetData<byte>()[i * img.Channels + c];
+                else o.GetData<ushort>()[i * ch + c] = img.GetData<ushort>()[i * img.Channels + c];
+            }
         return o;
     }
 
@@ -596,6 +599,185 @@ public class JpegTests
         if (oracle != null) TestUtil.AssertEqual(oracle, back, 0);
     }
 
+    static RawImage Synthetic16(int w, int h, ColorModel color, int bits, int seed = 1, int channels = 0)
+    {
+        var img = RawImage.Create(w, h, color, bits > 8 ? SampleType.UInt16 : SampleType.UInt8, channels);
+        int ch = img.Channels, max = (1 << bits) - 1;
+        var rnd = new Random(seed * 77 + bits);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                for (int c = 0; c < ch; c++)
+                {
+                    double v = 0.5 + 0.35 * Math.Sin(x * (0.11 + 0.05 * c) + seed) * Math.Cos(y * (0.07 + 0.03 * c)) + 0.1 * Math.Sin((x + y) * 0.31 + c);
+                    if (x > w * 2 / 3 && y < h / 3) v = c == 0 ? 1.2 : -0.2; // saturates to the range limits
+                    v += (rnd.NextDouble() - 0.5) * 0.03;
+                    int s = (int)Math.Clamp(v * max, 0, max);
+                    int i = (y * w + x) * ch + c;
+                    if (bits > 8) img.GetData<ushort>()[i] = (ushort)s; else img.GetData<byte>()[i] = (byte)s;
+                }
+        return img;
+    }
+
+    public static IEnumerable<object[]> Encode12Cases()
+    {
+        foreach (var color in new[] { ColorModel.Gray, ColorModel.Rgb })
+            foreach (var ss in color == ColorModel.Gray ? new[] { JpegSubsampling.Auto } : new[] { JpegSubsampling.Chroma444, JpegSubsampling.Chroma422, JpegSubsampling.Chroma420 })
+                foreach (bool progressive in new[] { false, true })
+                {
+                    foreach (var (w, h) in new[] { (1, 1), (7, 5), (17, 33), (64, 48), (67, 45) })
+                        yield return new object[] { color, w, h, 90, ss, progressive, 0 };
+                    yield return new object[] { color, 70, 50, 100, ss, progressive, 3 };
+                    yield return new object[] { color, 70, 50, 30, ss, progressive, 0 };
+                }
+    }
+
+    /// <summary>12 bit DCT JPEG from UInt16 images: our decoder and libjpeg-turbo 3 read the same pixels back.</summary>
+    [Theory]
+    [MemberData(nameof(Encode12Cases))]
+    public void Encode12BitRoundTrips(ColorModel color, int w, int h, int quality, JpegSubsampling ss, bool progressive, int restart)
+    {
+        var src = Synthetic16(w, h, color, 12, seed: w + quality);
+        var bytes = Encode(src, new JpegEncodeOptions { Quality = quality, Subsampling = ss, Progressive = progressive, RestartInterval = restart });
+        var back = Jpeg.Decode(bytes);
+        Assert.Equal((SampleType.UInt16, color), (back.SampleType, back.Color));
+        Assert.Equal(SampleType.UInt16, Jpeg.GetInfo(bytes).SampleType);
+        Assert.All(back.GetData<ushort>(), v => Assert.InRange(v, 0, 4095));
+        double psnr = TestUtil.Psnr(src, back, 4095);
+        double floor = ss is JpegSubsampling.Chroma420 or JpegSubsampling.Chroma422 ? 23 : quality >= 90 ? 40 : 28;
+        if (w >= 16 && h >= 16) Assert.True(psnr >= floor, $"PSNR {psnr:F1} dB below {floor}");
+        var oracle = TestUtil.OracleDecode(bytes, ".jpg");
+        if (oracle != null) TestUtil.AssertEqual(oracle, back, 0);
+    }
+
+    [Fact]
+    public void Encode12BitChecksRange()
+    {
+        var img = RawImage.Create(8, 8, ColorModel.Gray, SampleType.UInt16);
+        img.GetData<ushort>()[5] = 4096;
+        Assert.Throws<ArgumentException>(() => Encode(img));
+        Assert.Throws<ArgumentException>(() => Encode(img, new JpegEncodeOptions { Precision = 16 }));
+        Assert.Throws<ArgumentException>(() => Encode(RawImage.Create(8, 8, ColorModel.Gray, SampleType.UInt8), new JpegEncodeOptions { Precision = 12 }));
+        img.GetData<ushort>()[5] = 4095;
+        Assert.Equal(4095, Jpeg.Decode(Encode(img, new JpegEncodeOptions { Quality = 100, Precision = 12 })).GetData<ushort>().Max(), 40.0);
+    }
+
+    public static IEnumerable<object[]> LosslessCases()
+    {
+        foreach (int predictor in new[] { 0, 1, 2, 3, 4, 5, 6, 7 })
+        {
+            yield return new object[] { ColorModel.Gray, 0, 8, 33, 21, predictor, 0 };
+            yield return new object[] { ColorModel.Rgb, 0, 8, 23, 31, predictor, 0 };
+            yield return new object[] { ColorModel.Gray, 0, 16, 33, 21, predictor, 0 };
+            yield return new object[] { ColorModel.Rgb, 0, 16, 23, 31, predictor, 0 };
+        }
+        foreach (int bits in new[] { 2, 3, 5, 7, 9, 10, 12, 13, 15 })
+        {
+            yield return new object[] { ColorModel.Gray, 0, bits, 20, 17, 4, 0 };
+            yield return new object[] { ColorModel.Rgb, 0, bits, 20, 17, 7, 0 };
+        }
+        foreach (int bits in new[] { 8, 16 })
+        {
+            foreach (var (w, h) in new[] { (1, 1), (1, 9), (9, 1), (2, 2), (130, 97) })
+                yield return new object[] { ColorModel.Rgb, 0, bits, w, h, 4, 0 };
+            yield return new object[] { ColorModel.GrayAlpha, 0, bits, 20, 17, 1, 0 };
+            yield return new object[] { ColorModel.Rgba, 0, bits, 20, 17, 6, 0 };
+            yield return new object[] { ColorModel.Other, 2, bits, 20, 17, 4, 0 };
+            yield return new object[] { ColorModel.Other, 4, bits, 20, 17, 5, 0 };
+            foreach (int restart in new[] { 1, 40, 45, 200 })
+            {
+                yield return new object[] { ColorModel.Gray, 0, bits, 40, 23, 4, restart };
+                yield return new object[] { ColorModel.Rgb, 0, bits, 40, 23, 7, restart };
+            }
+        }
+    }
+
+    /// <summary>Lossless JPEG is exact through our decoder and through libjpeg-turbo 3, for every predictor and precision.</summary>
+    [Theory]
+    [MemberData(nameof(LosslessCases))]
+    public void EncodeLosslessRoundTrips(ColorModel color, int channels, int bits, int w, int h, int predictor, int restart)
+    {
+        var src = Synthetic16(w, h, color, bits, seed: w + predictor, channels);
+        if (bits == 16)
+        {
+            // make sure the extreme differences (+-32768, 65535) occur
+            var d = src.GetData<ushort>();
+            for (int i = 0; i + 4 < d.Length; i += 37) { d[i] = 0; d[i + 1] = 65535; d[i + 2] = 32768; d[i + 3] = 0; }
+        }
+        var bytes = Encode(src, new JpegEncodeOptions { Lossless = true, Predictor = predictor, RestartInterval = restart, Precision = bits is 8 or 16 ? 0 : bits });
+        var expected = Opaque(src);
+        var back = Jpeg.Decode(bytes);
+        Assert.Equal(expected.SampleType, back.SampleType);
+        if (color != ColorModel.Other) Assert.Equal(expected.Color, back.Color);
+        TestUtil.AssertEqual(expected, back, 0);
+        var info = Jpeg.GetInfo(bytes);
+        Assert.Equal((w, h, expected.Channels, expected.SampleType), (info.Width, info.Height, info.Channels, info.SampleType));
+        var oracle = TestUtil.OracleDecode(bytes, ".jpg");
+        if (oracle != null) TestUtil.AssertEqual(oracle, back, 0);
+    }
+
+    [Fact]
+    public void EncodeLosslessChecksArguments()
+    {
+        var img = RawImage.Create(8, 8, ColorModel.Gray, SampleType.UInt16);
+        img.GetData<ushort>()[3] = 1024;
+        Assert.Throws<ArgumentException>(() => Encode(img, new JpegEncodeOptions { Lossless = true, Precision = 10 }));
+        Assert.Throws<ArgumentException>(() => Encode(img, new JpegEncodeOptions { Lossless = true, Precision = 17 }));
+        Assert.Throws<ArgumentException>(() => Encode(img, new JpegEncodeOptions { Lossless = true, Predictor = 8 }));
+        Assert.Throws<ImageNotSupportedException>(() => Encode(RawImage.Create(4, 4, ColorModel.Other, SampleType.UInt8, 5), new JpegEncodeOptions { Lossless = true }));
+        Assert.Throws<ImageNotSupportedException>(() => Encode(RawImage.Create(4, 4, ColorModel.Gray, SampleType.Float32), new JpegEncodeOptions { Lossless = true }));
+        // metadata survives; gray keeps its density (JFIF), RGB cannot carry one
+        var rgb = Synthetic16(9, 7, ColorModel.Rgb, 16);
+        rgb.Metadata = new ImageMetadata { DpiX = 300, DpiY = 300, Orientation = 3, IccProfile = new byte[] { 1, 2, 3 } };
+        var m = Jpeg.Decode(Encode(rgb, new JpegEncodeOptions { Lossless = true })).Metadata!;
+        Assert.Equal((3, 0.0), (m.Orientation, m.DpiX));
+        Assert.Equal(new byte[] { 1, 2, 3 }, m.IccProfile);
+    }
+
+    public static IEnumerable<object[]> SamplingCases()
+    {
+        // whole-number ratios: libjpeg decodes these, so the oracle applies
+        foreach (var f in new[] { "1,1,2,1,2,1", "2,2,2,1,2,1", "4,1,1,1,1,1", "1,2,1,1,1,1", "2,1,1,2,1,2", "4,1,2,1,2,1", "2,2,1,1,2,2", "1,4,1,2,1,1" })
+            yield return new object[] { f, true };
+        // fractional ratios (2:3, 3:4, ...): valid JPEG that libjpeg refuses to decode
+        foreach (var f in new[] { "3,1,2,1,2,1", "3,2,2,1,1,2", "4,1,3,1,3,1", "2,3,1,2,2,1", "3,1,1,1,2,1", "2,1,3,1,3,1" })
+            yield return new object[] { f, false };
+    }
+
+    /// <summary>
+    /// Arbitrary sampling factors. Whole-number ratios must match libjpeg; for fractional ones (which libjpeg rejects
+    /// with "fractional sampling not implemented") components are interpolated bilinearly and the result has to be a
+    /// faithful picture of the source.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(SamplingCases))]
+    public void ArbitrarySamplingFactors(string factors, bool integral)
+    {
+        var f = factors.Split(',').Select(int.Parse).ToArray();
+        foreach (var (w, h) in new[] { (97, 71), (48, 48), (5, 3), (1, 1) })
+            foreach (bool progressive in new[] { false, true })
+            {
+                // smooth content: chroma is band limited enough that subsampling it costs little
+                var src = RawImage.Create(w, h, ColorModel.Rgb, SampleType.UInt8);
+                var d = src.GetData<byte>();
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                        for (int c = 0; c < 3; c++)
+                            d[(y * w + x) * 3 + c] = (byte)(128 + 100 * Math.Sin(x * 0.07 + c) * Math.Cos(y * 0.05 + 0.5 * c));
+                var bytes = Encode(src, new JpegEncodeOptions { Quality = 95, SamplingFactors = f, Progressive = progressive });
+                var back = Jpeg.Decode(bytes);
+                Assert.Equal((w, h), (back.Width, back.Height));
+                if (w > 16) Assert.True(TestUtil.Psnr(src, back, 255) > 36, $"{factors} {w}x{h}: PSNR {TestUtil.Psnr(src, back, 255):F1}");
+                foreach (int scale in new[] { 2, 4, 8 })
+                {
+                    var small = Jpeg.Decode(bytes, new JpegDecodeOptions { ScaleDenominator = scale });
+                    Assert.Equal(((w + scale - 1) / scale, (h + scale - 1) / scale), (small.Width, small.Height));
+                }
+                if (!integral) continue;
+                var oracle = TestUtil.OracleDecode(bytes, ".jpg");
+                if (oracle != null) TestUtil.AssertEqual(oracle, back, 0);
+            }
+    }
+
     [Fact]
     public void EncodeQualityOrdersSizeAndFidelity()
     {
@@ -651,7 +833,7 @@ public class JpegTests
     [Fact]
     public void EncodeRejectsUnsupportedInput()
     {
-        Assert.Throws<ImageNotSupportedException>(() => Encode(RawImage.Create(4, 4, ColorModel.Rgb, SampleType.UInt16)));
+        Assert.Throws<ImageNotSupportedException>(() => Encode(RawImage.Create(4, 4, ColorModel.Rgb, SampleType.Int16)));
         Assert.Throws<ImageNotSupportedException>(() => Encode(RawImage.Create(4, 4, ColorModel.Gray, SampleType.Float32)));
         Assert.Throws<ImageNotSupportedException>(() => Encode(RawImage.Create(4, 4, ColorModel.Other, SampleType.UInt8, 5)));
     }

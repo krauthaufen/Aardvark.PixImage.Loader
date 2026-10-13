@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
@@ -21,6 +22,7 @@ namespace PixCodec.JpegImpl
             public int ScanBlocksW, ScanBlocksH; // blocks covering the image, for non-interleaved scans
             public int Stride;
             public byte[] Plane = null!;
+            public ushort[]? Plane16; // 12 bit samples
             public short[] Coefs = null!;
             public int Pred;
             public HuffEnc Dc = null!, Ac = null!;
@@ -289,19 +291,41 @@ namespace PixCodec.JpegImpl
         readonly int _hMax, _vMax, _mcusX, _mcusY;
         readonly byte[][] _quant = new byte[2][];
         readonly int _restart;
+        readonly bool _genericSampling;
+        readonly int _precision = 8;
+        readonly int _maxAcSize = 10; // largest AC magnitude category the precision allows
 
         public static void Encode(RawImage image, Stream output, JpegEncodeOptions options)
         {
             ArgumentNullException.ThrowIfNull(image);
             ArgumentNullException.ThrowIfNull(output);
-            if (image.SampleType != SampleType.UInt8)
-                throw new ImageNotSupportedException($"JPEG encoding supports 8 bit samples only, not {image.SampleType}");
-            if (image.Color == ColorModel.Other)
-                throw new ImageNotSupportedException("JPEG encoding needs a gray or RGB image");
+            if (image.SampleType != SampleType.UInt8 && image.SampleType != SampleType.UInt16)
+                throw new ImageNotSupportedException($"JPEG encoding supports UInt8 and UInt16 samples, not {image.SampleType}");
             if (image.Width > 65535 || image.Height > 65535)
                 throw new ImageNotSupportedException("image is too large for JPEG (65535 x 65535 at most)");
+            bool wide = image.SampleType == SampleType.UInt16;
+            if (options.Lossless)
+            {
+                if (image.Color == ColorModel.Other && image.Channels > 4)
+                    throw new ImageNotSupportedException("lossless JPEG holds at most 4 components");
+                int precision = options.Precision != 0 ? options.Precision : wide ? 16 : 8;
+                if (precision < 2 || precision > (wide ? 16 : 8)) throw new ArgumentException($"lossless JPEG precision {precision} is not possible for {image.SampleType} samples");
+                new JpegEncoder(output, options).RunLossless(image, precision);
+                return;
+            }
+            if (image.Color == ColorModel.Other)
+                throw new ImageNotSupportedException("JPEG encoding needs a gray or RGB image (lossless mode also takes up to 4 arbitrary channels)");
+            if (options.Precision != 0 && options.Precision != (wide ? 12 : 8))
+                throw new ArgumentException(wide ? "UInt16 images are encoded with 12 bit precision (or lossless with up to 16)" : "UInt8 images are encoded with 8 bit precision");
             var e = new JpegEncoder(image, output, options);
             e.Run(image);
+        }
+
+        /// <summary>Lossless mode: only the output machinery is used.</summary>
+        JpegEncoder(Stream output, JpegEncodeOptions opt)
+        {
+            _out = output; _opt = opt;
+            _comps = Array.Empty<Comp>();
         }
 
         JpegEncoder(RawImage image, Stream output, JpegEncodeOptions opt)
@@ -309,19 +333,30 @@ namespace PixCodec.JpegImpl
             _out = output; _opt = opt;
             _w = image.Width; _h = image.Height;
             _restart = Math.Clamp(opt.RestartInterval, 0, 65535);
+            if (image.SampleType == SampleType.UInt16) { _precision = 12; _maxAcSize = 14; }
             bool gray = image.Color == ColorModel.Gray || image.Color == ColorModel.GrayAlpha;
             int quality = Math.Clamp(opt.Quality, 1, 100);
             var ss = opt.Subsampling;
             if (ss == JpegSubsampling.Auto) ss = quality >= 90 ? JpegSubsampling.Chroma444 : JpegSubsampling.Chroma420;
-            _hMax = gray || ss == JpegSubsampling.Chroma444 ? 1 : 2;
-            _vMax = !gray && ss == JpegSubsampling.Chroma420 ? 2 : 1;
-            _mcusX = (_w + 8 * _hMax - 1) / (8 * _hMax);
-            _mcusY = (_h + 8 * _vMax - 1) / (8 * _vMax);
-
+            int[] factors = gray ? [1, 1] : ss == JpegSubsampling.Chroma444 ? [1, 1, 1, 1, 1, 1] : ss == JpegSubsampling.Chroma422 ? [2, 1, 1, 1, 1, 1] : [2, 2, 1, 1, 1, 1];
+            if (opt.SamplingFactors != null && !gray)
+            {
+                factors = opt.SamplingFactors;
+                if (factors.Length != 6 || factors.Any(f => f < 1 || f > 4)) throw new ArgumentException("SamplingFactors needs 6 values between 1 and 4");
+                if (factors[0] * factors[1] + factors[2] * factors[3] + factors[4] * factors[5] > 10) throw new ArgumentException("an MCU holds at most 10 blocks");
+                _genericSampling = true;
+            }
             _comps = new Comp[gray ? 1 : 3];
             for (int i = 0; i < _comps.Length; i++)
             {
-                var c = new Comp { Id = i + 1, H = i == 0 ? _hMax : 1, V = i == 0 ? _vMax : 1, Tq = i == 0 ? 0 : 1 };
+                _comps[i] = new Comp { Id = i + 1, H = factors[2 * i], V = factors[2 * i + 1], Tq = i == 0 ? 0 : 1 };
+                _hMax = Math.Max(_hMax, _comps[i].H);
+                _vMax = Math.Max(_vMax, _comps[i].V);
+            }
+            _mcusX = (_w + 8 * _hMax - 1) / (8 * _hMax);
+            _mcusY = (_h + 8 * _vMax - 1) / (8 * _vMax);
+            foreach (var c in _comps)
+            {
                 c.BlocksW = _mcusX * c.H;
                 c.BlocksH = _mcusY * c.V;
                 c.ScanBlocksW = ((_w * c.H + _hMax - 1) / _hMax + 7) / 8;
@@ -329,9 +364,9 @@ namespace PixCodec.JpegImpl
                 c.Stride = c.BlocksW * 8;
                 long size = (long)c.Stride * c.BlocksH * 8;
                 if (size > Array.MaxLength) throw new ImageNotSupportedException("image is too large to encode");
-                c.Plane = GC.AllocateUninitializedArray<byte>((int)size);
+                if (_precision == 8) c.Plane = GC.AllocateUninitializedArray<byte>((int)size);
+                else c.Plane16 = GC.AllocateUninitializedArray<ushort>((int)size);
                 c.Coefs = GC.AllocateUninitializedArray<short>((int)size);
-                _comps[i] = c;
             }
 
             // IJG quality scaling of the Annex K tables
@@ -347,7 +382,8 @@ namespace PixCodec.JpegImpl
 
         void Run(RawImage image)
         {
-            FillPlanes(image);
+            if (_precision != 8 || _genericSampling) FillPlanesGeneric(image);
+            else FillPlanes(image);
             Transform();
             WriteHeaders(image.Metadata);
             if (_opt.Progressive) WriteProgressive();
@@ -405,6 +441,90 @@ namespace PixCodec.JpegImpl
                 if (_vMax > 1 && c.V == _vMax) rows = (h + 1) / 2 * 2; // luma rows were written in pairs
                 var last = c.Plane.AsSpan((rows - 1) * c.Stride, c.Stride);
                 for (int y = rows; y < c.BlocksH * 8; y++) last.CopyTo(c.Plane.AsSpan(y * c.Stride, c.Stride));
+            }
+        }
+
+        /// <summary>
+        /// Straightforward version of <see cref="FillPlanes"/> for the cases without a fast path (12 bit samples,
+        /// arbitrary sampling factors): full resolution planes first, then an area average down to each component's size.
+        /// </summary>
+        void FillPlanesGeneric(RawImage image)
+        {
+            int w = _w, h = _h, ch = image.Channels, nc = _comps.Length;
+            int center = 1 << (_precision - 1), max = (1 << _precision) - 1;
+            var full = new ushort[nc][];
+            for (int i = 0; i < nc; i++) full[i] = new ushort[w * h];
+            byte[]? s8 = image.SampleType == SampleType.UInt8 ? image.GetData<byte>() : null;
+            ushort[]? s16 = s8 == null ? image.GetData<ushort>() : null;
+            for (int i = 0, n = w * h; i < n; i++)
+            {
+                int r = s8 != null ? s8[i * ch] : s16![i * ch];
+                if (r > max) throw new ArgumentException($"sample value {r} exceeds the {_precision} bit range");
+                if (nc == 1) { full[0][i] = (ushort)r; continue; }
+                int g = s8 != null ? s8[i * ch + 1] : s16![i * ch + 1], b = s8 != null ? s8[i * ch + 2] : s16![i * ch + 2];
+                if (g > max || b > max) throw new ArgumentException($"sample value {Math.Max(g, b)} exceeds the {_precision} bit range");
+                full[0][i] = (ushort)((19595 * r + 38470 * g + 7471 * b + 32768) >> 16);
+                full[1][i] = (ushort)((-11059 * r - 21709 * g + 32768 * b + (center << 16) + 32767) >> 16);
+                full[2][i] = (ushort)((32768 * r - 27439 * g - 5329 * b + (center << 16) + 32767) >> 16);
+            }
+            for (int i = 0; i < nc; i++)
+            {
+                var c = _comps[i];
+                int sw = (w * c.H + _hMax - 1) / _hMax, sh = (h * c.V + _vMax - 1) / _vMax;
+                // horizontal, then vertical box filter; source samples past the edge repeat the last one
+                var tmp = new long[sw * h];
+                for (int y = 0; y < h; y++) BoxFilter(full[i], y * w, 1, w, tmp, y * sw, 1, sw, c.H, _hMax);
+                var col = new long[h];
+                var outCol = new long[sh];
+                int rows = c.BlocksH * 8, stride = c.Stride;
+                for (int x = 0; x < sw; x++)
+                {
+                    for (int y = 0; y < h; y++) col[y] = tmp[y * sw + x];
+                    BoxFilter(col, sh, outCol, c.V, _vMax);
+                    for (int y = 0; y < rows; y++)
+                    {
+                        // both passes left the sums unscaled: divide by the two box sizes at once
+                        long div = (long)_hMax * _vMax;
+                        int v = (int)((outCol[Math.Min(y, sh - 1)] + div / 2) / div);
+                        if (c.Plane16 != null) c.Plane16[y * stride + x] = (ushort)v; else c.Plane[y * stride + x] = (byte)v;
+                    }
+                }
+                for (int y = 0; y < rows; y++)
+                {
+                    if (c.Plane16 != null) c.Plane16.AsSpan(y * stride + sw, stride - sw).Fill(c.Plane16[y * stride + sw - 1]);
+                    else c.Plane.AsSpan(y * stride + sw, stride - sw).Fill(c.Plane[y * stride + sw - 1]);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Area average of n source samples onto m outputs where one output spans den / num source samples. The
+        /// results are sums over a window of weight den (the caller divides).
+        /// </summary>
+        static void BoxFilter(ushort[] src, int srcStart, int srcStep, int n, long[] dst, int dstStart, int dstStep, int m, int num, int den)
+        {
+            for (int i = 0; i < m; i++)
+            {
+                // in units of 1/num source samples the output covers [i * den, (i + 1) * den)
+                long lo = (long)i * den, hi = lo + den, sum = 0;
+                for (long j = lo / num; j * num < hi; j++)
+                {
+                    long overlap = Math.Min(hi, (j + 1) * num) - Math.Max(lo, j * num);
+                    sum += overlap * src[srcStart + (int)Math.Min(j, n - 1) * srcStep];
+                }
+                dst[dstStart + i * dstStep] = sum;
+            }
+        }
+
+        static void BoxFilter(long[] src, int m, long[] dst, int num, int den)
+        {
+            int n = src.Length;
+            for (int i = 0; i < m; i++)
+            {
+                long lo = (long)i * den, hi = lo + den, sum = 0;
+                for (long j = lo / num; j * num < hi; j++)
+                    sum += (Math.Min(hi, (j + 1) * num) - Math.Max(lo, j * num)) * src[Math.Min(j, n - 1)];
+                dst[i] = sum;
             }
         }
 
@@ -501,20 +621,33 @@ namespace PixCodec.JpegImpl
         void Transform()
         {
             float* recip = stackalloc float[64];
+            int* m = stackalloc int[64];
             foreach (var c in _comps)
             {
                 var q = _quant[c.Tq];
-                // FdctQuantize wants the divisors transposed and scaled by the DCT's factor of 8
+                // the quantizers want the divisors transposed and scaled by the DCT's factor of 8
                 for (int i = 0; i < 64; i++) recip[(i & 7) * 8 + (i >> 3)] = 1f / (8 * q[i]);
                 fixed (byte* plane = c.Plane)
+                fixed (ushort* plane16 = c.Plane16)
                 fixed (short* coefs = c.Coefs)
                 {
                     short* o = coefs;
                     for (int by = 0; by < c.BlocksH; by++)
                     {
-                        byte* row = plane + (nint)by * 8 * c.Stride;
+                        if (plane16 == null)
+                        {
+                            byte* row = plane + (nint)by * 8 * c.Stride;
+                            for (int bx = 0; bx < c.BlocksW; bx++, o += 64)
+                                JpegDct.FdctQuantize(row + bx * 8, c.Stride, recip, o);
+                            continue;
+                        }
                         for (int bx = 0; bx < c.BlocksW; bx++, o += 64)
-                            JpegDct.FdctQuantize(row + bx * 8, c.Stride, recip, o);
+                        {
+                            ushort* src = plane16 + ((nint)by * c.Stride + bx) * 8;
+                            for (int y = 0; y < 8; y++, src += c.Stride)
+                                for (int x = 0; x < 8; x++) m[y * 8 + x] = src[x] - (1 << (_precision - 1));
+                            JpegDct.FdctQuantizeGeneric(m, 1, recip, o);
+                        }
                     }
                 }
             }
@@ -524,14 +657,35 @@ namespace PixCodec.JpegImpl
 
         void WriteHeaders(ImageMetadata? meta)
         {
+            WriteMetadata(meta, jfif: true);
+            for (int t = 0; t < (_comps.Length == 1 ? 1 : 2); t++)
+            {
+                Marker(0xDB); U16(67); Byte(t);
+                for (int i = 0; i < 64; i++) Byte(_quant[t][JpegTables.ZigZag[i]]);
+            }
+
+            // baseline, extended sequential (needed beyond 8 bit) or progressive
+            Marker(_opt.Progressive ? 0xC2 : _precision == 8 ? 0xC0 : 0xC1);
+            U16(8 + 3 * _comps.Length); Byte(_precision); U16(_h); U16(_w); Byte(_comps.Length);
+            foreach (var c in _comps) { Byte(c.Id); Byte(c.H << 4 | c.V); Byte(c.Tq); }
+
+            if (_restart != 0) { Marker(0xDD); U16(4); U16(_restart); }
+        }
+
+        /// <summary>SOI and the application segments. A JFIF header implies gray or YCbCr, so RGB / raw data goes without.</summary>
+        void WriteMetadata(ImageMetadata? meta, bool jfif)
+        {
             Marker(0xD8);
-            // JFIF 1.01
-            Marker(0xE0); U16(16);
-            Bytes("JFIF\0"u8); Byte(1); Byte(1);
-            int dx = meta == null ? 0 : (int)Math.Round(meta.DpiX), dy = meta == null ? 0 : (int)Math.Round(meta.DpiY);
-            if (dx >= 1 && dy >= 1 && dx <= 65535 && dy <= 65535) { Byte(1); U16(dx); U16(dy); }
-            else { Byte(0); U16(1); U16(1); }
-            Byte(0); Byte(0);
+            if (jfif)
+            {
+                // JFIF 1.01
+                Marker(0xE0); U16(16);
+                Bytes("JFIF\0"u8); Byte(1); Byte(1);
+                int dx = meta == null ? 0 : (int)Math.Round(meta.DpiX), dy = meta == null ? 0 : (int)Math.Round(meta.DpiY);
+                if (dx >= 1 && dy >= 1 && dx <= 65535 && dy <= 65535) { Byte(1); U16(dx); U16(dy); }
+                else { Byte(0); U16(1); U16(1); }
+                Byte(0); Byte(0);
+            }
 
             byte[]? exif = meta?.Exif;
             if (exif == null && meta != null && meta.Orientation >= 1 && meta.Orientation <= 8)
@@ -559,18 +713,6 @@ namespace PixCodec.JpegImpl
                     Bytes(icc.AsSpan(i * iccChunk, n));
                 }
             }
-
-            for (int t = 0; t < (_comps.Length == 1 ? 1 : 2); t++)
-            {
-                Marker(0xDB); U16(67); Byte(t);
-                for (int i = 0; i < 64; i++) Byte(_quant[t][JpegTables.ZigZag[i]]);
-            }
-
-            Marker(_opt.Progressive ? 0xC2 : 0xC0);
-            U16(8 + 3 * _comps.Length); Byte(8); U16(_h); U16(_w); Byte(_comps.Length);
-            foreach (var c in _comps) { Byte(c.Id); Byte(c.H << 4 | c.V); Byte(c.Tq); }
-
-            if (_restart != 0) { Marker(0xDD); U16(4); U16(_restart); }
         }
 
         void WriteHuffmanTable(HuffEnc t, int cls, int id)
@@ -592,7 +734,7 @@ namespace PixCodec.JpegImpl
         {
             bool color = _comps.Length == 3;
             HuffEnc dc0, ac0, dc1, ac1;
-            if (_opt.OptimizeHuffman)
+            if (_opt.OptimizeHuffman || _precision != 8)
             {
                 dc0 = new HuffEnc(); ac0 = new HuffEnc(); dc1 = new HuffEnc(); ac1 = new HuffEnc();
             }
@@ -608,7 +750,7 @@ namespace PixCodec.JpegImpl
                 _comps[i].Dc = i == 0 ? dc0 : dc1;
                 _comps[i].Ac = i == 0 ? ac0 : ac1;
             }
-            if (_opt.OptimizeHuffman)
+            if (_opt.OptimizeHuffman || _precision != 8)
             {
                 _gather = true;
                 EncodeScan(_comps, 0, 63, 0, 0);
@@ -756,12 +898,12 @@ namespace PixCodec.JpegImpl
 
         void EncodeBlock(short* blk, Comp c)
         {
-            if (_gather) GatherBlock(blk, c);
+            if (_gather) GatherBlock(blk, c, _maxAcSize);
             else fixed (byte* buf = _buf) fixed (uint* dc = c.Dc.Packed, ac = c.Ac.Packed) EmitBlock(blk, c, buf, dc, ac);
         }
 
         /// <summary>Statistics pass of the sequential block coder: counts the symbols <see cref="EmitBlock"/> would write.</summary>
-        static void GatherBlock(short* blk, Comp c)
+        static void GatherBlock(short* blk, Comp c, int maxSize)
         {
             int diff = blk[0] - c.Pred;
             c.Pred = blk[0];
@@ -777,7 +919,7 @@ namespace PixCodec.JpegImpl
                     int run = k - prev - 1;
                     prev = k;
                     if (run > 15) { freq[0xF0] += run >> 4; run &= 15; }
-                    freq[run << 4 | Math.Min(10, BitLength(Math.Abs((int)blk[k])))]++;
+                    freq[run << 4 | Math.Min(maxSize, BitLength(Math.Abs((int)blk[k])))]++;
                 }
                 if (prev != 63) freq[0]++;
             }
@@ -819,7 +961,7 @@ namespace PixCodec.JpegImpl
                 }
                 v = blk[k];
                 s = BitLength(Math.Abs(v));
-                if (s > 10) { v = v < 0 ? -1023 : 1023; s = 10; } // cannot happen for real DCT output, but keep the stream legal
+                if (s > _maxAcSize) { s = _maxAcSize; v = v < 0 ? -((1 << s) - 1) : (1 << s) - 1; } // cannot happen for real DCT output, but keep the stream legal
                 e = ac[run << 4 | s];
                 len = (int)(e & 255) + s;
                 acc = acc << len | (e >> 8) << s | ((uint)(v + (v >> 31)) & ((1u << s) - 1));
@@ -921,6 +1063,133 @@ namespace PixCodec.JpegImpl
                 // flush before the run counter or the bit buffer could overflow with the next block
                 if (_eobRun == 0x7FFF || _corrCount > _corr.Length - 64) FlushEobRun();
             }
+        }
+
+        // ---------------------------------------------------------------- lossless (T.81 Annex H)
+
+        void RunLossless(RawImage image, int precision)
+        {
+            int w = image.Width, h = image.Height, ch = image.Channels;
+            int nc = image.Color switch { ColorModel.Gray or ColorModel.GrayAlpha => 1, ColorModel.Rgb or ColorModel.Rgba => 3, _ => ch };
+            int predictor = _opt.Predictor == 0 ? 1 : _opt.Predictor;
+            if (predictor < 1 || predictor > 7) throw new ArgumentException("lossless JPEG predictors are numbered 1 to 7");
+            // restart intervals have to cover whole lines in lossless mode
+            int restart = _opt.RestartInterval <= 0 ? 0 : (int)(((long)_opt.RestartInterval + w - 1) / w * w);
+            if (restart > 65535) restart = 0;
+
+            byte[]? s8 = image.SampleType == SampleType.UInt8 ? image.GetData<byte>() : null;
+            ushort[]? s16 = s8 == null ? image.GetData<ushort>() : null;
+            if (precision < (s8 != null ? 8 : 16))
+            {
+                int limit = 1 << precision;
+                for (int i = 0, n = w * h; i < n; i++)
+                    for (int c = 0; c < nc; c++)
+                        if ((s8 != null ? s8[i * ch + c] : s16![i * ch + c]) >= limit) throw new ArgumentException($"sample values exceed the {precision} bit range");
+            }
+
+            var tables = new HuffEnc[nc];
+            for (int c = 0; c < nc; c++) tables[c] = new HuffEnc();
+            LosslessPass(s8, s16, w, h, ch, nc, precision, predictor, restart, tables, emit: false);
+
+            bool rgb = image.Color is ColorModel.Rgb or ColorModel.Rgba;
+            WriteMetadata(image.Metadata, jfif: nc == 1);
+            if (rgb)
+            {
+                // Adobe segment with transform 0: the components are RGB, not YCbCr
+                Marker(0xEE); U16(14); Bytes("Adobe"u8); U16(100); U16(0); U16(0); Byte(0);
+            }
+            Marker(0xC3); U16(8 + 3 * nc); Byte(precision); U16(h); U16(w); Byte(nc);
+            for (int c = 0; c < nc; c++) { Byte(rgb ? "RGB"[c] : c + 1); Byte(0x11); Byte(0); }
+            for (int c = 0; c < nc; c++)
+            {
+                tables[c].BuildFromFrequencies();
+                WriteHuffmanTable(tables[c], 0, c);
+            }
+            if (restart != 0) { Marker(0xDD); U16(4); U16(restart); }
+            Marker(0xDA); U16(6 + 2 * nc); Byte(nc);
+            for (int c = 0; c < nc; c++) { Byte(rgb ? "RGB"[c] : c + 1); Byte(c << 4); }
+            Byte(predictor); Byte(0); Byte(0);
+            LosslessPass(s8, s16, w, h, ch, nc, precision, predictor, restart, tables, emit: true);
+            FlushBits();
+            Marker(0xD9);
+            _out.Write(_buf, 0, _pos);
+            _pos = 0;
+        }
+
+        /// <summary>Predicts every sample and either counts the difference categories or writes the coded differences.</summary>
+        void LosslessPass(byte[]? s8, ushort[]? s16, int w, int h, int ch, int nc, int precision, int predictor, int restart, HuffEnc[] tables, bool emit)
+        {
+            // current and previous line as plain ints, components interleaved
+            var cur = new int[w * nc];
+            var prev = new int[w * nc];
+            int rowsPerInterval = restart == 0 ? int.MaxValue : restart / w;
+            int topRow = 0, rst = 0;
+            ulong acc = _acc;
+            int n = _accBits;
+            fixed (byte* buf = _buf)
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    if (y != 0 && y % rowsPerInterval == 0)
+                    {
+                        if (emit)
+                        {
+                            _acc = acc; _accBits = n;
+                            FlushBits();
+                            Marker(0xD0 + rst);
+                            acc = 0; n = 0;
+                        }
+                        rst = (rst + 1) & 7;
+                        topRow = y;
+                    }
+                    (cur, prev) = (prev, cur);
+                    for (int x = 0, i = y * w * ch; x < w; x++, i += ch)
+                        for (int c = 0; c < nc; c++) cur[x * nc + c] = s8 != null ? s8[i + c] : s16![i + c];
+
+                    for (int x0 = 0; x0 < w; x0 += 256)
+                    {
+                        // every sample appends at most 8 bytes (31 bits plus stuffing)
+                        if (emit) Reserve(256 * 4 * 8 + 16);
+                        byte* o = buf + _pos;
+                        int x1 = Math.Min(w, x0 + 256);
+                        for (int x = x0; x < x1; x++)
+                        {
+                            for (int c = 0; c < nc; c++)
+                            {
+                                int k = x * nc + c, pred;
+                                if (y == topRow) pred = x == 0 ? 1 << (precision - 1) : cur[k - nc];
+                                else if (x == 0) pred = prev[k];
+                                else
+                                {
+                                    int ra = cur[k - nc], rb = prev[k], rc = prev[k - nc];
+                                    pred = predictor switch
+                                    {
+                                        1 => ra,
+                                        2 => rb,
+                                        3 => rc,
+                                        4 => ra + rb - rc,
+                                        5 => ra + ((rb - rc) >> 1),
+                                        6 => rb + ((ra - rc) >> 1),
+                                        _ => (ra + rb) >> 1,
+                                    };
+                                }
+                                // differences are taken modulo 65536; -32768 and +32768 coincide and get their own category
+                                int d = (short)(cur[k] - pred);
+                                int s = d == short.MinValue ? 16 : BitLength(Math.Abs(d));
+                                if (!emit) { tables[c].Freq[s]++; continue; }
+                                uint e = tables[c].Packed[s];
+                                int vb = s == 16 ? 0 : s;
+                                int len = (int)(e & 255) + vb;
+                                acc = acc << len | (e >> 8) << vb | ((uint)(d + (d >> 31)) & ((1u << vb) - 1));
+                                n += len;
+                                if (n >= 32) { n -= 32; o = Write32(o, (uint)(acc >> n)); }
+                            }
+                        }
+                        _pos = (int)(o - buf);
+                    }
+                }
+            }
+            _acc = acc; _accBits = n;
         }
     }
 }

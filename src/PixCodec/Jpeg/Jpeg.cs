@@ -63,8 +63,31 @@ namespace PixCodec
         /// <summary>Write a progressive (multi scan) JPEG instead of a baseline one. Always uses optimized Huffman tables.</summary>
         public bool Progressive { get; set; }
 
-        /// <summary>Emit a restart marker every this many MCUs (0 = none, at most 65535).</summary>
+        /// <summary>
+        /// Emit a restart marker every this many MCUs (0 = none, at most 65535). In lossless mode the interval is
+        /// rounded up to whole lines.
+        /// </summary>
         public int RestartInterval { get; set; }
+
+        /// <summary>
+        /// Write lossless JPEG (predictive coding, T.81 Annex H) instead of a DCT based one: exact for UInt8 and UInt16
+        /// Gray / Rgb images (an alpha channel is dropped) and for <see cref="ColorModel.Other"/> images with up to 4
+        /// channels, which are stored as they are. Quality, subsampling and <see cref="Progressive"/> do not apply.
+        /// </summary>
+        public bool Lossless { get; set; }
+
+        /// <summary>Lossless predictor 1..7 (1 = left neighbour, 2 = above, 4 = plane fit a + b - c, 7 = average; 0 picks 1).</summary>
+        public int Predictor { get; set; }
+
+        /// <summary>
+        /// Sample precision in bits; 0 picks the natural one. DCT based JPEG knows 8 bit (UInt8 images) and 12 bit
+        /// (UInt16 images whose values must lie in 0..4095). Lossless JPEG takes 2..16 (default 8 for UInt8, 16 for
+        /// UInt16; the values have to fit).
+        /// </summary>
+        public int Precision { get; set; }
+
+        /// <summary>Test hook: explicit sampling factors h, v for Y, Cb, Cr (1..4 each) instead of <see cref="Subsampling"/>.</summary>
+        internal int[]? SamplingFactors { get; set; }
     }
 
     /// <summary>
