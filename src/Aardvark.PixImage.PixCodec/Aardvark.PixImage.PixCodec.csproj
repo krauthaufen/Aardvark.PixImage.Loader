@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Aardvark.Base</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Aardvark.Base.Tensors" Version="5.3.26" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PixCodec\PixCodec.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Aardvark.PixImage.PixCodec/Aardvark.PixImage.PixCodec.csproj" />
     <Project Path="src/PixCodec/PixCodec.csproj" />
   </Folder>
   <Folder Name="/tests/">
