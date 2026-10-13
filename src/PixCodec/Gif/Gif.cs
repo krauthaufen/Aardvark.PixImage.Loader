@@ -28,7 +28,7 @@ namespace PixCodec
     public enum GifDither
     {
         None = 0,
-        /// <summary>Serpentine Floyd-Steinberg error diffusion.</summary>
+        /// <summary>Floyd-Steinberg error diffusion.</summary>
         FloydSteinberg = 1,
     }
 
@@ -42,7 +42,7 @@ namespace PixCodec
 
     public sealed class GifDecodeOptions
     {
-        /// <summary>Content of the frames returned by the animation API. <see cref="Gif.Decode"/> ignores it.</summary>
+        /// <summary>Content of the frames returned by the animation API. <see cref="Gif.Decode(ReadOnlySpan{byte}, GifDecodeOptions?)"/> ignores it.</summary>
         public GifFrameMode FrameMode { get; set; } = GifFrameMode.Composited;
 
         /// <summary>
@@ -191,7 +191,7 @@ namespace PixCodec
 
         /// <summary>
         /// Reads header level information without decoding pixel data. Width/Height are the logical screen;
-        /// Channels/Color are what <see cref="Decode"/> returns; FrameCount walks the block structure of the whole file.
+        /// Channels/Color are what <see cref="Decode(ReadOnlySpan{byte}, GifDecodeOptions?)"/> returns; FrameCount walks the block structure of the whole file.
         /// </summary>
         public static ImageInfo GetInfo(ReadOnlySpan<byte> data)
         {

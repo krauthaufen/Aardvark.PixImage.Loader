@@ -18,7 +18,7 @@ namespace PixCodec
             Skip,
             Composited,
             Indexed,
-            /// <summary>First frame as the Rgb or Rgba image <see cref="Gif.Decode"/> returns.</summary>
+            /// <summary>First frame as the Rgb or Rgba image <see cref="Gif.Decode(ReadOnlySpan{byte}, GifDecodeOptions?)"/> returns.</summary>
             FirstFrame,
         }
 

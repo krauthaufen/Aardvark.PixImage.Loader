@@ -148,18 +148,25 @@ namespace PixCodec
             }
         }
 
-        const int HashBits = 13;
+        const int HashBits = 15;
         const int HashSize = 1 << HashBits;
+        const uint Empty = 0xFFFFFFFFu;
 
         /// <summary>Writes the min code size byte, the code stream in sub-blocks and the block terminator.</summary>
         public static void Encode(ReadOnlySpan<byte> pixels, int minCodeSize, Stream output)
         {
-            // Hash slot: (prefix << 8 | byte) << 12 | code. Codes are never 0, so 0 marks an empty slot.
+            // Hash slot: (prefix << 8 | byte) << 12 | code. All ones marks an empty slot: that key would need prefix
+            // 4095, a code this encoder never creates. The home slot is prefix ^ mix[byte]: on the path from one pixel
+            // to the next there is only that xor and the table load, and two strings with the same last byte can
+            // never collide. The table stays sparse (at most 1/8 full): collisions cost more than its size.
             var pool = ArrayPool<byte>.Shared;
-            // Worst case is one 12 bit code per pixel plus clear/end codes.
-            byte[] buf = pool.Rent(checked(pixels.Length + pixels.Length / 2 + 64));
-            uint* table = stackalloc uint[HashSize];
-            new Span<uint>(table, HashSize).Clear();
+            // Worst case is one 12 bit code per pixel (the clear codes are paid for by the shorter codes after them),
+            // plus slack for the 8 byte stores.
+            byte[] buf = pool.Rent(checked(pixels.Length + pixels.Length / 2 + 128));
+            uint[] slots = ArrayPool<uint>.Shared.Rent(HashSize);
+            slots.AsSpan(0, HashSize).Fill(Empty);
+            ushort* mix = stackalloc ushort[256];
+            for (uint c = 0; c < 256; c++) mix[c] = (ushort)((c * 0x9E3779B1u) >> (32 - HashBits));
 
             int clear = 1 << minCodeSize, eoi = clear + 1;
             int next = clear + 2;
@@ -171,6 +178,7 @@ namespace PixCodec
             {
                 fixed (byte* p0 = pixels)
                 fixed (byte* b0 = buf)
+                fixed (uint* table = slots)
                 {
                     int n = pixels.Length;
                     uint prefix = n > 0 ? p0[0] : 0u;
@@ -178,23 +186,23 @@ namespace PixCodec
                     {
                         uint c = p0[i];
                         uint key = prefix << 8 | c;
-                        uint h = (key * 0x9E3779B1u) >> (32 - HashBits);
-                        uint e;
-                        while ((e = table[h]) != 0)
+                        uint h = prefix ^ mix[c];
+                        uint e = table[h];
+                        if (e >> 12 == key) { prefix = e & 0xFFF; continue; }
+                        while (e != Empty)
                         {
-                            if (e >> 12 == key) break;
                             h = (h + 1) & (HashSize - 1);
+                            e = table[h];
+                            if (e >> 12 == key) break;
                         }
-                        if (e != 0) { prefix = e & 0xFFF; continue; }
-
+                        if (e != Empty) { prefix = e & 0xFFF; continue; }
                         bits |= (ulong)prefix << nbits;
                         nbits += codeSize;
-                        if (nbits >= 32)
-                        {
-                            BinaryPrimitives.WriteUInt32LittleEndian(new Span<byte>(b0 + bp, 4), (uint)bits);
-                            bp += 4; bits >>= 32; nbits -= 32;
-                        }
-                        if (next < MaxCodes)
+                        *(ulong*)(b0 + bp) = bits;
+                        bp += nbits >> 3;
+                        bits >>= nbits & ~7;
+                        nbits &= 7;
+                        if (next < MaxCodes - 1)
                         {
                             table[h] = key << 12 | (uint)next;
                             if (next == 1 << codeSize) codeSize++;
@@ -204,12 +212,11 @@ namespace PixCodec
                         {
                             bits |= (ulong)clear << nbits;
                             nbits += codeSize;
-                            if (nbits >= 32)
-                            {
-                                BinaryPrimitives.WriteUInt32LittleEndian(new Span<byte>(b0 + bp, 4), (uint)bits);
-                                bp += 4; bits >>= 32; nbits -= 32;
-                            }
-                            new Span<uint>(table, HashSize).Clear();
+                            *(ulong*)(b0 + bp) = bits;
+                            bp += nbits >> 3;
+                            bits >>= nbits & ~7;
+                            nbits &= 7;
+                            new Span<uint>(table, HashSize).Fill(Empty);
                             next = clear + 2;
                             codeSize = minCodeSize + 1;
                         }
@@ -221,11 +228,6 @@ namespace PixCodec
                         nbits += codeSize;
                         // The decoder adds a table entry for this code too, which may widen the end code.
                         if (next < MaxCodes && next == 1 << codeSize) codeSize++;
-                        if (nbits >= 32)
-                        {
-                            BinaryPrimitives.WriteUInt32LittleEndian(new Span<byte>(b0 + bp, 4), (uint)bits);
-                            bp += 4; bits >>= 32; nbits -= 32;
-                        }
                     }
                     bits |= (ulong)eoi << nbits;
                     nbits += codeSize;
@@ -251,7 +253,7 @@ namespace PixCodec
                 }
                 finally { pool.Return(chunk); }
             }
-            finally { pool.Return(buf); }
+            finally { pool.Return(buf); ArrayPool<uint>.Shared.Return(slots); }
         }
     }
 }

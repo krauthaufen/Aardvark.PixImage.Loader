@@ -526,6 +526,7 @@ def gen_hand():
     # ICC profile in the ICCRGBG1012 application extension; the sidecar is what ImageMagick extracts from the file
     from PIL import ImageCms
     icc = ImageCms.ImageCmsProfile(ImageCms.createProfile('sRGB')).tobytes()
+    icc = icc[:24] + bytes(12) + icc[36:84] + bytes(16) + icc[100:]     # creation date and profile id vary from run to run
     hand_fixture('hand_icc_profile.gif', 14, 10, PAL4, [Frame(t)], head=b'\x21\xFF\x0BICCRGBG1012' + blocks(icc))
     icc_path = os.path.join(OUT, 'hand_icc_profile.gif.icc')
     subprocess.run(['magick', os.path.join(OUT, 'hand_icc_profile.gif'), 'icc:' + icc_path], check=True, capture_output=True)

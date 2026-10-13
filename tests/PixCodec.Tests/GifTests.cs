@@ -916,12 +916,27 @@ public class GifTests(ITestOutputHelper output)
             output.WriteLine($"  histogram: {mp / Best(3, () => new GifQuantizer().Add(px)):F0} MP/s");
             q.Add(px);
             uint[] colors = null!;
+            output.WriteLine($"  palette from histogram, no k-means: {Best(3, () => colors = q.BuildPalette(256, 0)) * 1000:F1} ms");
             output.WriteLine($"  palette from histogram: {Best(3, () => colors = q.BuildPalette(256, 3)) * 1000:F1} ms");
             var idx = new byte[px.Length];
             output.WriteLine($"  map, no dither: {mp / Best(3, () => new GifPalette(colors, colors.Length, false, null).Map(px, idx, W, H, GifDither.None)):F0} MP/s");
             output.WriteLine($"  map, Floyd-Steinberg: {mp / Best(3, () => new GifPalette(colors, colors.Length, false, null).Map(px, idx, W, H, GifDither.FloydSteinberg)):F0} MP/s");
-            new GifPalette(colors, colors.Length, false, null).Map(px, idx, W, H, GifDither.None);
+            var warm = new GifPalette(colors, colors.Length, false, null);
+            warm.Map(px, idx, W, H, GifDither.FloydSteinberg);
+            output.WriteLine($"  map, Floyd-Steinberg, inverse table warm: {mp / Best(3, () => warm.Map(px, idx, W, H, GifDither.FloydSteinberg)):F0} MP/s");
+            warm.Map(px, idx, W, H, GifDither.None);
+            output.WriteLine($"  map, no dither, inverse table warm: {mp / Best(3, () => warm.Map(px, idx, W, H, GifDither.None)):F0} MP/s");
             output.WriteLine($"  LZW encode: {mp / Best(3, () => GifLzw.Encode(idx, 8, new MemoryStream())):F0} MP/s");
+            var flatIdx = new byte[idx.Length];
+            for (int i = 0; i < flatIdx.Length; i++) flatIdx[i] = (byte)((i / 37 % 5) + ((i * 2654435761u >> 28) == 0 ? 1 : 0));
+            var smooth = new byte[idx.Length];
+            for (int i = 0; i < smooth.Length; i++) smooth[i] = (byte)((i % W / 8 + i / W / 8) + ((i * 2654435761u >> 30) == 0 ? 1 : 0));
+            foreach (var (name, data) in new[] { ("flat", flatIdx), ("smooth", smooth) })
+            {
+                var sink = new MemoryStream(8 << 20);
+                double te = Best(5, () => { sink.SetLength(0); GifLzw.Encode(data, 8, sink); });
+                output.WriteLine($"  LZW encode, {name} synthetic indices: {mp / te:F0} MP/s ({sink.Length * 8.0 / data.Length:F2} bits per pixel)");
+            }
             var lz = new MemoryStream();
             GifLzw.Encode(idx, 8, lz);
             var blocks = lz.ToArray();

@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using System.Runtime.Intrinsics;
 
 namespace PixCodec
 {
@@ -7,62 +8,83 @@ namespace PixCodec
     // with alpha already thresholded: opaque pixels have a = 255, transparent pixels are exactly 0.
 
     /// <summary>Collects up to 256 distinct opaque colors and maps them to dense indices (the lossless path).</summary>
-    internal sealed class GifColorSet
+    internal sealed unsafe class GifColorSet
     {
-        const int Size = 1024, Mask = Size - 1;
-        readonly uint[] _keys = new uint[Size];     // 0 = empty; opaque pixels are never 0
-        readonly short[] _index = new short[Size];
+        const int Bits = 10, Size = 1 << Bits, Mask = Size - 1;
+        const uint Empty = 1;                       // never a pixel: those are 0 or have alpha 255
+        /// <summary>What <see cref="MapAll"/> writes for transparent pixels; never a color index while there are any.</summary>
+        public const byte TransparentMarker = 255;
+
+        readonly ulong[] _slots = new ulong[Size];  // color | index << 32, open addressing
         public readonly uint[] Colors = new uint[256];
         public int Count;
         public bool Overflow;
         public bool HasTransparent;
 
-        static int Hash(uint c) => (int)((c * 0x9E3779B1u) >> 22);
-
-        /// <summary>Index of the color, adding it if new; -1 once more than 256 colors were seen.</summary>
-        public int Add(uint c)
-        {
-            int h = Hash(c);
-            while (true)
-            {
-                uint k = _keys[h];
-                if (k == c) return _index[h];
-                if (k == 0) break;
-                h = (h + 1) & Mask;
-            }
-            if (Count == 256) { Overflow = true; return -1; }
-            _keys[h] = c;
-            _index[h] = (short)Count;
-            Colors[Count] = c;
-            return Count++;
-        }
-
-        public int Find(uint c)
-        {
-            int h = Hash(c);
-            while (true)
-            {
-                uint k = _keys[h];
-                if (k == c) return _index[h];
-                if (k == 0) return -1;
-                h = (h + 1) & Mask;
-            }
-        }
+        public GifColorSet() => Array.Fill(_slots, (ulong)Empty);
 
         /// <summary>Adds all opaque colors (until the set overflows) and notes whether any pixel is transparent.</summary>
-        public void AddAll(ReadOnlySpan<uint> pixels)
+        public void AddAll(ReadOnlySpan<uint> pixels) => Scan(pixels, default, insert: true, TransparentMarker);
+
+        /// <summary>
+        /// <see cref="AddAll"/> and the index of every pixel in one pass. False once more than 256 colors were seen
+        /// (the indices are useless then).
+        /// </summary>
+        public bool MapAll(ReadOnlySpan<uint> pixels, Span<byte> indices)
         {
-            uint last = 0;
-            int i = 0;
-            for (; i < pixels.Length && !Overflow; i++)
+            Scan(pixels, indices, insert: true, TransparentMarker);
+            return !Overflow;
+        }
+
+        /// <summary>Indices of pixels whose colors are all in the set.</summary>
+        public void MapKnown(ReadOnlySpan<uint> pixels, Span<byte> indices, byte transparent) => Scan(pixels, indices, insert: false, transparent);
+
+        void Scan(ReadOnlySpan<uint> pixels, Span<byte> dst, bool insert, byte transparent)
+        {
+            bool write = !dst.IsEmpty;
+            int n = pixels.Length, i = 0;
+            if (Overflow) n = 0;
+            fixed (ulong* slots = _slots)
+            fixed (uint* s = pixels)
+            fixed (byte* d = dst)
             {
-                uint c = pixels[i];
-                if (c == 0) { HasTransparent = true; continue; }
-                if (c == last) continue;
-                last = c;
-                Add(c);
+                for (; i < n; i++)
+                {
+                    uint c = s[i];
+                    uint h = (c * 0x9E3779B1u) >> (32 - Bits);
+                    ulong e = slots[h];
+                    if ((uint)e == c)
+                    {
+                        // the common case: one probe, nothing that depends on the previous pixel
+                        if (write) d[i] = (byte)(e >> 32);
+                        continue;
+                    }
+                    if (c == 0)
+                    {
+                        HasTransparent = true;
+                        if (write) d[i] = transparent;
+                        continue;
+                    }
+                    while ((uint)e != Empty && (uint)e != c)
+                    {
+                        h = (h + 1) & Mask;
+                        e = slots[h];
+                    }
+                    if ((uint)e != c)
+                    {
+                        if (!insert) e = 0;
+                        else
+                        {
+                            if (Count == 256) { Overflow = true; break; }
+                            e = c | (ulong)Count << 32;
+                            slots[h] = e;
+                            Colors[Count++] = c;
+                        }
+                    }
+                    if (write) d[i] = (byte)(e >> 32);
+                }
             }
-            if (!HasTransparent && i < pixels.Length) HasTransparent = pixels.Slice(i).IndexOf(0u) >= 0;
+            if (Overflow && !HasTransparent && i < pixels.Length) HasTransparent = pixels.Slice(i).IndexOf(0u) >= 0;
         }
     }
 
@@ -75,24 +97,61 @@ namespace PixCodec
     internal sealed class GifQuantizer
     {
         const int S = 33, N = S * S * S;
-        readonly long[] _w = new long[N], _r = new long[N], _g = new long[N], _b = new long[N];
-        readonly double[] _m2 = new double[N];
+        // Per cell: count, sum r, sum g, sum b, sum of r*r + g*g + b*b.
+        const int Fields = 5;
+        readonly long[] _cells = new long[N * Fields];
+
+        // Pixels are first counted in 24 byte cells (four 32 bit sums and the 64 bit sum of squares next to each
+        // other): a pixel touches one cache line, and the cells an image actually uses stay in the L2 cache. The
+        // 32 bit sums are folded into _cells before they could overflow.
+        const int HotFields = 6;
+        const int FoldAfter = 1 << 24;          // 255 * 2^24 < 2^32
+        readonly uint[] _hot = new uint[N * HotFields];
+        int _hotPixels;
 
         static int Ix(int r, int g, int b) => (r * S + g) * S + b;
 
-        public void Add(ReadOnlySpan<uint> pixels)
+        public unsafe void Add(ReadOnlySpan<uint> pixels)
         {
-            long[] w = _w, mr = _r, mg = _g, mb = _b;
-            double[] m2 = _m2;
-            for (int i = 0; i < pixels.Length; i++)
+            while (!pixels.IsEmpty)
             {
-                uint c = pixels[i];
-                if (c == 0) continue;
-                int r = (int)(c & 255), g = (int)(c >> 8 & 255), b = (int)(c >> 16 & 255);
-                int ix = Ix((r >> 3) + 1, (g >> 3) + 1, (b >> 3) + 1);
-                w[ix]++; mr[ix] += r; mg[ix] += g; mb[ix] += b;
-                m2[ix] += r * r + g * g + b * b;
+                int n = Math.Min(pixels.Length, FoldAfter - _hotPixels);
+                fixed (uint* hot = _hot)
+                fixed (uint* s = pixels)
+                {
+                    for (int i = 0; i < n; i++)
+                    {
+                        uint c = s[i];
+                        if (c == 0) continue;
+                        uint r = c & 255, g = c >> 8 & 255, b = c >> 16 & 255;
+                        uint* cell = hot + (((r >> 3) + 1) * S + (g >> 3) + 1) * S * HotFields + ((b >> 3) + 1) * HotFields;
+                        cell[0]++; cell[1] += r; cell[2] += g; cell[3] += b;
+                        *(ulong*)(cell + 4) += r * r + g * g + b * b;
+                    }
+                }
+                _hotPixels += n;
+                pixels = pixels.Slice(n);
+                if (_hotPixels == FoldAfter) Fold();
             }
+        }
+
+        unsafe void Fold()
+        {
+            if (_hotPixels == 0) return;
+            fixed (uint* hot = _hot)
+            fixed (long* cells = _cells)
+            {
+                for (int i = 0; i < N; i++)
+                {
+                    uint* h = hot + i * HotFields;
+                    if (h[0] == 0) continue;
+                    long* c = cells + i * Fields;
+                    c[0] += h[0]; c[1] += h[1]; c[2] += h[2]; c[3] += h[3];
+                    c[4] += (long)*(ulong*)(h + 4);
+                }
+            }
+            Array.Clear(_hot);
+            _hotPixels = 0;
         }
 
         struct Box
@@ -113,9 +172,15 @@ namespace PixCodec
         public uint[] BuildPalette(int maxColors, int refineIterations)
         {
             // Keep the per cell statistics for the k-means passes, then turn the grids into 3D prefix sums.
-            long[] cw = (long[])_w.Clone(), cr = (long[])_r.Clone(), cg = (long[])_g.Clone(), cb = (long[])_b.Clone();
-            long[] w = (long[])_w.Clone(), mr = (long[])_r.Clone(), mg = (long[])_g.Clone(), mb = (long[])_b.Clone();
-            double[] m2 = (double[])_m2.Clone();
+            Fold();
+            long[] cw = new long[N], cr = new long[N], cg = new long[N], cb = new long[N];
+            double[] m2 = new double[N];
+            for (int i = 0; i < N; i++)
+            {
+                cw[i] = _cells[i * Fields]; cr[i] = _cells[i * Fields + 1]; cg[i] = _cells[i * Fields + 2]; cb[i] = _cells[i * Fields + 3];
+                m2[i] = _cells[i * Fields + 4];
+            }
+            long[] w = (long[])cw.Clone(), mr = (long[])cr.Clone(), mg = (long[])cg.Clone(), mb = (long[])cb.Clone();
             for (int r = 1; r < S; r++)
                 for (int g = 1; g < S; g++)
                     for (int b = 1; b < S; b++)
@@ -211,7 +276,7 @@ namespace PixCodec
         }
 
         /// <summary>Lloyd iterations on the occupied histogram cells (each cell acts as one weighted point at its mean).</summary>
-        static void Refine(long[] cw, long[] cr, long[] cg, long[] cb, double[] pr, double[] pg, double[] pb, int count, int iterations)
+        static unsafe void Refine(long[] cw, long[] cr, long[] cg, long[] cb, double[] pr, double[] pg, double[] pb, int count, int iterations)
         {
             int cells = 0;
             for (int i = 0; i < N; i++) if (cw[i] != 0) cells++;
@@ -233,6 +298,9 @@ namespace PixCodec
             Span<float> lane = stackalloc float[vc];
             for (int j = 0; j < vc; j++) lane[j] = j;
             var iota = new Vector<float>(lane);
+            float* laneD = stackalloc float[vc];
+            float* laneI = stackalloc float[vc];
+            fixed (float* fr = qr, fg = qg, fb = qb)
             for (int it = 0; it < iterations; it++)
             {
                 qr.AsSpan().Fill(1e6f); qg.AsSpan().Fill(1e6f); qb.AsSpan().Fill(1e6f);
@@ -251,7 +319,7 @@ namespace PixCodec
                         var step = new Vector<float>(vc);
                         for (int j = 0; j < padded; j += vc)
                         {
-                            var dr = vr - new Vector<float>(qr, j); var dg = vg - new Vector<float>(qg, j); var db = vb - new Vector<float>(qb, j);
+                            var dr = vr - Vector.Load(fr + j); var dg = vg - Vector.Load(fg + j); var db = vb - Vector.Load(fb + j);
                             var d = dr * dr + dg * dg + db * db;
                             var less = Vector.LessThan(d, best);
                             best = Vector.ConditionalSelect(less, d, best);
@@ -259,9 +327,10 @@ namespace PixCodec
                             index += step;
                         }
                         // smaller distance, then smaller index: independent of the vector width
-                        float rd = best[0], ri = bestIndex[0];
+                        best.Store(laneD); bestIndex.Store(laneI);
+                        float rd = laneD[0], ri = laneI[0];
                         for (int k = 1; k < vc; k++)
-                            if (best[k] < rd || (best[k] == rd && bestIndex[k] < ri)) { rd = best[k]; ri = bestIndex[k]; }
+                            if (laneD[k] < rd || (laneD[k] == rd && laneI[k] < ri)) { rd = laneD[k]; ri = laneI[k]; }
                         bj = (int)ri;
                     }
                     else
@@ -288,7 +357,7 @@ namespace PixCodec
     /// every color of the source, otherwise a lazily filled 6-6-6 bit inverse table (nearest entry to the cell center),
     /// optionally with Floyd-Steinberg error diffusion.
     /// </summary>
-    internal sealed class GifPalette
+    internal sealed unsafe class GifPalette
     {
         public readonly uint[] Colors;          // opaque entries; the transparent slot, if any, follows them
         public readonly int ColorCount;
@@ -296,8 +365,10 @@ namespace PixCodec
         public int Size => ColorCount + (TransparentIndex >= 0 ? 1 : 0);
 
         readonly GifColorSet? _exact;
+        public bool IsExact => _exact != null;
         ushort[]? _inverse;                     // index + 1, 0 = not computed yet
-        readonly int[] _pr, _pg, _pb;
+        readonly int[] _pr, _pg, _pb;       // padded to whole vectors
+        readonly int[] _rgb;                // r, g, b, 255 per color
 
         public GifPalette(uint[] colors, int count, bool transparentSlot, GifColorSet? exact)
         {
@@ -308,67 +379,100 @@ namespace PixCodec
             int padded = (count + Vector<int>.Count - 1) / Vector<int>.Count * Vector<int>.Count;
             _pr = new int[padded]; _pg = new int[padded]; _pb = new int[padded];
             _pr.AsSpan().Fill(1 << 12); _pg.AsSpan().Fill(1 << 12); _pb.AsSpan().Fill(1 << 12);
+            _rgb = new int[Math.Max(1, count) * 4];
             for (int i = 0; i < count; i++)
             {
-                _pr[i] = (int)(colors[i] & 255); _pg[i] = (int)(colors[i] >> 8 & 255); _pb[i] = (int)(colors[i] >> 16 & 255);
+                _rgb[i * 4] = _pr[i] = (int)(colors[i] & 255);
+                _rgb[i * 4 + 1] = _pg[i] = (int)(colors[i] >> 8 & 255);
+                _rgb[i * 4 + 2] = _pb[i] = (int)(colors[i] >> 16 & 255);
+                _rgb[i * 4 + 3] = 255;
             }
         }
 
-        /// <summary>Index of the closest palette entry (squared RGB distance), the lowest index on ties.</summary>
-        int Nearest(int r, int g, int b)
+        // The 6-6-6 inverse table is filled one 16 x 16 x 16 block of the color cube (4 x 4 x 4 cells) at a time, when
+        // a pixel first lands in it. Only palette entries that can be the nearest one for SOME point of the block are
+        // looked at (their closest approach to the block is not farther than the farthest corner from the best entry);
+        // the result is identical to a full search: nearest by squared RGB distance, lowest index on ties.
+        int[]? _approach;
+
+        void FillBlock(ushort* inverse, int* pal, int block)
         {
             int[] pr = _pr, pg = _pg, pb = _pb;
-            if (!Vector.IsHardwareAccelerated)
+            int[] approach = _approach ??= new int[pr.Length];
+            int r0 = (block >> 8) << 4, g0 = (block >> 4 & 15) << 4, b0 = (block & 15) << 4;
+            int reach = int.MaxValue;
+            if (Vector.IsHardwareAccelerated)
             {
-                int bestD = int.MaxValue, bi = 0;
+                // per channel: distance of the palette value to the block's center c, |p - c|; the block spans
+                // c - 7.5 .. c + 7.5, so in doubled units far = 2|p - c| + 15 and near = max(0, 2|p - c| - 15)
+                var cr = new Vector<int>(2 * r0 + 15); var cg = new Vector<int>(2 * g0 + 15); var cb = new Vector<int>(2 * b0 + 15);
+                var half = new Vector<int>(15);
+                var vreach = new Vector<int>(int.MaxValue);
+                for (int i = 0; i < pr.Length; i += Vector<int>.Count)
+                {
+                    var dr = Vector.Abs(new Vector<int>(pr, i) * 2 - cr);
+                    var dg = Vector.Abs(new Vector<int>(pg, i) * 2 - cg);
+                    var db = Vector.Abs(new Vector<int>(pb, i) * 2 - cb);
+                    var fr = dr + half; var fg = dg + half; var fb = db + half;
+                    vreach = Vector.Min(vreach, fr * fr + fg * fg + fb * fb);
+                    var nr = Vector.Max(dr - half, Vector<int>.Zero); var ng = Vector.Max(dg - half, Vector<int>.Zero); var nb = Vector.Max(db - half, Vector<int>.Zero);
+                    (nr * nr + ng * ng + nb * nb).CopyTo(approach, i);
+                }
+                for (int k = 0; k < Vector<int>.Count; k++) reach = Math.Min(reach, vreach[k]);
+            }
+            else
+            {
                 for (int i = 0; i < ColorCount; i++)
                 {
-                    int dr = r - pr[i], dg = g - pg[i], db = b - pb[i];
-                    int d = dr * dr + dg * dg + db * db;
-                    if (d < bestD) { bestD = d; bi = i; }
+                    int dr = Math.Abs(pr[i] * 2 - (2 * r0 + 15)), dg = Math.Abs(pg[i] * 2 - (2 * g0 + 15)), db = Math.Abs(pb[i] * 2 - (2 * b0 + 15));
+                    reach = Math.Min(reach, (dr + 15) * (dr + 15) + (dg + 15) * (dg + 15) + (db + 15) * (db + 15));
+                    int nr = Math.Max(dr - 15, 0), ng = Math.Max(dg - 15, 0), nb = Math.Max(db - 15, 0);
+                    approach[i] = nr * nr + ng * ng + nb * nb;
                 }
-                return bi;
             }
-            var vr = new Vector<int>(r); var vg = new Vector<int>(g); var vb = new Vector<int>(b);
-            var best = new Vector<int>(int.MaxValue);
-            var bestIndex = Vector<int>.Zero;
-            var index = Iota;
-            var step = new Vector<int>(Vector<int>.Count);
-            for (int i = 0; i < pr.Length; i += Vector<int>.Count)
+
+            // All 64 cell centers against every candidate, in palette order.
+            int* best = stackalloc int[64];
+            int* bestIndex = stackalloc int[64];
+            for (int k = 0; k < 64; k++) best[k] = int.MaxValue;
+            int* dg2 = stackalloc int[4];
+            int* db2 = stackalloc int[4];
+            for (int i = 0; i < ColorCount; i++)
             {
-                var dr = vr - new Vector<int>(pr, i); var dg = vg - new Vector<int>(pg, i); var db = vb - new Vector<int>(pb, i);
-                var d = dr * dr + dg * dg + db * db;
-                var less = Vector.LessThan(d, best);
-                best = Vector.ConditionalSelect(less, d, best);
-                bestIndex = Vector.ConditionalSelect(less, index, bestIndex);
-                index += step;
+                if (approach[i] > reach) continue;
+                int* p = pal + i * 4;
+                for (int k = 0; k < 4; k++)
+                {
+                    int dg = g0 + k * 4 + 2 - p[1], db = b0 + k * 4 + 2 - p[2];
+                    dg2[k] = dg * dg; db2[k] = db * db;
+                }
+                for (int ri = 0, cell = 0; ri < 4; ri++)
+                {
+                    int dr = r0 + ri * 4 + 2 - p[0];
+                    int dr2 = dr * dr;
+                    for (int gi = 0; gi < 4; gi++)
+                    {
+                        int drg = dr2 + dg2[gi];
+                        for (int bi = 0; bi < 4; bi++, cell++)
+                        {
+                            int d = drg + db2[bi];
+                            if (d < best[cell]) { best[cell] = d; bestIndex[cell] = i; }
+                        }
+                    }
+                }
             }
-            // Reducing with "smaller distance, then smaller index" gives the same answer for every vector width.
-            int rd = best[0], ri = bestIndex[0];
-            for (int k = 1; k < Vector<int>.Count; k++)
-                if (best[k] < rd || (best[k] == rd && bestIndex[k] < ri)) { rd = best[k]; ri = bestIndex[k]; }
-            return ri;
+            int baseKey = (r0 >> 2) << 12 | (g0 >> 2) << 6 | b0 >> 2;
+            for (int ri = 0, cell = 0; ri < 4; ri++)
+                for (int gi = 0; gi < 4; gi++)
+                    for (int bi = 0; bi < 4; bi++, cell++)
+                        inverse[baseKey + (ri << 12) + (gi << 6) + bi] = (ushort)(bestIndex[cell] + 1);
         }
 
-        static readonly Vector<int> Iota = MakeIota();
-
-        static Vector<int> MakeIota()
+        /// <summary>An inverse table cell that has not been computed yet; pal is the pinned <see cref="_rgb"/>.</summary>
+        int Fill(ushort* inverse, int* pal, int key)
         {
-            Span<int> v = stackalloc int[Vector<int>.Count];
-            for (int i = 0; i < v.Length; i++) v[i] = i;
-            return new Vector<int>(v);
-        }
-
-        int Lookup(int r, int g, int b)
-        {
-            int key = (r >> 2) << 12 | (g >> 2) << 6 | (b >> 2);
-            int v = _inverse![key];
-            if (v == 0)
-            {
-                v = Nearest((r & ~3) + 2, (g & ~3) + 2, (b & ~3) + 2) + 1;
-                _inverse[key] = (ushort)v;
-            }
-            return v - 1;
+            FillBlock(inverse, pal, (key >> 14) << 8 | (key >> 8 & 15) << 4 | (key >> 2 & 15));
+            return inverse[key];
         }
 
         /// <summary>Maps a w x h block of pixels (transparent ones go to the transparent slot) to palette indices.</summary>
@@ -377,67 +481,81 @@ namespace PixCodec
             byte t = (byte)Math.Max(0, TransparentIndex);
             if (_exact != null)
             {
-                uint last = 0;
-                byte lastIndex = t;
-                for (int i = 0; i < src.Length; i++)
-                {
-                    uint c = src[i];
-                    if (c != last)
-                    {
-                        last = c;
-                        lastIndex = c == 0 ? t : (byte)_exact.Find(c);
-                    }
-                    dst[i] = lastIndex;
-                }
+                _exact.MapKnown(src.Slice(0, w * h), dst.Slice(0, w * h), t);
                 return;
             }
 
             _inverse ??= new ushort[1 << 18];
-            if (dither == GifDither.None)
+            if (ColorCount == 0) { dst.Slice(0, w * h).Fill(t); return; }
+            fixed (ushort* inverse = _inverse)
+            fixed (int* pal = _rgb)
+            fixed (uint* s = src)
+            fixed (byte* d = dst)
             {
-                uint last = 0;
-                byte lastIndex = t;
-                for (int i = 0; i < src.Length; i++)
+                if (dither == GifDither.None)
                 {
-                    uint c = src[i];
-                    if (c != last)
+                    int n = w * h;
+                    for (int i = 0; i < n; i++)
                     {
-                        last = c;
-                        lastIndex = c == 0 ? t : (byte)Lookup((int)(c & 255), (int)(c >> 8 & 255), (int)(c >> 16 & 255));
+                        uint c = s[i];
+                        if (c == 0) { d[i] = t; continue; }
+                        int key = (int)((c & 0xFC) << 10 | (c >> 4 & 0xFC0) | (c >> 18 & 0x3F));
+                        int v = inverse[key];
+                        if (v == 0) v = Fill(inverse, pal, key);
+                        d[i] = (byte)(v - 1);
                     }
-                    dst[i] = lastIndex;
+                    return;
                 }
-                return;
-            }
 
-            // Floyd-Steinberg, alternating direction per row. Errors are kept in 1/16 units, three per pixel,
-            // with one pixel of padding on both sides.
-            var cur = new int[(w + 2) * 3];
-            var next = new int[(w + 2) * 3];
-            for (int y = 0; y < h; y++)
-            {
-                bool ltr = (y & 1) == 0;
-                int dir = ltr ? 1 : -1;
-                int x = ltr ? 0 : w - 1;
-                for (int n = 0; n < w; n++, x += dir)
+                // Floyd-Steinberg, every row left to right. The error of a pixel depends on the pixel before it through
+                // the palette lookup, a chain the CPU cannot shorten - so several rows are worked on at once, each two
+                // pixels behind the row above (which is all the distance the error terms need). The result is the
+                // same as going row by row. Errors are kept in 1/16 units, one vector (r, g, b, 0) per pixel with a
+                // pixel of padding on both sides; the 7/16 for the next pixel stays out of the buffers.
+                const int Rows = 4;
+                int stride = (w + 2) * 4;
+                var errors = new int[(Rows + 1) * stride];
+                var eight = Vector128.Create(8);
+                var max = Vector128.Create(255);
+                Vector128<int>* carry = stackalloc Vector128<int>[Rows];
+                fixed (int* err = errors)
                 {
-                    uint c = src[y * w + x];
-                    if (c == 0) { dst[y * w + x] = t; continue; }
-                    int e = (x + 1) * 3;
-                    int r = Math.Clamp((int)(c & 255) + ((cur[e] + 8) >> 4), 0, 255);
-                    int g = Math.Clamp((int)(c >> 8 & 255) + ((cur[e + 1] + 8) >> 4), 0, 255);
-                    int b = Math.Clamp((int)(c >> 16 & 255) + ((cur[e + 2] + 8) >> 4), 0, 255);
-                    int i = Lookup(r, g, b);
-                    dst[y * w + x] = (byte)i;
-                    int er = r - _pr[i], eg = g - _pg[i], eb = b - _pb[i];
-                    int ahead = e + dir * 3, behind = e - dir * 3;
-                    cur[ahead] += er * 7; cur[ahead + 1] += eg * 7; cur[ahead + 2] += eb * 7;
-                    next[behind] += er * 3; next[behind + 1] += eg * 3; next[behind + 2] += eb * 3;
-                    next[e] += er * 5; next[e + 1] += eg * 5; next[e + 2] += eb * 5;
-                    next[ahead] += er; next[ahead + 1] += eg; next[ahead + 2] += eb;
+                    for (int y0 = 0; y0 < h; y0 += Rows)
+                    {
+                        int rows = Math.Min(Rows, h - y0);
+                        for (int r = 0; r < rows; r++) carry[r] = Vector128<int>.Zero;
+                        for (int j = 0, end = w + 2 * (rows - 1); j < end; j++)
+                        {
+                            for (int r = 0; r < rows; r++)
+                            {
+                                int x = j - 2 * r;
+                                if ((uint)x >= (uint)w) continue;
+                                long at = (long)(y0 + r) * w + x;
+                                uint c = s[at];
+                                if (c == 0) { d[at] = t; carry[r] = Vector128<int>.Zero; continue; }
+                                int* mine = err + r * stride + (x + 1) * 4;
+                                // r, g, b, 255: the fourth lane rides along and always ends up with error 0
+                                var v = Vector128.WidenLower(Vector128.WidenLower(Vector128.CreateScalarUnsafe(c).AsByte())).AsInt32()
+                                      + Vector128.ShiftRightArithmetic(Vector128.Load(mine) + carry[r] + eight, 4);
+                                v = Vector128.Min(Vector128.Max(v, Vector128<int>.Zero), max);
+                                int key = (v.GetElement(0) >> 2) << 12 | (v.GetElement(1) >> 2) << 6 | v.GetElement(2) >> 2;
+                                int i = inverse[key];
+                                if (i == 0) i = Fill(inverse, pal, key);
+                                i--;
+                                d[at] = (byte)i;
+                                var e = v - Vector128.Load(pal + i * 4);
+                                carry[r] = Vector128.ShiftLeft(e, 3) - e;                       // 7/16 to the right
+                                int* below = mine + stride;
+                                (Vector128.Load(below - 4) + Vector128.ShiftLeft(e, 1) + e).Store(below - 4);   // 3/16
+                                (Vector128.Load(below) + Vector128.ShiftLeft(e, 2) + e).Store(below);           // 5/16
+                                (Vector128.Load(below + 4) + e).Store(below + 4);                               // 1/16
+                            }
+                        }
+                        // what the last row passed down belongs to the first row of the next band
+                        new Span<int>(err + rows * stride, stride).CopyTo(new Span<int>(err, stride));
+                        new Span<int>(err + stride, Rows * stride).Clear();
+                    }
                 }
-                (cur, next) = (next, cur);
-                Array.Clear(next);
             }
         }
     }

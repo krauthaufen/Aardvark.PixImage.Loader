@@ -19,6 +19,34 @@ namespace PixCodec
         int _w, _h;
         GifPalette? _global;
         byte[]? _icc;
+        byte[]? _stillIndices;
+        // Working buffers come from the shared pool (fresh megabyte arrays cost more than filling them) and are
+        // therefore often longer than asked for: never use their Length.
+        readonly List<uint[]> _pixelBuffers = new List<uint[]>();
+        readonly List<byte[]> _frameBytes = new List<byte[]>();
+        readonly List<uint[]> _framePixels = new List<uint[]>();
+
+        uint[] RentCanvas()
+        {
+            var a = System.Buffers.ArrayPool<uint>.Shared.Rent(_w * _h);
+            _pixelBuffers.Add(a);
+            return a;
+        }
+
+        byte[] RentFrameBytes(int length)
+        {
+            var a = System.Buffers.ArrayPool<byte>.Shared.Rent(length);
+            _frameBytes.Add(a);
+            return a;
+        }
+
+        void ReturnFrameBuffers()
+        {
+            foreach (var a in _frameBytes) System.Buffers.ArrayPool<byte>.Shared.Return(a);
+            foreach (var a in _framePixels) System.Buffers.ArrayPool<uint>.Shared.Return(a);
+            _frameBytes.Clear(); _framePixels.Clear();
+        }
+      // indices of a still from the color scan, transparent pixels marked
 
         public GifEncoder(Stream output, GifEncodeOptions options, bool animation)
         {
@@ -43,30 +71,52 @@ namespace PixCodec
         }
 
         /// <summary>To packed r | g &lt;&lt; 8 | b &lt;&lt; 16 | 255 &lt;&lt; 24, or 0 for pixels below the alpha threshold.</summary>
-        void Convert(RawImage image, uint[] dst)
+        unsafe void Convert(RawImage image, uint[] dst)
         {
-            byte[] src = image.GetData<byte>();
-            int n = _w * _h, thr = _o.AlphaThreshold;
-            switch (image.Color)
+            byte[] bytes = image.GetData<byte>();
+            int n = _w * _h;
+            uint thr = (uint)Math.Clamp(_o.AlphaThreshold, 0, 256);
+            fixed (byte* src = bytes)
+            fixed (uint* d = dst)
             {
-                case ColorModel.Gray:
-                    for (int i = 0; i < n; i++) dst[i] = src[i] * 0x010101u | 0xFF000000u;
-                    break;
-                case ColorModel.GrayAlpha:
-                    for (int i = 0; i < n; i++) dst[i] = src[2 * i + 1] >= thr ? src[2 * i] * 0x010101u | 0xFF000000u : 0;
-                    break;
-                case ColorModel.Rgb:
-                    for (int i = 0, s = 0; i < n; i++, s += 3)
-                        dst[i] = src[s] | (uint)src[s + 1] << 8 | (uint)src[s + 2] << 16 | 0xFF000000u;
-                    break;
-                default:
-                    for (int i = 0, s = 0; i < n; i++, s += 4)
-                        dst[i] = src[s + 3] >= thr ? src[s] | (uint)src[s + 1] << 8 | (uint)src[s + 2] << 16 | 0xFF000000u : 0;
-                    break;
+                switch (image.Color)
+                {
+                    case ColorModel.Gray:
+                        for (int i = 0; i < n; i++) d[i] = src[i] * 0x010101u | 0xFF000000u;
+                        break;
+                    case ColorModel.GrayAlpha:
+                        for (int i = 0; i < n; i++) d[i] = src[2 * i + 1] >= thr ? src[2 * i] * 0x010101u | 0xFF000000u : 0;
+                        break;
+                    case ColorModel.Rgb:
+                        {
+                            // four bytes at a time; the last pixel has no fourth byte to read
+                            byte* p = src;
+                            for (int i = 0; i < n - 1; i++, p += 3) d[i] = *(uint*)p | 0xFF000000u;
+                            if (n > 0) d[n - 1] = p[0] | (uint)p[1] << 8 | (uint)p[2] << 16 | 0xFF000000u;
+                        }
+                        break;
+                    default:
+                        {
+                            uint* p = (uint*)src;
+                            for (int i = 0; i < n; i++) d[i] = p[i] >> 24 >= thr ? p[i] | 0xFF000000u : 0;
+                        }
+                        break;
+                }
             }
         }
 
         public void Run(IEnumerable<GifInputFrame> frames)
+        {
+            try { Encode(frames); }
+            finally
+            {
+                ReturnFrameBuffers();
+                foreach (var a in _pixelBuffers) System.Buffers.ArrayPool<uint>.Shared.Return(a);
+                _pixelBuffers.Clear();
+            }
+        }
+
+        void Encode(IEnumerable<GifInputFrame> frames)
         {
             uint[]? firstPixels = null;
             if (!_animation || _o.PaletteMode == GifPaletteMode.Global)
@@ -89,7 +139,7 @@ namespace PixCodec
                 if (index == 0 && firstPixels != null) cur = firstPixels;
                 else
                 {
-                    cur = spare ?? new uint[_w * _h];
+                    cur = spare ?? RentCanvas();
                     spare = null;
                     Convert(f.Image, cur);
                 }
@@ -97,7 +147,7 @@ namespace PixCodec
                 {
                     bool cleared = WriteFrame(pending, before, cur, pendingDelay);
                     // 'before' becomes what the viewer shows once the pending frame was drawn and disposed.
-                    if (cleared) { spare = pending; Array.Clear(before ??= new uint[_w * _h]); }
+                    if (cleared) { spare = pending; Array.Clear(before ??= RentCanvas(), 0, _w * _h); }
                     else { spare = before; before = pending; }
                 }
                 pending = cur;
@@ -111,15 +161,24 @@ namespace PixCodec
 
         GifPalette BuildGlobalPalette(IReadOnlyList<GifInputFrame> list, out uint[]? firstPixels)
         {
-            var buf = new uint[_w * _h];
+            int n = _w * _h;
+            var buf = RentCanvas();
             firstPixels = list.Count == 1 ? buf : null;
             var set = new GifColorSet();
-            foreach (var f in list)
+            if (list.Count == 1)
             {
-                Convert(f.Image, buf);
-                set.AddAll(buf);
-                if (set.Overflow) break;
+                // a still: the color scan yields the palette indices on the way
+                Convert(list[0].Image, buf);
+                var indices = RentFrameBytes(n);
+                if (set.MapAll(buf.AsSpan(0, n), indices.AsSpan(0, n))) _stillIndices = indices;
             }
+            else
+                foreach (var f in list)
+                {
+                    Convert(f.Image, buf);
+                    set.AddAll(buf.AsSpan(0, n));
+                    if (set.Overflow) break;
+                }
             // An animation wants a transparent slot for "pixel unchanged"; a still only if it has transparent pixels.
             if (!set.Overflow)
             {
@@ -130,9 +189,10 @@ namespace PixCodec
             }
             bool slot = _animation || set.HasTransparent;
             var q = new GifQuantizer();
-            if (list.Count == 1) q.Add(buf);
+            _stillIndices = null;
+            if (list.Count == 1) q.Add(buf.AsSpan(0, n));
             else
-                foreach (var f in list) { Convert(f.Image, buf); q.Add(buf); }
+                foreach (var f in list) { Convert(f.Image, buf); q.Add(buf.AsSpan(0, n)); }
             var colors = q.BuildPalette(_maxColors - (slot ? 1 : 0), _o.RefineIterations);
             return new GifPalette(colors, colors.Length, slot, null);
         }
@@ -211,7 +271,7 @@ namespace PixCodec
         bool WriteFrame(uint[] target, uint[]? before, uint[]? next, int delayCs)
         {
             int w = _w, h = _h;
-            bool clear = next != null && NeedsClear(next, target);
+            bool clear = next != null && NeedsClear(next.AsSpan(0, w * h), target);
             bool substitute = before != null && _o.FrameDifferencing && (_global == null || _global.TransparentIndex >= 0);
 
             int rx = 0, ry = 0, rw = w, rh = h;
@@ -220,23 +280,36 @@ namespace PixCodec
             uint[] sub = substitute || rw != w || rh != h ? Cut(target, substitute ? before : null, rx, ry, rw, rh) : target;
 
             GifPalette palette;
-            if (_global != null) palette = _global;
+            byte[]? indices = null;
+            if (_global != null)
+            {
+                palette = _global;
+                if (_stillIndices != null && palette.IsExact && ReferenceEquals(sub, target))
+                {
+                    indices = _stillIndices;
+                    FixMarkers(indices.AsSpan(0, rw * rh), palette);
+                }
+            }
             else
             {
                 var set = new GifColorSet();
-                set.AddAll(sub);
-                if (!set.Overflow && set.Count + (set.HasTransparent ? 1 : 0) <= _maxColors)
+                indices = RentFrameBytes(rw * rh);
+                if (set.MapAll(sub.AsSpan(0, rw * rh), indices.AsSpan(0, rw * rh)) && set.Count + (set.HasTransparent ? 1 : 0) <= _maxColors)
+                {
                     palette = new GifPalette(set.Colors, set.Count, set.HasTransparent, set);
+                    FixMarkers(indices.AsSpan(0, rw * rh), palette);
+                }
                 else
                 {
                     palette = null!;
+                    indices = null;
                     if (substitute)
                     {
                         // The transparent slot for unchanged pixels costs a color; if the rectangle fits the
                         // palette exactly without it, prefer lossless.
                         var plain = Cut(target, null, rx, ry, rw, rh);
                         var set2 = new GifColorSet();
-                        set2.AddAll(plain);
+                        set2.AddAll(plain.AsSpan(0, rw * rh));
                         if (!set2.Overflow && !set2.HasTransparent && set2.Count <= _maxColors)
                         {
                             sub = plain;
@@ -246,17 +319,20 @@ namespace PixCodec
                     if (palette == null)
                     {
                         var q = new GifQuantizer();
-                        q.Add(sub);
+                        q.Add(sub.AsSpan(0, rw * rh));
                         var colors = q.BuildPalette(_maxColors - (set.HasTransparent ? 1 : 0), _o.RefineIterations);
                         palette = new GifPalette(colors, colors.Length, set.HasTransparent, null);
                     }
                 }
             }
 
-            var indices = new byte[rw * rh];
-            palette.Map(sub, indices, rw, rh, _o.Dither);
+            if (indices == null)
+            {
+                indices = RentFrameBytes(rw * rh);
+                palette.Map(sub, indices, rw, rh, _o.Dither);
+            }
             bool usesTransparency = palette.TransparentIndex >= 0 && (_global == null || sub.AsSpan(0, rw * rh).IndexOf(0u) >= 0);
-            if (_o.Interlace && rh > 1) indices = Interlace(indices, rw, rh);
+            if (_o.Interlace && rh > 1) indices = Interlace(indices, RentFrameBytes(rw * rh), rw, rh);
 
             var s = _head;
             s.SetLength(0);
@@ -274,14 +350,22 @@ namespace PixCodec
             s.WriteByte((byte)((_global == null ? 0x80 | (bits - 1) : 0) | (_o.Interlace && rh > 1 ? 0x40 : 0)));
             if (_global == null) WritePalette(s, palette);
             s.WriteTo(_out);
-            GifLzw.Encode(indices, Math.Max(2, bits), _out);
+            GifLzw.Encode(indices.AsSpan(0, rw * rh), Math.Max(2, bits), _out);
+            ReturnFrameBuffers();
             return clear;
         }
 
-        /// <summary>True if some pixel is opaque on the canvas but transparent in the next picture.</summary>
-        static bool NeedsClear(uint[] next, uint[] canvas)
+        /// <summary>Turns the color scan's transparency marker into the palette's transparent index.</summary>
+        static void FixMarkers(Span<byte> indices, GifPalette palette)
         {
-            if (next.AsSpan().IndexOf(0u) < 0) return false;
+            if (palette.TransparentIndex >= 0 && palette.TransparentIndex != GifColorSet.TransparentMarker)
+                indices.Replace(GifColorSet.TransparentMarker, (byte)palette.TransparentIndex);
+        }
+
+        /// <summary>True if some pixel is opaque on the canvas but transparent in the next picture.</summary>
+        static bool NeedsClear(ReadOnlySpan<uint> next, uint[] canvas)
+        {
+            if (next.IndexOf(0u) < 0) return false;
             for (int i = 0; i < next.Length; i++)
                 if (next[i] == 0 && canvas[i] != 0) return true;
             return false;
@@ -312,7 +396,8 @@ namespace PixCodec
         /// <summary>Copies a rectangle; with <paramref name="before"/> given, pixels equal to the canvas become transparent.</summary>
         uint[] Cut(uint[] target, uint[]? before, int rx, int ry, int rw, int rh)
         {
-            var sub = new uint[rw * rh];
+            var sub = System.Buffers.ArrayPool<uint>.Shared.Rent(rw * rh);
+            _framePixels.Add(sub);
             for (int y = 0; y < rh; y++)
             {
                 var src = target.AsSpan((ry + y) * _w + rx, rw);
@@ -324,9 +409,8 @@ namespace PixCodec
             return sub;
         }
 
-        static byte[] Interlace(byte[] rows, int w, int h)
+        static byte[] Interlace(byte[] rows, byte[] dst, int w, int h)
         {
-            var dst = new byte[rows.Length];
             int n = 0;
             for (int y = 0; y < h; y += 8) rows.AsSpan(y * w, w).CopyTo(dst.AsSpan(n++ * w));
             for (int y = 4; y < h; y += 8) rows.AsSpan(y * w, w).CopyTo(dst.AsSpan(n++ * w));
