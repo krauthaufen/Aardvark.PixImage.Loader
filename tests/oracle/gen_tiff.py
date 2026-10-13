@@ -174,7 +174,7 @@ def encode_chunk(a, p, e):
 def write_tiff(path, pages, byteorder='<', bigtiff=False):
     """pages: list of dicts with 'arr' (H,W,C) and options:
     bits, compression, predictor, planar(1|2), tile(tw,th), rps, photometric, extrasamples, colormap,
-    fillorder, lzw_old, sampleformat, tags [(id, type, values)], no_bytecounts, sparse (set of chunk indices),
+    fillorder, lzw_old, sampleformat, tags [(id, type, values)], no_bytecounts, zero_bytecounts, sparse (set of chunk indices),
     raw_chunks (pre-encoded strips, used for hand-built YCbCr data)."""
     e = byteorder
     f = io.BytesIO()
@@ -232,7 +232,7 @@ def write_tiff(path, pages, byteorder='<', bigtiff=False):
         else:
             tags += [(273, big_t, offsets), (278, 3, [chh])]
             if not p.get('no_bytecounts'):
-                tags.append((279, big_t, counts))
+                tags.append((279, big_t, [0] * len(counts) if p.get('zero_bytecounts') else counts))
         sf = p.get('sampleformat', {'u': 1, 'i': 2, 'f': 3}[kind])
         if sf != 1:
             tags.append((339, 3, [sf] * c))
@@ -393,8 +393,8 @@ def verify(name, path, p, page=0):
     # tifffile returns the stored samples without any photometric interpretation
     try:
         t = ref_tifffile(path, page)
-        if pm == 6:
-            pass  # hand-built YCbCr: tifffile does not unpack it, checked separately
+        if pm == 6 or p.get('zero_bytecounts'):
+            pass  # tifffile takes zero byte counts literally (libtiff recovers); YCbCr is checked separately
         else:
             if bits < 8:
                 t = t.astype(np.uint8)  # bilevel comes back as bool
@@ -673,6 +673,8 @@ def gen_structure():
     emit('packbits_runs', dict(arr=runs, compression=PACKBITS, rps=16))
     emit('no_bytecounts_u8_rgb', dict(arr=pat(3, 'uint8'), no_bytecounts=True))
     emit('no_bytecounts_lzw', dict(arr=pat(3, 'uint8'), compression=LZW, no_bytecounts=True))
+    emit('zero_bytecounts_u16_rgb', dict(arr=pat(3, 'uint16'), zero_bytecounts=True, rps=5))
+    emit('zero_bytecounts_lzw_pred2', dict(arr=pat(3, 'uint8'), compression=LZW, predictor=2, zero_bytecounts=True, rps=6))
     sp = pat(1, 'float32', 50, 37)
     sp_exp = sp.copy()
     sp_exp[0:16, 16:32] = 0

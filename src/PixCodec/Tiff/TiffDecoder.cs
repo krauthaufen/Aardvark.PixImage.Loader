@@ -236,22 +236,29 @@ namespace PixCodec
             if (offs.Length < total) throw new ImageFormatException("TIFF: too few strip/tile offsets");
             var cnts = File.Integers(e, Tiled ? 325 : 279) ?? (Tiled ? File.Integers(e, 279) : null);
             long len = File.Src.Length;
-            if (cnts == null || cnts.Length < total)
-            {
-                // StripByteCounts is missing in some old files: everything up to the end of the file may belong to the strip
-                cnts = new long[total];
-                for (int i = 0; i < total; i++)
-                {
-                    long avail = offs[i] > 0 && offs[i] < len ? len - offs[i] : 0;
-                    cnts[i] = Compression == 1 ? Math.Min(avail, ChunkBytes(ChunkH, out _)) : avail;
-                }
-            }
+            bool noCounts = cnts == null || cnts.Length < total;
+            if (noCounts) cnts = new long[total];
+            long[]? sorted = null;
             long sum = 0; int empty = 0;
             for (int i = 0; i < total; i++)
             {
-                long c = cnts[i], o = offs[i];
-                if (c == 0 || o == 0) { cnts[i] = 0; empty++; continue; } // sparse file: the chunk is not stored
-                if (o < 0 || c < 0 || o > len || c > len - o) throw new ImageFormatException("TIFF: strip/tile data outside of the file");
+                long c = cnts![i], o = offs[i];
+                if (o == 0 && !noCounts) { cnts[i] = 0; empty++; continue; } // sparse file (GDAL): the chunk is not stored
+                if (o <= 0 || o > len || c < 0) throw new ImageFormatException("TIFF: strip/tile data outside of the file");
+                if (c == 0)
+                {
+                    // StripByteCounts missing or zero (old writers; libtiff recovers the same way):
+                    // the chunk extends to the next chunk or the end of the file.
+                    if (sorted == null) { sorted = (long[])offs.Clone(); Array.Sort(sorted); }
+                    int k = Array.BinarySearch(sorted, o);
+                    while (k >= 0 && k < sorted.Length && sorted[k] <= o) k++;
+                    long end = k >= 0 && k < sorted.Length ? Math.Min(sorted[k], len) : len;
+                    c = end - o;
+                    if (Compression == 1) c = Math.Min(c, ChunkBytes(ChunkH, out _));
+                    cnts[i] = c;
+                    if (c == 0) { empty++; continue; }
+                }
+                if (c > len - o) throw new ImageFormatException("TIFF: strip/tile data outside of the file");
                 sum += c;
             }
             _offsets = offs; _counts = cnts;
