@@ -25,13 +25,13 @@ namespace PixCodec
         int _outType;                 // ExrPixelType of the output samples
         byte* _out;
         long[] _offsets = null!;
-        int _linesPerChunk, _tilesX;
+        int _linesPerChunk, _tilesX, _levelX, _levelY;
         int _minX, _minY, _maxX, _maxY, _width;
 
         public static RawImage Decode(ReadOnlySpan<byte> data, ExrFileStructure file, int partIndex, int[] sel, ColorModel color, ExrDecodeOptions opt)
         {
             var part = file.Parts[partIndex];
-            if (part.IsDeep) throw new ImageNotSupportedException("EXR deep data is not supported");
+            if (part.IsDeep) throw new ImageNotSupportedException("EXR deep parts have no flat channels; use Exr.Decode (flattened) or Exr.DecodeDeep");
             if (part.Compression > ExrCompression.Dwab)
                 throw new ImageNotSupportedException($"EXR compression {(int)part.Compression} is not supported");
             var chans = part.Chans;
@@ -39,8 +39,11 @@ namespace PixCodec
                 foreach (var c in chans)
                     if (c.XS != 1 || c.YS != 1) throw new ImageFormatException("EXR tiled part has subsampled channels");
 
-            int w = part.Width, h = part.Height;
-            var dw = part.DataWindow;
+            int lx = opt.LevelX, ly = opt.LevelY;
+            if (!part.HasLevel(lx, ly)) throw new ArgumentException($"EXR part has no level ({lx}, {ly})");
+            var (w, h) = part.GetLevelSize(lx, ly);
+            // a level keeps the origin of the data window
+            var dw = new ExrBox2i(part.DataWindow.MinX, part.DataWindow.MinY, part.DataWindow.MinX + w - 1, part.DataWindow.MinY + h - 1);
             if ((long)w * h * sel.Length > MaxArrayLength)
                 throw new ImageNotSupportedException($"EXR image {w}x{h}x{sel.Length} is too large for a single array");
 
@@ -57,7 +60,7 @@ namespace PixCodec
                 _length = data.Length, _multiPart = file.MultiPart, _partIndex = partIndex, _part = part, _chans = chans,
                 _nSel = sel.Length, _minX = dw.MinX, _minY = dw.MinY, _maxX = dw.MaxX, _maxY = dw.MaxY, _width = w,
                 _outType = outType == SampleType.UInt32 ? 0 : outType == SampleType.Float16 ? 1 : 2,
-                _slot = new int[chans.Length],
+                _slot = new int[chans.Length], _levelX = lx, _levelY = ly,
             };
             Array.Fill(d._slot, -1);
             for (int i = 0; i < sel.Length; i++) d._slot[sel[i]] = i;
@@ -73,7 +76,7 @@ namespace PixCodec
                 d._linesPerChunk = ExrCodecs.LinesPerChunk(part.Compression);
                 chunks = (h + d._linesPerChunk - 1) / d._linesPerChunk;
             }
-            d._offsets = ReadOffsets(data, file, partIndex, chunks);
+            d._offsets = ExrChunkTable.Locate(data, file, partIndex, part.FirstChunkOfLevel(lx, ly), chunks, lx, ly);
 
             // every sample is overwritten unless a subsampled channel leaves gaps, so the (large) array need not be zeroed
             bool subsampled = false;
@@ -109,128 +112,6 @@ namespace PixCodec
             return result;
         }
 
-        // ------------------------------------------------------------------ chunk tables
-
-        /// <summary>Number of chunks of a part as implied by its geometry (all levels for tiled parts).</summary>
-        static long ComputeChunkCount(ExrHeader p)
-        {
-            if (!p.IsTiled)
-            {
-                int lpc = ExrCodecs.LinesPerChunk(p.Compression);
-                return (p.Height + (long)lpc - 1) / lpc;
-            }
-            int w = p.Width, h = p.Height;
-            static int Levels(int size, bool up)
-            {
-                int l = 0;
-                while ((1 << (l + 1)) <= size) l++;
-                if (up && (1 << l) < size) l++;
-                return l + 1;
-            }
-            static long LevelSize(int size, int level, bool up)
-                => Math.Max(1, up ? (size + (1L << level) - 1) >> level : size >> level);
-            long Tiles(int lx, int ly)
-                => ((LevelSize(w, lx, p.LevelRoundUp) + p.TileWidth - 1) / p.TileWidth) * ((LevelSize(h, ly, p.LevelRoundUp) + p.TileHeight - 1) / p.TileHeight);
-            long n = 0;
-            switch (p.LevelMode)
-            {
-                case ExrLevelMode.OneLevel: n = Tiles(0, 0); break;
-                case ExrLevelMode.MipMap:
-                    for (int l = 0, nl = Levels(Math.Max(w, h), p.LevelRoundUp); l < nl; l++) n += Tiles(l, l);
-                    break;
-                default:
-                    for (int ly = 0, ny = Levels(h, p.LevelRoundUp); ly < ny; ly++)
-                        for (int lx = 0, nx = Levels(w, p.LevelRoundUp); lx < nx; lx++) n += Tiles(lx, ly);
-                    break;
-            }
-            return n;
-        }
-
-        static long[] ReadOffsets(ReadOnlySpan<byte> data, ExrFileStructure file, int partIndex, int needed)
-        {
-            // table sizes of all parts (ours starts after those of the preceding parts)
-            long tablePos = file.TablesStart, tablesEnd = file.TablesStart;
-            for (int i = 0; i < file.Parts.Length; i++)
-            {
-                var p = file.Parts[i];
-                long n = p.ChunkCountAttribute;
-                if (n < 0 || (i == partIndex && !file.MultiPart))
-                {
-                    if (p.IsDeep && file.MultiPart) throw new ImageFormatException("EXR deep part has no chunkCount");
-                    n = p.IsDeep ? 0 : ComputeChunkCount(p);
-                }
-                if (i == partIndex)
-                {
-                    tablePos = tablesEnd;
-                    if (n < needed) throw new ImageFormatException("EXR chunkCount does not match the image size");
-                }
-                tablesEnd += 8 * n;
-                if (tablesEnd > data.Length) throw new ImageFormatException("EXR offset table is truncated");
-            }
-
-            var offsets = new long[needed];
-            bool valid = true;
-            int minChunk = (file.MultiPart ? 4 : 0) + (file.Parts[partIndex].IsTiled ? 20 : 8);
-            for (int i = 0; i < needed; i++)
-            {
-                ulong o = BinaryPrimitives.ReadUInt64LittleEndian(data.Slice((int)(tablePos + 8L * i)));
-                if (o < (ulong)tablesEnd || o > (ulong)(data.Length - minChunk)) { valid = false; break; }
-                offsets[i] = (long)o;
-            }
-            if (!valid) ScanChunks(data, file, partIndex, (int)tablesEnd, offsets);
-            return offsets;
-        }
-
-        /// <summary>
-        /// Rebuilds the offsets of one part by walking the chunks in file order (for files with a missing or
-        /// incomplete offset table, as left behind by an interrupted writer).
-        /// </summary>
-        static void ScanChunks(ReadOnlySpan<byte> data, ExrFileStructure file, int partIndex, int start, long[] offsets)
-        {
-            Array.Clear(offsets);
-            var our = file.Parts[partIndex];
-            int lpc = our.IsTiled ? 0 : ExrCodecs.LinesPerChunk(our.Compression);
-            int tilesX = our.IsTiled ? (our.Width + our.TileWidth - 1) / our.TileWidth : 0;
-            long pos = start;
-            while (true)
-            {
-                long chunkStart = pos;
-                var part = our;
-                if (file.MultiPart)
-                {
-                    if (data.Length - pos < 4) break;
-                    int pn = BinaryPrimitives.ReadInt32LittleEndian(data.Slice((int)pos));
-                    if (pn < 0 || pn >= file.Parts.Length) break;
-                    part = file.Parts[pn];
-                    pos += 4;
-                }
-                if (part.IsDeep) break;
-                int hdr = part.IsTiled ? 20 : 8;
-                if (data.Length - pos < hdr) break;
-                var h = data.Slice((int)pos, hdr);
-                int size = BinaryPrimitives.ReadInt32LittleEndian(h.Slice(hdr - 4));
-                pos += hdr;
-                if (size < 0 || size > data.Length - pos) break;
-                pos += size;
-                if (part != our) continue;
-                long index;
-                if (part.IsTiled)
-                {
-                    int tx = BinaryPrimitives.ReadInt32LittleEndian(h), ty = BinaryPrimitives.ReadInt32LittleEndian(h.Slice(4));
-                    int lx = BinaryPrimitives.ReadInt32LittleEndian(h.Slice(8)), ly = BinaryPrimitives.ReadInt32LittleEndian(h.Slice(12));
-                    if (lx != 0 || ly != 0 || tx < 0 || tx >= tilesX || ty < 0) continue;
-                    index = (long)ty * tilesX + tx;
-                }
-                else
-                {
-                    long dy = (long)BinaryPrimitives.ReadInt32LittleEndian(h) - our.DataWindow.MinY;
-                    if (dy < 0 || dy % lpc != 0) continue;
-                    index = dy / lpc;
-                }
-                if (index < offsets.Length) offsets[index] = chunkStart;
-            }
-        }
-
         // ------------------------------------------------------------------ chunks
 
         void DecodeChunk(int index, ExrScratch s)
@@ -250,7 +131,7 @@ namespace PixCodec
             {
                 int tx = index % _tilesX, ty = index / _tilesX;
                 if (BinaryPrimitives.ReadInt32LittleEndian(h) != tx || BinaryPrimitives.ReadInt32LittleEndian(h.Slice(4)) != ty
-                    || BinaryPrimitives.ReadInt64LittleEndian(h.Slice(8)) != 0)
+                    || BinaryPrimitives.ReadInt32LittleEndian(h.Slice(8)) != _levelX || BinaryPrimitives.ReadInt32LittleEndian(h.Slice(12)) != _levelY)
                     throw new ImageFormatException("EXR tile coordinates do not match the offset table");
                 x0 = (int)Math.Min(_minX + (long)tx * _part.TileWidth, int.MaxValue);
                 x1 = (int)Math.Min(x0 + (long)_part.TileWidth - 1, _maxX);
@@ -376,6 +257,100 @@ namespace PixCodec
                                 Buffer.MemoryCopy(src + x * _nSel * es, row + x * _nSel * es, es, es);
                         }
                     }
+            }
+        }
+    }
+
+    /// <summary>Finds the chunks of one level of one part: from the offset table, or by scanning the file if the table is damaged.</summary>
+    internal static class ExrChunkTable
+    {
+        /// <summary>Bytes of a chunk header before the pixel data (without the part number of multi-part files).</summary>
+        static int HeaderSize(ExrHeader p) => (p.IsTiled ? 16 : 4) + (p.IsDeep ? 24 : 4);
+
+        public static long[] Locate(ReadOnlySpan<byte> data, ExrFileStructure file, int partIndex, long first, int count, int lx, int ly)
+        {
+            // table sizes of all parts (ours starts after those of the preceding parts)
+            long tablePos = file.TablesStart, tablesEnd = file.TablesStart;
+            for (int i = 0; i < file.Parts.Length; i++)
+            {
+                var p = file.Parts[i];
+                long n = p.ChunkCountAttribute;
+                if (n < 0 || (i == partIndex && !file.MultiPart)) n = p.ComputeChunkCount();
+                if (i == partIndex)
+                {
+                    tablePos = tablesEnd;
+                    if (n < first + count) throw new ImageFormatException("EXR chunkCount does not match the image size");
+                }
+                tablesEnd += 8 * n;
+                if (tablesEnd > data.Length) throw new ImageFormatException("EXR offset table is truncated");
+            }
+
+            var offsets = new long[count];
+            bool valid = true;
+            int minChunk = (file.MultiPart ? 4 : 0) + HeaderSize(file.Parts[partIndex]);
+            for (int i = 0; i < count; i++)
+            {
+                ulong o = BinaryPrimitives.ReadUInt64LittleEndian(data.Slice((int)(tablePos + 8L * (first + i))));
+                if (o < (ulong)tablesEnd || o > (ulong)(data.Length - minChunk)) { valid = false; break; }
+                offsets[i] = (long)o;
+            }
+            if (!valid) Scan(data, file, partIndex, (int)tablesEnd, offsets, lx, ly);
+            return offsets;
+        }
+
+        /// <summary>
+        /// Rebuilds the offsets by walking the chunks in file order (for files with a missing or incomplete offset
+        /// table, as left behind by an interrupted writer).
+        /// </summary>
+        static void Scan(ReadOnlySpan<byte> data, ExrFileStructure file, int partIndex, int start, long[] offsets, int levelX, int levelY)
+        {
+            Array.Clear(offsets);
+            var our = file.Parts[partIndex];
+            int lpc = our.IsTiled ? 0 : ExrCodecs.LinesPerChunk(our.Compression);
+            int tilesX = our.IsTiled ? (our.GetLevelSize(levelX, levelY).Width + our.TileWidth - 1) / our.TileWidth : 0;
+            long pos = start;
+            while (true)
+            {
+                long chunkStart = pos;
+                var part = our;
+                if (file.MultiPart)
+                {
+                    if (data.Length - pos < 4) break;
+                    int pn = BinaryPrimitives.ReadInt32LittleEndian(data.Slice((int)pos));
+                    if (pn < 0 || pn >= file.Parts.Length) break;
+                    part = file.Parts[pn];
+                    pos += 4;
+                }
+                int hdr = HeaderSize(part);
+                if (data.Length - pos < hdr) break;
+                var h = data.Slice((int)pos, hdr);
+                long size;
+                if (part.IsDeep)
+                {
+                    long table = BinaryPrimitives.ReadInt64LittleEndian(h.Slice(hdr - 24)), packed = BinaryPrimitives.ReadInt64LittleEndian(h.Slice(hdr - 16));
+                    if (table < 0 || packed < 0 || table > data.Length || packed > data.Length) break;
+                    size = table + packed;
+                }
+                else size = BinaryPrimitives.ReadInt32LittleEndian(h.Slice(hdr - 4));
+                pos += hdr;
+                if (size < 0 || size > data.Length - pos) break;
+                pos += size;
+                if (part != our) continue;
+                long index;
+                if (part.IsTiled)
+                {
+                    int tx = BinaryPrimitives.ReadInt32LittleEndian(h), ty = BinaryPrimitives.ReadInt32LittleEndian(h.Slice(4));
+                    int lx = BinaryPrimitives.ReadInt32LittleEndian(h.Slice(8)), ly = BinaryPrimitives.ReadInt32LittleEndian(h.Slice(12));
+                    if (lx != levelX || ly != levelY || tx < 0 || tx >= tilesX || ty < 0) continue;
+                    index = (long)ty * tilesX + tx;
+                }
+                else
+                {
+                    long dy = (long)BinaryPrimitives.ReadInt32LittleEndian(h) - our.DataWindow.MinY;
+                    if (dy < 0 || dy % lpc != 0) continue;
+                    index = dy / lpc;
+                }
+                if (index < offsets.Length) offsets[index] = chunkStart;
             }
         }
     }

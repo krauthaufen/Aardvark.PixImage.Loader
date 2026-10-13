@@ -57,9 +57,41 @@ namespace PixCodec
         public int Orientation;
     }
 
-    /// <summary>Cheap header level information about an encoded image.</summary>
+    /// <summary>
+    /// Cheap header level information about an encoded image. Width, Height, Channels, SampleType and Color describe
+    /// what Decode returns with default options; the remaining properties describe the file.
+    /// </summary>
     public readonly record struct ImageInfo(
-        ImageFormat Format, int Width, int Height, int Channels, SampleType SampleType, ColorModel Color, int FrameCount = 1);
+        ImageFormat Format, int Width, int Height, int Channels, SampleType SampleType, ColorModel Color, int FrameCount = 1)
+    {
+        /// <summary>
+        /// Bits per sample as stored in the file (e.g. 1, 4, 12, 16), which can be less than the SampleType holds.
+        /// For palette images the bits of one palette entry channel (8). 0 if the codec does not report it.
+        /// </summary>
+        public int BitsPerSample { get; init; }
+
+        /// <summary>
+        /// EXIF/TIFF orientation 1..8 (1 = top-left, i.e. no transformation needed), 0 if the file does not say.
+        /// Decoders do not apply it unless asked to through their options.
+        /// </summary>
+        public int Orientation { get; init; }
+
+        /// <summary>Horizontal / vertical resolution in pixels per inch, 0 if the file does not say.</summary>
+        public double DpiX { get; init; }
+        /// <inheritdoc cref="DpiX"/>
+        public double DpiY { get; init; }
+
+        /// <summary>Whether the file embeds an ICC colour profile.</summary>
+        public bool HasIccProfile { get; init; }
+
+        /// <summary>Whether the file is an animation (GIF, APNG, WebP) rather than a still image or a set of pages.</summary>
+        public bool IsAnimated { get; init; }
+
+        /// <summary>Width / Height as displayed after applying <see cref="Orientation"/> (swapped for 5..8).</summary>
+        public int OrientedWidth => Orientation >= 5 && Orientation <= 8 ? Height : Width;
+        /// <inheritdoc cref="OrientedWidth"/>
+        public int OrientedHeight => Orientation >= 5 && Orientation <= 8 ? Width : Height;
+    }
 
     /// <summary>
     /// A decoded image: tightly packed, row-major (top row first), channel-interleaved samples in a typed array.

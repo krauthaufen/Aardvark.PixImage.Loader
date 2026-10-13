@@ -2,17 +2,21 @@
 
 usage: python3 gen_tiff.py            (from tests/oracle; deterministic, overwrites the fixture directory)
 
-Most files come from the small TIFF writer below because none of the installed tools can produce the whole
-matrix (tifffile lacks LZW / PackBits / floating point predictor without `imagecodecs`, ImageMagick rewrites
-channel layouts and is not an HDRI build). Every file is then decoded by the independent reference decoders
-that can read it - tifffile, OpenCV (libtiff 4.7) and Pillow (libtiff) - and has to match the pixels the
-fixture was built from. Files that none of them can read (e.g. half floats with the floating point predictor,
-5-channel LZW) are listed as "by construction" in the summary: their reference is the source array, with the
-codec path they use being covered by other, verified fixtures.
+Needs tifffile + imagecodecs, OpenCV, Pillow and ImageMagick. Many files come from the small TIFF writer below
+because no single tool produces the whole matrix (odd bit depths with compression, old-style LZW and JPEG, sparse
+tiles, hand-packed YCbCr / LogL ...); others are written by tifffile, libtiff (through Pillow / OpenCV) and
+ImageMagick.
 
-The .ref holds what PixCodec is specified to return, i.e. the reference decoder's samples after the documented
-conversions (MinIsWhite inversion, 1/2/4-bit scaling, palette expansion, naive CMYK, un-premultiplied alpha).
-Those conversions are cross-checked against Pillow / ImageMagick where these implement the same thing.
+Provenance rule: every .ref is what a THIRD-PARTY decoder returned for the file - tifffile + imagecodecs for the
+stored samples, libtiff (OpenCV / Pillow / ImageMagick) where it interprets the data (YCbCr, CCITT, JPEG, LogLuv),
+LittleCMS for Lab - and all decoders that can read a file have to agree with the pixels it was built from. On top
+of the decoded samples only the conversions PixCodec documents are applied (MinIsWhite inversion, 1/2/4-bit
+scaling, palette expansion, naive CMYK, un-premultiplied alpha), each cross-checked against Pillow / ImageMagick
+where those implement the same thing. A `.tol` sidecar gives the allowed difference where bit exactness is not
+defined (float colour maths, lossy WebP).
+
+The few variants that no installed decoder reads go to the `unverified` folder with a reference derived from the
+source data; the script lists them at the end.
 """
 import io
 import os
@@ -23,6 +27,7 @@ import sys
 import warnings
 import zlib
 
+import imagecodecs
 import numpy as np
 
 from pxref import write_ref, test_pattern
@@ -130,21 +135,46 @@ TYPE_FMT = {1: 'B', 2: 'c', 3: 'H', 4: 'I', 5: 'II', 6: 'b', 7: 'B', 8: 'h', 9: 
             16: 'Q', 17: 'q'}
 
 
-def pack_bits_rows(a, bits):
-    """a: (rows, n) small integers -> rows of MSB-first packed samples, each row padded to a byte."""
+def pack_bits_rows(a, widths):
+    """a: (rows, n) integers, widths: bit width of each of the n columns -> rows of MSB-first packed samples,
+    each row padded to a byte. Negative values are stored in two's complement."""
     rows, n = a.shape
-    b = ((a[:, :, None].astype(np.uint16) >> np.arange(bits - 1, -1, -1)) & 1).astype(np.uint8).reshape(rows, n * bits)
-    return np.packbits(b, axis=1)
+    cols = []
+    for j in range(n):
+        w = widths[j]
+        v = a[:, j].astype(np.int64).astype(np.uint64) & np.uint64((1 << w) - 1)
+        cols.append(((v[:, None] >> np.arange(w - 1, -1, -1, dtype=np.uint64)) & np.uint64(1)).astype(np.uint8))
+    return np.packbits(np.concatenate(cols, axis=1), axis=1)
 
 
-def encode_chunk(a, p, e):
+def sample_bits(p, a, c):
+    """Per sample bit widths of a page description."""
+    bits = p.get('bits', 24 if p.get('float24') else a.dtype.itemsize * 8)
+    return list(bits) if isinstance(bits, (list, tuple)) else [bits] * c
+
+
+def encode_chunk(a, p, e, plane=None):
     """a: (rows, cols, samples) samples of one strip/tile (one plane when planar) -> compressed bytes."""
     rows, cols, s = a.shape
-    bits = p.get('bits', a.dtype.itemsize * 8)
     pred = p.get('predictor', 1)
     comp = p.get('compression', NONE)
-    if bits < 8:
-        raw = pack_bits_rows(a.reshape(rows, cols * s), bits)
+    if comp == 50001:
+        return imagecodecs.webp_encode(a, lossless=p.get('webp_lossless', True), level=p.get('webp_level', 75))
+    widths = sample_bits(p, a, p['arr'].shape[2] if p['arr'].ndim == 3 else 1)
+    widths = [widths[plane]] if plane is not None else widths
+    if p.get('float24'):
+        # three bytes per sample in file byte order; the predictor works on big endian byte planes like for all floats
+        b = np.frombuffer(imagecodecs.float24_encode(np.ascontiguousarray(a, np.float32), byteorder='>'), np.uint8).reshape(rows, cols * s, 3)
+        row_bytes = cols * s * 3
+        if pred == 3:
+            b = np.ascontiguousarray(b.transpose(0, 2, 1)).reshape(rows, -1).copy()
+            b[:, s:] -= b[:, :-s].copy()
+        elif e == '<':
+            b = b[:, :, ::-1]
+        raw = np.ascontiguousarray(b).tobytes()
+    elif any(w not in (8, 16, 32, 64) for w in widths) or len(set(widths)) > 1:
+        assert pred == 1
+        raw = pack_bits_rows(a.reshape(rows, cols * s), widths * cols)
         row_bytes = raw.shape[1]
         raw = raw.tobytes()
     else:
@@ -166,6 +196,12 @@ def encode_chunk(a, p, e):
         raw = zlib.compress(raw, 6)
     elif comp == PACKBITS:
         raw = packbits_encode(raw, row_bytes)
+    elif comp == 50000:
+        raw = imagecodecs.zstd_encode(raw)
+    elif comp == 34925:
+        raw = imagecodecs.lzma_encode(raw)
+    elif comp != NONE:
+        raise ValueError(comp)
     if p.get('fillorder', 1) == 2:
         raw = raw.translate(REV)
     return raw
@@ -175,7 +211,8 @@ def write_tiff(path, pages, byteorder='<', bigtiff=False):
     """pages: list of dicts with 'arr' (H,W,C) and options:
     bits, compression, predictor, planar(1|2), tile(tw,th), rps, photometric, extrasamples, colormap,
     fillorder, lzw_old, sampleformat, tags [(id, type, values)], no_bytecounts, zero_bytecounts, sparse (set of chunk indices),
-    raw_chunks (pre-encoded strips, used for hand-built YCbCr data)."""
+    raw_chunks (pre-encoded strips, used for hand-built YCbCr / JPEG data), prefix (bytes placed right after the
+    header, for tags holding absolute offsets), strips ((offsets, counts) overriding the strip tags)."""
     e = byteorder
     f = io.BytesIO()
     f.write((b'II' if e == '<' else b'MM') + struct.pack(e + 'H', 43 if bigtiff else 42))
@@ -191,7 +228,7 @@ def write_tiff(path, pages, byteorder='<', bigtiff=False):
         if a.ndim == 2:
             a = a[:, :, None]
         h, w, c = a.shape
-        bits = p.get('bits', a.dtype.itemsize * 8)
+        bits = sample_bits(p, a, c)
         planar = p.get('planar', 1)
         tile = p.get('tile')
         cw, chh = tile if tile else (w, p.get('rps', h))
@@ -208,8 +245,9 @@ def write_tiff(path, pages, byteorder='<', bigtiff=False):
                             pad = np.zeros((chh, cw, blk.shape[2]), a.dtype)
                             pad[:blk.shape[0], :blk.shape[1]] = blk
                             blk = pad
-                        chunks.append(encode_chunk(np.ascontiguousarray(blk), p, e))
+                        chunks.append(encode_chunk(np.ascontiguousarray(blk), p, e, plane))
         offsets, counts = [], []
+        f.write(p.get('prefix', b''))   # data that tags point to by absolute offset (written right after the header)
         for i, ch in enumerate(chunks):
             if i in p.get('sparse', ()):
                 offsets.append(0)
@@ -220,9 +258,11 @@ def write_tiff(path, pages, byteorder='<', bigtiff=False):
             f.write(ch)
         if f.tell() & 1:
             f.write(b'\0')
+        if 'strips' in p:
+            offsets, counts = p['strips']   # strips that live inside the prefix
 
         kind = a.dtype.kind
-        tags = [(256, 4, [w]), (257, 4, [h]), (258, 3, [bits] * c), (259, 3, [p.get('compression', NONE)]),
+        tags = [(256, 4, [w]), (257, 4, [h]), (258, 3, bits), (259, 3, [p.get('compression', NONE)]),
                 (262, 3, [p.get('photometric', 2 if c >= 3 else 1)]), (277, 3, [c]), (284, 3, [planar])]
         big_t = 16 if bigtiff else 4
         if tile:
@@ -292,17 +332,17 @@ def umax(dt):
     return np.iinfo(dt).max
 
 
-def unpremultiply(a):
-    """c = round(c * max / alpha) clamped; alpha 0 leaves the colour as stored."""
+def unpremultiply(a, m=None):
+    """c = round(c * max / alpha) clamped; alpha 0 leaves the colour as stored. m: largest sample value."""
     a = a.copy()
     al = a[:, :, -1:]
     col = a[:, :, :-1]
     if a.dtype.kind == 'u':
-        m = umax(a.dtype)
-        al64 = al.astype(np.uint64)
-        safe = np.maximum(al64, 1)
-        v = np.minimum((col.astype(np.uint64) * m + al64 // 2) // safe, m)
-        a[:, :, :-1] = np.where(al64 == 0, col, v).astype(a.dtype)
+        m = umax(a.dtype) if m is None else m
+        al_o = al.astype(object)
+        safe = np.maximum(al_o, 1)
+        v = np.minimum((col.astype(object) * m + al_o // 2) // safe, m)   # python ints: exact for 64 bit too
+        a[:, :, :-1] = np.where(al_o == 0, col, v).astype(a.dtype)
     elif a.dtype.kind == 'f':
         with np.errstate(all='ignore'):
             if a.dtype == np.float16:
@@ -320,17 +360,20 @@ def cmyk_to_rgb(a):
     return np.concatenate([rgb, a[:, :, 4:5]], axis=2) if a.shape[2] > 4 else rgb
 
 
-def expected(p):
-    """What PixCodec has to return for a page description."""
-    a = p['arr']
-    if a.ndim == 2:
-        a = a[:, :, None]
+BASE_SAMPLES = {0: 1, 1: 1, 3: 1, 4: 1, 2: 3, 5: 4, 6: 3, 8: 3, 9: 3, 10: 3}
+
+
+def expected(p, raw, scaling='default', convert=True):
+    """What PixCodec has to return, computed from the samples `raw` a third-party decoder returned for the page.
+    scaling: TiffBitScaling (default / none / full); convert: TiffDecodeOptions.ConvertToRgb."""
+    a = raw if raw.ndim == 3 else raw[:, :, None]
     a = a.copy()
-    bits = p.get('bits', a.dtype.itemsize * 8)
+    widths = sample_bits(p, a, a.shape[2])
+    bits = max(widths)
+    uniform = len(set(widths)) == 1
     pm = p.get('photometric', 2 if a.shape[2] >= 3 else 1)
     es = list(p.get('extrasamples', []))
-    base = {0: 1, 1: 1, 3: 1, 4: 1, 2: 3, 5: 4, 6: 3}[pm]
-    extra = a.shape[2] - base
+    extra = a.shape[2] - BASE_SAMPLES[pm]
     alpha = extra == 1 and len(es) >= 1 and es[0] in (1, 2)
     if pm == 3:
         n = 1 << bits
@@ -338,16 +381,24 @@ def expected(p):
         lut = (cm if cm.max() < 256 else cm >> 8).astype(np.uint8).T
         rgb = lut[a[:, :, 0]]
         if alpha:
-            rgb = np.concatenate([rgb, (a[:, :, 1:2].astype(np.uint16) * (255 // (n - 1))).astype(np.uint8)], axis=2)
+            rgb = np.concatenate([rgb, ((a[:, :, 1:2].astype(np.uint32) * 255 + (n - 1) // 2) // (n - 1)).astype(np.uint8)], axis=2)
         return rgb
-    if bits < 8:
-        a = (a * (255 // ((1 << bits) - 1))).astype(np.uint8)
+    smax = umax(a.dtype) if a.dtype.kind == 'u' else None
+    if a.dtype.kind == 'u' and any(w not in (8, 16, 32, 64) for w in widths):
+        if scaling == 'full' or (scaling == 'default' and uniform and bits in (1, 2, 4)):
+            o = a.astype(np.uint64)
+            for c, w in enumerate(widths):
+                im = (1 << w) - 1
+                o[:, :, c] = (o[:, :, c] * smax + im // 2) // im
+            a = o.astype(a.dtype)
+        elif uniform:
+            smax = (1 << bits) - 1
     if pm == 0 and a.dtype.kind == 'u':
-        a[:, :, 0] = umax(a.dtype) - a[:, :, 0]
-    if pm == 5:
+        a[:, :, 0] = smax - a[:, :, 0]
+    if pm == 5 and convert:
         a = cmyk_to_rgb(a)
-    if alpha and es[0] == 1:
-        a = unpremultiply(a)
+    if alpha and es[0] == 1 and (convert or pm not in (5, 8, 9, 10)):
+        a = unpremultiply(a, smax)
     return a
 
 
@@ -361,6 +412,8 @@ def ref_tifffile(path, page=0):
             a = np.moveaxis(a, 0, -1)
         if a.ndim == 2:
             a = a[:, :, None]
+        if a.dtype == bool:
+            a = a.astype(np.uint8)
         return a
 
 
@@ -374,7 +427,7 @@ def ref_cv2(path):
         a = a[:, :, ::-1]
     elif a.shape[2] == 4:
         a = a[:, :, [2, 1, 0, 3]]
-    return a
+    return np.ascontiguousarray(a)
 
 
 def same(a, b):
@@ -382,65 +435,94 @@ def same(a, b):
 
 
 SUMMARY = []
+UNVERIFIED = []
 
 
-def verify(name, path, p, page=0):
-    """Checks the stored samples of one page against the independent decoders. Returns the names that agreed."""
-    raw = p['arr'] if p['arr'].ndim == 3 else p['arr'][:, :, None]
-    bits = p.get('bits', raw.dtype.itemsize * 8)
-    pm = p.get('photometric', 2 if raw.shape[2] >= 3 else 1)
-    ok, failed = [], []
-    # tifffile returns the stored samples without any photometric interpretation
-    try:
-        t = ref_tifffile(path, page)
-        if pm == 6 or p.get('zero_bytecounts'):
-            pass  # tifffile takes zero byte counts literally (libtiff recovers); YCbCr is checked separately
+def third_party(name, path, p, page=0):
+    """Decodes the stored samples of one page with every independent decoder that can read it. All of them have to
+    agree with the fixture source. Returns (samples as decoded by a third party or None, names of the decoders)."""
+    src = p.get('expect_raw', p['arr'])
+    src = src if src.ndim == 3 else src[:, :, None]
+    widths = sample_bits(p, src, src.shape[2])
+    whole = all(w in (8, 16, 32, 64) for w in widths)
+    pm = p.get('photometric', 2 if src.shape[2] >= 3 else 1)
+    ok, failed, got = [], [], None
+
+    def note(who, arr):
+        nonlocal got
+        if same(arr, src):
+            ok.append(who)
+            got = arr if got is None else got
         else:
-            if bits < 8:
-                t = t.astype(np.uint8)  # bilevel comes back as bool
-            (ok if same(t, raw) else failed).append('tifffile')
-    except Exception:
-        pass
-    # OpenCV: gray / RGB(A) only, no palette, and it applies no inversion for 8+ bit MinIsWhite.
+            failed.append(who)
+
+    # tifffile (+ imagecodecs) returns the stored samples without any photometric interpretation
+    if 'raw_decode' in p:
+        who, arr = p['raw_decode'](path)
+        note(who, arr)
+    elif pm != 6 and not p.get('zero_bytecounts'):
+        # (tifffile takes zero byte counts literally where libtiff recovers; YCbCr is checked separately)
+        try:
+            t = ref_tifffile(path, page)
+        except Exception:
+            t = None
+        if t is not None and t.size:
+            note('tifffile', t)
     # libtiff ignores the Predictor tag for PackBits (tifffile honours it, as does PixCodec), so skip that combination.
-    libtiff_ok = not (p.get('compression') == PACKBITS and p.get('predictor', 1) != 1)
-    simple = page == 0 and bits >= 8 and pm in (1, 2) and raw.shape[2] in (1, 3) and 'extrasamples' not in p
-    if libtiff_ok and simple and raw.dtype in (np.uint8, np.uint16):
-        r = subprocess.run(['magick', path, '-depth', str(bits), '-endian', 'LSB', ('gray' if raw.shape[2] == 1 else 'rgb') + ':-'],
+    libtiff_ok = not (p.get('compression') == PACKBITS and p.get('predictor', 1) != 1) and p.get('compression', 1) < 34000
+    simple = page == 0 and whole and pm in (1, 2) and src.shape[2] in (1, 3) and 'extrasamples' not in p
+    if libtiff_ok and simple and src.dtype in (np.uint8, np.uint16):
+        r = subprocess.run(['magick', path, '-depth', str(widths[0]), '-endian', 'LSB', ('gray' if src.shape[2] == 1 else 'rgb') + ':-'],
                            capture_output=True)
-        if r.returncode == 0 and len(r.stdout) == raw.nbytes:
-            (ok if r.stdout == raw.tobytes() else failed).append('magick')
+        if r.returncode == 0 and len(r.stdout) == src.nbytes:
+            note('magick', np.frombuffer(r.stdout, src.dtype).reshape(src.shape))
     if not libtiff_ok or p.get('planar', 1) == 2:
         pass  # OpenCV misreads 16-bit planar files
-    elif page == 0 and bits >= 8 and pm in (1, 2) and raw.shape[2] <= 4 and 'extrasamples' not in p or \
-            (page == 0 and pm == 2 and raw.shape[2] == 4 and p.get('extrasamples') == [2] and bits >= 16):
+    elif page == 0 and whole and pm in (1, 2) and src.shape[2] <= 4 and 'extrasamples' not in p or \
+            (page == 0 and pm == 2 and src.shape[2] == 4 and p.get('extrasamples') == [2] and whole and widths[0] >= 16):
+        # OpenCV: gray / RGB(A) only, no palette, and it applies no inversion for 8+ bit MinIsWhite
         try:
-            c = ref_cv2(path)
-            (ok if same(c, raw) else failed).append('cv2')
+            note('cv2', ref_cv2(path))
         except Exception:
             pass
     if failed:
         raise AssertionError(f'{name}: reference decoder(s) {failed} disagree with the fixture source')
-    return ok
+    return got, ok
 
 
-def emit(name, pages, byteorder='<', bigtiff=False, check=None, subdir=None):
-    """Writes name.tif + name.tif.ref (first page) [+ name.tif.<n>.ref for further pages]."""
+def emit(name, pages, byteorder='<', bigtiff=False, check=None, subdir=None, variants=()):
+    """Writes name.tif + name.tif.ref (first page) [+ name.tif.<n>.ref for further pages]. The .ref is computed from
+    what a third-party decoder returned. A page marked `unverified='reason'` is expected to be unreadable for all of
+    them: it goes to the `unverified` folder with a reference derived from the source array and is listed.
+    variants: extra references name.tif.<variant>.ref for decode options ('none' / 'full' bit scaling, 'raw')."""
     if isinstance(pages, dict):
         pages = [pages]
+    reason = pages[0].get('unverified')
+    if reason:
+        subdir = 'unverified'
     d = OUT if subdir is None else os.path.join(OUT, subdir)
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, name + '.tif')
     write_tiff(path, pages, byteorder, bigtiff)
     agreed = None
     for i, p in enumerate(pages):
-        exp = expected(p)
-        ok = verify(name, path, p, i)
+        raw, ok = third_party(name, path, p, i)
+        if raw is None:
+            if not reason:
+                raise AssertionError(f'{name}: no third-party decoder can read page {i}')
+            raw = p['arr']
+        elif reason:
+            raise AssertionError(f'{name}: marked unverified but {ok} read it')
+        exp = p['ref_from_raw'](raw) if 'ref_from_raw' in p else expected(p, raw)
         if check is not None and i == 0:
             ok += check(path, exp)
         write_ref(path + ('.ref' if i == 0 else f'.{i}.ref'), exp)
+        for v in variants:
+            write_ref(path + f'.{v}.ref', expected(p, raw, convert=False) if v == 'raw' else expected(p, raw, scaling=v))
         agreed = ok if agreed is None else agreed
-    SUMMARY.append((name, agreed))
+    if reason:
+        UNVERIFIED.append((name, reason))
+    SUMMARY.append(((subdir + '/' if subdir else '') + name, agreed if not reason else ['UNVERIFIED: ' + reason]))
     return path
 
 
@@ -501,6 +583,11 @@ CNAME = {NONE: 'none', LZW: 'lzw', DEFLATE: 'deflate', PACKBITS: 'packbits'}
 
 
 def pat(c, dt, w=W, h=H, seed=1):
+    if np.dtype(dt).itemsize == 8 and np.dtype(dt).kind in 'ui':
+        # 64-bit integers: two 32-bit patterns glued together (float based patterns cannot fill 64 bits)
+        hi = test_pattern(w, h, c, np.uint32, seed).astype(np.uint64)
+        lo = test_pattern(w, h, c, np.uint32, seed + 50).astype(np.uint64)
+        return ((hi << np.uint64(32)) | lo).astype(dt)
     a = test_pattern(w, h, c, np.dtype(dt), seed)
     if np.dtype(dt).kind == 'f':
         # elevation-like smooth data plus specials
@@ -574,10 +661,11 @@ def gen_bits_and_photometric():
     for bits in (1, 2, 4):
         n = 1 << bits
         g = (test_pattern(W, H, 1, np.uint8, bits) >> (8 - bits)).astype(np.uint8)
-        emit(f'gray{bits}_minisblack', dict(arr=g, bits=bits, photometric=1, rps=5), check=both(check_pillow('L'), check_magick('gray')))
+        emit(f'gray{bits}_minisblack', dict(arr=g, bits=bits, photometric=1, rps=5), check=both(check_pillow('L'), check_magick('gray')),
+             variants=('none', 'full'))
         # (ImageMagick does not invert 2/4-bit MinIsWhite, Pillow and libtiff's RGBA interface do)
         emit(f'gray{bits}_miniswhite', dict(arr=g, bits=bits, photometric=0),
-             check=check_pillow('L') if bits > 1 else both(check_pillow('L'), check_magick('gray')))
+             check=check_pillow('L') if bits > 1 else both(check_pillow('L'), check_magick('gray')), variants=('none',))
         emit(f'gray{bits}_lzw', dict(arr=g, bits=bits, photometric=1, compression=LZW))
         emit(f'gray{bits}_packbits_tiled', dict(arr=np.tile(g, (3, 2, 1))[:37, :41], bits=bits, photometric=1, compression=PACKBITS, tile=(16, 16)))
         cm = rng.integers(0, 65536, 3 * n).tolist()
@@ -625,8 +713,8 @@ def premul(c, dt, seed=3):
     m = umax(a.dtype)
     a[:3, :, -1] = 0
     a[3:6, :, -1] = m
-    al = a[:, :, -1:].astype(np.uint64)
-    a[:, :, :-1] = (a[:, :, :-1].astype(np.uint64) * al // m).astype(dt)
+    al = a[:, :, -1:].astype(object)
+    a[:, :, :-1] = (a[:, :, :-1].astype(object) * al // m).astype(dt)
     a[8, 2:5, 0] = m  # colour above alpha: must clamp
     return a
 
@@ -674,16 +762,12 @@ def gen_structure():
     emit('no_bytecounts_u8_rgb', dict(arr=pat(3, 'uint8'), no_bytecounts=True))
     emit('no_bytecounts_lzw', dict(arr=pat(3, 'uint8'), compression=LZW, no_bytecounts=True))
     emit('zero_bytecounts_u16_rgb', dict(arr=pat(3, 'uint16'), zero_bytecounts=True, rps=5))
-    emit('zero_bytecounts_lzw_pred2', dict(arr=pat(3, 'uint8'), compression=LZW, predictor=2, zero_bytecounts=True, rps=6))
     sp = pat(1, 'float32', 50, 37)
     sp_exp = sp.copy()
     sp_exp[0:16, 16:32] = 0
     sp_exp[32:48, 0:16] = 0
-    p = dict(arr=sp, compression=DEFLATE, predictor=3, tile=(16, 16), sparse={1, 8})
-    path = os.path.join(OUT, 'sparse_tiles_f32.tif')
-    write_tiff(path, [p])
-    write_ref(path + '.ref', sp_exp)
-    SUMMARY.append(('sparse_tiles_f32', ['by construction (GDAL style sparse tiles)']))
+    # GDAL style sparse file: tiles with offset 0 / count 0 are not stored and read as zeros
+    emit('sparse_tiles_f32', dict(arr=sp, compression=DEFLATE, predictor=3, tile=(16, 16), sparse={1, 8}, expect_raw=sp_exp))
 
     icc = bytes(rng.integers(0, 256, 300).astype(np.uint8))
     emit('meta_res_icc_orient', dict(arr=pat(3, 'uint8'), tags=[
@@ -788,8 +872,67 @@ def gen_ycbcr():
         src = int(np.abs(ref.astype(int) - rgb[:h, :w].astype(int)).max())
         assert src < 40, (name, src)
         write_ref(path + '.ref', ref)
+        write_tol(path, 2)   # libtiff converts with fixed point tables, PixCodec with floats
         SUMMARY.append(('ycbcr/' + name, ['cv2 (libtiff RGBA)', f'max error vs. the RGB source {src}']))
 
+    def build_planar(name, w, h, sh, sv, comp, rps, tile=None):
+        # PlanarConfiguration 2: a full resolution Y plane and Cb / Cr planes reduced by the subsampling factors
+        rgb = test_pattern(w, h, 3, np.uint8, 22).astype(np.float64)
+        y = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+        cb = (rgb[:, :, 2] - y) / 1.772 + 128
+        cr = (rgb[:, :, 0] - y) / 1.402 + 128
+        ph, pw = -(-h // sv) * sv, -(-w // sh) * sh
+        pad = lambda a: np.pad(a, ((0, ph - h), (0, pw - w)), mode='edge')
+        q = lambda a: np.clip(np.round(a), 0, 255).astype(np.uint8)
+        planes = [q(y), q(pad(cb).reshape(ph // sv, sv, pw // sh, sh).mean(axis=(1, 3))), q(pad(cr).reshape(ph // sv, sv, pw // sh, sh).mean(axis=(1, 3)))]
+        chunks = []
+        for i, pl in enumerate(planes):
+            fh, fv = (1, 1) if i == 0 else (sh, sv)
+            if tile:
+                tw, th = tile[0] // fh, tile[1] // fv
+                for ty in range(0, -(-h // tile[1])):
+                    for tx in range(0, -(-w // tile[0])):
+                        blk = pl[ty * th:(ty + 1) * th, tx * tw:(tx + 1) * tw]
+                        blk = np.pad(blk, ((0, th - blk.shape[0]), (0, tw - blk.shape[1])))
+                        chunks.append(blk.tobytes())
+            else:
+                for r in range(0, h, rps):
+                    chunks.append(pl[r // fv:-(-min(r + rps, h) // fv)].tobytes())
+        chunks = [lzw_encode(c) if comp == LZW else zlib.compress(c) if comp == DEFLATE else c for c in chunks]
+        verified = sh == 1 and sv == 1
+        d = os.path.join(OUT, 'ycbcr' if verified else 'unverified')
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name + '.tif')
+        page = dict(arr=np.zeros((h, w, 3), np.uint8), photometric=6, planar=2, compression=comp, rps=rps, raw_chunks=chunks, tags=[
+            (530, 3, [sh, sv]), (532, 5, [(0, 1), (255, 1), (128, 1), (255, 1), (128, 1), (255, 1)])])
+        if tile:
+            page['tile'] = tile
+        write_tiff(path, [page])
+        if verified:
+            ref = ref_cv2(path)
+            src = int(np.abs(ref.astype(int) - rgb).max())
+            assert src < 6, (name, src)
+            write_ref(path + '.ref', ref)
+            write_tol(path, 2)
+            SUMMARY.append(('ycbcr/' + name, ['cv2 (libtiff RGBA)', f'max error vs. the RGB source {src}']))
+        else:
+            # libtiff refuses subsampled planar YCbCr and nothing else here converts it: reference = replicate the
+            # chroma samples and apply the same conversion the verified contiguous / 1x1 planar fixtures check
+            assert cv2.imread(path, cv2.IMREAD_UNCHANGED) is None
+            up = lambda pl: np.repeat(np.repeat(pl, sv, axis=0), sh, axis=1)[:h, :w].astype(np.float64)
+            yy, cbb, crr = planes[0].astype(np.float64), up(planes[1]) - 128, up(planes[2]) - 128
+            ref = np.stack([yy + 1.402 * crr, yy - (0.114 * 1.772 * cbb + 0.299 * 1.402 * crr) / 0.587, yy + 1.772 * cbb], axis=-1)
+            write_ref(path + '.ref', np.clip(np.floor(ref + 0.5), 0, 255).astype(np.uint8))
+            write_tol(path, 1)
+            reason = f'planar YCbCr with {sh}x{sv} subsampled chroma planes (libtiff: not supported)'
+            UNVERIFIED.append((name, reason))
+            SUMMARY.append(('unverified/' + name, ['UNVERIFIED: ' + reason]))
+
+    build_planar('ycbcr_planar_1x1_none', 23, 17, 1, 1, NONE, 6)
+    build_planar('ycbcr_planar_1x1_lzw', 23, 17, 1, 1, LZW, 17)
+    build_planar('ycbcr_planar_1x1_deflate_tiled', 40, 33, 1, 1, DEFLATE, 0, tile=(16, 16))
+    build_planar('ycbcr_planar_2x2_none', 23, 17, 2, 2, NONE, 8)
+    build_planar('ycbcr_planar_2x1_lzw_tiled', 40, 33, 2, 1, LZW, 0, tile=(16, 16))
     build('ycbcr_2x2_none', 24, 16, 2, 2, NONE, 16)
     build('ycbcr_2x2_odd_lzw', 23, 17, 2, 2, LZW, 8)
     build('ycbcr_2x1_deflate', 23, 17, 2, 1, DEFLATE, 5)
@@ -859,6 +1002,510 @@ def gen_jpeg():
         write_ref(path + '.ref', ref)
         SUMMARY.append(('jpeg/' + name, [f'pillow (libtiff/libjpeg): {desc}, mean error vs. source {err:.2f}']))
     os.remove(src)
+
+
+def write_tol(path, tol):
+    """Sidecar with the largest allowed sample difference for fixtures whose reference cannot be bit exact."""
+    with open(path + '.tol', 'w') as f:
+        f.write(repr(float(tol)))
+
+
+def gen_depths():
+    """Odd bit depths (packed MSB first), 64-bit integers, 24-bit floats, wide palettes."""
+    rng = np.random.default_rng(21)
+
+    def rnd(bits, c=1, w=W, h=H, signed=False):
+        dt = np.dtype(f'{"i" if signed else "u"}{1 if bits <= 8 else 2 if bits <= 16 else 4 if bits <= 32 else 8}')
+        lo, hi = (-(1 << (bits - 1)), 1 << (bits - 1)) if signed else (0, 1 << bits)
+        a = rng.integers(lo, hi, (h, w, c), dtype=np.int64 if bits < 64 else None).astype(dt) if bits < 64 else \
+            rng.integers(0, 1 << 63, (h, w, c), dtype=np.uint64).astype(dt) * (1 if signed else 2)
+        a[0, 0, :] = hi - 1 if bits < 64 else np.iinfo(dt).max
+        a[0, 1, :] = lo if bits < 64 else np.iinfo(dt).min
+        return a
+
+    for bits in (3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 17, 20, 24, 28, 31):
+        emit(f'gray{bits}bit', dict(arr=rnd(bits), bits=bits, rps=5), variants=('none', 'full'))
+    emit('gray12bit_miniswhite_lzw', dict(arr=rnd(12), bits=12, photometric=0, compression=LZW), variants=('full',))
+    emit('gray10bit_packbits_tiled', dict(arr=rnd(10, 1, 41, 37), bits=10, compression=PACKBITS, tile=(16, 16)))
+    emit('rgb12bit_lzw', dict(arr=rnd(12, 3), bits=12, compression=LZW, rps=6))
+    emit('rgb12bit_planar_deflate_tiled', dict(arr=rnd(12, 3, 41, 37), bits=12, compression=DEFLATE, planar=2, tile=(16, 16)))
+    emit('be_rgb14bit', dict(arr=rnd(14, 3), bits=14), byteorder='>')
+    emit('big_gray24bit_deflate', dict(arr=rnd(24), bits=24, compression=DEFLATE), bigtiff=True)
+    emit('rgb6bit_planar', dict(arr=rnd(6, 3), bits=6, planar=2), variants=('full',))
+    emit('rgba12bit_assoc', dict(arr=premul(4, 'uint16', seed=6) >> 4, bits=12, extrasamples=[1]), variants=('full',))
+    emit('graya10bit_unassoc', dict(arr=rnd(10, 2), bits=10, extrasamples=[2]))
+    emit('multiband5_12bit', dict(arr=rnd(12, 5), bits=12, photometric=1, extrasamples=[0] * 4))
+
+    def decode565(path):
+        # tifffile reads 5-6-5 words in the file byte order and rescales them; taken through its unpack_rgb here
+        # without rescaling. Packed bits are MSB first whatever the byte order (TIFF 6.0), i.e. big endian words.
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            with open(path, 'rb') as f:
+                data = b''
+                for o, n in zip(pg.dataoffsets, pg.databytecounts):
+                    f.seek(o)
+                    data += f.read(n)
+            words = np.frombuffer(data, '>u2').astype('<u2').tobytes()
+            u = tifffile.tifffile.unpack_rgb(words, np.uint8, (5, 6, 5), rescale=False)
+            return 'tifffile.unpack_rgb', u.reshape(pg.imagelength, pg.imagewidth, 3)
+
+    a565 = np.dstack([rng.integers(0, 32, (H, W)), rng.integers(0, 64, (H, W)), rng.integers(0, 32, (H, W))]).astype(np.uint8)
+    emit('be_rgb565', dict(arr=a565, bits=[5, 6, 5], raw_decode=decode565, rps=4), byteorder='>', variants=('full',))
+
+    cm12 = rng.integers(0, 65536, 3 * 4096).tolist()
+    emit('palette12', dict(arr=rnd(12), bits=12, photometric=3, colormap=cm12))
+    # a 16-bit colormap is 393 KB whatever the image size: one fixture only, with a regular (compressible) map
+    i = np.arange(65536)
+    cm16 = np.concatenate([i, 65535 - i, (i * 7) & 0xFFFF]).tolist()
+    emit('be_palette16_deflate', dict(arr=rnd(16), photometric=3, colormap=cm16, compression=DEFLATE, predictor=2), byteorder='>',
+         check=check_magick('rgb', tol=1))
+
+    # 64-bit integers
+    emit('u64_gray_none', dict(arr=rnd(64), rps=5))
+    emit('i64_gray_none', dict(arr=rnd(64, signed=True)))
+    emit('u64_rgb_lzw_pred2', dict(arr=rnd(64, 3), compression=LZW, predictor=2, rps=6))
+    emit('i64_rgb_deflate_pred2', dict(arr=rnd(64, 3, signed=True), compression=DEFLATE, predictor=2))
+    emit('be_u64_gray_deflate_pred2', dict(arr=rnd(64), compression=DEFLATE, predictor=2), byteorder='>')
+    emit('be_i64_rgb_none', dict(arr=rnd(64, 3, signed=True)), byteorder='>')
+    emit('u64_rgb_planar_tiled_packbits', dict(arr=rnd(64, 3, 41, 37), compression=PACKBITS, planar=2, tile=(16, 16)))
+    emit('u64_miniswhite', dict(arr=rnd(64), photometric=0))
+    emit('u64_rgba_assoc', dict(arr=premul(4, 'uint64', seed=8), extrasamples=[1]))
+    emit('i64_multiband4_lzw', dict(arr=rnd(64, 4, signed=True), photometric=1, extrasamples=[0] * 3, compression=LZW))
+
+    # 24-bit floats (values representable in 24 bits: 16 bit mantissa)
+    f24 = pat(3, 'float16').astype(np.float32)
+    f24[0, 2, 0] = 2.0 ** -70   # subnormal as a 24-bit float
+    f24[0, 3, 0] = -np.inf
+    emit('f24_gray_none', dict(arr=f24[:, :, :1], float24=True, sampleformat=3, rps=5))
+    emit('be_f24_rgb_none', dict(arr=f24, float24=True, sampleformat=3), byteorder='>')
+    emit('f24_rgb_planar_lzw', dict(arr=f24, float24=True, sampleformat=3, planar=2, compression=LZW))
+    emit('f24_gray_deflate_tiled', dict(arr=np.tile(f24[:, :, :1], (3, 2, 1))[:37, :41], float24=True, sampleformat=3,
+                                       compression=DEFLATE, tile=(16, 16)))
+
+    # no installed decoder reads these: listed, kept apart
+    emit('i12_gray', dict(arr=rnd(12, signed=True), bits=12, unverified='signed 12-bit packed samples (tifffile returns nothing, libtiff readers refuse)'))
+    emit('i5_rgb_lzw', dict(arr=rnd(5, 3, signed=True), bits=5, compression=LZW, unverified='signed 5-bit packed samples'))
+    emit('i20_gray_be', dict(arr=rnd(20, signed=True), bits=20, unverified='signed 20-bit packed samples'), byteorder='>')
+    emit('f24_gray_deflate_pred3', dict(arr=f24[:, :, :1], float24=True, sampleformat=3, compression=DEFLATE, predictor=3,
+                                       unverified='floating point predictor on 24-bit floats (tifffile: "unpredicting float24 not supported")'))
+
+
+def gen_more_codecs():
+    """ZSTD, LZMA and WebP compressed files (decoded by tifffile + imagecodecs)."""
+    for comp, cn in [(50000, 'zstd'), (34925, 'lzma')]:
+        kw = dict(subdir=cn)
+        emit(f'{cn}_u8_rgb', dict(arr=pat(3, 'uint8'), compression=comp, rps=6), **kw)
+        emit(f'{cn}_u8_rgb_pred2', dict(arr=pat(3, 'uint8'), compression=comp, predictor=2), **kw)
+        emit(f'{cn}_u16_rgba_pred2_tiled', dict(arr=pat(4, 'uint16', 50, 37), compression=comp, predictor=2, tile=(16, 16), extrasamples=[2]), **kw)
+        emit(f'{cn}_f32_gray_pred3', dict(arr=pat(1, 'float32'), compression=comp, predictor=3, rps=5), **kw)
+        emit(f'{cn}_be_f64_rgb_pred3_planar', dict(arr=pat(3, 'float64'), compression=comp, predictor=3, planar=2), byteorder='>', **kw)
+        emit(f'{cn}_big_i16_dem_pred2_tiled', dict(arr=pat(1, 'int16', 70, 45), compression=comp, predictor=2, tile=(32, 32)), bigtiff=True, **kw)
+        emit(f'{cn}_gray1', dict(arr=(test_pattern(37, 21, 1, np.uint8, 9) >> 7).astype(np.uint8), bits=1, compression=comp), **kw)
+        emit(f'{cn}_gray12bit', dict(arr=(pat(1, 'uint16') >> 4), bits=12, compression=comp), **kw)
+        emit(f'{cn}_u64_gray_pred2', dict(arr=pat(1, 'uint64'), compression=comp, predictor=2), **kw)
+    # written by tifffile itself
+    for cn in ('zstd', 'lzma'):
+        path = os.path.join(OUT, cn, f'{cn}_ext_tifffile_u16_rgb_tiled.tif')
+        tifffile.imwrite(path, pat(3, 'uint16', 70, 50), photometric='rgb', compression=cn, predictor=True, tile=(32, 32), metadata=None)
+        emit_external(f'{cn}/{cn}_ext_tifffile_u16_rgb_tiled', path, ref_tifffile(path), ['tifffile'])
+
+    # WebP: lossless files are bit exact; lossy ones are compared against libwebp with a tolerance
+    kw = dict(subdir='webp')
+    emit('webp_rgb_lossless_strips', dict(arr=pat(3, 'uint8', 40, 30), compression=50001, rps=8), **kw)
+    emit('webp_rgba_lossless_tiled', dict(arr=pat(4, 'uint8', 50, 37), compression=50001, tile=(32, 16), extrasamples=[2]), **kw)
+    emit('webp_rgb_lossless_1x1', dict(arr=pat(3, 'uint8', 1, 1), compression=50001), **kw)
+    for name, arr, kwargs in [
+        ('webp_ext_tifffile_rgb_lossy', pat(3, 'uint8', 70, 50), dict(photometric='rgb', compression='webp', compressionargs={'level': 80})),
+        ('webp_ext_tifffile_rgb_lossy_tiled', pat(3, 'uint8', 70, 50), dict(photometric='rgb', compression='webp', tile=(32, 32), compressionargs={'level': 80})),
+        ('webp_ext_tifffile_rgba_lossless', pat(4, 'uint8', 45, 31), dict(photometric='rgb', compression='webp', extrasamples=['unassalpha'],
+                                                                         compressionargs={'lossless': True})),
+    ]:
+        path = os.path.join(OUT, 'webp', name + '.tif')
+        tifffile.imwrite(path, arr, metadata=None, **kwargs)
+        emit_external('webp/' + name, path, ref_tifffile(path), ['tifffile (libwebp)'])
+        if 'lossy' in name:
+            write_tol(path, 4)
+
+
+def gen_lab():
+    """CIELab / ICCLab / ITULab. PixCodec converts to sRGB with the textbook D50 Lab -> XYZ -> (Bradford) sRGB maths;
+    the reference is LittleCMS (through Pillow's ImageCms: Lab D50 profile -> sRGB profile) applied to the samples
+    tifffile read from the file. LittleCMS works on 8-bit Lab here, so 16-bit and ITULab samples are first rounded
+    to 8-bit Lab - hence the tolerances (8-bit CIELab/ICCLab: 2 levels; ITULab and 16-bit data: the rounding to 8-bit Lab
+    dominates), which are the measured distance between the two computations plus a margin."""
+    from PIL import ImageCms
+    srgb_p, lab_p = ImageCms.createProfile('sRGB'), ImageCms.createProfile('LAB')
+    # NOOPTIMIZE: evaluate the real pipeline. By default LittleCMS interpolates 8-bit transforms in a 3D table,
+    # which is off by up to 32 levels near the gamut boundary.
+    to_lab = ImageCms.buildTransform(srgb_p, lab_p, 'RGB', 'LAB', flags=ImageCms.Flags.NOOPTIMIZE)
+    to_rgb = ImageCms.buildTransform(lab_p, srgb_p, 'LAB', 'RGB', flags=ImageCms.Flags.NOOPTIMIZE)
+    rgb = test_pattern(31, 23, 3, np.uint8, 41)
+    rgb[0, :8] = [[0, 0, 0], [255, 255, 255], [255, 0, 0], [0, 255, 0], [0, 0, 255], [128, 128, 128], [255, 255, 0], [0, 255, 255]]
+    # Pillow's LAB mode is the TIFF CIELab encoding: L 0..255, a and b as two's complement bytes
+    pil = np.asarray(ImageCms.applyTransform(Image.fromarray(rgb), to_lab))
+    L, A, B = pil[:, :, 0].astype(np.int32), pil[:, :, 1].astype(np.int8).astype(np.int32), pil[:, :, 2].astype(np.int8).astype(np.int32)
+
+    def to_float(raw, pm):
+        """Stored samples -> L*, a*, b* (the encodings PixCodec documents)."""
+        r = raw[:, :, :3].astype(np.float64)
+        if raw.dtype == np.uint8:
+            l = r[:, :, 0] * 100 / 255
+            if pm == 8:
+                a, b = raw[:, :, 1].astype(np.int8).astype(np.float64), raw[:, :, 2].astype(np.int8).astype(np.float64)
+            elif pm == 9:
+                a, b = r[:, :, 1] - 128, r[:, :, 2] - 128
+            else:
+                a, b = (r[:, :, 1] - 128) * 170 / 255, (r[:, :, 2] - 96) * 200 / 255
+        else:
+            if pm == 8:
+                l = r[:, :, 0] * 100 / 65535
+                a, b = raw[:, :, 1].astype(np.int16) / 256.0, raw[:, :, 2].astype(np.int16) / 256.0
+            elif pm == 9:
+                l, a, b = r[:, :, 0] * 100 / 65280, r[:, :, 1] / 256 - 128, r[:, :, 2] / 256 - 128
+            else:
+                l, a, b = r[:, :, 0] * 100 / 65535, (r[:, :, 1] - 32768) * 170 / 65535, (r[:, :, 2] - 24576) * 200 / 65535
+        return l, a, b
+
+    def formula(raw, pm):
+        """The documented conversion, in float64 (only used to report how far LittleCMS is from it)."""
+        l, a, b = to_float(raw, pm)
+        fy = (l + 16) / 116
+        fx, fz = fy + a / 500, fy - b / 200
+        g = lambda t: np.where(t > 6 / 29, t ** 3, 3 * (6 / 29) ** 2 * (t - 4 / 29))
+        x, y, z = 0.96422 * g(fx), g(fy), 0.82521 * g(fz)
+        lin = np.stack([3.1338561 * x - 1.6168667 * y - 0.4906146 * z, -0.9787684 * x + 1.9161415 * y + 0.0334540 * z,
+                        0.0719453 * x - 0.2289914 * y + 1.4052427 * z], axis=-1).clip(0, 1)
+        return np.where(lin <= 0.0031308, 12.92 * lin, 1.055 * lin ** (1 / 2.4) - 0.055)
+
+    def make(name, raw_arr, pm, tol, **kw):
+        def ref_from_raw(raw):
+            l, a, b = to_float(raw, pm)
+            lab8 = np.stack([np.round(l * 255 / 100).clip(0, 255), np.round(a).clip(-128, 127).astype(np.int64) & 255,
+                             np.round(b).clip(-128, 127).astype(np.int64) & 255], axis=-1).astype(np.uint8)
+            out = np.asarray(ImageCms.applyTransform(Image.fromarray(lab8, 'LAB'), to_rgb))
+            scale = 255 if raw.dtype == np.uint8 else 65535
+            mine = np.round(formula(raw, pm) * scale)
+            ref = out.astype(raw.dtype) * (1 if raw.dtype == np.uint8 else 257)
+            dist = float(np.abs(mine - ref).max())
+            assert dist <= tol * 0.8, (name, dist, tol)
+            notes.append(f'LittleCMS vs. formula: max {dist:.0f}, tolerance {tol}')
+            return np.concatenate([ref, raw[:, :, 3:]], axis=2) if raw.shape[2] > 3 else ref
+        notes = []
+        p = dict(arr=raw_arr, photometric=pm, ref_from_raw=ref_from_raw, **kw)
+        byteorder = p.pop('byteorder', '<')
+        path = emit(name, p, subdir='lab', byteorder=byteorder, variants=('raw',))
+        write_tol(path, tol)
+        SUMMARY[-1] = (SUMMARY[-1][0], SUMMARY[-1][1] + ['LittleCMS'] + notes)
+
+    u8 = lambda *c: np.stack(c, axis=-1).astype(np.uint8)
+    u16 = lambda *c: np.stack(c, axis=-1).astype(np.uint16)
+    alpha8 = pat(1, 'uint8', 31, 23, seed=9)
+    make('cielab8', u8(L, A & 255, B & 255), 8, 2, rps=6)
+    make('cielab8_lzw_planar', u8(L, A & 255, B & 255), 8, 2, compression=LZW, planar=2)
+    make('cielab8_alpha', np.concatenate([u8(L, A & 255, B & 255), alpha8], axis=2), 8, 2, extrasamples=[2])
+    make('icclab8', u8(L, A + 128, B + 128), 9, 2, compression=DEFLATE, predictor=2)
+    make('itulab8', u8(L, np.round(A * 255 / 170 + 128).clip(0, 255), np.round(B * 255 / 200 + 96).clip(0, 255)), 10, 12, tile=(16, 16))
+    make('cielab16', u16(L * 257, (A * 256) & 0xFFFF, (B * 256) & 0xFFFF), 8, 400)
+    make('be_cielab16_deflate', u16(L * 257 + 100, (A * 256 + 77) & 0xFFFF, (B * 256 - 90) & 0xFFFF).clip(0, 65535).astype(np.uint16),
+         8, 3200, compression=DEFLATE, predictor=2, byteorder='>')
+    make('icclab16', u16(np.round(L * 65280 / 255), (A + 128) * 256, (B + 128) * 256), 9, 400)
+    make('itulab16', u16(L * 257, np.round(A * 65535 / 170 + 32768).clip(0, 65535), np.round(B * 65535 / 200 + 24576).clip(0, 65535)), 10, 400)
+
+
+def sgilog_rle(planes_rows):
+    """Run length codes one row of byte planes the way SGILOG stores it (runs of 3+ equal bytes, else literals)."""
+    out = bytearray()
+    for row in planes_rows:
+        i, n = 0, len(row)
+        while i < n:
+            run = 1
+            while i + run < n and run < 127 and row[i + run] == row[i]:
+                run += 1
+            if run >= 3:
+                out += bytes([126 + run, row[i]])
+                i += run
+                continue
+            start = i
+            i += 1
+            while i < n and i - start < 127 and not (i + 2 < n and row[i] == row[i + 1] == row[i + 2]):
+                i += 1
+            out.append(i - start)
+            out += row[start:i]
+    return bytes(out)
+
+
+def gen_logluv():
+    """SGI LogLuv (32-bit) files written by libtiff through OpenCV, and a hand-packed LogL (16-bit luminance) file.
+    Reference: libtiff's float decoding through OpenCV (which converts XYZ to linear RGB with its XYZ2BGR matrix)."""
+    d = os.path.join(OUT, 'logluv')
+    os.makedirs(d, exist_ok=True)
+    rgb = np.abs(test_pattern(47, 31, 3, np.float32, 51)).astype(np.float32) * 0.6 + 0.01
+    rgb[:4, :9] = 0            # black: coded as zero luminance
+    rgb[4:8, :9] = 1.0         # flat area: runs
+    rgb[10, 3] = [900.0, 0.5, 0.01]
+    for name, extra in [('logluv32_strip', []), ('logluv32_multistrip', [cv2.IMWRITE_TIFF_ROWSPERSTRIP, 7])]:
+        path = os.path.join(d, name + '.tif')
+        assert cv2.imwrite(path, np.ascontiguousarray(rgb[:, :, ::-1]), [cv2.IMWRITE_TIFF_COMPRESSION, 34676] + extra)
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            assert int(pg.photometric) == 32845 and int(pg.compression) == 34676, (pg.photometric, pg.compression)
+            desc = f'{len(pg.dataoffsets)} strip(s)'
+        ref = ref_cv2(path)
+        assert ref.dtype == np.float32 and float(np.abs(ref - rgb).max() / 900) < 0.05
+        write_ref(path + '.ref', ref)
+        write_tol(path, 2e-3)
+        SUMMARY.append(('logluv/' + name, [f'cv2 (libtiff SGILOG float + XYZ2BGR), written by cv2/libtiff, {desc}']))
+
+    # LogL: 16-bit log luminance per pixel, big endian byte planes, run length coded per row
+    y = np.abs(test_pattern(37, 21, 1, np.float32, 52))[:, :, 0] * 3 + 0.02
+    y[:3, :10] = 0
+    y[3:6, :10] = 0.25
+    le = np.where(y > 0, np.floor(256 * (np.log2(np.maximum(y, 1e-30)) + 64)), 0).astype(np.uint16)
+    chunks = []
+    for r in range(0, 21, 8):
+        rows = []
+        for row in le[r:r + 8]:
+            rows += [bytes((row >> 8).astype(np.uint8)), bytes((row & 255).astype(np.uint8))]
+        chunks.append(sgilog_rle(rows))
+    # No installed decoder returns LogL as floats (OpenCV only switches libtiff to float output for LogLuv, ImageMagick
+    # maps it to display values), so this one is listed as unverified: the reference is the defining formula
+    # Y = 2^((Le + 0.5) / 256 - 64). The run length decoding and that formula are the ones the LogLuv fixtures verify.
+    d = os.path.join(OUT, 'unverified')
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, 'logl16.tif')
+    write_tiff(path, [dict(arr=np.zeros((21, 37, 1), np.int16), photometric=32844, compression=34676, rps=8, raw_chunks=chunks)])
+    ref = np.where(le > 0, np.exp2((le.astype(np.float64) + 0.5) / 256 - 64), 0).astype(np.float32)
+    write_ref(path + '.ref', ref)
+    write_tol(path, 1e-6)
+    reason = 'LogL (16-bit log luminance, photometric 32844): no decoder here returns it as floats'
+    UNVERIFIED.append(('logl16', reason))
+    SUMMARY.append(('unverified/logl16', ['UNVERIFIED: ' + reason]))
+
+
+def gen_jpeg_deep():
+    """JPEG-in-TIFF beyond 8-bit baseline: 12-bit DCT (written by tifffile / libjpeg-turbo) and lossless JPEG
+    (SOF3, DNG style) streams from imagecodecs wrapped into strips and tiles. References: tifffile + imagecodecs."""
+    rng = np.random.default_rng(61)
+    d12 = os.path.join(OUT, 'jpeg12')
+    os.makedirs(d12, exist_ok=True)
+    g12 = (test_pattern(70, 52, 1, np.uint16, 33)[:, :, 0] >> 4)
+    rgb12 = (test_pattern(70, 52, 3, np.uint16, 34) >> 4)
+    for name, arr, kw in [
+        ('jpeg12_gray_strips', g12, dict(rowsperstrip=16)),
+        ('jpeg12_gray_tiles', g12, dict(tile=(32, 32))),
+        ('jpeg12_ycbcr_strips', rgb12, dict(photometric='ycbcr', rowsperstrip=32)),
+        ('jpeg12_ycbcr_tiles', rgb12, dict(photometric='ycbcr', tile=(48, 32))),
+        ('jpeg12_ycbcr_420_strips', rgb12, dict(photometric='rgb')),
+    ]:
+        path = os.path.join(d12, name + '.tif')
+        tifffile.imwrite(path, arr, compression='jpeg', bitspersample=12, metadata=None, **kw)
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            assert int(pg.compression) == 7 and pg.bitspersample == 12, (name, pg.compression, pg.bitspersample)
+            desc = f'photometric {int(pg.photometric)}, {"tiles" if pg.is_tiled else "strips"} x{len(pg.dataoffsets)}' \
+                   f'{", JPEGTables" if 347 in pg.tags else ""}'
+        ref = ref_tifffile(path)
+        # (tifffile's writer is quirky here: asked for 'rgb' it writes a proper 4:2:0 YCbCr file, asked for 'ycbcr' it
+        # stores the given samples as Y, Cb, Cr unconverted. Both are valid YCbCr files; the reference is what
+        # libjpeg-turbo makes of the streams.)
+        assert ref.dtype == np.uint16 and int(pg.photometric) == (1 if arr.ndim == 2 else 6)
+        write_ref(path + '.ref', ref)
+        SUMMARY.append(('jpeg12/' + name, [f'tifffile (libjpeg-turbo 12 bit): {desc}']))
+
+    g16 = rng.integers(0, 65536, (37, 50), dtype=np.uint16)
+    g16[:8] = test_pattern(50, 8, 1, np.uint16, 35)[:, :, 0]
+    g8 = test_pattern(50, 37, 1, np.uint8, 36)[:, :, 0]
+    rgb8 = test_pattern(50, 37, 3, np.uint8, 37)
+    rgb16 = test_pattern(50, 37, 3, np.uint16, 38)
+
+    def lossless(a, bits):
+        return imagecodecs.jpeg8_encode(a, lossless=True, bitspersample=bits, colorspace='rgb' if a.ndim == 3 and a.shape[2] == 3 else None,
+                                        outcolorspace='rgb' if a.ndim == 3 and a.shape[2] == 3 else None)
+
+    def wrap(name, a, bits, tile=None, rps=None, reshape=None, **extra):
+        """a: (H,W[,C]). reshape: encode every strip/tile as a frame of that many components (DNG colour filter data)."""
+        h, w = a.shape[:2]
+        c = 1 if a.ndim == 2 else a.shape[2]
+        chunks = []
+        if tile:
+            for y in range(0, h, tile[1]):
+                for x in range(0, w, tile[0]):
+                    blk = a[y:y + tile[1], x:x + tile[0]]
+                    pad = [(0, tile[1] - blk.shape[0]), (0, tile[0] - blk.shape[1])] + ([(0, 0)] if a.ndim == 3 else [])
+                    blk = np.ascontiguousarray(np.pad(blk, pad))
+                    if reshape:
+                        blk = blk.reshape(tile[1], tile[0] // reshape, reshape)
+                    chunks.append(lossless(blk, bits))
+            page = dict(tile=tile)
+        else:
+            rps = rps or h
+            chunks = [lossless(np.ascontiguousarray(a[y:y + rps]), bits) for y in range(0, h, rps)]
+            page = dict(rps=rps)
+        page.update(arr=a if a.ndim == 3 else a[:, :, None], bits=bits if bits not in (8, 16) else a.dtype.itemsize * 8,
+                    compression=7, raw_chunks=chunks, **extra)
+        if bits not in (8, 16):
+            page['bits'] = [bits] * c
+        dd = os.path.join(OUT, 'jpegll')
+        os.makedirs(dd, exist_ok=True)
+        path = os.path.join(dd, name + '.tif')
+        write_tiff(path, [page])
+        src = a if a.ndim == 3 else a[:, :, None]
+        try:
+            ref = ref_tifffile(path)
+            who = 'tifffile + imagecodecs'
+        except Exception:
+            ref = None
+        if ref is None or not same(ref, src):
+            # tifffile does not undo the DNG frame reshaping: decode the tile streams with imagecodecs instead
+            assert reshape and tile
+            ref = np.zeros_like(src)
+            i = 0
+            for y in range(0, h, tile[1]):
+                for x in range(0, w, tile[0]):
+                    blk = imagecodecs.jpeg8_decode(chunks[i]).reshape(tile[1], tile[0], c)
+                    ref[y:y + tile[1], x:x + tile[0]] = blk[:h - y, :w - x]
+                    i += 1
+            who = 'imagecodecs (libjpeg-turbo) per tile, frames flattened to rows'
+        assert same(ref, src), name
+        write_ref(path + '.ref', ref)
+        SUMMARY.append(('jpegll/' + name, [who]))
+
+    wrap('jpegll_gray16_strips', g16, 16, rps=10)
+    wrap('jpegll_gray16_tiles', g16, 16, tile=(32, 16))
+    wrap('jpegll_gray12', g16 >> 4, 12, rps=37)
+    wrap('jpegll_gray10_tiles', g16 >> 6, 10, tile=(16, 32))
+    wrap('jpegll_gray8', g8, 8, rps=16)
+    wrap('jpegll_rgb8_tiles', rgb8, 8, tile=(32, 32), photometric=2)
+    wrap('jpegll_rgb16_strips', rgb16, 16, rps=19, photometric=2)
+    wrap('jpegll_dng_cfa16_2comp_tiles', g16, 16, tile=(32, 16), reshape=2)
+    wrap('jpegll_dng_cfa12_2comp_tile', g16 >> 4, 12, tile=(64, 48), reshape=2)
+
+
+def parse_jpeg(b):
+    """Splits a baseline JPEG into the pieces an old-style JPEG TIFF spreads over tags."""
+    p = 2
+    q, dc, ac, sof, dri = {}, {}, {}, None, 0
+    while True:
+        assert b[p] == 0xFF, p
+        m = b[p + 1]
+        n = struct.unpack('>H', b[p + 2:p + 4])[0]
+        seg = b[p + 4:p + 2 + n]
+        if m == 0xDB:
+            for i in range(0, len(seg), 65):
+                q[seg[i] & 15] = seg[i + 1:i + 65]
+        elif m == 0xC4:
+            i = 0
+            while i < len(seg):
+                k = sum(seg[i + 1:i + 17])
+                (dc if seg[i] >> 4 == 0 else ac)[seg[i] & 15] = seg[i + 1:i + 17 + k]
+                i += 17 + k
+        elif m == 0xC0:
+            h, w, k = struct.unpack('>HHB', seg[1:6])
+            sof = (h, w, [(seg[6 + 3 * c], seg[7 + 3 * c], seg[8 + 3 * c]) for c in range(k)])
+        elif m == 0xDD:
+            dri = struct.unpack('>H', seg)[0]
+        elif m == 0xDA:
+            sos = {seg[1 + 2 * c]: seg[2 + 2 * c] for c in range(seg[0])}
+            return dict(q=q, dc=dc, ac=ac, sof=sof, sos=sos, dri=dri, scan_start=p + 2 + n, scan_end=b.rindex(b'\xff\xd9'))
+        p += 2 + n
+
+
+def gen_ojpeg():
+    """Old-style JPEG (compression 6), assembled by hand from baseline JPEG files in the three layouts of the TIFF 6.0
+    spec: a complete interchange stream the strip points into, a tables-only interchange stream, and tables in the
+    JPEGQTables / JPEGDCTables / JPEGACTables tags (one strip, or one strip per restart interval).
+
+    Reference: libjpeg-turbo (Pillow) decoding the JPEG stream the file was assembled from. libtiff reads every one
+    of these files too (asserted here), but its old-JPEG codec hands out subsampled YCbCr that is then box-upsampled
+    and converted by libtiff's own tables: identical for 4:4:4 and gray, up to 16 levels off at chroma edges
+    for 4:2:0. The distance to libtiff is reported in the summary."""
+    # a smooth picture, so that libtiff's box-upsampled reading stays comparable
+    rgb = np.asarray(Image.fromarray(test_pattern(14, 11, 3, np.uint8, 31)).resize((70, 52), Image.BICUBIC))
+    gray = np.ascontiguousarray(rgb[:, :, 1])
+
+    def jpg(a, **kw):
+        b = io.BytesIO()
+        Image.fromarray(a).save(b, 'JPEG', quality=90, **kw)
+        return b.getvalue()
+
+    def finish(name, page, j, exp):
+        d = os.path.join(OUT, 'ojpeg')
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name + '.tif')
+        write_tiff(path, [page])
+        lib = np.asarray(Image.open(path).convert('RGB' if exp.ndim == 3 else 'L'))
+        dist = int(np.abs(lib.astype(int) - exp.astype(int)).max())
+        mean = float(np.abs(lib.astype(int) - exp.astype(int)).mean())
+        assert mean < 3, (name, mean)
+        write_ref(path + '.ref', exp)
+        SUMMARY.append(('ojpeg/' + name, [f'libjpeg-turbo on the embedded stream; libtiff (Pillow) reads the file: max {dist}, mean {mean:.2f} away']))
+
+    def layout(j):
+        info = parse_jpeg(j)
+        h, w, comps = info['sof']
+        hv = comps[0][1]
+        tags = [(512, 3, [1])]
+        if len(comps) == 3:
+            tags.append((530, 3, [hv >> 4, hv & 15]))
+        page = dict(arr=np.zeros((h, w, len(comps)), np.uint8), photometric=6 if len(comps) == 3 else 1, compression=6, tags=tags)
+        return info, page, np.asarray(Image.open(io.BytesIO(j)))
+
+    # 1. JPEGInterchangeFormat = the complete stream, the single strip is its scan data
+    for name, j in [('ojpeg_interchange_420', jpg(rgb, subsampling=2)), ('ojpeg_interchange_444', jpg(rgb, subsampling=0)),
+                    ('ojpeg_interchange_gray', jpg(gray))]:
+        info, page, exp = layout(j)
+        page.update(prefix=j, rps=exp.shape[0], raw_chunks=[], strips=([8 + info['scan_start']], [info['scan_end'] + 2 - info['scan_start']]))
+        page['tags'] += [(513, 4, [8]), (514, 4, [len(j)])]
+        finish(name, page, j, exp)
+
+    # 2. tables in tags; raw entropy coded data in the strip(s)
+    def tables_page(j, per_interval):
+        info, page, exp = layout(j)
+        h, w, comps = info['sof']
+        blobs, pos = [], 8
+        offs = {519: [], 520: [], 521: []}
+        for tag, pick in ((519, lambda c: info['q'][c[2]]), (520, lambda c: info['dc'][info['sos'][c[0]] >> 4]),
+                          (521, lambda c: info['ac'][info['sos'][c[0]] & 15])):
+            for c in comps:
+                offs[tag].append(pos)
+                blobs.append(pick(c))
+                pos += len(blobs[-1])
+        scan = j[info['scan_start']:info['scan_end']]
+        parts, rps = [scan], h
+        if per_interval:
+            # one restart interval (= one row of MCUs) per strip; libtiff puts the restart markers back in
+            assert info['dri'] > 0
+            parts, start, i = [], 0, 0
+            while i < len(scan) - 1:
+                if scan[i] == 0xFF and 0xD0 <= scan[i + 1] <= 0xD7:
+                    parts.append(scan[start:i])
+                    start = i = i + 2
+                else:
+                    i += 1
+            parts.append(scan[start:])
+            rps = 8 * (comps[0][1] & 15)
+            assert len(parts) == -(-h // rps), (len(parts), h, rps)
+            page['tags'].append((515, 3, [info['dri']]))
+        page.update(prefix=b''.join(blobs), rps=rps, raw_chunks=parts)
+        page['tags'] += [(tag, 4, o) for tag, o in offs.items()]
+        return page, exp
+
+    for name, j, per in [('ojpeg_tables_444', jpg(rgb, subsampling=0), False), ('ojpeg_tables_420', jpg(rgb, subsampling=2), False),
+                         ('ojpeg_tables_gray', jpg(gray), False),
+                         ('ojpeg_tables_420_restart_strips', jpg(rgb, subsampling=2, restart_marker_rows=1), True),
+                         ('ojpeg_tables_422_restart_strips', jpg(rgb, subsampling=1, restart_marker_rows=1), True),
+                         ('ojpeg_tables_gray_restart_strips', jpg(gray, restart_marker_rows=1), True)]:
+        page, exp = tables_page(j, per)
+        finish(name, page, j, exp)
+
+    # 3. JPEGInterchangeFormat holds only the header with the tables; the strip is the scan data stored elsewhere
+    j = jpg(rgb, subsampling=2)
+    info, page, exp = layout(j)
+    header = j[:info['scan_start']]
+    page.update(prefix=header, rps=exp.shape[0], raw_chunks=[j[info['scan_start']:info['scan_end'] + 2]])
+    page['tags'] += [(513, 4, [8]), (514, 4, [len(header)])]
+    finish('ojpeg_header_then_strip_420', page, j, exp)
 
 
 def gen_ccitt():
@@ -940,7 +1587,7 @@ def main():
             full = os.path.join(OUT, f)
             if os.path.isfile(full):
                 os.remove(full)
-            elif f in ('ycbcr', 'jpeg', 'ccitt'):
+            else:
                 shutil.rmtree(full)
     os.makedirs(OUT, exist_ok=True)
     gen_matrix()
@@ -948,14 +1595,23 @@ def main():
     gen_extras()
     gen_structure()
     gen_external()
+    gen_depths()
+    gen_more_codecs()
+    gen_lab()
+    gen_logluv()
     gen_ccitt()
     gen_ycbcr()
     gen_jpeg()
-    unverified = [n for n, by in SUMMARY if not by]
+    gen_jpeg_deep()
+    gen_ojpeg()
     for n, by in SUMMARY:
-        print(f'{n:45s} {", ".join(by) if by else "by construction"}')
+        assert by, n
+        print(f'{n:45s} {", ".join(by)}')
     size = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(OUT) for f in fs)
-    print(f'\n{len(SUMMARY)} fixtures, {len(unverified)} without an independent reference decoder, {size / 1024:.0f} KB total')
+    print(f'\n{len(SUMMARY)} fixtures, {size / 1024:.0f} KB total')
+    print(f'{len(UNVERIFIED)} fixtures that no installed third-party decoder can read (reference derived from the source array):')
+    for n, why in UNVERIFIED:
+        print(f'  unverified/{n}: {why}')
 
 
 if __name__ == '__main__':

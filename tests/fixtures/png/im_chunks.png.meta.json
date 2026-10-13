@@ -1,0 +1,49 @@
+{
+ "chromaticity": [
+  0.3127,
+  0.329,
+  0.64,
+  0.33,
+  0.3,
+  0.6,
+  0.15,
+  0.06
+ ],
+ "text": [
+  {
+   "keyword": "comment",
+   "text": "made by ImageMagick",
+   "itxt": false,
+   "lang": "",
+   "tkey": ""
+  },
+  {
+   "keyword": "date:create",
+   "text": "2026-10-13T11:41:33+00:00",
+   "itxt": false,
+   "lang": "",
+   "tkey": ""
+  },
+  {
+   "keyword": "date:modify",
+   "text": "2026-10-13T11:41:33+00:00",
+   "itxt": false,
+   "lang": "",
+   "tkey": ""
+  },
+  {
+   "keyword": "date:timestamp",
+   "text": "2026-10-13T11:41:33+00:00",
+   "itxt": false,
+   "lang": "",
+   "tkey": ""
+  }
+ ],
+ "bkgd": [
+  0,
+  0,
+  16,
+  32,
+  48
+ ]
+}

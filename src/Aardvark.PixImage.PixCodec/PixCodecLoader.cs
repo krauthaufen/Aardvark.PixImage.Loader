@@ -79,10 +79,9 @@ namespace Aardvark.Base
                     break;
                 case PixFileFormat.Exr:
                     var exr = saveParams as PixExrSaveParams;
-                    if (exr != null && exr.LuminanceChroma)
-                        throw new NotSupportedException($"luminance/chroma EXR output is not supported by {Name}");
                     Exr.Encode(ToRawImage(image, Target.Float), stream, new ExrEncodeOptions
                     {
+                        LuminanceChroma = exr?.LuminanceChroma ?? false,
                         Compression = exr?.Compression switch
                         {
                             null or PixExrCompression.Default or PixExrCompression.Zip => ExrCompression.Zip,

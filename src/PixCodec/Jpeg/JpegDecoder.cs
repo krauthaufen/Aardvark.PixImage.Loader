@@ -4,28 +4,50 @@ using System.Runtime.CompilerServices;
 
 namespace PixCodec.JpegImpl
 {
+    /// <summary>How a component plane is brought to output resolution.</summary>
+    internal enum JpegUpsample { Direct, Replicate, Fractional, H2V1, H2V2, H1V2 }
+
     internal sealed unsafe class JpegComponent
     {
         public int Id, H, V, Tq;
-        /// <summary>Allocated size in blocks (whole MCUs of an interleaved scan).</summary>
+        /// <summary>Allocated size in data units (blocks, or samples for lossless): whole MCUs of an interleaved scan.</summary>
         public int BlocksW, BlocksH;
-        /// <summary>Size in blocks of a non-interleaved scan of this component.</summary>
+        /// <summary>Size in data units of a non-interleaved scan of this component.</summary>
         public int ScanBlocksW, ScanBlocksH;
-        /// <summary>Samples that carry image content (the rest of the plane is block padding).</summary>
+        /// <summary>Output samples per data unit edge: 8, or 4 / 2 / 1 with DCT domain downscaling (1 for lossless).</summary>
+        public int S = 8;
+        /// <summary>Samples that carry image content (the rest of the plane is padding).</summary>
         public int SampledW, SampledH;
         public int Stride;
         public byte[]? PlaneArr;
         public byte* Plane;
+        public ushort[]? Plane16Arr;
+        public ushort* Plane16;
         public short[]? CoefArr;
         public short* Coefs;
         public int[]? QuantArr;
         public int* Quant;
         public int DcPred;
         public HuffDecodeTable? Dc, Ac;
+        // arithmetic coding: conditioning table numbers and the DC context carried from block to block
+        public int DcTableId, AcTableId, DcContext;
+        /// <summary>Lossless point transform of the scan that coded this component.</summary>
+        public int PointTransform;
+        public bool Decoded;
+        public JpegUpsample Upsample;
+        public int HExp = 1, VExp = 1;
+        // fractional ratios: source step per output sample as HNum / HDen
+        public int HNum = 1, HDen = 1, VNum = 1, VDen = 1;
     }
 
-    internal enum JpegColorSpace { Gray, YCbCr, Rgb, Cmyk, Ycck, /// <summary>All components as stored, interleaved.</summary>
-        Raw }
+    internal enum JpegColorSpace
+    {
+        Gray, YCbCr, Rgb, Cmyk, Ycck,
+        /// <summary>All components as stored, interleaved.</summary>
+        Raw,
+        /// <summary>YCCK with only the YCbCr part converted: 4 channels in the stored (Adobe: inverted) CMYK convention.</summary>
+        YcckToCmyk,
+    }
 
     internal sealed unsafe class JpegDecoder
     {
@@ -34,18 +56,26 @@ namespace PixCodec.JpegImpl
         readonly byte* _d;
         readonly int _len;
 
+        /// <summary>Frame size as coded.</summary>
         public int Width, Height;
-        public bool Progressive;
+        /// <summary>Size after DCT domain downscaling.</summary>
+        public int OutWidth, OutHeight;
+        public int Precision = 8;
+        public bool Progressive, Lossless, Arithmetic;
+        /// <summary>1, 2, 4 or 8; set before parsing. Ignored by lossless frames.</summary>
+        public int ScaleDenominator = 1;
         public JpegComponent[] Comps = Array.Empty<JpegComponent>();
         public int HMax, VMax;
+        int _minS = 8;
         int _mcusX, _mcusY;
-        bool _allocated;
+        bool _geometry, _allocated;
         int _scans;
         int _restartInterval;
 
         readonly int[]?[] _quant = new int[4][];
         readonly HuffDecodeTable?[] _dc = new HuffDecodeTable[4];
         readonly HuffDecodeTable?[] _ac = new HuffDecodeTable[4];
+        JpegArith? _arith;
 
         bool _jfif, _adobe;
         int _adobeTransform;
@@ -60,21 +90,44 @@ namespace PixCodec.JpegImpl
 
         public bool HasMetadata => _hasMetadata;
 
+        /// <summary>Samples wider than 8 bit, or lossless: planes are 16 bit.</summary>
+        public bool Wide => Precision > 8 || Lossless;
+
         /// <summary>Set for a tables-only stream (TIFF JPEGTables): no frame or scan is expected.</summary>
         public bool TablesOnly;
 
-        /// <summary>Starts out with the tables defined by another (tables-only) stream. Tables are immutable, so sharing is safe.</summary>
-        public void ImportTables(JpegDecoder other)
+        /// <summary>Starts out with tables defined elsewhere (TIFF JPEGTables). The table objects are immutable, so sharing is safe.</summary>
+        public void ImportTables(JpegTiffTables t)
         {
             for (int i = 0; i < 4; i++)
             {
-                _quant[i] = other._quant[i];
-                _dc[i] = other._dc[i];
-                _ac[i] = other._ac[i];
+                _quant[i] = t.Quant[i];
+                _dc[i] = t.Dc[i];
+                _ac[i] = t.Ac[i];
             }
-            _restartInterval = other._restartInterval;
+            _restartInterval = t.RestartInterval;
+            if (t.Conditioning != null)
+            {
+                _arith = new JpegArith();
+                t.Conditioning.AsSpan(0, 4).CopyTo(_arith.DcL);
+                t.Conditioning.AsSpan(4, 4).CopyTo(_arith.DcU);
+                t.Conditioning.AsSpan(8, 4).CopyTo(_arith.AcK);
+            }
         }
 
+        public void ExportTables(JpegTiffTables t)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                t.Quant[i] = _quant[i];
+                t.Dc[i] = _dc[i];
+                t.Ac[i] = _ac[i];
+            }
+            t.RestartInterval = _restartInterval;
+            if (_arith != null) t.Conditioning = [.. _arith.DcL, .. _arith.DcU, .. _arith.AcK];
+        }
+
+        /// <summary>The color space libjpeg would assume from the markers and component ids.</summary>
         public JpegColorSpace ColorSpace
         {
             get
@@ -87,8 +140,10 @@ namespace PixCodec.JpegImpl
                         if (_adobe) return _adobeTransform == 0 ? JpegColorSpace.Rgb : JpegColorSpace.YCbCr;
                         if (Comps[0].Id == 'R' && Comps[1].Id == 'G' && Comps[2].Id == 'B') return JpegColorSpace.Rgb;
                         return JpegColorSpace.YCbCr;
-                    default:
+                    case 4:
                         return _adobe && _adobeTransform != 0 ? JpegColorSpace.Ycck : JpegColorSpace.Cmyk;
+                    default:
+                        return JpegColorSpace.Raw;
                 }
             }
         }
@@ -110,7 +165,7 @@ namespace PixCodec.JpegImpl
             }
         }
 
-        /// <summary>Walks the marker segments. With <paramref name="headerOnly"/> it stops after the frame header.</summary>
+        /// <summary>Walks the marker segments. With <paramref name="headerOnly"/> it stops once the frame geometry is known.</summary>
         public void Parse(bool headerOnly)
         {
             if (_len < 4 || _d[0] != 0xFF || _d[1] != 0xD8) throw Bad("missing SOI marker");
@@ -128,25 +183,26 @@ namespace PixCodec.JpegImpl
                 pos += len;
                 switch (m)
                 {
-                    case 0xC0: case 0xC1: case 0xC2:
+                    case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC9: case 0xCA:
                         ReadFrame(m, p, n);
-                        if (headerOnly) return;
+                        if (headerOnly && Height != 0) { SetupGeometry(); return; }
                         break;
-                    case 0xC3: case 0xC7: case 0xCB: case 0xCF:
-                        throw new ImageNotSupportedException("lossless JPEG is not supported");
-                    case 0xC5: case 0xC6: case 0xCD: case 0xCE:
+                    case 0xCB:
+                        throw new ImageNotSupportedException("arithmetic coded lossless JPEG is not supported");
+                    case 0xC5: case 0xC6: case 0xC7: case 0xCD: case 0xCE: case 0xCF:
                         throw new ImageNotSupportedException("hierarchical JPEG is not supported");
-                    case 0xC9: case 0xCA:
-                        throw new ImageNotSupportedException("arithmetic coded JPEG is not supported");
                     case 0xC4: ReadHuffmanTables(p, n); break;
+                    case 0xCC: ReadConditioning(p, n); break;
                     case 0xDB: ReadQuantTables(p, n); break;
                     case 0xDD:
                         if (n != 2) throw Bad("bad DRI segment");
                         _restartInterval = U16(p);
                         break;
                     case 0xDA:
+                        if (TablesOnly) break;
                         if (Comps.Length == 0) throw Bad("scan before frame header");
-                        if (headerOnly) return;
+                        if (Height == 0) FindNumberOfLines(pos);
+                        if (headerOnly) { SetupGeometry(); return; }
                         pos = ReadScan(p, n);
                         break;
                     case 0xE0: ReadApp0(p, n); break;
@@ -157,9 +213,15 @@ namespace PixCodec.JpegImpl
             }
             if (TablesOnly) return;
             if (Comps.Length == 0) throw Bad("no frame header");
-            if (headerOnly) return;
+            if (headerOnly)
+            {
+                if (Height == 0) throw Bad("image height is not defined");
+                SetupGeometry();
+                return;
+            }
             if (_scans == 0) throw Bad("no image data");
             if (Progressive) IdctAll();
+            if (Lossless) FinishLossless();
             FinishIcc();
         }
 
@@ -167,23 +229,22 @@ namespace PixCodec.JpegImpl
 
         void ReadFrame(int marker, int p, int n)
         {
+            if (TablesOnly) return;
             if (Comps.Length != 0) throw Bad("multiple frame headers");
             if (n < 6) throw Bad("bad frame header");
-            int precision = _d[p];
+            Precision = _d[p];
             Height = U16(p + 1);
             Width = U16(p + 3);
             int nc = _d[p + 5];
             if (n != 6 + 3 * nc) throw Bad("bad frame header");
-            if (precision != 8)
-            {
-                if (precision == 12 && marker != 0xC0) throw new ImageNotSupportedException("12 bit JPEG is not supported");
-                throw Bad("unsupported sample precision " + precision);
-            }
+            Lossless = marker == 0xC3;
+            Progressive = marker == 0xC2 || marker == 0xCA;
+            Arithmetic = marker == 0xC9 || marker == 0xCA;
+            bool precisionOk = Lossless ? Precision >= 2 && Precision <= 16 : Precision == 8 || (Precision == 12 && marker != 0xC0);
+            if (!precisionOk) throw Bad("unsupported sample precision " + Precision);
             if (Width == 0) throw Bad("zero width");
-            if (Height == 0) throw new ImageNotSupportedException("JPEG with DNL defined height is not supported");
             if (nc == 0) throw Bad("no components");
-            if (nc != 1 && nc != 3 && nc != 4) throw new ImageNotSupportedException($"JPEG with {nc} components is not supported");
-            Progressive = marker == 0xC2;
+            if (nc > 4) throw new ImageNotSupportedException($"JPEG with {nc} components is not supported");
 
             var comps = new JpegComponent[nc];
             for (int i = 0; i < nc; i++)
@@ -196,43 +257,124 @@ namespace PixCodec.JpegImpl
                 VMax = Math.Max(VMax, c.V);
                 comps[i] = c;
             }
-            _mcusX = (Width + 8 * HMax - 1) / (8 * HMax);
-            _mcusY = (Height + 8 * VMax - 1) / (8 * VMax);
-            foreach (var c in comps)
+            Comps = comps;
+        }
+
+        /// <summary>
+        /// A frame header with height 0 leaves the number of lines to a DNL segment after the first scan (T.81 B.2.5).
+        /// Looks ahead over the entropy coded data starting at <paramref name="pos"/> for it.
+        /// </summary>
+        void FindNumberOfLines(int pos)
+        {
+            for (; pos + 1 < _len; pos++)
             {
-                c.SampledW = (Width * c.H + HMax - 1) / HMax;
-                c.SampledH = (Height * c.V + VMax - 1) / VMax;
-                c.ScanBlocksW = (c.SampledW + 7) / 8;
-                c.ScanBlocksH = (c.SampledH + 7) / 8;
+                if (_d[pos] != 0xFF) continue;
+                int m = _d[pos + 1];
+                if (m == 0 || m == 0xFF || (m >= 0xD0 && m <= 0xD7)) continue;
+                if (m == 0xDC && pos + 6 <= _len && U16(pos + 2) == 4) Height = U16(pos + 4);
+                break;
+            }
+            if (Height == 0) throw Bad("image height is not defined");
+        }
+
+        /// <summary>Derives all sizes from the frame header and the requested scale.</summary>
+        void SetupGeometry()
+        {
+            if (_geometry) return;
+            _geometry = true;
+            int unit = Lossless ? 1 : 8;
+            _minS = Lossless ? 1 : 8 / ScaleDenominator;
+            _mcusX = (Width + unit * HMax - 1) / (unit * HMax);
+            _mcusY = (Height + unit * VMax - 1) / (unit * VMax);
+            OutWidth = (Width * _minS + unit - 1) / unit;
+            OutHeight = (Height * _minS + unit - 1) / unit;
+            foreach (var c in Comps)
+            {
+                int s = _minS;
+                // a subsampled component can make up (part of) its deficit by using a larger inverse DCT than the
+                // others instead of being upsampled afterwards; only while that keeps both ratios whole
+                if (!Lossless)
+                    while (s < 8 && HMax * _minS % (c.H * s * 2) == 0 && VMax * _minS % (c.V * s * 2) == 0) s *= 2;
+                c.S = s;
+                c.ScanBlocksW = ((Width * c.H + HMax - 1) / HMax + unit - 1) / unit;
+                c.ScanBlocksH = ((Height * c.V + VMax - 1) / VMax + unit - 1) / unit;
+                c.SampledW = (int)(((long)Width * c.H * s + (long)HMax * unit - 1) / ((long)HMax * unit));
+                c.SampledH = (int)(((long)Height * c.V * s + (long)VMax * unit - 1) / ((long)VMax * unit));
                 c.BlocksW = _mcusX * c.H;
                 c.BlocksH = _mcusY * c.V;
-                c.Stride = c.BlocksW * 8;
+                c.Stride = c.BlocksW * s;
+
+                c.HNum = c.H * s; c.HDen = HMax * _minS;
+                c.VNum = c.V * s; c.VDen = VMax * _minS;
+                if (c.HDen % c.HNum != 0 || c.VDen % c.VNum != 0) { c.Upsample = JpegUpsample.Fractional; continue; }
+                c.HExp = c.HDen / c.HNum;
+                c.VExp = c.VDen / c.VNum;
+                // triangle filters for the 2:1 cases, like libjpeg's "fancy upsampling" (which needs 3+ columns for
+                // the horizontal filter and is not used at all at 1/8 scale); plain replication otherwise
+                if (c.HExp == 1 && c.VExp == 1) c.Upsample = JpegUpsample.Direct;
+                else if (_minS == 1) c.Upsample = JpegUpsample.Replicate;
+                else if (c.HExp == 2 && c.VExp == 1 && c.SampledW > 2) c.Upsample = JpegUpsample.H2V1;
+                else if (c.HExp == 2 && c.VExp == 2 && c.SampledW > 2) c.Upsample = JpegUpsample.H2V2;
+                else if (c.HExp == 1 && c.VExp == 2) c.Upsample = JpegUpsample.H1V2;
+                else c.Upsample = JpegUpsample.Replicate;
             }
-            Comps = comps;
         }
 
         void Allocate(int remainingBytes)
         {
+            SetupGeometry();
             long pixels = (long)Width * Height;
-            // Even a flat image needs a bit per block (512 pixels per byte at best); refuse headers that promise far
-            // more than the data can hold. Small images are exempt so that heavily truncated files still decode.
-            if (pixels > 1 << 16 && pixels / 1024 > remainingBytes) throw Bad("image dimensions do not fit the amount of data");
-            if (pixels * (Comps.Length == 1 ? 1 : 3) > Array.MaxLength) throw new ImageNotSupportedException("JPEG image is too large");
+            // Even a flat image needs a bit per block (512 pixels per byte at best) resp. per sample; refuse headers
+            // that promise far more than the data can hold. Small images are exempt so that heavily truncated files still decode.
+            if (pixels > 1 << 16 && pixels / (Lossless ? 16 : 1024) > remainingBytes) throw Bad("image dimensions do not fit the amount of data");
+            if ((long)OutWidth * OutHeight * Comps.Length > Array.MaxLength) throw new ImageNotSupportedException("JPEG image is too large");
             foreach (var c in Comps)
             {
-                long size = (long)c.Stride * c.BlocksH * 8;
-                if (size > Array.MaxLength) throw new ImageNotSupportedException("JPEG image is too large");
-                c.PlaneArr = GC.AllocateUninitializedArray<byte>((int)size, pinned: true);
-                fixed (byte* q = c.PlaneArr) c.Plane = q;
-                // blocks that never get decoded (truncated file) come out mid gray
-                c.PlaneArr.AsSpan().Fill(128);
+                long size = (long)c.Stride * c.BlocksH * c.S;
+                long coefs = (long)c.BlocksW * c.BlocksH * 64;
+                if (size > Array.MaxLength || (Progressive && coefs > Array.MaxLength)) throw new ImageNotSupportedException("JPEG image is too large");
+                // data units that never get decoded (truncated file) come out mid gray
+                if (Wide)
+                {
+                    c.Plane16Arr = GC.AllocateUninitializedArray<ushort>((int)size, pinned: true);
+                    fixed (ushort* q = c.Plane16Arr) c.Plane16 = q;
+                    c.Plane16Arr.AsSpan().Fill((ushort)(1 << (Precision - 1)));
+                }
+                else
+                {
+                    c.PlaneArr = GC.AllocateUninitializedArray<byte>((int)size, pinned: true);
+                    fixed (byte* q = c.PlaneArr) c.Plane = q;
+                    c.PlaneArr.AsSpan().Fill(128);
+                }
                 if (Progressive)
                 {
-                    c.CoefArr = GC.AllocateArray<short>((int)size, pinned: true);
+                    c.CoefArr = GC.AllocateArray<short>((int)coefs, pinned: true);
                     fixed (short* q = c.CoefArr) c.Coefs = q;
                 }
             }
             _allocated = true;
+        }
+
+        void ReadConditioning(int p, int n)
+        {
+            if ((n & 1) != 0) throw Bad("bad DAC segment");
+            _arith ??= new JpegArith();
+            for (int end = p + n; p < end; p += 2)
+            {
+                int tc = _d[p] >> 4, tb = _d[p] & 15, cs = _d[p + 1];
+                if (tc > 1 || tb > 3) throw Bad("bad arithmetic conditioning table id");
+                if (tc == 0)
+                {
+                    if ((cs & 15) > cs >> 4) throw Bad("bad DC conditioning");
+                    _arith.DcL[tb] = (byte)(cs & 15);
+                    _arith.DcU[tb] = (byte)(cs >> 4);
+                }
+                else
+                {
+                    if (cs < 1 || cs > 63) throw Bad("bad AC conditioning");
+                    _arith.AcK[tb] = (byte)cs;
+                }
+            }
         }
 
         void ReadQuantTables(int p, int n)
@@ -342,10 +484,16 @@ namespace PixCodec.JpegImpl
             if (++_scans > MaxScans) throw Bad("too many scans");
             var sc = new JpegComponent[ns];
             int ss = _d[p + 1 + 2 * ns], se = _d[p + 2 + 2 * ns], ah = _d[p + 3 + 2 * ns] >> 4, al = _d[p + 3 + 2 * ns] & 15;
-            if (!Progressive) { ss = 0; se = 63; ah = 0; al = 0; }
+            if (Lossless)
+            {
+                // ss selects the predictor, al is the point transform
+                if (ss < 1 || ss > 7 || al >= Precision) throw Bad("bad lossless scan parameters");
+            }
+            else if (!Progressive) { ss = 0; se = 63; ah = 0; al = 0; }
             else if (ss > se || se > 63 || al > 13 || ah > 13 || (ss == 0 && se != 0) || (ss != 0 && ns != 1))
                 throw Bad("bad progressive scan parameters");
             if (!_allocated) Allocate(_len - p);
+            if (Arithmetic) _arith ??= new JpegArith();
 
             for (int i = 0; i < ns; i++)
             {
@@ -355,12 +503,17 @@ namespace PixCodec.JpegImpl
                 if (c == null) throw Bad("scan refers to an unknown component");
                 for (int j = 0; j < i; j++) if (sc[j] == c) throw Bad("component listed twice in a scan");
                 int td = tables >> 4, ta = tables & 15;
-                if (td > 3 || ta > 3) throw Bad("bad Huffman table selector");
-                c.Dc = _dc[td];
-                c.Ac = _ac[ta];
-                if (ss == 0 && ah == 0 && c.Dc == null) throw Bad("missing DC Huffman table");
-                if (se != 0 && c.Ac == null) throw Bad("missing AC Huffman table");
-                if (c.Quant == null)
+                if (td > 3 || ta > 3) throw Bad("bad entropy table selector");
+                c.DcTableId = td;
+                c.AcTableId = ta;
+                if (!Arithmetic)
+                {
+                    c.Dc = _dc[td];
+                    c.Ac = _ac[ta];
+                    if ((Lossless || (ss == 0 && ah == 0)) && c.Dc == null) throw Bad("missing DC Huffman table");
+                    if (!Lossless && se != 0 && c.Ac == null) throw Bad("missing AC Huffman table");
+                }
+                if (!Lossless && c.Quant == null)
                 {
                     // the table in effect at the component's first scan is the one that applies
                     var q = _quant[c.Tq] ?? throw Bad("missing quantization table");
@@ -369,43 +522,96 @@ namespace PixCodec.JpegImpl
                     fixed (int* qp = c.QuantArr) c.Quant = qp;
                 }
                 c.DcPred = 0;
+                c.DcContext = 0;
+                c.Decoded = true;
+                if (Lossless) c.PointTransform = al;
                 sc[i] = c;
             }
 
             var br = new JpegBitReader { End = _d + _len };
             br.Reset(_d + p + n);
-            if (Progressive) DecodeProgressiveScan(sc, ss, se, ah, al, ref br);
+            if (Arithmetic) _arith!.Start(_d + p + n, _d + _len);
+            if (Lossless) DecodeLosslessScan(sc, ss, al, ref br);
+            else if (Progressive) DecodeProgressiveScan(sc, ss, se, ah, al, ref br);
             else DecodeSequentialScan(sc, ref br);
-            return (int)(br.P - _d);
+            return (int)((Arithmetic ? _arith!.Position : br.P) - _d);
         }
 
         /// <summary>
-        /// Called at a restart boundary: finds the next marker and decides how to continue. Returns false when the
-        /// coming interval has no data (lost marker or end of scan) and its MCUs have to be skipped.
+        /// Called at a restart boundary with the current read position: finds the next marker and decides how to
+        /// continue. Returns false when the coming interval has no data (lost marker or end of scan) and its MCUs
+        /// have to be skipped.
         /// </summary>
-        static bool NextRestart(ref JpegBitReader br, ref int expected)
+        static bool NextRestart(ref byte* q, byte* end, ref int expected)
         {
-            byte* q = br.P, end = br.End;
             int want = expected;
             expected = (expected + 1) & 7;
             while (true)
             {
                 while (end - q >= 2 && !(q[0] == 0xFF && q[1] != 0 && q[1] != 0xFF)) q++;
-                if (end - q < 2) { br.Reset(end); return false; }
+                if (end - q < 2) { q = end; return false; }
                 int m = q[1];
-                if (m < 0xD0 || m > 0xD7) { br.Reset(q); return false; } // some other marker: the scan ended early
+                if (m < 0xD0 || m > 0xD7) return false; // some other marker: the scan ended early
                 int d = (m - 0xD0 - want) & 7;
-                if (d == 1 || d == 2) { br.Reset(q); return false; } // a marker got lost; this interval is gone
-                if (d >= 6) { q += 2; continue; } // stale marker, keep looking
-                br.Reset(q + 2);
+                if (d == 1 || d == 2) return false; // a marker got lost; this interval is gone
+                q += 2;
+                if (d >= 6) continue; // stale marker, keep looking
                 return true;
+            }
+        }
+
+        /// <summary>Restart boundary handling shared by all scan types. Returns true if the next interval must be skipped.</summary>
+        bool Restart(JpegComponent[] sc, ref JpegBitReader br, ref int expected)
+        {
+            byte* q = Arithmetic ? _arith!.Position : br.P;
+            bool ok = NextRestart(ref q, _d + _len, ref expected);
+            if (Arithmetic) _arith!.Start(q, _d + _len); else br.Reset(q);
+            foreach (var c in sc) { c.DcPred = 0; c.DcContext = 0; }
+            return !ok;
+        }
+
+        /// <summary>Inverse transforms a natural order block into its place in the component plane.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        void PutBlock(JpegComponent c, short* block, bool dcOnly, int col, int row)
+        {
+            if (c.Plane != null && c.S == 8)
+            {
+                byte* dst = c.Plane + ((nint)row * c.Stride + col) * 8;
+                if (dcOnly) JpegDct.IdctDc(block[0] * c.Quant[0], dst, c.Stride);
+                else JpegDct.Idct(block, c.Quant, dst, c.Stride);
+            }
+            else if (c.Plane != null && c.S == 4 && !dcOnly && JpegDct.HasIdct4)
+                JpegDct.Idct4(block, c.Quant, c.Plane + ((nint)row * c.Stride + col) * 4, c.Stride);
+            else PutBlockGeneric(c, block, dcOnly, col, row);
+        }
+
+        [SkipLocalsInit]
+        void PutBlockGeneric(JpegComponent c, short* block, bool dcOnly, int col, int row)
+        {
+            int* v = stackalloc int[64];
+            int s = c.S;
+            // a lone DC coefficient gives a flat block at every size
+            if (dcOnly) new Span<int>(v, s * s).Fill((block[0] * c.Quant[0] + 4) >> 3);
+            else JpegDct.IdctGeneric(block, c.Quant, s, Precision == 8 ? 2 : 1, v);
+            int center = 1 << (Precision - 1), max = (1 << Precision) - 1;
+            if (c.Plane != null)
+            {
+                byte* dst = c.Plane + ((nint)row * c.Stride + col) * s;
+                for (int y = 0; y < s; y++, dst += c.Stride)
+                    for (int x = 0; x < s; x++) dst[x] = (byte)Math.Clamp(v[y * s + x] + center, 0, max);
+            }
+            else
+            {
+                ushort* dst = c.Plane16 + ((nint)row * c.Stride + col) * s;
+                for (int y = 0; y < s; y++, dst += c.Stride)
+                    for (int x = 0; x < s; x++) dst[x] = (ushort)Math.Clamp(v[y * s + x] + center, 0, max);
             }
         }
 
         void DecodeSequentialScan(JpegComponent[] sc, ref JpegBitReader br)
         {
             int ns = sc.Length;
-            bool single = ns == 1;
+            bool single = ns == 1, arith = Arithmetic;
             int mcusX = single ? sc[0].ScanBlocksW : _mcusX, mcusY = single ? sc[0].ScanBlocksH : _mcusY;
             short* block = stackalloc short[64];
             int ri = _restartInterval, todo = ri, expected = 0;
@@ -418,9 +624,8 @@ namespace PixCodec.JpegImpl
                     {
                         if (todo == 0)
                         {
-                            skip = !NextRestart(ref br, ref expected);
+                            skip = Restart(sc, ref br, ref expected);
                             todo = ri;
-                            foreach (var c in sc) c.DcPred = 0;
                         }
                         todo--;
                     }
@@ -428,20 +633,17 @@ namespace PixCodec.JpegImpl
                     foreach (var c in sc)
                     {
                         int h = single ? 1 : c.H, v = single ? 1 : c.V;
-                        nint stride = c.Stride;
-                        byte* row = c.Plane + (nint)my * v * 8 * stride + mx * h * 8;
-                        for (int by = 0; by < v; by++, row += 8 * stride)
+                        for (int by = 0; by < v; by++)
                         {
                             for (int bx = 0; bx < h; bx++)
                             {
                                 Unsafe.InitBlockUnaligned(block, 0, 128);
-                                int last = DecodeBlock(ref br, c.Dc!, c.Ac!, block, ref c.DcPred);
-                                if (last == 0) JpegDct.IdctDc(block[0] * c.Quant[0], row + bx * 8, stride);
-                                else JpegDct.Idct(block, c.Quant, row + bx * 8, stride);
+                                int last = arith ? _arith!.DecodeBlock(c, block) : DecodeBlock(ref br, c.Dc!, c.Ac!, block, ref c.DcPred);
+                                PutBlock(c, block, last == 0, mx * h + bx, my * v + by);
                             }
                         }
                     }
-                    if (br.Overrun)
+                    if (arith ? _arith!.Corrupt : br.Overrun)
                     {
                         // ran past the end of the data: nothing more to decode until the next restart marker
                         if (ri == 0) return;
@@ -570,7 +772,7 @@ namespace PixCodec.JpegImpl
         void DecodeProgressiveScan(JpegComponent[] sc, int ss, int se, int ah, int al, ref JpegBitReader br)
         {
             int ns = sc.Length;
-            bool single = ns == 1;
+            bool single = ns == 1, arith = Arithmetic;
             int mcusX = single ? sc[0].ScanBlocksW : _mcusX, mcusY = single ? sc[0].ScanBlocksH : _mcusY;
             int ri = _restartInterval, todo = ri, expected = 0, eobrun = 0;
             bool skip = false;
@@ -582,10 +784,9 @@ namespace PixCodec.JpegImpl
                     {
                         if (todo == 0)
                         {
-                            skip = !NextRestart(ref br, ref expected);
+                            skip = Restart(sc, ref br, ref expected);
                             todo = ri;
                             eobrun = 0;
-                            foreach (var c in sc) c.DcPred = 0;
                         }
                         todo--;
                     }
@@ -598,7 +799,17 @@ namespace PixCodec.JpegImpl
                             short* blk = c.Coefs + ((nint)(my * v + by) * c.BlocksW + mx * h) * 64;
                             for (int bx = 0; bx < h; bx++, blk += 64)
                             {
-                                if (ss == 0)
+                                if (arith)
+                                {
+                                    if (ss == 0)
+                                    {
+                                        if (ah == 0) _arith!.DecodeDcFirst(c, blk, al);
+                                        else _arith!.DecodeDcRefine(blk, al);
+                                    }
+                                    else if (ah == 0) _arith!.DecodeAcFirst(c, blk, ss, se, al);
+                                    else _arith!.DecodeAcRefine(c, blk, ss, se, al);
+                                }
+                                else if (ss == 0)
                                 {
                                     if (ah == 0)
                                     {
@@ -617,7 +828,7 @@ namespace PixCodec.JpegImpl
                             }
                         }
                     }
-                    if (br.Overrun)
+                    if (arith ? _arith!.Corrupt : br.Overrun)
                     {
                         if (ri == 0) return;
                         skip = true;
@@ -770,26 +981,247 @@ namespace PixCodec.JpegImpl
             foreach (var c in Comps)
             {
                 if (c.Quant == null) continue; // never appeared in a scan: stays gray
-                nint stride = c.Stride;
                 for (int by = 0; by < c.ScanBlocksH; by++)
                 {
                     short* blk = c.Coefs + (nint)by * c.BlocksW * 64;
-                    byte* dst = c.Plane + by * 8 * stride;
-                    for (int bx = 0; bx < c.ScanBlocksW; bx++, blk += 64, dst += 8)
+                    for (int bx = 0; bx < c.ScanBlocksW; bx++, blk += 64)
                     {
                         ulong mask = JpegTables.NonZeroMask(blk) & ~1UL;
-                        if (mask == 0) { JpegDct.IdctDc(blk[0] * c.Quant[0], dst, stride); continue; }
                         // zigzag -> natural order
                         Unsafe.InitBlockUnaligned(nat, 0, 128);
                         nat[0] = blk[0];
-                        for (; mask != 0; mask &= mask - 1)
+                        for (ulong m = mask; m != 0; m &= m - 1)
                         {
-                            int k = System.Numerics.BitOperations.TrailingZeroCount(mask);
+                            int k = System.Numerics.BitOperations.TrailingZeroCount(m);
                             nat[zz[k]] = blk[k];
                         }
-                        JpegDct.Idct(nat, c.Quant, dst, stride);
+                        PutBlock(c, nat, mask == 0, bx, by);
                     }
                 }
+            }
+        }
+
+        // ---------------------------------------------------------------- lossless (T.81 Annex H)
+
+        /// <summary>One prediction difference: Huffman coded magnitude category 0..16, then that many bits (none for 16 = 32768).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int DecodeDifference(ref JpegBitReader br, HuffDecodeTable table)
+        {
+            if (br.Cnt < 32) br.Refill();
+            int e = table.Fast[(int)(br.Buf >> (64 - HuffDecodeTable.LookBits))], s;
+            if (e != 0)
+            {
+                int n = e & 31;
+                br.Buf <<= n; br.Cnt -= n;
+                // the table was built for run/size symbols: category 16 looks like "run 1, size 0"
+                if ((e & HuffDecodeTable.NoValueFlag) != 0) return (e & 0x1E0) != 0 ? 32768 : 0;
+                s = (e >> 9) & 15;
+                if (s == 0) return e >> 16;
+            }
+            else
+            {
+                s = br.DecodeSymbol(table);
+                if (s == 0) return 0;
+                if (s >= 16) return 32768;
+            }
+            int v = (int)(br.Buf >> (64 - s));
+            br.Buf <<= s; br.Cnt -= s;
+            return v + (((v - (1 << (s - 1))) >> 31) & (1 - (1 << s)));
+        }
+
+        void DecodeLosslessScan(JpegComponent[] sc, int predictor, int pt, ref JpegBitReader br)
+        {
+            int ns = sc.Length;
+            bool single = ns == 1;
+            int mcusX = single ? sc[0].ScanBlocksW : _mcusX, mcusY = single ? sc[0].ScanBlocksH : _mcusY;
+            int initial = 1 << (Precision - pt - 1);
+            int ri = _restartInterval, todo = ri, expected = 0;
+            // prediction restarts at the top of the scan and after every restart marker
+            int topRow = 0, firstCol = 0;
+            bool skip = false;
+
+            // the usual layout - one sample of every component per MCU, restarts (if any) at line starts - goes line by line
+            bool simple = ri % mcusX == 0;
+            foreach (var c in sc) simple &= single || (c.H == 1 && c.V == 1);
+            if (simple)
+            {
+                ushort** cur = stackalloc ushort*[4];
+                int** fast = stackalloc int*[4];
+                for (int my = 0; my < mcusY; my++)
+                {
+                    bool top = my == 0;
+                    if (ri != 0 && my != 0 && (long)my * mcusX % ri == 0)
+                    {
+                        skip = Restart(sc, ref br, ref expected);
+                        top = true;
+                    }
+                    if (skip) continue;
+                    for (int i = 0; i < ns; i++)
+                    {
+                        cur[i] = sc[i].Plane16 + (nint)my * sc[i].Stride;
+                        fast[i] = sc[i].Dc!.Fast;
+                    }
+                    DecodeLosslessLine(ref br, sc, cur, fast, mcusX, top ? 0 : predictor, initial);
+                    if (br.Overrun)
+                    {
+                        if (ri == 0) return;
+                        skip = true;
+                    }
+                }
+                return;
+            }
+
+            for (int my = 0; my < mcusY; my++)
+            {
+                for (int mx = 0; mx < mcusX; mx++)
+                {
+                    if (ri != 0)
+                    {
+                        if (todo == 0)
+                        {
+                            skip = Restart(sc, ref br, ref expected);
+                            todo = ri;
+                            topRow = my; firstCol = mx;
+                        }
+                        todo--;
+                    }
+                    if (skip) continue;
+                    foreach (var c in sc)
+                    {
+                        int h = single ? 1 : c.H, v = single ? 1 : c.V;
+                        nint stride = c.Stride;
+                        var table = c.Dc!;
+                        for (int by = 0; by < v; by++)
+                        {
+                            ushort* row = c.Plane16 + (nint)(my * v + by) * stride;
+                            bool top = my == topRow && by == 0;
+                            for (int bx = 0; bx < h; bx++)
+                            {
+                                int x = mx * h + bx, pred;
+                                if (top) pred = mx == firstCol && bx == 0 ? initial : row[x - 1];
+                                else if (x == 0) pred = row[-stride];
+                                else
+                                {
+                                    int ra = row[x - 1], rb = row[x - stride], rc = row[x - stride - 1];
+                                    pred = predictor switch
+                                    {
+                                        1 => ra,
+                                        2 => rb,
+                                        3 => rc,
+                                        4 => ra + rb - rc,
+                                        5 => ra + ((rb - rc) >> 1),
+                                        6 => rb + ((ra - rc) >> 1),
+                                        _ => (ra + rb) >> 1,
+                                    };
+                                }
+                                row[x] = (ushort)(pred + DecodeDifference(ref br, table));
+                            }
+                        }
+                    }
+                    if (br.Overrun)
+                    {
+                        if (ri == 0) return;
+                        skip = true;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// One line of a lossless scan whose components are all sampled 1 x 1. <paramref name="predictor"/> 0 marks the
+        /// first line (of the scan or after a restart), which predicts from the left only.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        static void DecodeLosslessLine(ref JpegBitReader br, JpegComponent[] sc, ushort** cur, int** fast, int width, int predictor, int initial)
+        {
+            // bit reader state in locals, as in DecodeBlock
+            ulong buf = br.Buf;
+            int cnt = br.Cnt;
+            byte* p = br.P, end = br.End;
+            int ns = sc.Length;
+            for (int x = 0; x < width; x++)
+            {
+                for (int i = 0; i < ns; i++)
+                {
+                    if (cnt < 32)
+                    {
+                        if (end - p >= 8)
+                        {
+                            ulong w = System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<ulong>(p));
+                            if (((~w - 0x0101010101010101UL) & w & 0x8080808080808080UL) == 0)
+                            {
+                                buf |= w >> cnt;
+                                p += (63 - cnt) >> 3;
+                                cnt |= 56;
+                                goto filled;
+                            }
+                        }
+                        br.Buf = buf; br.Cnt = cnt; br.P = p;
+                        br.RefillSlow();
+                        buf = br.Buf; cnt = br.Cnt; p = br.P;
+                    }
+                filled:
+                    int e = fast[i][(int)(buf >> (64 - HuffDecodeTable.LookBits))], s, d;
+                    if (e != 0)
+                    {
+                        int n = e & 31;
+                        buf <<= n; cnt -= n;
+                        s = (e >> 9) & 15;
+                        d = e >> 16;
+                        // category 16 (a difference of 32768, no extra bits) looks like "run 1, size 0" to the table builder
+                        if ((e & HuffDecodeTable.NoValueFlag) != 0) d = (e & 0x1E0) != 0 ? 32768 : 0;
+                    }
+                    else
+                    {
+                        br.Buf = buf; br.Cnt = cnt; br.P = p;
+                        s = br.DecodeSymbol(sc[i].Dc!);
+                        buf = br.Buf; cnt = br.Cnt; p = br.P;
+                        d = 0;
+                        if (s >= 16) { s = 0; d = 32768; }
+                    }
+                    if (s != 0)
+                    {
+                        d = (int)(buf >> (64 - s));
+                        buf <<= s; cnt -= s;
+                        d += ((d - (1 << (s - 1))) >> 31) & (1 - (1 << s));
+                    }
+
+                    ushort* row = cur[i];
+                    int pred;
+                    if (predictor == 0) pred = x == 0 ? initial : row[x - 1];
+                    else
+                    {
+                        ushort* above = row - sc[i].Stride;
+                        if (x == 0) pred = above[0];
+                        else
+                        {
+                            int ra = row[x - 1], rb = above[x], rc = above[x - 1];
+                            pred = predictor switch
+                            {
+                                1 => ra,
+                                2 => rb,
+                                3 => rc,
+                                4 => ra + rb - rc,
+                                5 => ra + ((rb - rc) >> 1),
+                                6 => rb + ((ra - rc) >> 1),
+                                _ => (ra + rb) >> 1,
+                            };
+                        }
+                    }
+                    row[x] = (ushort)(pred + d);
+                }
+            }
+            br.Buf = buf; br.Cnt = cnt; br.P = p;
+        }
+
+        /// <summary>Undoes the point transform and blanks components no scan delivered.</summary>
+        void FinishLossless()
+        {
+            foreach (var c in Comps)
+            {
+                if (c.PointTransform == 0) continue;
+                var plane = c.Plane16Arr.AsSpan();
+                for (int i = 0; i < plane.Length; i++) plane[i] = (ushort)(plane[i] << c.PointTransform);
             }
         }
     }
@@ -818,6 +1250,38 @@ namespace PixCodec.JpegImpl
                 return v >= 1 && v <= 8 ? v : 0;
             }
             return 0;
+        }
+
+        /// <summary>
+        /// Brings pixels stored with the given EXIF orientation (2..8) upright. Orientations 5..8 swap width and height.
+        /// </summary>
+        public static T[] Reorient<T>(T[] src, ref int w, ref int h, int ch, int orientation) where T : unmanaged
+        {
+            if (orientation < 2 || orientation > 8) return src;
+            int sw = w, sh = h;
+            bool swap = orientation >= 5;
+            int dw = swap ? sh : sw, dh = swap ? sw : sh;
+            var dst = GC.AllocateUninitializedArray<T>(src.Length);
+            for (int y = 0; y < dh; y++)
+                for (int x = 0; x < dw; x++)
+                {
+                    // source position of destination pixel (x, y)
+                    int sx, sy;
+                    switch (orientation)
+                    {
+                        case 2: sx = sw - 1 - x; sy = y; break;          // mirrored left-right
+                        case 3: sx = sw - 1 - x; sy = sh - 1 - y; break; // rotated 180
+                        case 4: sx = x; sy = sh - 1 - y; break;          // mirrored top-bottom
+                        case 5: sx = y; sy = x; break;                   // transposed
+                        case 6: sx = y; sy = sh - 1 - x; break;          // needs 90 clockwise
+                        case 7: sx = sw - 1 - y; sy = sh - 1 - x; break; // transversed
+                        default: sx = sw - 1 - y; sy = x; break;         // needs 90 counterclockwise
+                    }
+                    int s = (sy * sw + sx) * ch, d = (y * dw + x) * ch;
+                    for (int c = 0; c < ch; c++) dst[d + c] = src[s + c];
+                }
+            w = dw; h = dh;
+            return dst;
         }
 
         static int R16(ReadOnlySpan<byte> e, int o, bool le) => le ? e[o] | e[o + 1] << 8 : e[o] << 8 | e[o + 1];

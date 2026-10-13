@@ -34,6 +34,43 @@ namespace PixCodec
             Id = id; Type = type; Count = count; Value = value;
         }
 
+        /// <summary>
+        /// A tag to write with <see cref="TiffEncodeOptions.ExtraTags"/>. <paramref name="value"/> must have the
+        /// type listed above for <paramref name="type"/> (Rational / SRational take a double[] and are stored as
+        /// fractions). The factory methods below cover the common cases.
+        /// </summary>
+        public TiffTag(int id, TiffTagType type, object value)
+        {
+            if (id < 0 || id > 65535) throw new ArgumentOutOfRangeException(nameof(id));
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            var want = type switch
+            {
+                TiffTagType.Byte or TiffTagType.Undefined => typeof(byte[]),
+                TiffTagType.Ascii => typeof(string),
+                TiffTagType.Short => typeof(ushort[]),
+                TiffTagType.Long or TiffTagType.Ifd => typeof(uint[]),
+                TiffTagType.SByte => typeof(sbyte[]),
+                TiffTagType.SShort => typeof(short[]),
+                TiffTagType.SLong => typeof(int[]),
+                TiffTagType.Long8 or TiffTagType.Ifd8 => typeof(ulong[]),
+                TiffTagType.SLong8 => typeof(long[]),
+                TiffTagType.Float => typeof(float[]),
+                TiffTagType.Double or TiffTagType.Rational or TiffTagType.SRational => typeof(double[]),
+                _ => throw new ArgumentException("unknown TIFF field type", nameof(type)),
+            };
+            // exact type test: `value is byte[]` would also accept an sbyte[]
+            if (value.GetType() != want) throw new ArgumentException($"a {type} tag needs a {want.Name} value, got {value.GetType().Name}");
+            Id = id; Type = type; Value = value;
+            Count = value is string s ? Encoding.UTF8.GetByteCount(s) + 1 : ((Array)value).Length;
+        }
+
+        public static TiffTag Ascii(int id, string text) => new TiffTag(id, TiffTagType.Ascii, text);
+        public static TiffTag Shorts(int id, params ushort[] values) => new TiffTag(id, TiffTagType.Short, values);
+        public static TiffTag Longs(int id, params uint[] values) => new TiffTag(id, TiffTagType.Long, values);
+        public static TiffTag Doubles(int id, params double[] values) => new TiffTag(id, TiffTagType.Double, values);
+        public static TiffTag Rationals(int id, params double[] values) => new TiffTag(id, TiffTagType.Rational, values);
+        public static TiffTag Bytes(int id, byte[] values) => new TiffTag(id, TiffTagType.Undefined, values);
+
         /// <summary>The string of an Ascii tag, null for other types.</summary>
         public string? AsString() => Value as string;
 
@@ -167,8 +204,6 @@ namespace PixCodec
         public readonly TiffSource Src;
         public readonly bool BigEndian, Big;
         public readonly long FirstIfd;
-        /// <summary>True when multi-byte values in the file need swapping on this machine.</summary>
-        public readonly bool Swap;
 
         public static bool IsMatch(ReadOnlySpan<byte> h)
         {
@@ -186,7 +221,6 @@ namespace PixCodec
             src.Read(0, h.Slice(0, 8));
             if (!IsMatch(h)) throw new ImageFormatException("not a TIFF file");
             BigEndian = h[0] == (byte)'M';
-            Swap = BigEndian == BitConverter.IsLittleEndian;
             Big = U16(h.Slice(2)) == 43;
             if (Big)
             {
@@ -304,6 +338,16 @@ namespace PixCodec
             return raw;
         }
 
+        /// <summary>The value bytes of an entry converted to little endian, for copying an entry into another file.</summary>
+        public byte[] RawLittleEndian(in TiffEntry e)
+        {
+            var raw = ReadRaw(e, out _);
+            int unit = TiffField.ElementSize(e.Type);
+            if (BigEndian && unit > 1)
+                for (int i = 0; i + unit <= raw.Length; i += unit) raw.AsSpan(i, unit).Reverse();
+            return raw;
+        }
+
         T[] Cast<T>(byte[] raw, int count) where T : unmanaged
         {
             var r = new T[count];
@@ -316,7 +360,7 @@ namespace PixCodec
         {
             var raw = ReadRaw(e, out int n);
             int size = TypeSize(e.Type);
-            if (Swap && size > 1)
+            if (BigEndian && size > 1)
             {
                 int unit = e.Type is 5 or 10 ? 4 : size;
                 for (int i = 0; i + unit <= raw.Length; i += unit) raw.AsSpan(i, unit).Reverse();

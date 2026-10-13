@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace PixCodec
 {
@@ -14,8 +16,38 @@ namespace PixCodec
         /// <summary>Upper bound for the number of decoding threads, 0 or less = no limit.</summary>
         public int MaxDegreeOfParallelism { get; set; }
 
+        /// <summary>How samples whose bit depth is not 8, 16, 32 or 64 are mapped into the next larger sample type.</summary>
+        public TiffBitScaling BitScaling { get; set; } = TiffBitScaling.Default;
+
+        /// <summary>
+        /// true (default): CMYK, CIELab / ICCLab / ITULab and LogLuv images are converted to RGB.
+        /// false: these come back as stored with <see cref="ColorModel.Other"/> - CMYK as its 4 (or more) samples,
+        /// Lab as its encoded samples (CIELab keeps a* and b* as two's complement values in the unsigned array),
+        /// LogLuv as Float32 CIE XYZ. GetInfo always describes the converted layout.
+        /// </summary>
+        public bool ConvertToRgb { get; set; } = true;
+
         /// <summary>Decoded size in bytes from which <see cref="Parallel"/> kicks in.</summary>
         internal long ParallelThreshold = 512 * 1024;
+
+        internal static readonly TiffDecodeOptions Default = new TiffDecodeOptions();
+    }
+
+    /// <summary>
+    /// Treatment of unsigned samples with an odd bit depth (1..7, 9..15, 17..31 bits). Signed samples are always
+    /// sign extended and palette indices always kept, whatever the mode.
+    /// </summary>
+    public enum TiffBitScaling
+    {
+        /// <summary>
+        /// 1, 2 and 4 bit samples are stretched to 0..255 (so bilevel and 16-level images display as intended);
+        /// every other depth keeps its stored values (a 12-bit sample 0..4095 arrives as UInt16 0..4095).
+        /// </summary>
+        Default,
+        /// <summary>All depths keep their stored values (a bilevel image decodes to 0 and 1).</summary>
+        None,
+        /// <summary>All odd depths are stretched to the full range of the output type: round(v * typeMax / (2^bits - 1)).</summary>
+        FullRange,
     }
 
     public enum TiffPredictor
@@ -54,28 +86,79 @@ namespace PixCodec
 
         /// <summary>Compress strips/tiles on several threads.</summary>
         public bool Parallel { get; set; } = true;
+
+        /// <summary>Write a big endian ("MM") file. A file level setting: for multi-page output the value of the options passed to Encode counts.</summary>
+        public bool BigEndian { get; set; }
+
+        /// <summary>
+        /// Write an 8-bit Gray image as a 1-bit bilevel image (samples &gt;= 128 become white). Always the case for
+        /// <see cref="TiffCompression.CcittGroup4"/>.
+        /// </summary>
+        public bool Bilevel { get; set; }
+
+        /// <summary>Quality 1..100 for <see cref="TiffCompression.Jpeg"/>.</summary>
+        public int JpegQuality { get; set; } = 90;
+
+        /// <summary>Chroma subsampling for <see cref="TiffCompression.Jpeg"/> with Rgb images (Auto: 4:4:4 from quality 90, 4:2:0 below).</summary>
+        public JpegSubsampling JpegSubsampling { get; set; } = JpegSubsampling.Auto;
+
+        /// <summary>
+        /// Additional tags to write into the image directory, e.g. the GeoTIFF tags (ModelPixelScale 33550,
+        /// ModelTiepoint 33922, GeoKeyDirectory 34735, GDAL_NODATA 42113) or Software / ImageDescription. They take
+        /// precedence over what the image metadata would produce; tags describing the pixel layout are refused.
+        /// </summary>
+        public IList<TiffTag> ExtraTags { get; set; } = new List<TiffTag>();
+
+        /// <summary>Test seam: zero bytes inserted after the header, pushing every offset (also past 4 GB).</summary>
+        internal long TestPadding;
+    }
+
+    /// <summary>One image of a multi-page TIFF to write.</summary>
+    public sealed class TiffPage
+    {
+        public TiffPage(RawImage image, TiffEncodeOptions? options = null)
+        {
+            Image = image ?? throw new ArgumentNullException(nameof(image));
+            Options = options;
+        }
+
+        public RawImage Image { get; }
+
+        /// <summary>Per image settings (compression, tiling, tags ...); null uses the options passed to Encode.</summary>
+        public TiffEncodeOptions? Options { get; set; }
+
+        /// <summary>Marks the image as a reduced resolution version of another one (NewSubfileType bit 0): an overview / pyramid level.</summary>
+        public bool ReducedResolution { get; set; }
     }
 
     /// <summary>
-    /// TIFF codec: classic TIFF and BigTIFF, strips and tiles, both byte orders.
-    /// <para>Decoding rules worth knowing:</para>
+    /// TIFF codec: classic TIFF and BigTIFF, strips and tiles, both byte orders, multi-page files.
+    /// <para>Decoding:</para>
     /// <list type="bullet">
-    /// <item>1/2/4-bit gray is scaled to the full UInt8 range; MinIsWhite is inverted for unsigned integer data
-    /// (signed and float data is returned as stored).</item>
-    /// <item>Palette images are expanded to UInt8 Rgb; CMYK is converted naively to Rgb.</item>
+    /// <item>Compression: none, LZW, Deflate, PackBits, CCITT RLE / Group 3 / Group 4, JPEG (8 and 12 bit DCT, lossless,
+    /// old-style), ZSTD, LZMA, WebP, SGI LogLuv. Predictors 2 and 3.</item>
+    /// <item>Samples: unsigned and signed integers of 1..32 and 64 bits, floats of 16, 24, 32 and 64 bits. Samples of an
+    /// odd bit depth arrive with their stored values in the next larger type (12 bit: UInt16 0..4095; 24-bit floats:
+    /// Float32); only 1, 2 and 4 bit unsigned samples are stretched to 0..255 by default, see
+    /// <see cref="TiffBitScaling"/>.</item>
+    /// <item>MinIsWhite is inverted for unsigned integer data (signed and float data is returned as stored).</item>
+    /// <item>Palette images are expanded to UInt8 Rgb; YCbCr, CMYK (naively), CIELab / ICCLab / ITULab (to sRGB) and
+    /// LogLuv (to linear Float32 RGB) are converted to Rgb unless <see cref="TiffDecodeOptions.ConvertToRgb"/> is off.</item>
     /// <item>Exactly one extra sample marked as alpha gives GrayAlpha/Rgba (associated alpha is un-premultiplied).
     /// Any other surplus samples (unspecified extras, more than one extra) keep ALL samples as stored and report
     /// <see cref="ColorModel.Other"/>.</item>
-    /// <item>Orientation is reported in the metadata, never applied.</item>
+    /// <item>Orientation is reported in the metadata, never applied. Resolution, ICC profile and EXIF are returned.</item>
     /// </list>
+    /// <para>Encoding: all sample types and colour models; none, LZW, Deflate, PackBits, JPEG and CCITT Group 4;
+    /// strips or tiles; multi-page files and pyramids; either byte order; arbitrary extra tags.</para>
     /// </summary>
     public static unsafe class Tiff
     {
         /// <summary>
-        /// Decoder for JPEG-in-TIFF (compression 7) strips and tiles, see <see cref="TiffJpegDecoder"/>.
-        /// A field so tests can substitute it.
+        /// Test hook: when set, replaces the built-in JPEG codec for 8-bit JPEG-in-TIFF strips and tiles
+        /// (see <see cref="TiffJpegDecoder"/>). Null in normal operation.
         /// </summary>
-        internal static TiffJpegDecoder? JpegDecoder = Jpeg.DecodeForTiff;
+        internal static TiffJpegDecoder? JpegDecoder;
 
         /// <summary>Returns whether the data starts with a TIFF signature (needs at most 16 bytes).</summary>
         public static bool IsMatch(ReadOnlySpan<byte> header) => TiffFile.IsMatch(header);
@@ -186,7 +269,20 @@ namespace PixCodec
 
         /// <summary>Encodes an image as TIFF to the stream (which only needs to be writable, not seekable).</summary>
         public static void Encode(RawImage image, Stream output, TiffEncodeOptions? options = null)
-            => TiffEncoder.Encode(image, output, options ?? new TiffEncodeOptions());
+            => TiffEncoder.Encode(new[] { new TiffPage(image ?? throw new ArgumentNullException(nameof(image))) }, output, options ?? new TiffEncodeOptions());
+
+        /// <summary>
+        /// Writes several images into one TIFF (multi-page file, or a pyramid when the further pages are marked
+        /// <see cref="TiffPage.ReducedResolution"/>). File level settings (BigTiff, BigEndian) come from
+        /// <paramref name="options"/>, everything else can be set per page. The pages are enumerated lazily when
+        /// BigTiff is set explicitly; with the automatic choice all of them are looked at first to size the file.
+        /// </summary>
+        public static void Encode(IEnumerable<TiffPage> pages, Stream output, TiffEncodeOptions? options = null)
+            => TiffEncoder.Encode(pages, output, options ?? new TiffEncodeOptions());
+
+        /// <summary>Writes several images into one multi-page TIFF with the same options.</summary>
+        public static void Encode(IEnumerable<RawImage> pages, Stream output, TiffEncodeOptions? options = null)
+            => TiffEncoder.Encode((pages ?? throw new ArgumentNullException(nameof(pages))).Select(p => new TiffPage(p)), output, options ?? new TiffEncodeOptions());
 
         static ImageInfo InfoCore(TiffSource src)
         {
@@ -222,7 +318,7 @@ namespace PixCodec
         {
             options ??= new TiffDecodeOptions();
             var file = new TiffFile(src);
-            var img = new TiffImage(file, Locate(file, options.ImageIndex));
+            var img = new TiffImage(file, Locate(file, options.ImageIndex), options);
             return region is var (x, y, w, h)
                 ? img.Decode(x, y, w, h, options)
                 : img.Decode(0, 0, img.Width, img.Height, options);
@@ -249,5 +345,15 @@ namespace PixCodec
 
 namespace PixCodec
 {
-    public enum TiffCompression { None, Lzw, Deflate, PackBits }
+    public enum TiffCompression
+    {
+        None,
+        Lzw,
+        Deflate,
+        PackBits,
+        /// <summary>JPEG (compression 7), 8-bit Gray or Rgb only; Rgb is stored as YCbCr. Lossy.</summary>
+        Jpeg,
+        /// <summary>CCITT Group 4 fax (compression 4): 1-bit bilevel output from an 8-bit Gray image.</summary>
+        CcittGroup4,
+    }
 }

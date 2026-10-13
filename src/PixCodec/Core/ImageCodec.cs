@@ -40,8 +40,94 @@ namespace PixCodec
             _ => throw new ImageFormatException("unknown image format"),
         };
 
-        public static ImageInfo GetInfo(Stream stream) => GetInfo(ReadAll(stream));
-        public static ImageInfo GetInfo(string path) => GetInfo(File.ReadAllBytes(path));
+        /// <summary>
+        /// Reads format, dimensions, channels, sample type and frame count of an image file without decoding it and
+        /// without reading the whole file: only the leading part holding the headers is read (TIFF directories are
+        /// located by seeking). GIF is the exception, counting its frames needs the whole file.
+        /// </summary>
+        public static ImageInfo GetInfo(string path)
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.None);
+            return GetInfo(fs);
+        }
+
+        /// <summary>
+        /// Like <see cref="GetInfo(string)"/> for a stream positioned at the start of the image. Reads only as far as
+        /// the headers need (the stream position afterwards is unspecified). Works on non-seekable streams.
+        /// </summary>
+        public static ImageInfo GetInfo(Stream stream) => GetInfo(stream, 8192);
+
+        /// <summary>Returns false instead of throwing when the file is missing, unreadable or not a supported image.</summary>
+        public static bool TryGetInfo(string path, out ImageInfo info)
+        {
+            try { info = GetInfo(path); return true; }
+            catch (Exception e) when (e is ImageFormatException or ImageNotSupportedException or IOException or UnauthorizedAccessException)
+            {
+                info = default;
+                return false;
+            }
+        }
+
+        internal static ImageInfo GetInfo(Stream stream, int initialSize)
+        {
+            var buf = new byte[Math.Max(initialSize, 64)];
+            int n = Fill(stream, buf, 0);
+            bool eof = n < buf.Length;
+            var format = DetectFormat(buf.AsSpan(0, n));
+            if (format == ImageFormat.Unknown) throw new ImageFormatException("unknown image format");
+            if (format == ImageFormat.Tiff && stream.CanSeek)
+            {
+                stream.Seek(-n, SeekOrigin.Current);
+                return Tiff.GetInfo(stream);
+            }
+            // TIFF directories can be anywhere and GIF frames have to be counted: these need all the data.
+            // The others are parsed from a growing prefix; their header parsers throw ImageFormatException when
+            // the prefix ends inside the headers, which is the signal to read more.
+            bool needAll = format is ImageFormat.Tiff or ImageFormat.Gif;
+            while (true)
+            {
+                if (eof) return GetInfo(buf.AsSpan(0, n));
+                if (!needAll && (format != ImageFormat.Png || PngHeadersComplete(buf.AsSpan(0, n))))
+                {
+                    try { return GetInfo(buf.AsSpan(0, n)); }
+                    catch (ImageFormatException) { }
+                }
+                Array.Resize(ref buf, (int)Math.Min((long)buf.Length * 4, Array.MaxLength));
+                int got = Fill(stream, buf, n);
+                eof = n + got < buf.Length;
+                n += got;
+                if (!eof && n == Array.MaxLength) throw new ImageNotSupportedException("image headers exceed 2 GB");
+            }
+        }
+
+        /// <summary>
+        /// PNG's header parser stops quietly at the end of its input, so decide here whether the prefix reaches the
+        /// first IDAT (everything that affects the info - tRNS, acTL - has to precede it).
+        /// </summary>
+        static bool PngHeadersComplete(ReadOnlySpan<byte> prefix)
+        {
+            long pos = 8;
+            while (pos + 8 <= prefix.Length)
+            {
+                var head = prefix.Slice((int)pos, 8);
+                uint length = (uint)(head[0] << 24 | head[1] << 16 | head[2] << 8 | head[3]);
+                if (head.Slice(4).SequenceEqual("IDAT"u8) || head.Slice(4).SequenceEqual("IEND"u8)) return true;
+                pos += 12L + length;
+            }
+            return false;
+        }
+
+        static int Fill(Stream stream, byte[] buffer, int offset)
+        {
+            int total = 0;
+            while (offset + total < buffer.Length)
+            {
+                int r = stream.Read(buffer, offset + total, buffer.Length - offset - total);
+                if (r <= 0) break;
+                total += r;
+            }
+            return total;
+        }
 
         public static RawImage Decode(ReadOnlySpan<byte> data) => DetectFormat(data) switch
         {

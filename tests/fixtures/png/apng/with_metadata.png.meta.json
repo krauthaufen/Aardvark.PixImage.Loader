@@ -1,0 +1,20 @@
+{
+ "gamma": 0.45455,
+ "text": [
+  {
+   "keyword": "Title",
+   "text": "animated",
+   "itxt": false,
+   "lang": "",
+   "tkey": ""
+  }
+ ],
+ "frames": 4,
+ "loop": 0,
+ "durations": [
+  100.0,
+  100.0,
+  100.0,
+  100.0
+ ]
+}

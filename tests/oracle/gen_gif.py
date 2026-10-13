@@ -3,7 +3,7 @@ RGBA canvas after frame N).
 
 Three kinds of fixtures:
   * written by Pillow / ImageMagick / ffmpeg; references are Pillow's and ImageMagick's (-coalesce) decodes, which
-    must agree unless the file is listed in PREFER with the reason;
+    must agree unless the file is listed in NEEDS_CHROMIUM;
   * hand built with the small writer below (things the tools cannot write); the reference is computed from the
     palette indices that went into the file with the browser compositing rules (canvas starts transparent,
     disposal 2 clears to transparent, frames are clipped to the screen) and is cross checked against the tools
@@ -12,7 +12,10 @@ Three kinds of fixtures:
 
 Transparent pixels are normalized to (0,0,0,0) everywhere.
 
-usage: python3 gen_gif.py [--report]
+After that gen_gif_chrome.js replaces every reference Chromium can produce with Chromium's (see there); what is
+described above remains the reference only for the files Chromium refuses.
+
+usage: python3 gen_gif.py [--report] [--no-chromium]
 """
 import io
 import os
@@ -86,8 +89,10 @@ def same(a, b):
     return len(a) == len(b) and all(x.shape == y.shape and np.array_equal(x, y) for x, y in zip(a, b))
 
 
-# Tool-written files where Pillow and ImageMagick disagree: which one matches browsers, and why.
-PREFER = {
+# Tool-written files where Pillow and ImageMagick disagree. Neither is trusted then: the file needs the Chromium pass
+# (gen_gif_chrome.js) for its reference; Pillow's frames are only a placeholder until that has run.
+NEEDS_CHROMIUM = {
+    'pil_anim_disposal3.gif': 'Pillow writes "restore previous" on the first frame too and deltas against it',
 }
 
 
@@ -98,11 +103,9 @@ def tool_fixture(name):
     if same(p, m):
         write_refs(name, p)
         return
-    if name not in PREFER:
-        raise SystemExit(f'{name}: Pillow and ImageMagick disagree and no preference is recorded')
-    if REPORT:
-        print(f'{name}: oracles disagree, using {PREFER[name][0]} ({PREFER[name][1]})')
-    write_refs(name, p if PREFER[name][0] == 'pillow' else m)
+    if name not in NEEDS_CHROMIUM:
+        raise SystemExit(f'{name}: Pillow and ImageMagick disagree and the file is not listed in NEEDS_CHROMIUM')
+    write_refs(name, p)
 
 
 # ---------------------------------------------------------------- hand written GIF writer
@@ -237,20 +240,38 @@ def composite(w, h, gpal, frames):
         backup = canvas.copy()
         pal = f.pal if f.pal is not None else gpal
         if pal is None:
-            pal = [(i, i, i) for i in range(256)]
+            pal = []        # no color table anywhere: black, as in Chromium
         fh, fw = f.idx.shape
-        order = INTERLACE(fh) if f.interlace else list(range(fh))
-        n = 0
-        for row in order:
-            for col in range(fw):
-                n += 1
-                if f.decoded is not None and n > f.decoded:
-                    continue
-                i = int(f.idx[row, col])
-                yy, xx = f.y + row, f.x + col
-                if i == f.trans or yy >= h or xx >= w:
-                    continue
-                canvas[yy, xx] = (*pal[i], 255) if i < len(pal) else (0, 0, 0, 255)
+        # rows[y] = (source row, number of valid pixels). An opaque interlaced FIRST frame that stops early spreads each
+        # finished row of pass 1/2/3 over the 8/4/2 rows it stands for, as browsers do while an image loads; any other
+        # frame just keeps the pixels it got.
+        rows = {}
+        if f.decoded is None:
+            rows = {y: (y, fw) for y in range(fh)}
+        elif not f.interlace:
+            rows = {y: (y, max(0, min(fw, f.decoded - y * fw))) for y in range(fh)}
+        elif k > 0 or f.trans is not None:
+            rows = {y: (y, max(0, min(fw, f.decoded - n * fw))) for n, y in enumerate(INTERLACE(fh))}
+        else:
+            n = 0
+            for start, step, repeat in ((0, 8, 8), (4, 8, 4), (2, 4, 2), (1, 2, 1)):
+                for y in range(start, fh, step):
+                    have = max(0, min(fw, f.decoded - n * fw))
+                    n += 1
+                    if have == fw:
+                        for k in range(min(repeat, fh - y)):
+                            rows[y + k] = (y, fw)
+                    elif have:
+                        rows[y] = (y, have, rows.get(y))
+        for row, src in rows.items():
+            layers = [src] if len(src) == 2 else [src[2], src[:2]] if src[2] else [src[:2]]
+            for srow, have in layers:
+                for col in range(have):
+                    i = int(f.idx[srow, col])
+                    yy, xx = f.y + row, f.x + col
+                    if i == f.trans or yy >= h or xx >= w:
+                        continue
+                    canvas[yy, xx] = (*pal[i], 255) if i < len(pal) else (0, 0, 0, 255)
         result.append(canvas.copy())
         prev = (f, backup)
     return result
@@ -316,9 +337,7 @@ def gen_pillow():
             frames.append(Image.fromarray(a).quantize(32, dither=Image.Dither.NONE))
         return frames
     fr = moving(4)
-    # Not with disposal 3: Pillow writes "restore previous" on the first frame too and then deltas against it;
-    # Pillow, ImageMagick and browsers each show such a file differently (see hand_anim_disposal3*.gif instead).
-    for d in (0, 1, 2):
+    for d in (0, 1, 2, 3):
         fr[0].save(os.path.join(OUT, f'pil_anim_disposal{d}.gif'), save_all=True, append_images=fr[1:], duration=[30, 70, 110, 200],
                    loop=0, disposal=d)
         tool_fixture(f'pil_anim_disposal{d}.gif')
@@ -442,7 +461,21 @@ def gen_hand():
     istream = lzw(img[INTERLACE(12)].ravel()[:70], 3, end_code=False)
     ihead = bytearray(head); ihead[-1] |= 0x40
     icut.decoded = 70
-    hand_fixture('hand_truncated_interlaced.gif', 16, 12, PAL8, [icut], data=bytes(ihead) + bytes([3]) + blocks(istream), check=False)
+    hand_fixture('hand_truncated_interlaced.gif', 16, 12, PAL8, [icut], data=bytes(ihead) + bytes([3]) + blocks(istream)[:-1], check=False)
+    # too few pixels although the block chain, end code and trailer are all there
+    short = Frame(img)
+    short.decoded = 100
+    hand_fixture('hand_short_frame.gif', 16, 12, PAL8, [short], data=head + bytes([3]) + blocks(lzw(img.ravel()[:100], 3)) + b'\x3B', check=False)
+    ishort = Frame(img, interlace=True)
+    ishort.decoded = 70
+    hand_fixture('hand_short_frame_interlaced.gif', 16, 12, PAL8, [ishort],
+                 data=bytes(ihead) + bytes([3]) + blocks(lzw(img[INTERLACE(12)].ravel()[:70], 3)) + b'\x3B', check=False)
+    # transparent, so no spreading
+    ticut = Frame(img, interlace=True, trans=5)
+    ticut.decoded = 70
+    tih = bytearray(tfull_head := build(16, 12, PAL8, [Frame(img, trans=5)])[:build(16, 12, PAL8, [Frame(img, trans=5)]).index(b'\x2C') + 10])
+    tih[-1] |= 0x40
+    hand_fixture('hand_truncated_interlaced_transparent.gif', 16, 12, PAL8, [ticut], data=bytes(tih) + bytes([3]) + blocks(istream)[:-1], check=False)
     # transparent frame, truncated: the rest stays transparent
     tcut = Frame(img, trans=5)
     tcut.decoded = 100
@@ -490,6 +523,29 @@ def gen_hand():
     app = b'\x21\xFF\x0BXMP DataXMP' + blocks(b'<x:xmpmeta/>')
     hand_fixture('hand_extensions.gif', 14, 10, PAL4, [Frame(t)], head=comment + plain + unknown + app, check=False)
     hand_fixture('hand_extension_between_gce_and_image.gif', 14, 10, PAL4, [Frame(t, trans=1, mid=comment + unknown)])
+    # ICC profile in the ICCRGBG1012 application extension; the sidecar is what ImageMagick extracts from the file
+    from PIL import ImageCms
+    icc = ImageCms.ImageCmsProfile(ImageCms.createProfile('sRGB')).tobytes()
+    icc = icc[:24] + bytes(12) + icc[36:84] + bytes(16) + icc[100:]     # creation date and profile id vary from run to run
+    hand_fixture('hand_icc_profile.gif', 14, 10, PAL4, [Frame(t)], head=b'\x21\xFF\x0BICCRGBG1012' + blocks(icc))
+    icc_path = os.path.join(OUT, 'hand_icc_profile.gif.icc')
+    subprocess.run(['magick', os.path.join(OUT, 'hand_icc_profile.gif'), 'icc:' + icc_path], check=True, capture_output=True)
+    assert open(icc_path, 'rb').read() == icc, 'ImageMagick extracts a different ICC profile'
+    # browsers enlarge the screen for a first frame that does not fit, and only for the first
+    hand_fixture('hand_anim_first_beyond_screen.gif', 10, 8, PAL8,
+                 [Frame(R(7, 9, 8), x=6, y=4, delay=3), Frame(R(9, 12, 8), x=8, y=6, delay=3, disposal=2), Frame(R(4, 30, 8), x=0, y=9, delay=3)],
+                 check=False)
+    # transparent, interlaced and cut short, also as a later frame over existing content
+    ti = R(12, 16, 8)
+    def cut_frames(n_px):
+        fr = [Frame(R(12, 16, 8), delay=2), Frame(ti, trans=5, interlace=True, delay=2)]
+        whole = build(16, 12, PAL8, fr)
+        at = whole.index(b'\x2C', whole.index(b'\x2C') + 1) + 10
+        return fr, whole[:at] + bytes([3]) + blocks(lzw(ti[INTERLACE(12)].ravel()[:n_px], 3, end_code=False))[:-1]
+    for n_px in (40, 90, 150):
+        fr, data = cut_frames(n_px)
+        fr[1].decoded = n_px
+        hand_fixture(f'hand_truncated_interlaced_second_{n_px}.gif', 16, 12, PAL8, fr, data=data, check=False)
     hand_fixture('hand_comment_after_image.gif', 14, 10, PAL4, [Frame(t)], tail=comment)
     hand_fixture('hand_loop_animexts.gif', 14, 10, PAL4, [Frame(t, delay=3), Frame(R(10, 14, 4), delay=4)], loop=7,
                  loop_id=b'ANIMEXTS1.0', check=False)
@@ -539,6 +595,12 @@ def main():
     gen_pillow()
     gen_tools()
     gen_hand()
+    # Chromium has the last word wherever it can read the file.
+    js = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gen_gif_chrome.js')
+    if '--no-chromium' in sys.argv:
+        print('WARNING: references are NOT browser verified (--no-chromium): ' + ', '.join(NEEDS_CHROMIUM) + ' are wrong')
+    else:
+        subprocess.run(['node', js], check=True)
     files = os.listdir(OUT)
     size = sum(os.path.getsize(os.path.join(OUT, f)) for f in files)
     print(f'{sum(f.endswith(".gif") for f in files)} gif fixtures, {len(files)} files, {size / 1024:.0f} KiB')

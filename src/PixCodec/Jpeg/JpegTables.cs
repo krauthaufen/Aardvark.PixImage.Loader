@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace PixCodec.JpegImpl
 {
@@ -33,6 +34,27 @@ namespace PixCodec.JpegImpl
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static ulong NonZeroMask(short* blk)
         {
+            if (Avx2.IsSupported)
+            {
+                // compare 32 coefficients, narrow the results to bytes (which interleaves the 128 bit halves), put them back in order
+                var z = Vector256<short>.Zero;
+                var lo = Avx2.PackSignedSaturate(Avx2.CompareEqual(Avx.LoadVector256(blk), z), Avx2.CompareEqual(Avx.LoadVector256(blk + 16), z));
+                var hi = Avx2.PackSignedSaturate(Avx2.CompareEqual(Avx.LoadVector256(blk + 32), z), Avx2.CompareEqual(Avx.LoadVector256(blk + 48), z));
+                uint a = (uint)Avx2.MoveMask(Avx2.Permute4x64(lo.AsInt64(), 0b11011000).AsByte());
+                uint b = (uint)Avx2.MoveMask(Avx2.Permute4x64(hi.AsInt64(), 0b11011000).AsByte());
+                return ~(a | (ulong)b << 32);
+            }
+            if (Sse2.IsSupported)
+            {
+                var z = Vector128<short>.Zero;
+                ulong zero = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    var packed = Sse2.PackSignedSaturate(Sse2.CompareEqual(Sse2.LoadVector128(blk + i * 16), z), Sse2.CompareEqual(Sse2.LoadVector128(blk + i * 16 + 8), z));
+                    zero |= (ulong)(uint)Sse2.MoveMask(packed) << (i * 16);
+                }
+                return ~zero;
+            }
             if (Vector128.IsHardwareAccelerated)
             {
                 ulong zero = 0;

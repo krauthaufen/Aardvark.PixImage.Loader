@@ -608,21 +608,23 @@ public class GifTests(ITestOutputHelper output)
     {
         ImageInfo? info = null;
         RawImage? first = null;
+        // damaged size fields may announce anything; keep what the test allocates small
+        var small = new GifDecodeOptions { MaxPixels = 1 << 20 };
         try { info = Gif.GetInfo(data); } catch (ImageFormatException) { } catch (ImageNotSupportedException) { }
-        try { first = Gif.Decode(data); } catch (ImageFormatException) { } catch (ImageNotSupportedException) { }
+        try { first = Gif.Decode(data, small); } catch (ImageFormatException) { } catch (ImageNotSupportedException) { }
         if (info != null && first != null)
             Assert.Equal((info.Value.Width, info.Value.Height, info.Value.Channels), (first.Width, first.Height, first.Channels));
         foreach (var mode in new[] { GifFrameMode.Composited, GifFrameMode.Indexed })
         {
             try
             {
-                var a = Gif.DecodeAnimation(data, new GifDecodeOptions { FrameMode = mode });
+                var a = Gif.DecodeAnimation(data, new GifDecodeOptions { FrameMode = mode, MaxPixels = 1 << 20 });
                 Assert.Equal(info!.Value.FrameCount, a.Frames.Count);
             }
             catch (ImageFormatException) { }
             catch (ImageNotSupportedException) { }
         }
-        try { foreach (var _ in Gif.EnumerateFrames(data)) { } } catch (ImageFormatException) { } catch (ImageNotSupportedException) { }
+        try { foreach (var _ in Gif.EnumerateFrames(data, small)) { } } catch (ImageFormatException) { } catch (ImageNotSupportedException) { }
     }
 
     [Theory, MemberData(nameof(Fixtures))]
@@ -657,30 +659,193 @@ public class GifTests(ITestOutputHelper output)
         Assert.True(sw.Elapsed.TotalSeconds < 30, $"took {sw.Elapsed.TotalSeconds:F1}s");
     }
 
+    /// <summary>A file made of the given screen and one frame (2 colors, pixel value 1 everywhere it has data).</summary>
+    static byte[] Synthetic(int screenW, int screenH, int fx, int fy, int fw, int fh, int pixels, bool interlace = false)
+    {
+        var ms = new MemoryStream();
+        ms.Write("GIF89a"u8);
+        ms.Write(new byte[] { (byte)screenW, (byte)(screenW >> 8), (byte)screenH, (byte)(screenH >> 8), 0x80, 0, 0, 10, 20, 30, 200, 100, 50 });
+        ms.Write(new byte[] { 0x2C, (byte)fx, (byte)(fx >> 8), (byte)fy, (byte)(fy >> 8), (byte)fw, (byte)(fw >> 8), (byte)fh, (byte)(fh >> 8), (byte)(interlace ? 0x40 : 0) });
+        var px = new byte[pixels];
+        px.AsSpan().Fill(1);
+        GifLzw.Encode(px, 2, ms);
+        ms.WriteByte(0x3B);
+        return ms.ToArray();
+    }
+
     [Fact]
     public void LyingHeadersDoNotAllocate()
     {
-        // 65535 x 65535 screen and frame, a handful of data bytes
-        var data = new List<byte>();
-        data.AddRange("GIF89a"u8.ToArray());
-        data.AddRange(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0x80, 0, 0, 0, 0, 0, 255, 255, 255 });
-        data.AddRange(new byte[] { 0x2C, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 2, 2, 0x4C, 0x01, 0, 0x3B });
-        var bytes = data.ToArray();
-        long before = GC.GetTotalAllocatedBytes(true);
+        // 65535 x 65535 screen and frame, one pixel of data
+        var bytes = Synthetic(65535, 65535, 0, 0, 65535, 65535, 1);
+        Assert.True(bytes.Length < 40);
+        long before = GC.GetAllocatedBytesForCurrentThread();
         var info = Gif.GetInfo(bytes);
         Assert.Equal((65535, 65535, 1), (info.Width, info.Height, info.FrameCount));
-        Assert.Throws<ImageFormatException>(() => Gif.Decode(bytes));
-        Assert.Throws<ImageFormatException>(() => Gif.DecodeAnimation(bytes));
-        Assert.Throws<ImageFormatException>(() => Gif.DecodeAnimation(bytes, new GifDecodeOptions { FrameMode = GifFrameMode.Indexed }));
-        Assert.True(GC.GetTotalAllocatedBytes(true) - before < 1 << 20);
+        // above the hard limit
+        Assert.Throws<ImageNotSupportedException>(() => Gif.Decode(bytes));
+        Assert.Throws<ImageNotSupportedException>(() => Gif.DecodeAnimation(bytes, new GifDecodeOptions { FrameMode = GifFrameMode.Indexed }));
+        // below it, but the file cannot possibly paint that much
+        foreach (var size in new[] { 16000, 9000 })
+        {
+            var lie = Synthetic(size, size, 0, 0, size, size, 1);
+            Assert.Throws<ImageFormatException>(() => Gif.Decode(lie));
+            Assert.Throws<ImageFormatException>(() => Gif.DecodeAnimation(lie));
+            Assert.Throws<ImageFormatException>(() => Gif.DecodeAnimation(lie, new GifDecodeOptions { FrameMode = GifFrameMode.Indexed }));
+            Assert.Throws<ImageFormatException>(() => Gif.EnumerateFrames(lie).ToList());
+        }
+        // small frame, lying screen
+        Assert.Throws<ImageFormatException>(() => Gif.Decode(Synthetic(20000, 10000, 5, 5, 3, 3, 9)));
+        // small screen, lying frame that hangs over it - the first frame would enlarge the screen
+        Assert.Throws<ImageFormatException>(() => Gif.Decode(Synthetic(10, 10, 0, 0, 30000, 8000, 9)));
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 1 << 20, "lying headers must be rejected before allocating");
 
-        // small frame on a huge screen
-        bytes[24] = 1; bytes[25] = 0; bytes[26] = 1; bytes[27] = 0;
-        Assert.Throws<ImageFormatException>(() => Gif.Decode(bytes));
-        // plausible but above the caller's limit
-        bytes[6] = 100; bytes[7] = 0; bytes[8] = 100; bytes[9] = 0;
-        Assert.Equal(100, Gif.Decode(bytes).Width);
-        Assert.Throws<ImageNotSupportedException>(() => Gif.Decode(bytes, new GifDecodeOptions { MaxPixels = 9999 }));
+        // the caller can tighten both limits
+        var ok = Synthetic(100, 100, 0, 0, 100, 100, 10000);
+        Assert.Equal(100, Gif.Decode(ok).Width);
+        Assert.Throws<ImageNotSupportedException>(() => Gif.Decode(ok, new GifDecodeOptions { MaxPixels = 9999 }));
+        Assert.Throws<ImageFormatException>(() => Gif.Decode(Synthetic(2000, 2000, 0, 0, 2, 2, 4), new GifDecodeOptions { MaxUnbackedPixels = 0 }));
+        Assert.Equal(100, Gif.Decode(ok, new GifDecodeOptions { MaxUnbackedPixels = 0 }).Width);
+    }
+
+    /// <summary>A valid file: a 3 x 3 frame on a 6000 x 4000 screen in 40 bytes. The canvas is mostly empty, not a lie.</summary>
+    [Fact]
+    public void TinyFrameOnHugeCanvas()
+    {
+        const int W = 6000, H = 4000;
+        var bytes = Synthetic(W, H, 4321, 1234, 3, 3, 9);
+        var info = Gif.GetInfo(bytes);
+        Assert.Equal((W, H, 4, 1), (info.Width, info.Height, info.Channels, info.FrameCount));
+        var img = Gif.Decode(bytes);
+        Assert.Equal((W, H, ColorModel.Rgba), (img.Width, img.Height, img.Color));
+        var d = img.GetData<byte>();
+        long opaque = 0;
+        for (int i = 3; i < d.Length; i += 4) if (d[i] != 0) opaque++;
+        Assert.Equal(9, opaque);
+        Assert.Equal(new byte[] { 200, 100, 50, 255 }, d.AsSpan((1235 * W + 4322) * 4, 4).ToArray());
+        Assert.Equal(new byte[4], d.AsSpan((1234 * W + 4320) * 4, 4).ToArray());
+
+        // indexed frames never need the canvas at all
+        var raw = Gif.DecodeAnimation(bytes, new GifDecodeOptions { FrameMode = GifFrameMode.Indexed });
+        Assert.Equal(new byte[] { 1, 1, 1, 1, 1, 1, 1, 1, 1 }, raw.Frames[0].Indices);
+        // beyond the default allowance it takes the option
+        var bigger = Synthetic(12000, 8000, 7, 7, 3, 3, 9);
+        Assert.Throws<ImageFormatException>(() => Gif.Decode(bigger));
+        var o = new GifDecodeOptions { MaxUnbackedPixels = 100_000_000, FrameMode = GifFrameMode.Indexed };
+        Assert.Equal(9, Gif.DecodeAnimation(bigger, o).Frames[0].Indices!.Length);
+    }
+
+    /// <summary>A large image of which only the beginning arrived: decoded as far as it goes, the rest untouched.</summary>
+    [Theory]
+    [InlineData(false), InlineData(true)]
+    public void TruncatedLargeImage(bool interlace)
+    {
+        const int W = 3000, H = 2500;
+        var rows = 8;
+        var bytes = Synthetic(W, H, 0, 0, W, H, W * rows + 100, interlace);
+        Assert.True(bytes.Length < 3000);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var anim = Gif.DecodeAnimation(bytes);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        var f = anim.Frames[0];
+        Assert.True(f.Truncated);
+        var d = f.Image!.GetData<byte>();
+        long opaque = 0;
+        for (int i = 3; i < d.Length; i += 4) if (d[i] != 0) opaque++;
+        // interlaced: an opaque first frame spreads its finished rows downwards like a browser does while loading
+        // (8 rows of pass 1 stand for 8 rows each), plus the 100 pixels of the unfinished row
+        Assert.Equal((interlace ? (long)W * rows * 8 : (long)W * rows) + 100, opaque);
+        // the canvas twice (working copy and the frame's own) plus index scratch of at most the frame size
+        Assert.True(allocated < 2L * W * H * 4 + 2L * W * H + (1 << 20), $"{allocated} bytes allocated");
+        var rgb = Gif.Decode(bytes);
+        Assert.Equal(ColorModel.Rgb, rgb.Color);
+        Assert.Equal(new byte[] { 200, 100, 50, 0, 0, 0 }, new[] { 0, 1, 2 }.Select(k => rgb.GetData<byte>()[k]).Concat(rgb.GetData<byte>().AsSpan(rgb.GetData<byte>().Length - 3).ToArray()).ToArray());
+    }
+
+    [Fact]
+    public void DelayClamping()
+    {
+        var data = File.ReadAllBytes(Fixture("gif/hand_anim_40_frames.gif"));     // delays 1, 0, 1, 2, 3, ... (1/100 s)
+        var raw = Gif.DecodeAnimation(data);
+        Assert.Equal(new[] { 1, 0, 1, 2, 3 }, raw.Frames.Take(5).Select(f => f.DelayCs));
+        Assert.Equal(new[] { 10, 0, 10, 20, 30 }, raw.Frames.Take(5).Select(f => f.DelayMs));
+        foreach (var mode in new[] { GifFrameMode.Composited, GifFrameMode.Indexed })
+        {
+            var o = new GifDecodeOptions { ClampDelays = true, FrameMode = mode };
+            var clamped = Gif.DecodeAnimation(data, o);
+            Assert.Equal(new[] { 1, 0, 1, 2, 3 }, clamped.Frames.Take(5).Select(f => f.DelayCs));
+            Assert.Equal(new[] { 100, 100, 100, 20, 30 }, clamped.Frames.Take(5).Select(f => f.DelayMs));
+            Assert.Equal(new[] { 100, 100, 100, 20, 30 }, Gif.EnumerateFrames(data, o).Take(5).Select(f => f.DelayMs));
+        }
+    }
+
+    [Fact]
+    public void SingleImageInfoAndMetadata()
+    {
+        var data = File.ReadAllBytes(Fixture("gif/pil_comment.gif"));
+        var img = Gif.Decode(data, out var info);
+        AssertEqual(Gif.Decode(data), img);
+        Assert.Equal(string.Concat(Enumerable.Repeat("hello gif ", 40)), Assert.Single(info.Comments));
+        Assert.Equal((img.Width, img.Height, 1), (info.Width, info.Height, info.FrameCount));
+        Assert.Equal(0, info.PixelAspectRatio);
+        Assert.Equal(1.0, info.PixelAspect);
+        Assert.Null(img.Metadata);
+        Assert.Null(info.IccProfile);
+
+        // pixel aspect ratio byte 113 = (113 + 15) / 64 = 2:1
+        var wide = (byte[])data.Clone();
+        wide[12] = 113;
+        Gif.Decode(wide, out var wideInfo);
+        Assert.Equal((113, 2.0), (wideInfo.PixelAspectRatio, wideInfo.PixelAspect));
+
+        // ICC profile: the sidecar is what ImageMagick extracts from the fixture
+        var iccFile = File.ReadAllBytes(Fixture("gif/hand_icc_profile.gif"));
+        var expected = File.ReadAllBytes(Fixture("gif/hand_icc_profile.gif.icc"));
+        var withIcc = Gif.Decode(iccFile, out var iccInfo);
+        Assert.Equal(expected, withIcc.Metadata!.IccProfile);
+        Assert.Equal(expected, iccInfo.IccProfile);
+        Assert.Equal(expected, Gif.DecodeAnimation(iccFile).Frames[0].Image!.Metadata!.IccProfile);
+        Assert.Equal(expected, Gif.GetAnimationInfo(iccFile).IccProfile);
+
+        // and written back, for stills and animations
+        var again = Encode(withIcc);
+        Assert.Equal(expected, Gif.Decode(again).Metadata!.IccProfile);
+        AssertEqual(withIcc, Gif.Decode(again));
+        var anim = Gif.EncodeAnimation(new[] { new GifInputFrame(withIcc, 50), new GifInputFrame(withIcc, 50) },
+            new GifEncodeOptions { PaletteMode = GifPaletteMode.PerFrame });
+        Assert.Equal(expected, Gif.GetAnimationInfo(anim).IccProfile);
+        if (!PythonAvailable) return;
+        var tmp = Path.Combine(FixtureDir, "_tmp");
+        Directory.CreateDirectory(tmp);
+        var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + ".gif");
+        try
+        {
+            File.WriteAllBytes(f, again);
+            var psi = new ProcessStartInfo("magick", $"\"{f}\" \"icc:{f}.icc\"") { RedirectStandardError = true, UseShellExecute = false };
+            Process? p;
+            try { p = Process.Start(psi); } catch { return; }        // no ImageMagick here
+            p!.WaitForExit();
+            Assert.Equal(0, p.ExitCode);
+            Assert.Equal(expected, File.ReadAllBytes(f + ".icc"));
+        }
+        finally { File.Delete(f); File.Delete(f + ".icc"); }
+    }
+
+    /// <summary>chrome.json documents where every reference came from; almost all must be Chromium's.</summary>
+    [Fact]
+    public void ReferencesAreBrowserVerified()
+    {
+        var json = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Fixture("gif/chrome.json"))).RootElement;
+        var notChromium = new List<string>();
+        foreach (var row in Fixtures)
+        {
+            var name = Path.GetFileName((string)row[0]);
+            Assert.True(json.TryGetProperty(name, out var e), name + " is missing from chrome.json - rerun gen_gif_chrome.js");
+            if (!e.GetProperty("source").GetString()!.StartsWith("chromium")) notChromium.Add(name);
+            else Assert.Equal(FrameRefs(Fixture((string)row[0])).Count, e.GetProperty("frames").GetInt32());
+        }
+        // Chromium refuses a frame whose data ends (with an end code) before all pixels are there; we keep what arrived.
+        Assert.Equal(new[] { "hand_short_frame.gif", "hand_short_frame_interlaced.gif" }, notChromium);
     }
 
     [Fact]
@@ -751,12 +916,27 @@ public class GifTests(ITestOutputHelper output)
             output.WriteLine($"  histogram: {mp / Best(3, () => new GifQuantizer().Add(px)):F0} MP/s");
             q.Add(px);
             uint[] colors = null!;
+            output.WriteLine($"  palette from histogram, no k-means: {Best(3, () => colors = q.BuildPalette(256, 0)) * 1000:F1} ms");
             output.WriteLine($"  palette from histogram: {Best(3, () => colors = q.BuildPalette(256, 3)) * 1000:F1} ms");
             var idx = new byte[px.Length];
             output.WriteLine($"  map, no dither: {mp / Best(3, () => new GifPalette(colors, colors.Length, false, null).Map(px, idx, W, H, GifDither.None)):F0} MP/s");
             output.WriteLine($"  map, Floyd-Steinberg: {mp / Best(3, () => new GifPalette(colors, colors.Length, false, null).Map(px, idx, W, H, GifDither.FloydSteinberg)):F0} MP/s");
-            new GifPalette(colors, colors.Length, false, null).Map(px, idx, W, H, GifDither.None);
+            var warm = new GifPalette(colors, colors.Length, false, null);
+            warm.Map(px, idx, W, H, GifDither.FloydSteinberg);
+            output.WriteLine($"  map, Floyd-Steinberg, inverse table warm: {mp / Best(3, () => warm.Map(px, idx, W, H, GifDither.FloydSteinberg)):F0} MP/s");
+            warm.Map(px, idx, W, H, GifDither.None);
+            output.WriteLine($"  map, no dither, inverse table warm: {mp / Best(3, () => warm.Map(px, idx, W, H, GifDither.None)):F0} MP/s");
             output.WriteLine($"  LZW encode: {mp / Best(3, () => GifLzw.Encode(idx, 8, new MemoryStream())):F0} MP/s");
+            var flatIdx = new byte[idx.Length];
+            for (int i = 0; i < flatIdx.Length; i++) flatIdx[i] = (byte)((i / 37 % 5) + ((i * 2654435761u >> 28) == 0 ? 1 : 0));
+            var smooth = new byte[idx.Length];
+            for (int i = 0; i < smooth.Length; i++) smooth[i] = (byte)((i % W / 8 + i / W / 8) + ((i * 2654435761u >> 30) == 0 ? 1 : 0));
+            foreach (var (name, data) in new[] { ("flat", flatIdx), ("smooth", smooth) })
+            {
+                var sink = new MemoryStream(8 << 20);
+                double te = Best(5, () => { sink.SetLength(0); GifLzw.Encode(data, 8, sink); });
+                output.WriteLine($"  LZW encode, {name} synthetic indices: {mp / te:F0} MP/s ({sink.Length * 8.0 / data.Length:F2} bits per pixel)");
+            }
             var lz = new MemoryStream();
             GifLzw.Encode(idx, 8, lz);
             var blocks = lz.ToArray();

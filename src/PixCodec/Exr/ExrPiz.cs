@@ -457,6 +457,15 @@ namespace PixCodec
             }
         }
 
+        /// <summary>Huffman codes a block of 16 bit words (used for the DWA AC coefficients).</summary>
+        internal static byte[] HufEncodeBlock(ReadOnlySpan<ushort> data, ExrScratch s)
+        {
+            var t = s.Piz ??= new Tables();
+            var outBuf = s.Bytes(1, 20 + EncSize + (int)Math.Min(int.MaxValue / 2, data.Length * 17L / 8) + 64);
+            fixed (ushort* w = data)
+                return outBuf.AsSpan(0, HufEncode(w, data.Length, outBuf, 0, t)).ToArray();
+        }
+
         static int HufEncode(ushort* w, int n, byte[] outBuf, int start, Tables t)
         {
             if (n == 0) return 0;
