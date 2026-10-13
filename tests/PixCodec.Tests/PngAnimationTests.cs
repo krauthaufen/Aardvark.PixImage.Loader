@@ -434,7 +434,7 @@ public class PngAnimationTests
         var png = Png.EncodeAnimation(frames, new PngEncodeOptions { LoopCount = 2 });
 
         // composited frames by ffmpeg (cross-checked with Pillow at 8 bit inside the oracle), stacked vertically
-        var oracle = TestUtil.OracleDecode(png, ".anim.png");
+        var oracle = PngFeatureTests.OracleDecode(png, ".anim.png");
         if (oracle == null) return;
         Assert.Equal(images[0].Height * images.Count, oracle.Height);
         var expect = RawImage.Create(images[0].Width, oracle.Height, ColorModel.Rgba, type);
@@ -599,20 +599,12 @@ public class PngAnimationTests
             }
             if (!alpha) Assert.DoesNotContain(ops, o => o.Blend == PngBlend.Over);
 
-            // third-party decoders show the same frames; 16 bit frames that blend are rendered by libjxl only,
-            // which is fetched by `gen_png.py --fetch-tools` and may be missing
-            if (type == SampleType.UInt16 && ops.Any(o => o.Blend == PngBlend.Over) && !HasLibjxl.Value) continue;
-            var oracle = TestUtil.OracleDecode(png, ".anim.png");
+            // third-party decoders show the same frames (null where the installed ones cannot verify the file:
+            // 16 bit animations need libjxl next to ffmpeg, see decode_to_ref.py)
+            var oracle = PngFeatureTests.OracleDecode(png, ".anim.png");
             if (oracle != null) TestUtil.AssertEqual(StackVisible(images), oracle);
         }
     }
-
-    static readonly Lazy<bool> HasLibjxl = new(() =>
-    {
-        if (!TestUtil.PythonAvailable) return false;
-        var (exit, output) = TestUtil.RunPython("-c \"import gen_png; print('tool:' + str(bool(gen_png.tool('cjxl') and gen_png.tool('djxl'))))\"");
-        return exit == 0 && output.Contains("tool:True");
-    });
 
     [Fact]
     public void OptimizedFramesHandleTranslucentPixels()
@@ -674,7 +666,7 @@ public class PngAnimationTests
                 TestUtil.AssertEqual(images[0], Png.Decode(png));
                 Assert.True(png.Length < Png.EncodeAnimation(frames, new PngEncodeOptions { OptimizeFrames = optimize }).Length);
                 Assert.InRange(Png.ReadPalette(png)!.Length / 4, 30, 40);
-                var oracle = TestUtil.OracleDecode(png, ".anim.png");
+                var oracle = PngFeatureTests.OracleDecode(png, ".anim.png");
                 if (oracle != null) TestUtil.AssertEqual(StackVisible(images), oracle);
             }
         // one frame with too many colors keeps the whole animation in true color

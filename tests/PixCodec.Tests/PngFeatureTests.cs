@@ -25,9 +25,34 @@ public class PngFeatureTests
         finally { File.Delete(f); }
     }
 
+    /// <summary>
+    /// Decodes a PNG we wrote with the third-party decoders of tests/oracle/decode_to_ref.py. Returns null when
+    /// python is unavailable, and also when the oracle exits with status 77: that means the decoders installed on
+    /// this machine cannot verify the file (some need tools that `gen_png.py --fetch-tools` installs).
+    /// </summary>
+    internal static RawImage? OracleDecode(byte[] encoded, string extension)
+    {
+        if (!TestUtil.PythonAvailable) return null;
+        var tmp = Path.Combine(TestUtil.FixtureDir, "_tmp");
+        Directory.CreateDirectory(tmp);
+        var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + extension);
+        try
+        {
+            File.WriteAllBytes(f, encoded);
+            var (exit, output) = TestUtil.RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
+            if (exit == 77) return null;
+            Assert.True(exit == 0, "oracle decode failed: " + output);
+            return TestUtil.LoadRef(f + ".ref");
+        }
+        finally
+        {
+            File.Delete(f); File.Delete(f + ".ref");
+        }
+    }
+
     static void AssertOracle(RawImage expected, byte[] png)
     {
-        var oracle = TestUtil.OracleDecode(png, ".png");
+        var oracle = PngFeatureTests.OracleDecode(png, ".png");
         if (oracle != null) TestUtil.AssertEqual(expected, oracle);
     }
 

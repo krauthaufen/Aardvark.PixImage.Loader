@@ -602,7 +602,7 @@ public class PngTests
         };
         foreach (var (img, opt) in cases)
         {
-            var oracle = TestUtil.OracleDecode(Png.Encode(img, opt), ".png");
+            var oracle = PngFeatureTests.OracleDecode(Png.Encode(img, opt), ".png");
             if (oracle == null) return;
             TestUtil.AssertEqual(img, oracle);
         }
@@ -638,7 +638,7 @@ public class PngTests
         Assert.True(chunks.Count(c => c.type == "IDAT") > 2);
         Assert.Equal("IEND", chunks[^1].type);
         TestUtil.AssertEqual(img, Png.Decode(png));
-        var oracle = TestUtil.OracleDecode(png, ".png");
+        var oracle = PngFeatureTests.OracleDecode(png, ".png");
         if (oracle != null) TestUtil.AssertEqual(img, oracle);
     }
 
@@ -690,7 +690,7 @@ public class PngTests
         var types = Chunks(png).Select(c => c.type).ToList();
         Assert.Equal(new[] { "IHDR", "gAMA", "iCCP", "pHYs", "eXIf", "IDAT", "IEND" }, types);
 
-        var oracle = TestUtil.OracleDecode(png, ".png");
+        var oracle = PngFeatureTests.OracleDecode(png, ".png");
         if (oracle != null) TestUtil.AssertEqual(img, oracle);
 
         // orientation without an EXIF blob is written as a minimal one
@@ -748,7 +748,7 @@ public class PngTests
         TestUtil.AssertEqual(img, back);
         Assert.Equal(colors, Png.ReadPalette(png)!.Length / 4);
 
-        var oracle = TestUtil.OracleDecode(png, ".png");
+        var oracle = PngFeatureTests.OracleDecode(png, ".png");
         if (oracle != null) TestUtil.AssertEqual(img, oracle);
     }
 

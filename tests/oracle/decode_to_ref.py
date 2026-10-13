@@ -93,7 +93,8 @@ def decode_apng(path, im):
     """Composited frames, stacked vertically, on which at least two of these agree exactly (fully transparent
     pixels aside): ffmpeg (not for palette or sub-byte files, and it skips 16 bit frames that blend), Pillow
     (8 bit files) and libjxl (cjxl + djxl, if installed - see gen_png.tool). The one case with a single decoder
-    is a 16 bit animation with blended frames, which only libjxl renders."""
+    is a 16 bit animation with blended frames, which only libjxl renders. Exits with status 77 when the decoders
+    installed here are not enough to verify the file."""
     import subprocess
     with open(path, 'rb') as f:
         depth, ctype = f.read(26)[24:26]
@@ -125,7 +126,10 @@ def decode_apng(path, im):
         pass
     # 16 bit frames that blend are rendered by libjxl alone (ffmpeg skips them, Pillow is 8 bit)
     alone = wide and [r[0] for r in results] == ['libjxl']
-    assert len(results) >= 2 or alone, f'only {[r[0] for r in results]} can decode this animation'
+    if len(results) < 2 and not alone:
+        # not verifiable with what is installed here (libjxl is optional): the caller skips the check
+        sys.stderr.write(f'only {[r[0] for r in results]} can decode this animation\n')
+        sys.exit(77)
 
     def visible(a):
         a = a.copy()
