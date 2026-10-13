@@ -1,0 +1,54 @@
+{
+ "plays": 0,
+ "default_is_frame": true,
+ "frames": [
+  {
+   "x": 0,
+   "y": 0,
+   "w": 16,
+   "h": 12,
+   "delay": [
+    1,
+    10
+   ],
+   "dispose": 0,
+   "blend": 0
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "w": 5,
+   "h": 4,
+   "delay": [
+    1,
+    10
+   ],
+   "dispose": 1,
+   "blend": 1
+  },
+  {
+   "x": 4,
+   "y": 2,
+   "w": 6,
+   "h": 5,
+   "delay": [
+    1,
+    10
+   ],
+   "dispose": 2,
+   "blend": 0
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "w": 7,
+   "h": 3,
+   "delay": [
+    1,
+    10
+   ],
+   "dispose": 0,
+   "blend": 1
+  }
+ ]
+}

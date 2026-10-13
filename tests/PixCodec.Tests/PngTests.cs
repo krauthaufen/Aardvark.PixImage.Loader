@@ -13,15 +13,16 @@ public class PngTests
     static bool IsCorruptSuiteFile(string rel) => Path.GetFileName(rel).StartsWith('x');
 
     public static IEnumerable<object[]> Fixtures()
-        => TestUtil.Files("png", ".png").Concat(TestUtil.Files("png/pngsuite", ".png")).Where(r => !IsCorruptSuiteFile((string)r[0]));
+        => TestUtil.Files("png", ".png").Concat(TestUtil.Files("png/pngsuite", ".png")).Concat(TestUtil.Files("png/apng", ".png"))
+            .Where(r => !IsCorruptSuiteFile((string)r[0]));
 
     public static IEnumerable<object[]> CorruptSuiteFiles()
         => TestUtil.Files("png/pngsuite", ".png").Where(r => IsCorruptSuiteFile((string)r[0]));
 
-    static byte[] Load(string name) => File.ReadAllBytes(TestUtil.Fixture(name));
+    internal static byte[] Load(string name) => File.ReadAllBytes(TestUtil.Fixture(name));
 
     /// <summary>Deterministic image: smooth gradients with edges, or pure noise.</summary>
-    static RawImage MakeImage(int w, int h, ColorModel color, SampleType type, int seed, bool noise = false)
+    internal static RawImage MakeImage(int w, int h, ColorModel color, SampleType type, int seed, bool noise = false)
     {
         var img = RawImage.Create(w, h, color, type);
         int ch = img.Channels;
@@ -42,7 +43,7 @@ public class PngTests
         return img;
     }
 
-    static byte[] Chunk(string type, byte[] body)
+    internal static byte[] Chunk(string type, byte[] body)
     {
         var c = new byte[12 + body.Length];
         BinaryPrimitives.WriteUInt32BigEndian(c, (uint)body.Length);
@@ -53,7 +54,7 @@ public class PngTests
     }
 
     /// <summary>Splits a PNG into (type, whole chunk bytes) after the signature.</summary>
-    static List<(string type, byte[] bytes)> Chunks(byte[] png)
+    internal static List<(string type, byte[] bytes)> Chunks(byte[] png)
     {
         var list = new List<(string, byte[])>();
         for (int pos = 8; pos < png.Length;)
@@ -65,7 +66,7 @@ public class PngTests
         return list;
     }
 
-    static byte[] Assemble(IEnumerable<byte[]> chunks)
+    internal static byte[] Assemble(IEnumerable<byte[]> chunks)
     {
         var ms = new MemoryStream();
         ms.Write(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
@@ -73,7 +74,7 @@ public class PngTests
         return ms.ToArray();
     }
 
-    static byte[] Ihdr(int w, int h, int depth, int colorType, int interlace = 0)
+    internal static byte[] Ihdr(int w, int h, int depth, int colorType, int interlace = 0)
     {
         var b = new byte[13];
         BinaryPrimitives.WriteInt32BigEndian(b, w);
@@ -103,7 +104,8 @@ public class PngTests
         Assert.Equal(RawImage.DefaultColorModel(expected.Channels), img.Color);
 
         var info = Png.GetInfo(bytes);
-        Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, img.SampleType, img.Color), info);
+        Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, img.SampleType, img.Color, info.FrameCount), info);
+        Assert.Equal(rel.Contains("apng") && !rel.Contains("single_frame"), info.FrameCount > 1);
 
         // same result through the generic entry point and without CRC checks
         TestUtil.AssertEqual(expected, ImageCodec.Decode(bytes));
@@ -179,15 +181,84 @@ public class PngTests
     }
 
     [Fact]
-    public void PaletteIndexBeyondPaletteIsOpaqueBlack()
+    public void PaletteIndexBeyondPaletteIsRejectedUnlessAllowed()
     {
-        // 2x1, 8 bit palette with one entry, second pixel uses index 5
-        var png = Assemble(new[]
+        var allow = new PngDecodeOptions { AllowInvalidPaletteIndices = true };
+        // 8 bit and 2 bit palette images whose last pixel uses an index the palette does not have
+        var wide = new byte[41]; wide[40] = 5;
+        var png8 = Assemble(new[]
         {
-            Ihdr(2, 1, 8, 3), Chunk("PLTE", new byte[] { 10, 20, 30 }),
-            Chunk("IDAT", Zlib.Compress(new byte[] { 0, 0, 5 })), Chunk("IEND", Array.Empty<byte>()),
+            Ihdr(40, 1, 8, 3), Chunk("PLTE", new byte[] { 10, 20, 30 }),
+            Chunk("IDAT", Zlib.Compress(wide)), Chunk("IEND", Array.Empty<byte>()),
         });
-        Assert.Equal(new byte[] { 10, 20, 30, 0, 0, 0 }, Png.Decode(png).GetData<byte>());
+        var png2 = Assemble(new[]
+        {
+            Ihdr(4, 1, 2, 3), Chunk("PLTE", new byte[] { 10, 20, 30, 40, 50, 60 }),
+            Chunk("IDAT", Zlib.Compress(new byte[] { 0, 0b00_01_00_11 })), Chunk("IEND", Array.Empty<byte>()),
+        });
+        foreach (var png in new[] { png8, png2 })
+        {
+            Assert.Throws<ImageFormatException>(() => Png.Decode(png));
+            Assert.Throws<ImageFormatException>(() => Png.Decode(png, new PngDecodeOptions { KeepIndexed = true }));
+            var rgb = Png.Decode(png, allow).GetData<byte>();
+            Assert.Equal(new byte[] { 10, 20, 30 }, rgb[..3]);
+            Assert.Equal(new byte[] { 0, 0, 0 }, rgb[^3..]);
+        }
+        Assert.Equal(new byte[] { 0, 1, 0, 3 }, Png.Decode(png2, new PngDecodeOptions { KeepIndexed = true, AllowInvalidPaletteIndices = true }).GetData<byte>());
+        Assert.Equal(5, Png.Decode(png8, new PngDecodeOptions { KeepIndexed = true, AllowInvalidPaletteIndices = true }).GetData<byte>()[39]);
+    }
+
+    [Fact]
+    public void AdlerChecksumIsVerified()
+    {
+        var good = Load("png/idat_split_small.png");
+        var chunks = Chunks(good);
+        var ihdr = chunks[0].bytes;
+        var iend = chunks[^1].bytes;
+        var stream = chunks.Where(c => c.type == "IDAT").SelectMany(c => c.bytes.AsSpan(8, c.bytes.Length - 12).ToArray()).ToArray();
+        var noVerify = new PngDecodeOptions { VerifyChecksums = false };
+
+        // wrong Adler-32 (chunk CRCs are valid)
+        var bad = (byte[])stream.Clone();
+        bad[^1] ^= 1;
+        var png = Assemble(new[] { ihdr, Chunk("IDAT", bad), iend });
+        Assert.Throws<ImageFormatException>(() => Png.Decode(png));
+        TestUtil.AssertEqual(Png.Decode(good), Png.Decode(png, noVerify));
+
+        // all pixels present but the trailer is cut off
+        png = Assemble(new[] { ihdr, Chunk("IDAT", stream[..^3]), iend });
+        Assert.Throws<ImageFormatException>(() => Png.Decode(png));
+        TestUtil.AssertEqual(Png.Decode(good), Png.Decode(png, noVerify));
+
+        // the vectorized Adler-32 against the plain one, across block boundaries
+        var rnd = new Random(5);
+        foreach (int n in new[] { 0, 1, 15, 16, 63, 64, 65, 5535, 5536, 5537, 5552, 11072, 100_003 })
+        {
+            var data = new byte[n];
+            rnd.NextBytes(data);
+            Assert.Equal(Zlib.Adler32(data), PngDecoder.Adler32(data));
+            Array.Fill(data, (byte)255);
+            Assert.Equal(Zlib.Adler32(data), PngDecoder.Adler32(data));
+        }
+    }
+
+    [Fact]
+    public void GetInfoAgreesWithDecodeOnDamagedTransparency()
+    {
+        foreach (var name in new[] { "t_gray_d08_n", "t_rgb_d16_n", "t_pal_d4_n" })
+        {
+            var chunks = Chunks(Load($"png/{name}.png"));
+            var damaged = Assemble(chunks.Select(c =>
+            {
+                var b = (byte[])c.bytes.Clone();
+                if (c.type == "tRNS") b[^1] ^= 0x10;
+                return b;
+            }));
+            var img = Png.Decode(damaged);   // the damaged chunk is dropped
+            Assert.False(img.HasAlpha);
+            var info = Png.GetInfo(damaged);
+            Assert.Equal((img.Channels, img.Color), (info.Channels, info.Color));
+        }
     }
 
     [Fact]
@@ -290,7 +361,7 @@ public class PngTests
 
     // ------------------------------------------------------------------ robustness
 
-    static void MustDecodeOrReject(byte[] data, PngDecodeOptions options)
+    internal static void MustDecodeOrReject(byte[] data, PngDecodeOptions options)
     {
         try
         {

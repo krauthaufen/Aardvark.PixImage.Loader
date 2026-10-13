@@ -1,0 +1,18 @@
+{
+ "plays": 0,
+ "default_is_frame": false,
+ "frames": [
+  {
+   "x": 0,
+   "y": 0,
+   "w": 16,
+   "h": 12,
+   "delay": [
+    1,
+    10
+   ],
+   "dispose": 0,
+   "blend": 0
+  }
+ ]
+}

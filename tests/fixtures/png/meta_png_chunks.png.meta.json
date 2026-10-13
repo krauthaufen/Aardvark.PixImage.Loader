@@ -1,0 +1,60 @@
+{
+ "gamma": 0.45455,
+ "chromaticity": [
+  0.3127,
+  0.329,
+  0.64,
+  0.33,
+  0.3,
+  0.6,
+  0.15,
+  0.06
+ ],
+ "srgb": 1,
+ "text": [
+  {
+   "keyword": "Title",
+   "text": "Latin-1 text: café",
+   "itxt": false,
+   "lang": "",
+   "tkey": ""
+  },
+  {
+   "keyword": "Description",
+   "text": "PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec ",
+   "itxt": false,
+   "lang": "",
+   "tkey": ""
+  },
+  {
+   "keyword": "Comment",
+   "text": "Grüße, 日本語, 😀",
+   "itxt": true,
+   "lang": "de-AT",
+   "tkey": "Kommentar"
+  },
+  {
+   "keyword": "Warning",
+   "text": "PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec PixCodec  ✓",
+   "itxt": true,
+   "lang": "",
+   "tkey": ""
+  },
+  {
+   "keyword": "Software",
+   "text": "after the image data",
+   "itxt": false,
+   "lang": "",
+   "tkey": ""
+  }
+ ],
+ "time": "2024-02-29T23:59:58Z",
+ "bkgd": [
+  0,
+  0,
+  255,
+  128,
+  3
+ ],
+ "sbit": true
+}

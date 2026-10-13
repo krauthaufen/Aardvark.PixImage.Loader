@@ -1,6 +1,7 @@
 """Generates the PNG fixtures in tests/fixtures/png and their .ref sidecars.
 
-  python3 gen_png.py            regenerate everything (deterministic)
+  python3 gen_png.py [-v]            regenerate everything (deterministic); -v lists who confirmed each file
+  python3 gen_png.py --meta x.png    print what third-party readers report about a PNG's metadata as JSON
 
 Most files are assembled by hand (make_png below) because no common encoder can produce the whole feature
 matrix: every color type / bit depth, Adam7, each row filter, tRNS color keys, split IDATs, ancillary chunks.
@@ -85,12 +86,8 @@ def filter_image(arr, depth, filt, salt):
     return b''.join(out)
 
 
-def make_png(arr, ctype, depth, interlace=False, filt='mixed', plte=None, trns=None, pre=(), post=(),
-             idat_split=None, level=9):
-    """arr: (h, w, c) array of sample values (palette indices for ctype 3). pre/post: raw chunks around IDAT."""
-    arr = np.asarray(arr)
-    h, w, c = arr.shape
-    assert c == CHANNELS[ctype]
+def deflate_image(arr, depth, interlace=False, filt='mixed', level=9):
+    """Filtered (and optionally Adam7 interlaced) scanlines of arr (h, w, c) as a zlib stream."""
     raw = b''
     if interlace:
         for p, (x0, y0, dx, dy) in enumerate(ADAM7):
@@ -99,7 +96,27 @@ def make_png(arr, ctype, depth, interlace=False, filt='mixed', plte=None, trns=N
                 raw += filter_image(sub, depth, filt, p)
     else:
         raw = filter_image(arr, depth, filt, 0)
-    z = zlib.compress(raw, level)
+    return zlib.compress(raw, level)
+
+
+def split_chunks(z, sizes):
+    if sizes is None:
+        return [z]
+    out, pos, k = [], 0, 0
+    while pos < len(z):
+        n = sizes[k % len(sizes)]
+        out.append(z[pos:pos + n])
+        pos += n
+        k += 1
+    return out
+
+
+def make_png(arr, ctype, depth, interlace=False, filt='mixed', plte=None, trns=None, pre=(), post=(),
+             idat_split=None, level=9):
+    """arr: (h, w, c) array of sample values (palette indices for ctype 3). pre/post: raw chunks around IDAT."""
+    arr = np.asarray(arr)
+    h, w, c = arr.shape
+    assert c == CHANNELS[ctype]
     out = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, depth, ctype, 0, 0, 1 if interlace else 0))
     for ch in pre:
         out += ch
@@ -107,18 +124,42 @@ def make_png(arr, ctype, depth, interlace=False, filt='mixed', plte=None, trns=N
         out += chunk(b'PLTE', bytes(plte))
     if trns is not None:
         out += chunk(b'tRNS', bytes(trns))
-    if idat_split is None:
-        out += chunk(b'IDAT', z)
-    else:
-        pos = 0
-        k = 0
-        while pos < len(z):
-            n = idat_split[k % len(idat_split)]
-            out += chunk(b'IDAT', z[pos:pos + n])
-            pos += n
-            k += 1
+    for part in split_chunks(deflate_image(arr, depth, interlace, filt, level), idat_split):
+        out += chunk(b'IDAT', part)
     for ch in post:
         out += ch
+    return out + chunk(b'IEND')
+
+
+def make_apng(w, h, ctype, depth, frames, default=None, plays=0, interlace=False, plte=None, trns=None, split=None,
+              pre=()):
+    """frames: dicts with arr (fh, fw, c) and optional x, y, delay (num, den), dispose (0..2), blend (0..1).
+    default: pixels of a default image that is not part of the animation (else frame 0 is the default image)."""
+    out = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, depth, ctype, 0, 0, 1 if interlace else 0))
+    for ch in pre:
+        out += ch
+    out += chunk(b'acTL', struct.pack('>II', len(frames), plays))
+    if plte is not None:
+        out += chunk(b'PLTE', bytes(plte))
+    if trns is not None:
+        out += chunk(b'tRNS', bytes(trns))
+    seq = 0
+    if default is not None:
+        out += chunk(b'IDAT', deflate_image(np.asarray(default), depth, interlace))
+    for k, f in enumerate(frames):
+        arr = np.asarray(f['arr'])
+        num, den = f.get('delay', (1, 10))
+        out += chunk(b'fcTL', struct.pack('>IIIIIHHBB', seq, arr.shape[1], arr.shape[0], f.get('x', 0), f.get('y', 0),
+                                          num, den, f.get('dispose', 0), f.get('blend', 0)))
+        seq += 1
+        parts = split_chunks(deflate_image(arr, depth, interlace), split)
+        if k == 0 and default is None:
+            for part in parts:
+                out += chunk(b'IDAT', part)
+        else:
+            for part in parts:
+                out += chunk(b'fdAT', struct.pack('>I', seq) + part)
+                seq += 1
     return out + chunk(b'IEND')
 
 
@@ -247,9 +288,12 @@ def reference(path, expect=None):
     lay = png_layout(path)
     name = os.path.basename(path)
     results = []
+    animated = b'acTL' in open(path, 'rb').read(200)
     for dname, dec in DECODERS:
         if (name, dname) in KNOWN_BAD:
             continue
+        if animated and dname in ('ffmpeg', 'pillow'):
+            continue  # they decode the first animation frame, which need not be the default image
         try:
             a = dec(path, lay)
         except Exception as e:  # a decoder failing outright simply does not vote
@@ -466,9 +510,551 @@ def gen_suite_refs():
         written.append(('pngsuite/' + name[:-4], who))
 
 
+# ---------------------------------------------------------------------------------------------- APNG
+
+APNG = os.path.join(OUT, 'apng')
+TMP = os.path.normpath(os.path.join(HERE, '..', '..', '.tmp'))
+
+CHROME_JS = r"""
+const fs = require('fs');
+const { browser } = require(process.env.HOME + '/.headed-chrome');
+(async () => {
+  const b = await browser();
+  const page = await b.newPage();
+  await page.setRequestInterception(true);
+  page.on('request', r => r.respond({ status: 200, contentType: 'text/html', body: '<html></html>' }));
+  await page.goto('http://localhost:3000/');   // a secure context is needed for ImageDecoder
+  for (const f of process.argv.slice(2)) {
+    const b64 = fs.readFileSync(f).toString('base64');
+    const res = await page.evaluate(async (b64) => {
+      const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const dec = new ImageDecoder({ data: bin, type: 'image/apng', premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+      await dec.tracks.ready; await dec.completed;
+      const t = dec.tracks.selectedTrack;
+      const out = { frames: [], durations: [], count: t.frameCount, repetitions: t.repetitionCount };
+      for (let i = 0; i < t.frameCount; i++) {
+        const vf = (await dec.decode({ frameIndex: i })).image;
+        out.w = vf.displayWidth; out.h = vf.displayHeight;
+        const buf = new Uint8Array(vf.allocationSize({ format: 'RGBA' }));
+        await vf.copyTo(buf, { format: 'RGBA' });
+        out.durations.push(vf.duration);
+        let s = ''; for (let k = 0; k < buf.length; k += 0x8000) s += String.fromCharCode.apply(null, buf.subarray(k, k + 0x8000));
+        out.frames.push(btoa(s));
+        vf.close();
+      }
+      return out;
+    }, b64).catch(e => ({ error: String(e) }));
+    console.log(JSON.stringify(res));
+  }
+  await page.close();
+  b.disconnect();
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+
+
+def chrome_decode(paths):
+    """Composited frames of each APNG as Chrome's ImageDecoder produces them (8 bit RGBA), or None per file.
+    Uses the persistent headed Chromium of this machine; returns all None when that is not available."""
+    import base64
+    import json
+    try:
+        os.makedirs(TMP, exist_ok=True)
+        js = os.path.join(TMP, 'png_chrome_oracle.js')
+        with open(js, 'w') as f:
+            f.write(CHROME_JS)
+        out = []
+        for i in range(0, len(paths), 40):
+            r = subprocess.run(['node', js, *paths[i:i + 40]], capture_output=True, text=True, timeout=300)
+            lines = r.stdout.strip().splitlines()
+            if r.returncode != 0 or len(lines) != len(paths[i:i + 40]):
+                return [None] * len(paths)
+            out += [json.loads(line) for line in lines]
+        os.remove(js)
+    except Exception:
+        return [None] * len(paths)
+    res = []
+    for j in out:
+        if 'error' in j:
+            res.append(None)
+            continue
+        fr = [np.frombuffer(base64.b64decode(f), np.uint8).reshape(j['h'], j['w'], 4) for f in j['frames']]
+        res.append({'frames': np.stack(fr), 'repetitions': j['repetitions'], 'durations': j['durations']})
+    return res
+
+
+def to_rgba(arr, ctype, depth, plte=None, trns=None):
+    e = expand(arr, ctype, depth, plte, trns)
+    full = np.iinfo(e.dtype).max
+    if e.shape[2] == 1:
+        e = np.concatenate([e, e, e, np.full_like(e, full)], -1)
+    elif e.shape[2] == 2:
+        e = e[..., [0, 0, 0, 1]]
+    elif e.shape[2] == 3:
+        e = np.concatenate([e, np.full_like(e[..., :1], full)], -1)
+    return e
+
+
+def composite(frames, w, h, dtype):
+    """The APNG rendering rules, straight from the specification: frames are dicts with rgba, x, y, dispose,
+    blend. Returns the canvas after each frame. "Over" is rounded exactly."""
+    full = int(np.iinfo(dtype).max)
+    canvas = np.zeros((h, w, 4), np.int64)
+    out = []
+    for k, f in enumerate(frames):
+        a = f['rgba'].astype(np.int64)
+        fh, fw = a.shape[:2]
+        x, y = f.get('x', 0), f.get('y', 0)
+        dispose = f.get('dispose', 0)
+        if k == 0 and dispose == 2:
+            dispose = 1
+        saved = canvas.copy()
+        reg = canvas[y:y + fh, x:x + fw]
+        if f.get('blend', 0) == 0:
+            reg[:] = a
+        else:
+            sa, da = a[..., 3:], reg[..., 3:].copy()
+            sw, dw = sa * full, da * (full - sa)
+            total = np.maximum(sw + dw, 1)
+            mixed = np.concatenate([(a[..., :3] * sw + reg[..., :3] * dw + total // 2) // total,
+                                    (sw + dw + full // 2) // full], -1)
+            reg[:] = np.where(sa == 0, reg, np.where((sa == full) | (da == 0), a, mixed))
+        out.append(canvas.copy())
+        if dispose == 1:
+            reg[:] = 0
+        elif dispose == 2:
+            canvas[:] = saved
+    return np.stack(out).astype(dtype)
+
+
+def anim_ffmpeg(path, w, h, dtype):
+    fmt = 'rgba64le' if dtype == np.uint16 else 'rgba'
+    r = subprocess.run(['ffmpeg', '-v', 'error', '-i', path, '-fps_mode', 'passthrough', '-f', 'rawvideo', '-pix_fmt', fmt, '-'],
+                       capture_output=True)
+    size = w * h * 4 * np.dtype(dtype).itemsize
+    if r.returncode != 0 or not r.stdout or len(r.stdout) % size:
+        return None
+    return np.frombuffer(r.stdout, np.dtype(dtype).newbyteorder('<')).reshape(-1, h, w, 4)
+
+
+def anim_pillow(path, w, h, dtype):
+    """Pillow composites at 8 bit, also for 16 bit files (see judge: 'reduced')."""
+    from PIL import Image
+    im = Image.open(path)
+    fr = []
+    for i in range(getattr(im, 'n_frames', 1)):
+        im.seek(i)
+        fr.append(np.asarray(im.convert('RGBA')).copy())
+    return np.stack(fr)
+
+
+def anim_imagecodecs(path, w, h, dtype):
+    import imagecodecs
+    a = imagecodecs.apng_decode(open(path, 'rb').read())
+    if a.dtype != dtype:
+        return None
+    if a.ndim == 3:
+        a = a[..., None]
+    full = np.iinfo(a.dtype).max
+    if a.shape[3] == 1:
+        a = np.concatenate([a, a, a, np.full_like(a, full)], -1)
+    elif a.shape[3] == 2:
+        a = a[..., [0, 0, 0, 1]]
+    elif a.shape[3] == 3:
+        a = np.concatenate([a, np.full_like(a[..., :1], full)], -1)
+    return a
+
+
+ANIM_DECODERS = [('ffmpeg', anim_ffmpeg), ('pillow', anim_pillow), ('imagecodecs', anim_imagecodecs)]
+
+
+def judge(a, ref, separate_default=False):
+    """How a third-party decode relates to the reference frames. Fully transparent pixels count as equal whatever
+    colour they carry (decoders differ in what they leave under alpha 0).
+    'exact'    identical RGBA
+    'near'     RGBA within 2 (differently rounded "over" blending)
+    'rgb'      identical colour wherever the reference is opaque, from a decoder without a notion of the transparent
+               canvas (opaque colour types: it shows cleared regions as opaque black)
+    'reduced'  an 8 bit decoder matching the 16 bit reference reduced to 8 bit ('exact' or 'rgb' sense)
+    None       anything else.
+    Pillow and imagecodecs also return the default image of files where it is not part of the animation; that
+    extra first frame is dropped."""
+    if a is None:
+        return None
+    if separate_default and a.shape[0] == ref.shape[0] + 1:
+        a = a[1:]
+    if a.shape != ref.shape:
+        return None
+    reduced = a.dtype == np.uint8 and ref.dtype == np.uint16
+    candidates = [ref]
+    if reduced:
+        # the two usual 16 -> 8 bit reductions
+        candidates = [(ref >> 8).astype(np.uint8), ((ref.astype(np.uint32) * 255 + 32767) // 65535).astype(np.uint8)]
+    elif a.dtype != ref.dtype:
+        return None
+    for r in candidates:
+        x, y = a.astype(np.int64), r.astype(np.int64)
+        x[x[..., 3] == 0] = 0
+        y[y[..., 3] == 0] = 0
+        d = np.abs(x - y).max()
+        if d == 0:
+            return 'reduced' if reduced else 'exact'
+        opaque = r[..., 3] == 255 if reduced else ref[..., 3] == np.iinfo(ref.dtype).max
+        if np.all(a[..., 3] == np.iinfo(a.dtype).max) and np.array_equal(a[..., :3][opaque], r[..., :3][opaque]):
+            return 'reduced' if reduced else 'rgb'
+        if d <= 2 and not reduced:
+            return 'near'
+    return None
+
+
+def judge_chrome(c, ref):
+    """Chrome keeps the canvas premultiplied at 8 bit: alpha must match exactly and premultiplied colour within 1
+    (16 bit references, which Chrome reduces to 8 bit before compositing: alpha within 1, colour within 2)."""
+    if c is None or c['frames'].shape != ref.shape:
+        return None
+    a = c['frames'].astype(np.int64)
+    r = ref.astype(np.int64)
+    wide = ref.dtype == np.uint16
+    if wide:
+        r = (r * 255 + 32767) // 65535
+    if np.abs(a[..., 3] - r[..., 3]).max() > (1 if wide else 0):
+        return None
+    pa, pr = a[..., :3] * a[..., 3:] / 255.0, r[..., :3] * r[..., 3:] / 255.0
+    return 'chrome' if np.abs(pa - pr).max() <= (2.5 if wide else 1.5) else None
+
+
+anims = []   # (name, path, reference frames, {decoder: verdict})
+
+
+def emit_anim(name, data, ref, info):
+    """Writes an APNG fixture: the file, the default image ref (still decoders), the composited frames stacked
+    vertically (.frames.ref) and a JSON description. ref is the candidate reference; who confirms it is checked
+    in finish_anims once Chrome has decoded all files in one go."""
+    import json
+    path = os.path.join(APNG, name + '.png')
+    with open(path, 'wb') as f:
+        f.write(data)
+    still, _ = reference(path)
+    write_ref(path + '.ref', still)
+    n, h, w, _ = ref.shape
+    verdicts = {}
+    for dname, dec in ANIM_DECODERS:
+        try:
+            verdicts[dname] = judge(dec(path, w, h, ref.dtype.type), ref, not info.get('default_is_frame', True))
+        except Exception:
+            verdicts[dname] = None
+    write_ref(path + '.frames.ref', ref.reshape(n * h, w, 4))
+    with open(path + '.json', 'w') as f:
+        json.dump(info, f, indent=1)
+    anims.append((name, path, ref, verdicts))
+
+
+def finish_anims():
+    """Every animation reference must be confirmed by at least two third-party decoders, see judge()."""
+    chrome = chrome_decode([a[1] for a in anims])
+    bad = []
+    for (name, path, ref, verdicts), c in zip(anims, chrome):
+        verdicts['chrome'] = judge_chrome(c, ref)
+        ok = [d for d, v in verdicts.items() if v]
+        if len(ok) < (1 if name in SINGLE_ORACLE else 2):
+            bad.append(f'{name}: confirmed only by {verdicts}')
+    if bad:
+        raise SystemExit('animation references lack confirmation:\n  ' + '\n  '.join(bad))
+
+
+def anim_frames(rng, ctype, depth, plan, alpha='binary'):
+    """plan: (w, h, x, y, dispose, blend[, delay]) per frame -> frame dicts with random pixels.
+    alpha (colour types with an alpha channel): 'binary' 0/max, 'partial' anything, 'opaque'."""
+    hi = 1 << depth
+    frames = []
+    for item in plan:
+        fw, fh, x, y, dispose, blend = item[:6]
+        a = rng.integers(0, hi, (fh, fw, CHANNELS[ctype]))
+        if ctype in (4, 6):
+            if alpha == 'binary':
+                a[..., -1] = rng.integers(0, 2, (fh, fw)) * (hi - 1)
+            elif alpha == 'opaque':
+                a[..., -1] = hi - 1
+            else:
+                a[..., -1] = np.where(rng.integers(0, 4, (fh, fw)) == 0, rng.integers(0, 2, (fh, fw)) * (hi - 1), a[..., -1])
+        f = dict(arr=a, x=x, y=y, dispose=dispose, blend=blend)
+        if len(item) > 6:
+            f['delay'] = item[6]
+        frames.append(f)
+    return frames
+
+
+W_A, H_A = 16, 12
+FULL = (W_A, H_A, 0, 0)
+# every dispose (0 none, 1 background, 2 previous) x blend (0 source, 1 over) combination, in changing order
+PLAN_ALL = [FULL + (0, 0), (5, 4, 2, 3, 1, 1), (6, 5, 4, 2, 2, 0), (7, 3, 1, 1, 0, 1), (4, 4, 8, 6, 0, 0), (9, 9, 1, 0, 2, 1),
+            (3, 3, 0, 0, 1, 0), (2, 2, 5, 5, 0, 1), (16, 1, 0, 11, 2, 1), (1, 12, 15, 0, 1, 1), (8, 6, 8, 6, 2, 0), (16, 12, 0, 0, 0, 1)]
+# canvas stays opaque: only "none"/"previous" disposal after an opaque first frame
+PLAN_OPAQUE = [FULL + (0, 0), (5, 4, 2, 3, 0, 1), (6, 5, 4, 2, 2, 1), (7, 3, 1, 1, 0, 1), (9, 9, 1, 0, 2, 1), (16, 12, 0, 0, 0, 1)]
+
+
+# for decoders that do not implement "previous" disposal (imagecodecs)
+PLAN_NO_PREVIOUS = [f[:4] + (0 if f[4] == 2 else f[4], f[5]) for f in PLAN_ALL]
+PLAN_SOURCE = [f[:5] + (0,) for f in PLAN_NO_PREVIOUS]
+
+# References that only one third-party decoder can confirm, and why that is accepted.
+SINGLE_ORACLE = {
+    'ops_rgba16_partial_on_opaque':
+        'no decoder at hand blends 16 bit samples: ffmpeg skips such frames, Pillow and Chrome work at 8 bit, '
+        'imagecodecs blends alpha like a colour channel. Chrome confirms it at 8 bit precision.',
+}
+
+
+def gen_apng():
+    os.makedirs(APNG, exist_ok=True)
+
+    def build(name, ctype, depth, plan, alpha='binary', seed=0, plte=None, trns=None, **kw):
+        rng = np.random.default_rng(1000 + seed)
+        frames = anim_frames(rng, ctype, depth, plan, alpha)
+        if 'opaque_first' in kw:
+            kw.pop('opaque_first')
+            frames[0]['arr'][..., -1] = (1 << depth) - 1
+        default = kw.get('default')
+        dtype = np.uint16 if depth == 16 else np.uint8
+        data = make_apng(W_A, H_A, ctype, depth, frames, plte=plte, trns=trns, **kw)
+        ref = composite([dict(f, rgba=to_rgba(f['arr'], ctype, depth, plte, trns)) for f in frames], W_A, H_A, dtype)
+        info = {'plays': kw.get('plays', 0), 'default_is_frame': default is None,
+                'frames': [{'x': f['x'], 'y': f['y'], 'w': f['arr'].shape[1], 'h': f['arr'].shape[0],
+                            'delay': list(f.get('delay', (1, 10))), 'dispose': f['dispose'], 'blend': f['blend']} for f in frames]}
+        emit_anim(name, data, ref, info)
+
+    build('ops_rgba8_binary', 6, 8, PLAN_ALL, seed=1)
+    build('ops_rgba8_first_previous', 6, 8, [FULL + (2, 1)] + PLAN_ALL[1:6], seed=2)
+    build('ops_rgba8_partial_on_opaque', 6, 8, PLAN_OPAQUE, 'partial', seed=3, opaque_first=True)
+    build('ops_rgba8_partial', 6, 8, PLAN_ALL, 'partial', seed=4)
+    build('ops_rgb8', 2, 8, PLAN_ALL, seed=5)
+    build('ops_gray8', 0, 8, PLAN_ALL, seed=6)
+    build('ops_ga8_binary', 4, 8, PLAN_ALL, seed=7)
+    build('ops_ga8_partial_on_opaque', 4, 8, PLAN_OPAQUE, 'partial', seed=8, opaque_first=True)
+    build('ops_gray2', 0, 2, PLAN_ALL, seed=9)
+    build('ops_rgba16_binary', 6, 16, PLAN_ALL, seed=10)
+    build('ops_rgba16_partial_on_opaque', 6, 16, PLAN_OPAQUE, 'partial', seed=11, opaque_first=True)
+    build('ops_rgba16_partial_source', 6, 16, PLAN_SOURCE, 'partial', seed=12)
+    build('ops_rgb16', 2, 16, PLAN_ALL, seed=13)
+    build('ops_gray16', 0, 16, PLAN_ALL, seed=14)
+    build('ops_ga16_binary', 4, 16, PLAN_ALL, seed=15)
+    # colour keys: a few key coloured pixels come out of the random data at these low sample counts
+    rng = np.random.default_rng(77)
+    build('ops_rgb8_key', 2, 8, PLAN_ALL, seed=16, trns=struct.pack('>3H', 0, 0, 0))
+    build('ops_gray4_key', 0, 4, PLAN_NO_PREVIOUS, seed=17, trns=struct.pack('>H', 5))
+    build('ops_gray16_key', 0, 16, PLAN_NO_PREVIOUS, seed=18, trns=struct.pack('>H', 0))
+    build('ops_pal8', 3, 8, PLAN_ALL, seed=19, plte=palette(256, 19))
+    build('ops_pal4_alpha_binary', 3, 4, PLAN_ALL, seed=20, plte=palette(16, 20), trns=bytes([0, 255, 0, 0, 255, 0]))
+    build('ops_pal2_alpha_partial_source', 3, 2, PLAN_SOURCE, seed=21, plte=palette(4, 21), trns=bytes([0, 90, 200]))
+    build('ops_pal1', 3, 1, PLAN_ALL, seed=22, plte=palette(2, 22))
+    del rng
+
+    # container variants
+    rng = np.random.default_rng(2000)
+    build('default_not_a_frame', 6, 8, PLAN_ALL[:6], seed=30, default=rng.integers(0, 256, (H_A, W_A, 4)))
+    build('default_not_a_frame_rgb16', 2, 16, PLAN_ALL[:5], seed=31, default=rng.integers(0, 65536, (H_A, W_A, 3)))
+    build('interlaced_rgba8', 6, 8, PLAN_ALL, seed=32, interlace=True)
+    build('interlaced_pal4', 3, 4, PLAN_NO_PREVIOUS[:7], seed=33, interlace=True, plte=palette(16, 33), trns=bytes([0, 255, 0]))
+    build('split_data_chunks', 6, 8, PLAN_ALL[:7], seed=34, split=[1, 3, 9, 30])
+    build('single_frame', 2, 8, [FULL + (0, 0)], seed=35)
+    build('single_frame_after_default', 6, 8, [FULL + (0, 0)], seed=36, default=rng.integers(0, 256, (H_A, W_A, 4)))
+    build('plays_3_delays', 6, 8, [FULL + (0, 0, (1, 0)), (5, 4, 2, 3, 0, 0, (0, 100)), (4, 4, 8, 6, 0, 1, (65535, 1000)),
+                                  (3, 3, 0, 0, 1, 0, (7, 30)), (2, 2, 5, 5, 0, 1, (2, 1))], seed=37, plays=3)
+    build('with_metadata', 2, 8, PLAN_ALL[:4], seed=38,
+          pre=[chunk(b'gAMA', struct.pack('>I', 45455)), chunk(b'tEXt', b'Title\x00animated')])
+
+    gen_apng_third_party()
+
+
+def gen_apng_third_party():
+    """APNGs written by Pillow, ffmpeg and imagecodecs. Without source frame geometry to reason from, their
+    reference is what ffmpeg decodes (binary alpha only, where every correct renderer is bit exact), confirmed like
+    the others."""
+    import json
+    from PIL import Image
+    import imagecodecs
+
+    def finish(name, path):
+        im = Image.open(path)
+        w, h = im.size
+        ref = anim_ffmpeg(path, w, h, np.uint8)
+        if ref is None:
+            raise SystemExit(name + ': ffmpeg cannot decode it')
+        still, _ = reference(path)
+        write_ref(path + '.ref', still)
+        verdicts = {'ffmpeg': 'exact'}
+        for dname, dec in ANIM_DECODERS[1:]:
+            try:
+                verdicts[dname] = judge(dec(path, w, h, np.uint8), ref, True)
+            except Exception:
+                verdicts[dname] = None
+        write_ref(path + '.frames.ref', ref.reshape(-1, w, 4))
+        with open(path + '.json', 'w') as f:
+            json.dump({'plays': im.info.get('loop', 0), 'frames': None}, f)
+        anims.append((name, path, ref, verdicts))
+
+    rng = np.random.default_rng(3000)
+    base = test_pattern(40, 30, 4, np.uint8, 500)
+    base[..., 3] = 255
+    frames = []
+    for k in range(6):
+        a = base.copy()
+        a[4 + 3 * k:12 + 3 * k, 5 + 4 * k:15 + 4 * k] = rng.integers(0, 256, 4)
+        a[4 + 3 * k:12 + 3 * k, 5 + 4 * k:15 + 4 * k, 3] = 255 * (k % 2)
+        frames.append(Image.fromarray(a))
+    path = os.path.join(APNG, 'pil_diff.png')
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=[50, 100, 150, 200, 250, 300], loop=2)
+    finish('pil_diff', path)
+    path = os.path.join(APNG, 'pil_dispose_blend.png')
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=40, loop=0, default_image=False,
+                   disposal=[0, 1, 2, 0, 1, 2], blend=[0, 1, 1, 0, 1, 0])
+    finish('pil_dispose_blend', path)
+    path = os.path.join(APNG, 'pil_default_image.png')
+    frames[0].save(path, save_all=True, append_images=frames[1:4], duration=70, default_image=True)
+    finish('pil_default_image', path)
+
+    path = os.path.join(APNG, 'imagecodecs_rgb.png')
+    with open(path, 'wb') as f:
+        f.write(imagecodecs.apng_encode(np.stack([np.asarray(fr)[..., :3] for fr in frames])))
+    finish('imagecodecs_rgb', path)
+
+    raw = b''.join(np.asarray(fr)[..., :3].tobytes() for fr in frames)
+    path = os.path.join(APNG, 'ffmpeg_rgb.png')
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '40x30', '-r', '5', '-i', '-',
+                    '-plays', '4', '-f', 'apng', path], input=raw, check=True)
+    finish('ffmpeg_rgb', path)
+
+
+# ---------------------------------------------------------------------------------------------- metadata
+
+def read_meta(path):
+    """What third-party readers report about the ancillary chunks and the animation of a PNG:
+    Pillow (gamma, chromaticities, sRGB intent, text, frame count / loop count / frame durations),
+    ImageMagick (tIME) and netpbm's pngtopam (raw bKGD values, presence of sBIT)."""
+    import re
+    import warnings
+    from PIL import Image
+    warnings.simplefilter('ignore')
+    m = {}
+    im = Image.open(path)
+    try:
+        im.load()
+    except Exception:
+        pass  # Pillow cannot decode interlaced APNG frames; the chunk level information is still there
+    for key, name in (('gamma', 'gamma'), ('chromaticity', 'chromaticity'), ('srgb', 'srgb')):
+        if key in im.info:
+            v = im.info[key]
+            m[name] = list(v) if isinstance(v, tuple) else v
+    text = []
+    for k, v in getattr(im, 'text', {}).items():
+        itxt = hasattr(v, 'lang')
+        lang, tkey = getattr(v, 'lang', None), getattr(v, 'tkey', None)
+        lang = lang.decode('latin-1') if isinstance(lang, bytes) else lang
+        tkey = tkey.decode('utf-8') if isinstance(tkey, bytes) else tkey
+        text.append({'keyword': k, 'text': str(v), 'itxt': itxt, 'lang': lang or '', 'tkey': tkey or ''})
+    if text:
+        m['text'] = text
+    n = getattr(im, 'n_frames', 1)
+    if getattr(im, 'is_animated', False) or b'acTL' in open(path, 'rb').read(4096):
+        m['frames'] = n
+        m['loop'] = im.info.get('loop', 0)
+        try:
+            durations = []
+            for i in range(n):
+                im.seek(i)
+                durations.append(float(im.info.get('duration', 0)))
+            m['durations'] = durations
+        except Exception:
+            pass
+    r = subprocess.run(['magick', 'identify', '-format', '%[png:tIME]', 'PNG:' + path], capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip():
+        m['time'] = r.stdout.strip()
+    r = subprocess.run(['pngtopam', '-verbose', path], capture_output=True)
+    err = r.stderr.decode('latin-1')
+    bk = re.search(r'background \{index, gray, red, green, blue\} = \{(\d+), (\d+), (\d+), (\d+), (\d+)\}', err)
+    if bk and 'bKGD chunk: present' in err:
+        m['bkgd'] = [int(x) for x in bk.groups()]
+    if 'sBIT chunk: present' in err:
+        m['sbit'] = True
+    return m
+
+
+def gen_meta():
+    """Metadata fixtures and a .meta.json sidecar (see read_meta) for every fixture that has something to report."""
+    import json
+    from PIL import Image, PngImagePlugin
+    arr = samples(21, 13, 3, 8, 600)
+    long_text = 'PixCodec ' * 200
+    itxt = lambda key, lang, tkey, text, z: chunk(b'iTXt', key + b'\x00' + (b'\x01' if z else b'\x00') + b'\x00' + lang + b'\x00'
+                                                  + tkey.encode() + b'\x00' + (zlib.compress(text.encode()) if z else text.encode()))
+    pre = [
+        chunk(b'sRGB', b'\x01'),
+        chunk(b'gAMA', struct.pack('>I', 45455)),
+        chunk(b'cHRM', struct.pack('>8I', 31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000)),
+        chunk(b'sBIT', bytes([5, 6, 5])),
+        chunk(b'bKGD', struct.pack('>3H', 255, 128, 3)),
+        chunk(b'tIME', struct.pack('>HBBBBB', 2024, 2, 29, 23, 59, 58)),
+        chunk(b'tEXt', b'Title\x00Latin-1 text: caf\xe9'),
+        chunk(b'zTXt', b'Description\x00\x00' + zlib.compress(long_text.encode('latin-1'))),
+        itxt(b'Comment', b'de-AT', 'Kommentar', 'Grüße, 日本語, 😀', False),
+        itxt(b'Warning', b'', '', long_text + ' ✓', True),
+    ]
+    post = [chunk(b'tEXt', b'Software\x00after the image data')]
+    emit('meta_png_chunks', make_png(arr, 2, 8, pre=pre, post=post), arr)
+
+    gray = samples(9, 9, 1, 4, 601)
+    emit('meta_bkgd_gray4', make_png(gray, 0, 4, pre=[chunk(b'bKGD', struct.pack('>H', 9)), chunk(b'sBIT', bytes([3]))]),
+         expand(gray, 0, 4))
+    idx = samples(9, 9, 1, 8, 602) % 7
+    pal = palette(7, 6)
+    with open(os.path.join(OUT, 'meta_bkgd_palette.png'), 'wb') as f:   # bKGD has to follow PLTE
+        data = make_png(idx, 3, 8, plte=pal)
+        cut = data.index(b'IDAT') - 4
+        f.write(data[:cut] + chunk(b'bKGD', bytes([4])) + data[cut:])
+    ref, who = reference(os.path.join(OUT, 'meta_bkgd_palette.png'), expand(idx, 3, 8, pal))
+    write_ref(os.path.join(OUT, 'meta_bkgd_palette.png.ref'), ref)
+    written.append(('meta_bkgd_palette', who))
+
+    # written by Pillow and ImageMagick
+    info = PngImagePlugin.PngInfo()
+    info.add_text('Author', 'Pillow')
+    info.add_text('Compressed', 'z' * 3000, zip=True)
+    info.add_itxt('Greeting', 'héllo wörld ✓', lang='fr', tkey='Salut')
+    info.add_itxt('Packed', 'ü' * 2000, lang='de', tkey='Gepackt', zip=True)
+    path = os.path.join(OUT, 'pil_text.png')
+    Image.fromarray(arr.astype(np.uint8)).save(path, pnginfo=info, gamma=0.5)
+    ref, who = reference(path)
+    write_ref(path + '.ref', ref)
+    written.append(('pil_text', who))
+
+    path = os.path.join(OUT, 'im_chunks.png')
+    tmp = os.path.join(OUT, '_src.png')
+    Image.fromarray(arr.astype(np.uint8)).save(tmp)
+    subprocess.run(['magick', tmp, '-background', '#102030', '-set', 'comment', 'made by ImageMagick',
+                    '-define', 'png:include-chunk=all', '-define', 'png:exclude-chunk=date,tIME', '-set', 'colorspace', 'sRGB',
+                    path], check=True)   # no timestamps: the fixture has to be reproducible
+    os.remove(tmp)
+    ref, who = reference(path)
+    write_ref(path + '.ref', ref)
+    written.append(('im_chunks', who))
+
+    count = 0
+    for d in (OUT, SUITE, APNG):
+        for path in sorted(glob.glob(os.path.join(d, '*.png'))):
+            if os.path.basename(path).startswith('x') and d == SUITE:
+                continue
+            m = read_meta(path)
+            if m:
+                with open(path + '.meta.json', 'w') as f:
+                    json.dump(m, f, indent=1, ensure_ascii=False)
+                count += 1
+    return count
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
-    for f in glob.glob(os.path.join(OUT, '*.png')) + glob.glob(os.path.join(OUT, '*.ref')) + glob.glob(os.path.join(SUITE, '*.ref')):
+    stale = [os.path.join(OUT, '*.png'), os.path.join(OUT, '*.ref'), os.path.join(OUT, '*.json'), os.path.join(SUITE, '*.ref'),
+             os.path.join(SUITE, '*.json'), os.path.join(APNG, '*')]
+    for f in [f for pattern in stale for f in glob.glob(pattern)]:
         os.remove(f)
     gen_matrix()
     gen_filters()
@@ -477,14 +1063,26 @@ def main():
     gen_third_party()
     if os.path.isdir(SUITE):
         gen_suite_refs()
+    gen_apng()
+    finish_anims()
+    metas = gen_meta()
     votes = {}
     for _, who in written:
         votes[len(who)] = votes.get(len(who), 0) + 1
     print(f'{len(written)} fixtures; reference decoders agreeing per file: {dict(sorted(votes.items()))}')
+    print(f'{len(anims)} animations, each confirmed by at least two decoders (except {sorted(SINGLE_ORACLE)})')
+    print(f'{metas} metadata sidecars')
     if '-v' in sys.argv:
         for name, who in written:
             print(f'  {name}: {",".join(who)}')
+        for name, _, _, verdicts in anims:
+            print(f'  apng/{name}: ' + ', '.join(f'{d}={v}' for d, v in verdicts.items() if v))
 
 
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == '--meta':
+        # used by the C# tests to check what OUR encoder wrote
+        import json
+        print(json.dumps(read_meta(sys.argv[2]), ensure_ascii=True))
+    else:
+        main()
