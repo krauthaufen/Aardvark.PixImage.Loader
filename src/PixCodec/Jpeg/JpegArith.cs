@@ -95,6 +95,7 @@ namespace PixCodec.JpegImpl
         public void Start(byte* p, byte* end)
         {
             _stats.AsSpan().Clear();
+            _losslessStats.AsSpan().Clear();
             _p = p; _end = end;
             _padding = 0;
             Corrupt = false;
@@ -183,6 +184,50 @@ namespace PixCodec.JpegImpl
             v++;
             return sign != 0 ? -v : v;
         }
+
+        // lossless (H.1.2.3): 25 contexts x 4 bins from the classes of the left and upper difference, then two sets of
+        // magnitude category / magnitude bit bins (15 + 14 each)
+        const int LosslessBins = 100 + 2 * 29;
+        readonly byte[] _losslessStats = GC.AllocateArray<byte>(4 * LosslessBins, pinned: true);
+
+        /// <summary>0 = zero, 1 / 2 = small positive / negative, 3 / 4 = large positive / negative.</summary>
+        int Classify(int d, int table)
+        {
+            int a = Math.Abs(d);
+            if (a <= (1 << DcL[table]) >> 1) return 0;
+            return (a <= 1 << DcU[table] ? 1 : 3) + (d < 0 ? 1 : 0);
+        }
+
+        /// <summary>One prediction difference of a lossless scan, given the differences to the left (da) and above (db).</summary>
+        public int DecodeLosslessDifference(int table, int da, int db)
+        {
+            fixed (byte* all = _losslessStats)
+            {
+                byte* stats = all + table * LosslessBins;
+                int ca = Classify(da, table), cb = Classify(db, table);
+                byte* st = stats + 4 * (LosslessContextOrder == 0 ? 5 * ca + cb : 5 * cb + ca);
+                if (Decode(st) == 0) return 0;
+                int sign = Decode(st + 1);
+                st += 2 + sign;
+                int m = Decode(st);
+                if (m != 0)
+                {
+                    st = stats + ((LosslessLargeFrom == 0 ? cb : ca) >= 3 ? 129 : 100);
+                    while (Decode(st) != 0)
+                    {
+                        if (m == 0x8000) { Corrupt = true; return 0; }
+                        m <<= 1;
+                        st++;
+                    }
+                }
+                int v = m;
+                st += 14;
+                while ((m >>= 1) != 0) if (Decode(st) != 0) v |= m;
+                v++;
+                return sign != 0 ? -v : v;
+            }
+        }
+        internal static int LosslessContextOrder, LosslessLargeFrom;
 
         /// <summary>Magnitude and sign of a nonzero AC coefficient at zigzag position k (F.1.4.4.2), after its zero run.</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

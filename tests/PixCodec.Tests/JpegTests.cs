@@ -10,7 +10,43 @@ public class JpegTests
     public static IEnumerable<object[]> MiscWithRef() => TestUtil.Files("jpeg/misc", ".jpg").Where(f => File.Exists(TestUtil.Fixture((string)f[0]) + ".ref"));
     public static IEnumerable<object[]> Unsupported() => TestUtil.Files("jpeg/unsupported", ".jpg");
 
+    public static IEnumerable<object[]> IsoFixtures() => TestUtil.Files("jpeg/iso", ".jpg");
+
     static byte[] Load(string file) => File.ReadAllBytes(TestUtil.Fixture(file));
+
+    /// <summary>
+    /// Files written by the ISO/IEC 10918 reference software (see gen_jpeg.py, round3): hierarchical mode, lossless with
+    /// arithmetic coding, 12 bit arithmetic / progressive, subsampled lossless, DNL. The file name carries the tolerance:
+    /// 0 wherever the reference is libjpeg-turbo or the coding is lossless, a few levels where only the reference
+    /// software's own DCT decoder (different inverse DCT) is available.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(IsoFixtures))]
+    public void DecodeReferenceSoftwareFiles(string file)
+    {
+        var parts = Path.GetFileName(file).Split('.');
+        int tolerance = int.Parse(parts.First(p => p.Length > 1 && p[0] == 't' && char.IsDigit(p[1]))[1..]);
+        bool raw = parts.Contains("raw");
+        var data = Load(file);
+        var expected = TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref");
+        var actual = Jpeg.Decode(data, new JpegDecodeOptions { KeepYCbCr = raw });
+        TestUtil.AssertEqual(expected, actual, tolerance);
+        var info = Jpeg.GetInfo(data);
+        Assert.Equal((actual.Width, actual.Height, actual.SampleType), (info.Width, info.Height, info.SampleType));
+
+        if (parts[0].StartsWith("dnl") && !parts.Contains("plain"))
+        {
+            // the same encode without DNL decodes to the same pixels
+            var twin = Jpeg.Decode(Load(file.Replace(parts[0] + ".", parts[0] + ".plain.")), new JpegDecodeOptions { KeepYCbCr = raw });
+            TestUtil.AssertEqual(twin, actual, 0);
+            Assert.True(data.AsSpan().IndexOf(new byte[] { 0xFF, 0xDC, 0x00, 0x04 }) > 0);
+        }
+        if (parts[0].StartsWith("hier"))
+        {
+            // scaling does not apply to hierarchical files; the option is ignored
+            TestUtil.AssertEqual(actual, Jpeg.Decode(data, new JpegDecodeOptions { KeepYCbCr = raw, ScaleDenominator = 4 }), 0);
+        }
+    }
 
     // ------------------------------------------------------------------ decoding
 
@@ -572,6 +608,7 @@ public class JpegTests
 
     [Theory]
     [MemberData(nameof(Fixtures))]
+    [MemberData(nameof(IsoFixtures))]
     public void TruncationNeverCrashes(string file)
     {
         var data = Load(file);
@@ -583,6 +620,7 @@ public class JpegTests
 
     [Theory]
     [MemberData(nameof(Fixtures))]
+    [MemberData(nameof(IsoFixtures))]
     public void CorruptionNeverCrashes(string file)
     {
         var data = Load(file);

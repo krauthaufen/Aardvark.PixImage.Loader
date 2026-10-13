@@ -34,6 +34,8 @@ namespace PixCodec.JpegImpl
         /// <summary>Lossless point transform of the scan that coded this component.</summary>
         public int PointTransform;
         public bool Decoded;
+        /// <summary>Arithmetic lossless coding: the differences of the scan, which condition the coding of their neighbours.</summary>
+        public short[]? Differences;
         public JpegUpsample Upsample;
         public int HExp = 1, VExp = 1;
         // fractional ratios: source step per output sample as HNum / HDen
@@ -77,6 +79,16 @@ namespace PixCodec.JpegImpl
         readonly HuffDecodeTable?[] _ac = new HuffDecodeTable[4];
         JpegArith? _arith;
 
+        // hierarchical mode (T.81 Annex J): a DHP segment announces the final image, then a sequence of frames follows,
+        // each (after the first) coding the difference to the - possibly 2x expanded - result of the ones before
+        public bool Hierarchical;
+        bool _differential, _firstFrameLossless, _expandH, _expandV, _frameExpandH, _frameExpandV;
+        int _frames, _frameScans;
+        int _finalWidth, _finalHeight;
+        (int Id, int H, int V)[] _finalComps = Array.Empty<(int, int, int)>();
+        ushort[][]? _reference;
+        int[] _referenceW = new int[4], _referenceH = new int[4];
+
         bool _jfif, _adobe;
         int _adobeTransform;
         public readonly ImageMetadata Metadata = new ImageMetadata();
@@ -91,7 +103,7 @@ namespace PixCodec.JpegImpl
         public bool HasMetadata => _hasMetadata;
 
         /// <summary>Samples wider than 8 bit, or lossless: planes are 16 bit.</summary>
-        public bool Wide => Precision > 8 || Lossless;
+        public bool Wide => Precision > 8 || Lossless || Hierarchical;
 
         /// <summary>Set for a tables-only stream (TIFF JPEGTables): no frame or scan is expected.</summary>
         public bool TablesOnly;
@@ -184,14 +196,20 @@ namespace PixCodec.JpegImpl
                 pos += len;
                 switch (m)
                 {
-                    case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC9: case 0xCA:
+                    case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC9: case 0xCA: case 0xCB:
+                    case 0xC5: case 0xC6: case 0xC7: case 0xCD: case 0xCE: case 0xCF:
                         ReadFrame(m, p, n);
                         if (headerOnly && Height != 0) { SetupGeometry(); return; }
                         break;
-                    case 0xCB:
-                        throw new ImageNotSupportedException("arithmetic coded lossless JPEG is not supported");
-                    case 0xC5: case 0xC6: case 0xC7: case 0xCD: case 0xCE: case 0xCF:
-                        throw new ImageNotSupportedException("hierarchical JPEG is not supported");
+                    case 0xDE:
+                        ReadHierarchy(p, n);
+                        if (headerOnly && Height != 0) { InstallFinalGeometry(); return; }
+                        break;
+                    case 0xDF:
+                        if (n != 1 || !Hierarchical) throw Bad("bad EXP segment");
+                        _expandH = _d[p] >> 4 != 0;
+                        _expandV = (_d[p] & 15) != 0;
+                        break;
                     case 0xC4: ReadHuffmanTables(p, n); break;
                     case 0xCC: ReadConditioning(p, n); break;
                     case 0xDB: ReadQuantTables(p, n); break;
@@ -221,8 +239,8 @@ namespace PixCodec.JpegImpl
                 return;
             }
             if (_scans == 0) throw Bad("no image data");
-            if (Progressive) IdctAll();
-            if (Lossless) FinishLossless();
+            FinishFrame();
+            if (Hierarchical) InstallFinalGeometry();
             FinishIcc();
         }
 
@@ -231,21 +249,42 @@ namespace PixCodec.JpegImpl
         void ReadFrame(int marker, int p, int n)
         {
             if (TablesOnly) return;
-            if (Comps.Length != 0) throw Bad("multiple frame headers");
+            bool differential = marker is 0xC5 or 0xC6 or 0xC7 or 0xCD or 0xCE or 0xCF;
+            if (Comps.Length != 0 && _frames > 0)
+            {
+                if (!Hierarchical) throw Bad("multiple frame headers");
+                if (_headerOnly) return;
+                FinishFrame();
+            }
+            if (differential && (!Hierarchical || _reference == null)) throw Bad("differential frame without a reference");
+            if (!differential && _reference != null) throw Bad("second non-differential frame");
             if (n < 6) throw Bad("bad frame header");
-            Precision = _d[p];
-            Height = U16(p + 1);
-            Width = U16(p + 3);
+            int precision = _d[p], height = U16(p + 1), width = U16(p + 3);
             int nc = _d[p + 5];
             if (n != 6 + 3 * nc) throw Bad("bad frame header");
-            Lossless = marker == 0xC3;
-            Progressive = marker == 0xC2 || marker == 0xCA;
-            Arithmetic = marker == 0xC9 || marker == 0xCA;
-            bool precisionOk = Lossless ? Precision >= 2 && Precision <= 16 : Precision == 8 || (Precision == 12 && marker != 0xC0);
-            if (!precisionOk) throw Bad("unsupported sample precision " + Precision);
-            if (Width == 0) throw Bad("zero width");
+            Lossless = marker is 0xC3 or 0xC7 or 0xCB or 0xCF;
+            Progressive = marker is 0xC2 or 0xC6 or 0xCA or 0xCE;
+            Arithmetic = marker >= 0xC9;
+            bool precisionOk = Lossless ? precision >= 2 && precision <= 16 : precision == 8 || (precision == 12 && marker != 0xC0);
+            if (!precisionOk) throw Bad("unsupported sample precision " + precision);
+            if (width == 0) throw Bad("zero width");
             if (nc == 0) throw Bad("no components");
             if (nc > 4) throw new ImageNotSupportedException($"JPEG with {nc} components is not supported");
+            if (Hierarchical)
+            {
+                if (precision != Precision || nc != _finalComps.Length || height == 0 || width > _finalWidth || height > _finalHeight)
+                    throw Bad("frame does not fit the hierarchical progression");
+                if (_frames == 0) _firstFrameLossless = Lossless;
+            }
+            Precision = precision; Height = height; Width = width;
+            _differential = differential;
+            // the EXP segment in front of this frame says how its reference is to be enlarged
+            _frameExpandH = _expandH; _frameExpandV = _expandV;
+            _expandH = _expandV = false;
+            _frames++;
+            _frameScans = 0;
+            _geometry = _allocated = false;
+            HMax = VMax = 0;
 
             var comps = new JpegComponent[nc];
             for (int i = 0; i < nc; i++)
@@ -254,11 +293,132 @@ namespace PixCodec.JpegImpl
                 if (c.H < 1 || c.H > 4 || c.V < 1 || c.V > 4) throw Bad("bad sampling factor");
                 if (c.Tq > 3) throw Bad("bad quantization table index");
                 for (int j = 0; j < i; j++) if (comps[j].Id == c.Id) throw Bad("duplicate component id");
+                if (Hierarchical && (c.Id, c.H, c.V) != _finalComps[i]) throw Bad("frame components differ from the hierarchical progression");
                 HMax = Math.Max(HMax, c.H);
                 VMax = Math.Max(VMax, c.V);
                 comps[i] = c;
             }
             Comps = comps;
+        }
+
+        /// <summary>DHP: the parameters of the completed image of a hierarchical progression (same layout as a frame header).</summary>
+        void ReadHierarchy(int p, int n)
+        {
+            if (TablesOnly) return;
+            if (Comps.Length != 0 || Hierarchical) throw Bad("misplaced DHP segment");
+            if (n < 6) throw Bad("bad DHP segment");
+            Precision = _d[p];
+            _finalHeight = U16(p + 1);
+            _finalWidth = U16(p + 3);
+            int nc = _d[p + 5];
+            if (n != 6 + 3 * nc || nc == 0 || _finalWidth == 0 || _finalHeight == 0 || Precision < 2 || Precision > 16) throw Bad("bad DHP segment");
+            if (nc > 4) throw new ImageNotSupportedException($"JPEG with {nc} components is not supported");
+            _finalComps = new (int, int, int)[nc];
+            for (int i = 0; i < nc; i++)
+            {
+                int h = _d[p + 7 + i * 3] >> 4, v = _d[p + 7 + i * 3] & 15;
+                if (h < 1 || h > 4 || v < 1 || v > 4) throw Bad("bad sampling factor");
+                _finalComps[i] = (_d[p + 6 + i * 3], h, v);
+            }
+            Hierarchical = true;
+            Width = _finalWidth; Height = _finalHeight;
+        }
+
+        /// <summary>Completes the frame in progress; in a hierarchical progression its result becomes (part of) the reference for the next one.</summary>
+        void FinishFrame()
+        {
+            if (Comps.Length == 0 || !_allocated)
+            {
+                if (Hierarchical && _frames > 0) throw Bad("frame without image data");
+                return;
+            }
+            if (Progressive) IdctAll();
+            if (Lossless) FinishLossless();
+            if (!Hierarchical) return;
+
+            int mask = (1 << Precision) - 1;
+            var merged = new ushort[Comps.Length][];
+            for (int i = 0; i < Comps.Length; i++)
+            {
+                var c = Comps[i];
+                int w = c.SampledW, h = c.SampledH;
+                var dst = merged[i] = new ushort[w * h];
+                var plane = c.Plane16Arr!;
+                if (!_differential)
+                {
+                    for (int y = 0; y < h; y++) plane.AsSpan(y * c.Stride, w).CopyTo(dst.AsSpan(y * w));
+                }
+                else
+                {
+                    var up = Expand(_reference![i], _referenceW[i], _referenceH[i], w, h);
+                    for (int y = 0; y < h; y++)
+                        for (int x = 0; x < w; x++)
+                        {
+                            // lossless differences wrap around, DCT based ones are an approximation and get clamped
+                            int v = up[y * w + x] + (short)plane[y * c.Stride + x];
+                            dst[y * w + x] = (ushort)(Lossless ? v & mask : Math.Clamp(v, 0, mask));
+                        }
+                }
+                _referenceW[i] = w; _referenceH[i] = h;
+            }
+            _reference = merged;
+        }
+
+        /// <summary>
+        /// Brings a reference component to the size of the next frame: doubled where the EXP segment asked for it
+        /// (J.1.1.2: samples in between are the truncated mean of their two neighbours, the edge is repeated).
+        /// </summary>
+        ushort[] Expand(ushort[] src, int sw, int sh, int w, int h)
+        {
+            if ((_frameExpandH ? (w + 1) / 2 : w) != sw || (_frameExpandV ? (h + 1) / 2 : h) != sh) throw Bad("frame size does not match its reference");
+            if (!_frameExpandH && !_frameExpandV) return src;
+            // output sample (x, y) is the truncated mean of the up to four reference samples around it
+            var dst = new ushort[w * h];
+            for (int y = 0; y < h; y++)
+            {
+                int y0 = _frameExpandV ? y >> 1 : y, y1 = _frameExpandV ? Math.Min(y0 + (y & 1), sh - 1) : y0;
+                for (int x = 0; x < w; x++)
+                {
+                    int x0 = _frameExpandH ? x >> 1 : x, x1 = _frameExpandH ? Math.Min(x0 + (x & 1), sw - 1) : x0;
+                    dst[y * w + x] = (ushort)((src[y0 * sw + x0] + src[y0 * sw + x1] + src[y1 * sw + x0] + src[y1 * sw + x1]) >> 2);
+                }
+            }
+            return dst;
+        }
+
+        /// <summary>Sets the decoder up to present the completed hierarchical image (or, header only, just its geometry).</summary>
+        void InstallFinalGeometry()
+        {
+            Width = _finalWidth; Height = _finalHeight;
+            var comps = new JpegComponent[_finalComps.Length];
+            HMax = VMax = 0;
+            for (int i = 0; i < comps.Length; i++)
+            {
+                comps[i] = new JpegComponent { Id = _finalComps[i].Id, H = _finalComps[i].H, V = _finalComps[i].V };
+                HMax = Math.Max(HMax, comps[i].H);
+                VMax = Math.Max(VMax, comps[i].V);
+            }
+            Comps = comps;
+            // sample planes at component resolution, like a lossless frame
+            bool lossless = _headerOnly ? Lossless : _firstFrameLossless;
+            Lossless = true;
+            _geometry = false;
+            SetupGeometry();
+            Lossless = lossless;
+            if (_reference == null) return;
+            for (int i = 0; i < comps.Length; i++)
+            {
+                var c = comps[i];
+                if (_referenceW[i] != c.SampledW || _referenceH[i] != c.SampledH) throw Bad("hierarchical progression ends before the full size");
+                c.Plane16Arr = GC.AllocateUninitializedArray<ushort>(c.Stride * c.BlocksH, pinned: true);
+                fixed (ushort* q = c.Plane16Arr) c.Plane16 = q;
+                for (int y = 0; y < c.BlocksH; y++)
+                {
+                    var row = c.Plane16Arr.AsSpan(y * c.Stride, c.Stride);
+                    _reference[i].AsSpan(Math.Min(y, c.SampledH - 1) * c.SampledW, c.SampledW).CopyTo(row);
+                    row.Slice(c.SampledW).Fill(row[c.SampledW - 1]);
+                }
+            }
         }
 
         /// <summary>
@@ -284,7 +444,7 @@ namespace PixCodec.JpegImpl
             if (_geometry) return;
             _geometry = true;
             int unit = Lossless ? 1 : 8;
-            _minS = Lossless ? 1 : 8 / ScaleDenominator;
+            _minS = Lossless ? 1 : Hierarchical ? 8 : 8 / ScaleDenominator;
             _mcusX = (Width + unit * HMax - 1) / (unit * HMax);
             _mcusY = (Height + unit * VMax - 1) / (unit * VMax);
             OutWidth = (Width * _minS + unit - 1) / unit;
@@ -339,7 +499,7 @@ namespace PixCodec.JpegImpl
                 {
                     c.Plane16Arr = GC.AllocateUninitializedArray<ushort>((int)size, pinned: true);
                     fixed (ushort* q = c.Plane16Arr) c.Plane16 = q;
-                    c.Plane16Arr.AsSpan().Fill((ushort)(1 << (Precision - 1)));
+                    c.Plane16Arr.AsSpan().Fill(_differential ? (ushort)0 : (ushort)(1 << (Precision - 1)));
                 }
                 else
                 {
@@ -494,12 +654,13 @@ namespace PixCodec.JpegImpl
             int ns = _d[p];
             if (ns < 1 || ns > 4 || n != 4 + 2 * ns) throw Bad("bad scan header");
             if (++_scans > MaxScans) throw Bad("too many scans");
+            _frameScans++;
             var sc = new JpegComponent[ns];
             int ss = _d[p + 1 + 2 * ns], se = _d[p + 2 + 2 * ns], ah = _d[p + 3 + 2 * ns] >> 4, al = _d[p + 3 + 2 * ns] & 15;
             if (Lossless)
             {
                 // ss selects the predictor, al is the point transform
-                if (ss < 1 || ss > 7 || al >= Precision) throw Bad("bad lossless scan parameters");
+                if ((_differential ? ss != 0 : ss < 1 || ss > 7) || al >= Precision) throw Bad("bad lossless scan parameters");
             }
             else if (!Progressive) { ss = 0; se = 63; ah = 0; al = 0; }
             else if (ss > se || se > 63 || al > 13 || ah > 13 || (ss == 0 && se != 0) || (ss != 0 && ns != 1))
@@ -606,7 +767,14 @@ namespace PixCodec.JpegImpl
             if (dcOnly) new Span<int>(v, s * s).Fill((block[0] * c.Quant[0] + 4) >> 3);
             else JpegDct.IdctGeneric(block, c.Quant, s, Precision == 8 ? 2 : 1, v);
             int center = 1 << (Precision - 1), max = (1 << Precision) - 1;
-            if (c.Plane != null)
+            if (_differential)
+            {
+                // a difference image: signed, no level shift
+                ushort* dst = c.Plane16 + ((nint)row * c.Stride + col) * s;
+                for (int y = 0; y < s; y++, dst += c.Stride)
+                    for (int x = 0; x < s; x++) dst[x] = (ushort)(short)Math.Clamp(v[y * s + x], short.MinValue, short.MaxValue);
+            }
+            else if (c.Plane != null)
             {
                 byte* dst = c.Plane + ((nint)row * c.Stride + col) * s;
                 for (int y = 0; y < s; y++, dst += c.Stride)
@@ -650,6 +818,7 @@ namespace PixCodec.JpegImpl
                             for (int bx = 0; bx < h; bx++)
                             {
                                 Unsafe.InitBlockUnaligned(block, 0, 128);
+                                if (_differential) c.DcPred = 0; // differences are coded without DC prediction
                                 int last = arith ? _arith!.DecodeBlock(c, block) : DecodeBlock(ref br, c.Dc!, c.Ac!, block, ref c.DcPred);
                                 PutBlock(c, block, last == 0, mx * h + bx, my * v + by);
                             }
@@ -815,6 +984,7 @@ namespace PixCodec.JpegImpl
                                 {
                                     if (ss == 0)
                                     {
+                                        if (_differential) c.DcPred = 0;
                                         if (ah == 0) _arith!.DecodeDcFirst(c, blk, al);
                                         else _arith!.DecodeDcRefine(blk, al);
                                     }
@@ -825,6 +995,7 @@ namespace PixCodec.JpegImpl
                                 {
                                     if (ah == 0)
                                     {
+                                        if (_differential) c.DcPred = 0;
                                         int s = br.DecodeSymbol(c.Dc!) & 15;
                                         if (s != 0) c.DcPred += br.ReceiveExtend(s);
                                         blk[0] = (short)(c.DcPred << al);
@@ -1053,7 +1224,12 @@ namespace PixCodec.JpegImpl
             bool skip = false;
 
             // the usual layout - one sample of every component per MCU, restarts (if any) at line starts - goes line by line
-            bool simple = ri % mcusX == 0;
+            if (_differential) predictor = NoPrediction;
+            if (Arithmetic)
+            {
+                foreach (var c in sc) c.Differences = new short[c.Stride * c.BlocksH];
+            }
+            bool simple = ri % mcusX == 0 && !Arithmetic;
             foreach (var c in sc) simple &= single || (c.H == 1 && c.V == 1);
             if (simple)
             {
@@ -1073,7 +1249,7 @@ namespace PixCodec.JpegImpl
                         cur[i] = sc[i].Plane16 + (nint)my * sc[i].Stride;
                         fast[i] = sc[i].Dc!.Fast;
                     }
-                    DecodeLosslessLine(ref br, sc, cur, fast, mcusX, top ? 0 : predictor, initial);
+                    DecodeLosslessLine(ref br, sc, cur, fast, mcusX, top && !_differential ? 0 : predictor, initial);
                     if (br.Overrun)
                     {
                         if (ri == 0) return;
@@ -1103,6 +1279,7 @@ namespace PixCodec.JpegImpl
                         int h = single ? 1 : c.H, v = single ? 1 : c.V;
                         nint stride = c.Stride;
                         var table = c.Dc!;
+                        fixed (short* diffs = c.Differences)
                         for (int by = 0; by < v; by++)
                         {
                             ushort* row = c.Plane16 + (nint)(my * v + by) * stride;
@@ -1110,7 +1287,8 @@ namespace PixCodec.JpegImpl
                             for (int bx = 0; bx < h; bx++)
                             {
                                 int x = mx * h + bx, pred;
-                                if (top) pred = mx == firstCol && bx == 0 ? initial : row[x - 1];
+                                if (predictor == NoPrediction) pred = 0;
+                                else if (top) pred = mx == firstCol && bx == 0 ? initial : row[x - 1];
                                 else if (x == 0) pred = row[-stride];
                                 else
                                 {
@@ -1126,11 +1304,22 @@ namespace PixCodec.JpegImpl
                                         _ => (ra + rb) >> 1,
                                     };
                                 }
-                                row[x] = (ushort)(pred + DecodeDifference(ref br, table));
+                                int diff;
+                                if (Arithmetic)
+                                {
+                                    // conditioned on the differences coded to the left and above (none at the start of a line / interval)
+                                    short* dr = diffs + (nint)(my * v + by) * stride;
+                                    int da = x == 0 || (my == topRow && mx == firstCol && bx == 0) ? 0 : dr[x - 1];
+                                    int db = top ? 0 : dr[x - stride];
+                                    diff = _arith!.DecodeLosslessDifference(c.DcTableId, da, db);
+                                    dr[x] = (short)diff;
+                                }
+                                else diff = DecodeDifference(ref br, table);
+                                row[x] = (ushort)(pred + diff);
                             }
                         }
                     }
-                    if (br.Overrun)
+                    if (Arithmetic ? _arith!.Corrupt : br.Overrun)
                     {
                         if (ri == 0) return;
                         skip = true;
@@ -1138,6 +1327,9 @@ namespace PixCodec.JpegImpl
                 }
             }
         }
+
+        /// <summary>Predictor selection value used for differential frames: the sample is the difference itself.</summary>
+        const int NoPrediction = 8;
 
         /// <summary>
         /// One line of a lossless scan whose components are all sampled 1 x 1. <paramref name="predictor"/> 0 marks the
@@ -1201,6 +1393,7 @@ namespace PixCodec.JpegImpl
                     ushort* row = cur[i];
                     int pred;
                     if (predictor == 0) pred = x == 0 ? initial : row[x - 1];
+                    else if (predictor == NoPrediction) pred = 0;
                     else
                     {
                         ushort* above = row - sc[i].Stride;
