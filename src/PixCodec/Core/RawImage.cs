@@ -40,6 +40,7 @@ namespace PixCodec
         Gif,
         Exr,
         Webp,
+        Jp2,
     }
 
     /// <summary>Optional, format independent metadata. Decoders fill in what they find, encoders write what they can.</summary>

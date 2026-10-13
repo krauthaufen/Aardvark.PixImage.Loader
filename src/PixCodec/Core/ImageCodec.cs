@@ -14,6 +14,7 @@ namespace PixCodec
             if (Tiff.IsMatch(header)) return ImageFormat.Tiff;
             if (Exr.IsMatch(header)) return ImageFormat.Exr;
             if (Webp.IsMatch(header)) return ImageFormat.Webp;
+            if (Jp2.IsMatch(header)) return ImageFormat.Jp2;
             return ImageFormat.Unknown;
         }
 
@@ -26,6 +27,7 @@ namespace PixCodec
                 ".gif" => ImageFormat.Gif,
                 ".exr" => ImageFormat.Exr,
                 ".webp" => ImageFormat.Webp,
+                ".jp2" or ".j2k" or ".j2c" or ".jpc" or ".jpf" or ".jpx" or ".jph" or ".jhc" => ImageFormat.Jp2,
                 _ => ImageFormat.Unknown,
             };
 
@@ -37,6 +39,7 @@ namespace PixCodec
             ImageFormat.Tiff => Tiff.GetInfo(data),
             ImageFormat.Exr => Exr.GetInfo(data),
             ImageFormat.Webp => Webp.GetInfo(data),
+            ImageFormat.Jp2 => Jp2.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -137,6 +140,7 @@ namespace PixCodec
             ImageFormat.Tiff => Tiff.Decode(data),
             ImageFormat.Exr => Exr.Decode(data),
             ImageFormat.Webp => Webp.Decode(data),
+            ImageFormat.Jp2 => Jp2.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -154,6 +158,7 @@ namespace PixCodec
                 case ImageFormat.Tiff: Tiff.Encode(image, output); break;
                 case ImageFormat.Exr: Exr.Encode(image, output); break;
                 case ImageFormat.Webp: Webp.Encode(image, output); break;
+                case ImageFormat.Jp2: Jp2.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }

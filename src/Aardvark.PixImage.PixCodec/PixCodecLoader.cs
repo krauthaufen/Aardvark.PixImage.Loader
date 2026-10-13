@@ -61,6 +61,10 @@ namespace Aardvark.Base
                         Lossless = webp?.Lossless ?? false,
                     });
                     break;
+                case PixFileFormat.Jp2:
+                case PixFileFormat.J2k:
+                    Jp2.Encode(ToRawImage(image, Target.ByteOrUShort), stream, new Jp2EncodeOptions { RawCodestream = saveParams.Format == PixFileFormat.J2k });
+                    break;
                 case PixFileFormat.Gif:
                     Gif.Encode(ToRawImage(image, Target.Byte), stream);
                     break;
