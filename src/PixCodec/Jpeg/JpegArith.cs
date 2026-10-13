@@ -48,6 +48,7 @@ namespace PixCodec.JpegImpl
         // state byte (index | mps << 7) -> Qe | next after MPS << 16 | next after LPS << 24 (both again with the mps bit)
         static readonly uint[] s_table = BuildTable();
         static readonly uint* s_tablePtr;
+        internal static uint* Table => s_tablePtr;
 
         static uint[] BuildTable()
         {
@@ -66,7 +67,7 @@ namespace PixCodec.JpegImpl
             fixed (uint* p = s_table) s_tablePtr = p;
         }
 
-        const byte FixedState = 113;
+        internal const byte FixedState = 113;
 
         // per table statistics: DC 64 bins (5 contexts x 4, 15 magnitude category bins, 14 magnitude bit bins),
         // AC 256 bins (3 per coefficient, then two sets of category + bit bins for low / high frequencies)
@@ -95,6 +96,7 @@ namespace PixCodec.JpegImpl
         public void Start(byte* p, byte* end)
         {
             _stats.AsSpan().Clear();
+            _losslessStats.AsSpan().Clear();
             _p = p; _end = end;
             _padding = 0;
             Corrupt = false;
@@ -182,6 +184,50 @@ namespace PixCodec.JpegImpl
             while ((m >>= 1) != 0) if (Decode(st) != 0) v |= m;
             v++;
             return sign != 0 ? -v : v;
+        }
+
+        // lossless (H.1.2.3): 25 contexts x 4 bins from the classes of the left and upper difference, then two sets of
+        // magnitude category / magnitude bit bins (15 + 14 each)
+        const int LosslessBins = 100 + 2 * 29;
+        readonly byte[] _losslessStats = GC.AllocateArray<byte>(4 * LosslessBins, pinned: true);
+
+        /// <summary>0 = zero, 1 / 2 = small positive / negative, 3 / 4 = large positive / negative.</summary>
+        int Classify(int d, int table)
+        {
+            int a = Math.Abs(d);
+            if (a <= (1 << DcL[table]) >> 1) return 0;
+            return (a <= 1 << DcU[table] ? 1 : 3) + (d < 0 ? 1 : 0);
+        }
+
+        /// <summary>One prediction difference of a lossless scan, given the differences to the left (da) and above (db).</summary>
+        public int DecodeLosslessDifference(int table, int da, int db)
+        {
+            fixed (byte* all = _losslessStats)
+            {
+                byte* stats = all + table * LosslessBins;
+                int ca = Classify(da, table), cb = Classify(db, table);
+                byte* st = stats + 4 * (5 * ca + cb);
+                if (Decode(st) == 0) return 0;
+                int sign = Decode(st + 1);
+                st += 2 + sign;
+                int m = Decode(st);
+                if (m != 0)
+                {
+                    // the magnitude bins come in two sets, chosen by whether the difference above is large
+                    st = stats + (cb >= 3 ? 129 : 100);
+                    while (Decode(st) != 0)
+                    {
+                        if (m == 0x8000) { Corrupt = true; return 0; }
+                        m <<= 1;
+                        st++;
+                    }
+                }
+                int v = m;
+                st += 14;
+                while ((m >>= 1) != 0) if (Decode(st) != 0) v |= m;
+                v++;
+                return sign != 0 ? -v : v;
+            }
         }
 
         /// <summary>Magnitude and sign of a nonzero AC coefficient at zigzag position k (F.1.4.4.2), after its zero run.</summary>
@@ -288,6 +334,230 @@ namespace PixCodec.JpegImpl
                     if (++k > se) { Corrupt = true; return; }
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// The encoding side of the arithmetic coder (T.81 D.1) with the same statistics models as <see cref="JpegArith"/>.
+    /// Output for one entropy coded segment is collected in <see cref="Buffer"/> (already byte stuffed).
+    /// </summary>
+    internal sealed unsafe class JpegArithEncoder
+    {
+        readonly byte[] _stats = GC.AllocateArray<byte>(4 * 64 + 4 * 256, pinned: true);
+        readonly byte* _dcStats, _acStats;
+        // conditioning: the defaults (no DAC segment is written)
+        const int DcL = 0, DcU = 1, AcK = 5;
+
+        public byte[] Buffer = new byte[1 << 16];
+        public int Length;
+
+        uint _a, _c;
+        int _ct;
+        int _pending; // byte waiting for a possible carry, -1 before the first
+        int _stackedFF; // 0xFF bytes behind it that a carry would turn into zeros
+
+        public JpegArithEncoder()
+        {
+            fixed (byte* p = _stats) _dcStats = p;
+            _acStats = _dcStats + 4 * 64;
+        }
+
+        /// <summary>Begins a segment with fresh statistics.</summary>
+        public void Start()
+        {
+            _stats.AsSpan().Clear();
+            Length = 0;
+            _a = 0x10000; _c = 0; _ct = 11;
+            _pending = -1; _stackedFF = 0;
+        }
+
+        void Emit(int b)
+        {
+            if (Length + 2 > Buffer.Length) Array.Resize(ref Buffer, Buffer.Length * 2);
+            Buffer[Length++] = (byte)b;
+            if (b == 0xFF) Buffer[Length++] = 0; // stuffing
+        }
+
+        void ByteOut()
+        {
+            uint t = _c >> 19;
+            if (t > 0xFF)
+            {
+                // carry: propagates into the pending byte and turns the stacked 0xFF bytes into zeros
+                if (_pending >= 0) Emit(_pending + 1);
+                for (; _stackedFF > 0; _stackedFF--) Emit(0);
+                _pending = (int)(t & 0xFF);
+            }
+            else if (t == 0xFF) _stackedFF++;
+            else
+            {
+                if (_pending >= 0) Emit(_pending);
+                for (; _stackedFF > 0; _stackedFF--) Emit(0xFF);
+                _pending = (int)t;
+            }
+            _c &= 0x7FFFF;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        void Encode(byte* st, int bit)
+        {
+            uint sv = *st, e = JpegArith.Table[sv], qe = e & 0xFFFF;
+            _a -= qe;
+            if (bit != (int)(sv >> 7))
+            {
+                // less probable symbol: it gets the lower sub-interval unless that is the larger one
+                if (_a >= qe) { _c += _a; _a = qe; }
+                *st = (byte)(e >> 24);
+            }
+            else
+            {
+                if (_a >= 0x8000) return;
+                if (_a < qe) { _c += _a; _a = qe; }
+                *st = (byte)(e >> 16);
+            }
+            do
+            {
+                _a <<= 1; _c <<= 1;
+                if (--_ct == 0) { ByteOut(); _ct = 8; }
+            } while (_a < 0x8000);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        void EncodeFixed(int bit)
+        {
+            byte st = JpegArith.FixedState;
+            Encode(&st, bit);
+        }
+
+        /// <summary>Terminates the segment (D.1.8); afterwards Buffer[0..Length) holds its bytes.</summary>
+        public void Finish()
+        {
+            // pick the value in the final interval with the most trailing zero bits
+            uint t = (_c + _a - 1) & 0xFFFF0000;
+            if (t < _c) t += 0x8000;
+            _c = t << _ct;
+            ByteOut();
+            _c <<= 8;
+            ByteOut();
+            if (_pending >= 0) Emit(_pending);
+            for (; _stackedFF > 0; _stackedFF--) Emit(0xFF);
+            _pending = -1;
+            // trailing zero bytes carry no information: the decoder supplies zeros itself
+            while (Length > 0 && Buffer[Length - 1] == 0 && !(Length > 1 && Buffer[Length - 2] == 0xFF)) Length--;
+        }
+
+        public void EncodeDc(int table, ref int context, int diff)
+        {
+            byte* stats = _dcStats + table * 64, st = stats + context;
+            if (diff == 0)
+            {
+                Encode(st, 0);
+                context = 0;
+                return;
+            }
+            Encode(st, 1);
+            int sign = diff < 0 ? 1 : 0, v = Math.Abs(diff) - 1, m = 0;
+            Encode(st + 1, sign);
+            st += 2 + sign;
+            if (v == 0) Encode(st, 0);
+            else
+            {
+                Encode(st, 1);
+                m = 1;
+                st = stats + 20;
+                for (int v2 = v; (v2 >>= 1) != 0; st++) { Encode(st, 1); m <<= 1; }
+                Encode(st, 0);
+            }
+            if (m < (1 << DcL) >> 1) context = 0;
+            else if (m > (1 << DcU) >> 1) context = 12 + sign * 4;
+            else context = 4 + sign * 4;
+            st += 14;
+            while ((m >>= 1) != 0) Encode(st, (m & v) != 0 ? 1 : 0);
+        }
+
+        /// <summary>Sign and magnitude of a nonzero coefficient at zigzag position k; st is its 3 bin group.</summary>
+        void EncodeAcValue(byte* stats, byte* st, int k, int value)
+        {
+            EncodeFixed(value < 0 ? 1 : 0);
+            int v = Math.Abs(value) - 1, m = 0;
+            st += 2;
+            if (v == 0) Encode(st, 0);
+            else
+            {
+                Encode(st, 1);
+                m = 1;
+                int v2 = v;
+                if ((v2 >>= 1) != 0)
+                {
+                    Encode(st, 1);
+                    m <<= 1;
+                    st = stats + (k <= AcK ? 189 : 217);
+                    for (; (v2 >>= 1) != 0; st++) { Encode(st, 1); m <<= 1; }
+                }
+                Encode(st, 0);
+            }
+            st += 14;
+            while ((m >>= 1) != 0) Encode(st, (m & v) != 0 ? 1 : 0);
+        }
+
+        /// <summary>The AC coefficients ss..se of a zigzag ordered block, each divided by 2^al (toward zero): sequential and progressive first pass.</summary>
+        public void EncodeAc(int table, short* blk, int ss, int se, int al)
+        {
+            byte* stats = _acStats + table * 256;
+            int ke = se;
+            while (ke >= ss && Math.Abs((int)blk[ke]) >> al == 0) ke--;
+            int k = ss;
+            for (; k <= ke; k++)
+            {
+                byte* st = stats + 3 * (k - 1);
+                Encode(st, 0); // not the end of the block
+                int v;
+                while ((v = Math.Abs((int)blk[k]) >> al) == 0)
+                {
+                    Encode(st + 1, 0);
+                    st += 3;
+                    k++;
+                }
+                Encode(st + 1, 1);
+                EncodeAcValue(stats, st, k, blk[k] < 0 ? -v : v);
+            }
+            if (k <= se) Encode(stats + 3 * (k - 1), 1);
+        }
+
+        public void EncodeDcRefine(int bit) => EncodeFixed(bit & 1);
+
+        /// <summary>Progressive refinement of a band from precision ah to al = ah - 1 (G.1.3.3).</summary>
+        public void EncodeAcRefine(int table, short* blk, int ss, int se, int ah, int al)
+        {
+            byte* stats = _acStats + table * 256;
+            // ends of block of this pass and of the passes before it
+            int ke = se, kex;
+            while (ke >= ss && Math.Abs((int)blk[ke]) >> al == 0) ke--;
+            for (kex = ke; kex >= ss && Math.Abs((int)blk[kex]) >> ah == 0; kex--) { }
+            int k = ss;
+            for (; k <= ke; k++)
+            {
+                byte* st = stats + 3 * (k - 1);
+                if (k > kex) Encode(st, 0);
+                while (true)
+                {
+                    int v = Math.Abs((int)blk[k]) >> al;
+                    if (v != 0)
+                    {
+                        if (v >> 1 != 0) Encode(st + 2, v & 1); // known already: one more magnitude bit
+                        else
+                        {
+                            Encode(st + 1, 1);
+                            EncodeFixed(blk[k] < 0 ? 1 : 0);
+                        }
+                        break;
+                    }
+                    Encode(st + 1, 0);
+                    st += 3;
+                    k++;
+                }
+            }
+            if (k <= se) Encode(stats + 3 * (k - 1), 1);
         }
     }
 }

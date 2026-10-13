@@ -26,6 +26,7 @@ namespace PixCodec.JpegImpl
             public ushort[]? Plane16; // 12 bit samples
             public short[] Coefs = null!;
             public int Pred;
+            public int ArithContext, ArithTable; // arithmetic coding: DC conditioning state, statistics table (0 luma, 1 chroma)
             public HuffEnc Dc = null!, Ac = null!;
         }
 
@@ -412,10 +413,20 @@ namespace PixCodec.JpegImpl
             if (_precision != 8 || _genericSampling) FillPlanesGeneric(image);
             else FillPlanes(image);
             if (!_opt.Progressive) SetupBaselineTables();
-            Transform();
-            WriteHeaders(image.Metadata);
-            if (_opt.Progressive) WriteProgressive();
-            else WriteBaseline();
+            if (SinglePass)
+            {
+                // standard tables, sequential: nothing depends on the whole image, so each MCU is transformed and
+                // coded in one go without ever storing the coefficients
+                WriteHeaders(image.Metadata);
+                EncodeSinglePass();
+            }
+            else
+            {
+                Transform();
+                WriteHeaders(image.Metadata);
+                if (_opt.Progressive) WriteProgressive();
+                else WriteBaseline();
+            }
             Marker(0xD9);
             _out.Write(_buf, 0, _pos);
             _pos = 0;
@@ -506,23 +517,32 @@ namespace PixCodec.JpegImpl
                 int sw = (w * c.H + _hMax - 1) / _hMax, sh = (h * c.V + _vMax - 1) / _vMax;
                 if (_hMax % c.H == 0 && _vMax % c.V == 0)
                 {
-                    // whole-number ratios: plain averages over fx x fy samples (edge samples repeat)
-                    int fx = _hMax / c.H, fy = _vMax / c.V, area = fx * fy, planeRows = c.BlocksH * 8, st = c.Stride;
+                    // whole-number ratios: plain averages over fx x fy samples; rows / columns past the image repeat the edge
+                    int fx = _hMax / c.H, fy = _vMax / c.V, planeRows = c.BlocksH * 8, st = c.Stride;
                     var src = full[i];
+                    var acc = new int[sw];
                     for (int y = 0; y < planeRows; y++)
                     {
-                        int sy = Math.Min(y, sh - 1) * fy;
-                        for (int x = 0; x < st; x++)
+                        if (y < sh)
                         {
-                            int sx = Math.Min(x, sw - 1) * fx, sum = area >> 1;
+                            Array.Clear(acc);
                             for (int j = 0; j < fy; j++)
                             {
-                                int o = Math.Min(sy + j, h - 1) * w;
-                                for (int k = 0; k < fx; k++) sum += src[o + Math.Min(sx + k, w - 1)];
+                                int o = Math.Min(y * fy + j, h - 1) * w;
+                                int whole = fx == 1 ? sw : w / fx; // outputs whose inputs all exist
+                                if (fx == 1) for (int x = 0; x < whole; x++) acc[x] += src[o + x];
+                                else if (fx == 2) for (int x = 0; x < whole; x++) acc[x] += src[o + 2 * x] + src[o + 2 * x + 1];
+                                else for (int x = 0; x < whole; x++) for (int k = 0; k < fx; k++) acc[x] += src[o + x * fx + k];
+                                for (int x = whole; x < sw; x++) for (int k = 0; k < fx; k++) acc[x] += src[o + Math.Min(x * fx + k, w - 1)];
                             }
-                            int v = area == 1 ? sum : sum / area;
-                            if (c.Plane16 != null) c.Plane16[y * st + x] = (ushort)v; else c.Plane[y * st + x] = (byte)v;
+                            int area = fx * fy, round = area >> 1;
+                            if (c.Plane16 != null) for (int x = 0; x < sw; x++) c.Plane16[y * st + x] = (ushort)((acc[x] + round) / area);
+                            else for (int x = 0; x < sw; x++) c.Plane[y * st + x] = (byte)((acc[x] + round) / area);
+                            if (c.Plane16 != null) c.Plane16.AsSpan(y * st + sw, st - sw).Fill(c.Plane16[y * st + sw - 1]);
+                            else c.Plane.AsSpan(y * st + sw, st - sw).Fill(c.Plane[y * st + sw - 1]);
                         }
+                        else if (c.Plane16 != null) c.Plane16.AsSpan((sh - 1) * st, st).CopyTo(c.Plane16.AsSpan(y * st, st));
+                        else c.Plane.AsSpan((sh - 1) * st, st).CopyTo(c.Plane.AsSpan(y * st, st));
                     }
                     continue;
                 }
@@ -624,6 +644,16 @@ namespace PixCodec.JpegImpl
             }
         }
 
+        /// <summary>8 values below 256 in 32 bit lanes to 8 bytes.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void Store8(Vector256<int> v, byte* dst)
+        {
+            var words = Avx2.PackSignedSaturate(v, v);
+            var bytes = Avx2.PackUnsignedSaturate(words, words).AsUInt32();
+            Unsafe.WriteUnaligned(dst, bytes.GetElement(0));
+            Unsafe.WriteUnaligned(dst + 4, bytes.GetElement(4));
+        }
+
         /// <summary>Byte shuffle with a run time mask (Vector128.Shuffle is only accelerated for constant masks). Indices of 0x80 give zero.</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static Vector128<byte> Shuffle(Vector128<byte> v, Vector128<byte> idx)
@@ -637,7 +667,40 @@ namespace PixCodec.JpegImpl
             {
                 byte* s = sp;
                 int x = 0;
-                if ((Ssse3.IsSupported || AdvSimd.Arm64.IsSupported))
+                if (Avx2.IsSupported)
+                {
+                    // 8 pixels per step with 16 bit multiply-adds; the coefficients 38470 (G to Y) and 32768 do not
+                    // fit a signed 16 bit factor, so their 32768 part is added as a shift
+                    var spread3 = Vector128.Create((byte)0, 1, 2, 0x80, 3, 4, 5, 0x80, 6, 7, 8, 0x80, 9, 10, 11, 0x80);
+                    var lowBytes = Vector256.Create(0x00FF00FF).AsInt16();
+                    var yRB = Vector256.Create(19595 | 7471 << 16).AsInt16();
+                    var yG = Vector256.Create(38470 - 32768).AsInt16();
+                    var cbR = Vector256.Create(-11059 & 0xFFFF).AsInt16();
+                    var cbG = Vector256.Create(-21709 & 0xFFFF).AsInt16();
+                    var crG = Vector256.Create(-27439 & 0xFFFF).AsInt16();
+                    var crB = Vector256.Create(-5329 << 16).AsInt16();
+                    var vh = Vector256.Create(half); var vc = Vector256.Create(center);
+                    var byteMask = Vector256.Create(255);
+                    int end8 = w - (ch == 3 ? 10 : 8);
+                    for (; x <= end8; x += 8, s += 8 * ch)
+                    {
+                        var px = ch == 3
+                            ? Vector256.Create(Ssse3.Shuffle(Sse2.LoadVector128(s), spread3), Ssse3.Shuffle(Sse2.LoadVector128(s + 12), spread3))
+                            : Avx.LoadVector256(s);
+                        var rb = Avx2.And(px.AsInt16(), lowBytes);
+                        var g32 = Avx2.And(Avx2.ShiftRightLogical(px.AsInt32(), 8), byteMask); // (the top byte may be alpha)
+                        var g = g32.AsInt16();
+                        var r32 = Avx2.And(px.AsInt32(), byteMask);
+                        var b32 = Avx2.And(Avx2.ShiftRightLogical(px.AsInt32(), 16), byteMask);
+                        var yv = Avx2.Add(Avx2.Add(Avx2.MultiplyAddAdjacent(rb, yRB), Avx2.MultiplyAddAdjacent(g, yG)), Avx2.Add(Avx2.ShiftLeftLogical(g32, 15), vh));
+                        var cb = Avx2.Add(Avx2.Add(Avx2.MultiplyAddAdjacent(rb, cbR), Avx2.MultiplyAddAdjacent(g, cbG)), Avx2.Add(Avx2.ShiftLeftLogical(b32, 15), vc));
+                        var cr = Avx2.Add(Avx2.Add(Avx2.MultiplyAddAdjacent(rb, crB), Avx2.MultiplyAddAdjacent(g, crG)), Avx2.Add(Avx2.ShiftLeftLogical(r32, 15), vc));
+                        Store8(Avx2.ShiftRightLogical(yv, 16), yp + x);
+                        Store8(Avx2.ShiftRightLogical(cb, 16), cbp + x);
+                        Store8(Avx2.ShiftRightLogical(cr, 16), crp + x);
+                    }
+                }
+                else if (Ssse3.IsSupported || AdvSimd.Arm64.IsSupported)
                 {
                     // 4 pixels per step in 32 bit lanes; reads 16 source bytes, so stop while that stays inside the row
                     var spread = ch == 3
@@ -704,10 +767,7 @@ namespace PixCodec.JpegImpl
                         }
                         for (int bx = 0; bx < c.BlocksW; bx++, o += 64)
                         {
-                            ushort* src = plane16 + ((nint)by * c.Stride + bx) * 8;
-                            for (int y = 0; y < 8; y++, src += c.Stride)
-                                for (int x = 0; x < 8; x++) m[y * 8 + x] = src[x] - (1 << (_precision - 1));
-                            JpegDct.FdctQuantizeGeneric(m, 1, recip, o);
+                            JpegDct.FdctQuantizeWide(plane16 + ((nint)by * c.Stride + bx) * 8, c.Stride, 1 << (_precision - 1), recip, o);
                             if (freq != null && bx < c.StatBlocksW && by < c.StatBlocksH) GatherAc(o, freq, _maxAcSize);
                         }
                     }
@@ -727,7 +787,7 @@ namespace PixCodec.JpegImpl
             }
 
             // baseline, extended sequential (needed beyond 8 bit) or progressive
-            Marker(_opt.Progressive ? 0xC2 : _precision == 8 ? 0xC0 : 0xC1);
+            Marker(_opt.Arithmetic ? (_opt.Progressive ? 0xCA : 0xC9) : _opt.Progressive ? 0xC2 : _precision == 8 ? 0xC0 : 0xC1);
             U16(8 + 3 * _comps.Length); Byte(_precision); U16(_h); U16(_w); Byte(_comps.Length);
             foreach (var c in _comps) { Byte(c.Id); Byte(c.H << 4 | c.V); Byte(c.Tq); }
 
@@ -792,7 +852,9 @@ namespace PixCodec.JpegImpl
 
         // ---------------------------------------------------------------- scans
 
-        bool OptimizedBaseline => !_opt.Progressive && (_opt.OptimizeHuffman || _precision != 8);
+        bool SinglePass => !_opt.Progressive && !_opt.Arithmetic && !OptimizedBaseline && _precision == 8;
+
+        bool OptimizedBaseline => !_opt.Progressive && !_opt.Arithmetic && (_opt.OptimizeHuffman || _precision != 8);
 
         /// <summary>The standard tables, or empty ones to be built from the image's statistics (always beyond 8 bit: the standard tables stop at 8 bit magnitudes).</summary>
         void SetupBaselineTables()
@@ -809,8 +871,143 @@ namespace PixCodec.JpegImpl
             }
         }
 
+        void EncodeSinglePass()
+        {
+            bool color = _comps.Length == 3, single = !color;
+            WriteHuffmanTable(_comps[0].Dc, 0, 0); WriteHuffmanTable(_comps[0].Ac, 1, 0);
+            if (color) { WriteHuffmanTable(_comps[1].Dc, 0, 1); WriteHuffmanTable(_comps[1].Ac, 1, 1); }
+            WriteScanHeader(_comps, color ? [0, 1, 1] : [0], color ? [0, 1, 1] : [0], 0, 63, 0, 0);
+
+            int nc = _comps.Length;
+            float* recips = stackalloc float[2 * 64];
+            for (int t = 0; t < 2; t++)
+                for (int i = 0; i < 64; i++) recips[t * 64 + (i & 7) * 8 + (i >> 3)] = 1f / (8 * _quant[t][i]);
+            short* blk = stackalloc short[64];
+            int mcusX = single ? _comps[0].ScanBlocksW : _mcusX, mcusY = single ? _comps[0].ScanBlocksH : _mcusY;
+            int todo = _restart, rst = 0;
+            foreach (var c in _comps) c.Pred = 0;
+            var c0 = _comps[0]; var c1 = _comps[nc > 1 ? 1 : 0]; var c2 = _comps[nc > 2 ? 2 : 0];
+            fixed (byte* buf = _buf, p0 = c0.Plane, p1 = c1.Plane, p2 = c2.Plane)
+            fixed (uint* dc0 = c0.Dc.Packed, ac0 = c0.Ac.Packed, dc1 = c1.Dc.Packed, ac1 = c1.Ac.Packed)
+            fixed (ulong* acx0 = c0.Ac.Extended, acx1 = c1.Ac.Extended)
+            {
+                byte** planes = stackalloc byte*[3];
+                planes[0] = p0; planes[1] = p1; planes[2] = p2;
+                for (int my = 0; my < mcusY; my++)
+                {
+                    for (int mx = 0; mx < mcusX; mx++)
+                    {
+                        if (_restart != 0)
+                        {
+                            if (todo == 0)
+                            {
+                                FlushBits();
+                                Marker(0xD0 + rst);
+                                rst = (rst + 1) & 7;
+                                todo = _restart;
+                                foreach (var c in _comps) c.Pred = 0;
+                            }
+                            todo--;
+                        }
+                        Reserve(10 * 600);
+                        for (int i = 0; i < nc; i++)
+                        {
+                            var c = _comps[i];
+                            int h = single ? 1 : c.H, v = single ? 1 : c.V;
+                            nint stride = c.Stride;
+                            byte* src = planes[i] + ((nint)my * v * stride + mx * h) * 8;
+                            for (int by = 0; by < v; by++, src += 8 * stride)
+                                for (int bx = 0; bx < h; bx++)
+                                {
+                                    JpegDct.FdctQuantizeTransposed(src + bx * 8, stride, recips + (i == 0 ? 0 : 64), blk);
+                                    ulong mask = JpegTables.TransposedMaskToZigZag(JpegTables.NonZeroMask(blk));
+                                    if (i == 0) EmitBlock(blk, JpegTables.ZigZagTransposed, mask, c, buf, dc0, ac0, acx0);
+                                    else EmitBlock(blk, JpegTables.ZigZagTransposed, mask, c, buf, dc1, ac1, acx1);
+                                }
+                        }
+                    }
+                }
+            }
+            FlushBits();
+        }
+
+        JpegArithEncoder? _arith;
+
+        /// <summary>
+        /// One scan with arithmetic coding: a single pass (the coder adapts, there are no tables to prepare), for
+        /// sequential (ss = 0, se = 63) and progressive scans alike.
+        /// </summary>
+        void EncodeScanArithmetic(Comp[] comps, int ss, int se, int ah, int al)
+        {
+            var coder = _arith ??= new JpegArithEncoder();
+            for (int i = 0; i < _comps.Length; i++) _comps[i].ArithTable = i == 0 ? 0 : 1;
+            var ids = new int[comps.Length];
+            for (int i = 0; i < comps.Length; i++) ids[i] = comps[i].ArithTable;
+            WriteScanHeader(comps, ids, ids, ss, se, ah, al);
+
+            bool single = comps.Length == 1, sequential = !_opt.Progressive;
+            int mcusX = single ? comps[0].ScanBlocksW : _mcusX, mcusY = single ? comps[0].ScanBlocksH : _mcusY;
+            int todo = _restart, rst = 0;
+            foreach (var c in comps) { c.Pred = 0; c.ArithContext = 0; }
+            coder.Start();
+            for (int my = 0; my < mcusY; my++)
+            {
+                for (int mx = 0; mx < mcusX; mx++)
+                {
+                    if (_restart != 0)
+                    {
+                        if (todo == 0)
+                        {
+                            coder.Finish();
+                            Bytes(coder.Buffer.AsSpan(0, coder.Length));
+                            Marker(0xD0 + rst);
+                            rst = (rst + 1) & 7;
+                            todo = _restart;
+                            foreach (var c in comps) { c.Pred = 0; c.ArithContext = 0; }
+                            coder.Start();
+                        }
+                        todo--;
+                    }
+                    foreach (var c in comps)
+                    {
+                        int h = single ? 1 : c.H, v = single ? 1 : c.V;
+                        fixed (short* coefs = c.Coefs)
+                        {
+                            for (int by = 0; by < v; by++)
+                            {
+                                short* blk = coefs + ((nint)(my * v + by) * c.BlocksW + mx * h) * 64;
+                                for (int bx = 0; bx < h; bx++, blk += 64)
+                                {
+                                    if (ss == 0)
+                                    {
+                                        if (ah != 0) coder.EncodeDcRefine(blk[0] >> al);
+                                        else
+                                        {
+                                            int value = blk[0] >> al;
+                                            coder.EncodeDc(c.ArithTable, ref c.ArithContext, value - c.Pred);
+                                            c.Pred = value;
+                                        }
+                                        if (sequential) coder.EncodeAc(c.ArithTable, blk, 1, 63, 0);
+                                    }
+                                    else if (ah == 0) coder.EncodeAc(c.ArithTable, blk, ss, se, al);
+                                    else coder.EncodeAcRefine(c.ArithTable, blk, ss, se, ah, al);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            coder.Finish();
+            Bytes(coder.Buffer.AsSpan(0, coder.Length));
+        }
+
         void WriteBaseline()
         {
+            if (_opt.Arithmetic)
+            {
+                EncodeScanArithmetic(_comps, 0, 63, 0, 0);
+                return;
+            }
             bool color = _comps.Length == 3;
             HuffEnc dc0 = _comps[0].Dc, ac0 = _comps[0].Ac, dc1 = _comps[^1].Dc, ac1 = _comps[^1].Ac;
             if (OptimizedBaseline)
@@ -858,6 +1055,11 @@ namespace PixCodec.JpegImpl
 
         void ProgressiveScan(Comp[] comps, int ss, int se, int ah, int al)
         {
+            if (_opt.Arithmetic)
+            {
+                EncodeScanArithmetic(comps, ss, se, ah, al);
+                return;
+            }
             var ids = new int[comps.Length];
             var slots = new HuffEnc?[2];
             bool dcRefine = ss == 0 && ah != 0; // raw bits only, no table
@@ -963,7 +1165,7 @@ namespace PixCodec.JpegImpl
         void EncodeBlock(short* blk, Comp c)
         {
             if (_gather) GatherDc(blk, c);
-            else fixed (byte* buf = _buf) fixed (uint* dc = c.Dc.Packed, ac = c.Ac.Packed) fixed (ulong* acx = c.Ac.Extended) EmitBlock(blk, c, buf, dc, ac, acx);
+            else fixed (byte* buf = _buf) fixed (uint* dc = c.Dc.Packed, ac = c.Ac.Packed) fixed (ulong* acx = c.Ac.Extended) EmitBlock(blk, JpegTables.Identity, JpegTables.NonZeroMask(blk), c, buf, dc, ac, acx);
         }
 
         /// <summary>Statistics for optimized tables, DC part: counts the difference categories in scan order.</summary>
@@ -992,7 +1194,10 @@ namespace PixCodec.JpegImpl
         }
 
         /// <summary>Sequential block coder. The bit accumulator and output pointer live in locals for the duration of the block.</summary>
-        void EmitBlock(short* blk, Comp c, byte* buf, uint* dc, uint* ac, ulong* acx)
+        /// <param name="blk">The coefficients, in any storage order.</param>
+        /// <param name="order">Zigzag position -> index into blk.</param>
+        /// <param name="mask">Nonzero coefficients by zigzag position.</param>
+        void EmitBlock(short* blk, byte* order, ulong mask, Comp c, byte* buf, uint* dc, uint* ac, ulong* acx)
         {
             ulong acc = _acc;
             int n = _accBits;
@@ -1008,7 +1213,7 @@ namespace PixCodec.JpegImpl
             n += len;
             if (n >= 32) { n -= 32; o = Write32(o, (uint)(acc >> n)); }
 
-            ulong mask = JpegTables.NonZeroMask(blk) & ~1UL;
+            mask &= ~1UL;
             int prev = 0; // index of the previous nonzero coefficient
             int maxSize = _maxAcSize;
             uint zrl = ac[0xF0];
@@ -1026,7 +1231,7 @@ namespace PixCodec.JpegImpl
                     if (n >= 32) { n -= 32; o = Write32(o, (uint)(acc >> n)); }
                     run -= 16;
                 }
-                v = blk[k];
+                v = blk[order[k]];
                 int sign = v >> 31;
                 s = BitLength((v ^ sign) - sign);
                 if (s > maxSize) { s = maxSize; v = ((1 << s) - 1 ^ sign) - sign; } // cannot happen for real DCT output, but keep the stream legal
@@ -1184,12 +1389,61 @@ namespace PixCodec.JpegImpl
             _pos = 0;
         }
 
+        /// <summary>
+        /// Prediction differences of one line (components interleaved, n values). Predictor 0 stands for the first
+        /// line of the image or of a restart interval, which predicts from the left only.
+        /// </summary>
+        static void PredictLine(int[] cur, int[] prev, int[] diff, int n, int nc, int predictor, int initial)
+        {
+            for (int c = 0; c < nc; c++) diff[c] = cur[c] - (predictor == 0 ? initial : prev[c]);
+            int k = nc;
+            if (Vector.IsHardwareAccelerated)
+            {
+                fixed (int* pc = cur, pp = prev, pd = diff)
+                {
+                    for (int vn = Vector<int>.Count; k + vn <= n; k += vn)
+                    {
+                        var ra = Vector.Load(pc + k - nc);
+                        var rb = Vector.Load(pp + k);
+                        var rc = Vector.Load(pp + k - nc);
+                        var pred = predictor switch
+                        {
+                            0 or 1 => ra,
+                            2 => rb,
+                            3 => rc,
+                            4 => ra + rb - rc,
+                            5 => ra + Vector.ShiftRightArithmetic(rb - rc, 1),
+                            6 => rb + Vector.ShiftRightArithmetic(ra - rc, 1),
+                            _ => Vector.ShiftRightArithmetic(ra + rb, 1),
+                        };
+                        Vector.Store(Vector.Load(pc + k) - pred, pd + k);
+                    }
+                }
+            }
+            for (; k < n; k++)
+            {
+                int ra = cur[k - nc], rb = prev[k], rc = prev[k - nc];
+                int pred = predictor switch
+                {
+                    0 or 1 => ra,
+                    2 => rb,
+                    3 => rc,
+                    4 => ra + rb - rc,
+                    5 => ra + ((rb - rc) >> 1),
+                    6 => rb + ((ra - rc) >> 1),
+                    _ => (ra + rb) >> 1,
+                };
+                diff[k] = cur[k] - pred;
+            }
+        }
+
         /// <summary>Predicts every sample and either counts the difference categories or writes the coded differences.</summary>
         void LosslessPass(byte[]? s8, ushort[]? s16, int w, int h, int ch, int nc, int precision, int predictor, int restart, HuffEnc[] tables, bool emit)
         {
             // current and previous line as plain ints, components interleaved
             var cur = new int[w * nc];
             var prev = new int[w * nc];
+            var diff = new int[w * nc];
             int rowsPerInterval = restart == 0 ? int.MaxValue : restart / w;
             int topRow = 0, rst = 0;
             ulong acc = _acc;
@@ -1214,6 +1468,8 @@ namespace PixCodec.JpegImpl
                     for (int x = 0, i = y * w * ch; x < w; x++, i += ch)
                         for (int c = 0; c < nc; c++) cur[x * nc + c] = s8 != null ? s8[i + c] : s16![i + c];
 
+                    PredictLine(cur, prev, diff, w * nc, nc, y == topRow ? 0 : predictor, 1 << (precision - 1));
+
                     for (int x0 = 0; x0 < w; x0 += 256)
                     {
                         // every sample appends at most 8 bytes (31 bits plus stuffing)
@@ -1224,25 +1480,8 @@ namespace PixCodec.JpegImpl
                         {
                             for (int c = 0; c < nc; c++)
                             {
-                                int k = x * nc + c, pred;
-                                if (y == topRow) pred = x == 0 ? 1 << (precision - 1) : cur[k - nc];
-                                else if (x == 0) pred = prev[k];
-                                else
-                                {
-                                    int ra = cur[k - nc], rb = prev[k], rc = prev[k - nc];
-                                    pred = predictor switch
-                                    {
-                                        1 => ra,
-                                        2 => rb,
-                                        3 => rc,
-                                        4 => ra + rb - rc,
-                                        5 => ra + ((rb - rc) >> 1),
-                                        6 => rb + ((ra - rc) >> 1),
-                                        _ => (ra + rb) >> 1,
-                                    };
-                                }
                                 // differences are taken modulo 65536; -32768 and +32768 coincide and get their own category
-                                int d = (short)(cur[k] - pred);
+                                int d = (short)diff[x * nc + c];
                                 int s = d == short.MinValue ? 16 : BitLength(Math.Abs(d));
                                 if (!emit) { tables[c].Freq[s]++; continue; }
                                 uint e = tables[c].Packed[s];

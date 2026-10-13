@@ -234,10 +234,143 @@ def round2(cmyk):
             write_ref(path + '.ref', np.asarray(ImageOps.exif_transpose(Image.open(io.BytesIO(data)))))
 
 
+ISO_TOOL = os.environ.get('PIXCODEC_ISO_JPEG', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.tmp', 'jpeg170'))
+
+
+def round3():
+    """Fixtures in jpeg/iso/ written by the ISO/IEC 10918 reference software ("libjpeg" by Thomas Richter, version 1.70,
+    https://github.com/thorfdbg/libjpeg, built outside the repository and only RUN here): the corners of the standard
+    no other available writer produces - hierarchical mode, lossless with arithmetic coding, 12 bit with arithmetic
+    coding or progressive, subsampled lossless, DNL. The pictures are our own synthetic ones.
+
+    File names: <name>.t<N>[.raw].jpg - N is the tolerated sample difference, 'raw' means the reference holds the
+    components as stored (compare with KeepYCbCr). References come from libjpeg-turbo 3 (imagecodecs) wherever it
+    decodes the file (N = 0), otherwise from the reference software's own decoder: exact for lossless coding, within a
+    few levels for DCT based coding because inverse DCT and chroma upsampling are not standardized bit for bit.
+    <name>.plain.jpg next to a DNL file is the same encode without DNL (the test demands identical pixels).
+    """
+    iso = os.path.join(OUT, 'iso')
+    if not os.path.exists(ISO_TOOL):
+        print('reference JPEG software not found at', ISO_TOOL, '- keeping the existing jpeg/iso fixtures')
+        return
+    if os.path.isdir(iso):
+        shutil.rmtree(iso)
+    os.makedirs(iso)
+
+    def pnm(path, a, bits):
+        h, w = a.shape[:2]
+        c = a.shape[2] if a.ndim == 3 else 1
+        with open(path, 'wb') as f:
+            f.write(b'%s\n%d %d\n%d\n' % (b'P6' if c == 3 else b'P5', w, h, (1 << bits) - 1))
+            f.write(a.astype('>u2').tobytes() if bits > 8 else a.tobytes())
+
+    def rd(path):
+        with open(path, 'rb') as f:
+            d = f.read()
+        parts = d.split(None, 4)
+        w, h, mx = int(parts[1]), int(parts[2]), int(parts[3])
+        a = np.frombuffer(parts[4], dtype='>u2' if mx > 255 else np.uint8).reshape(h, w, 3 if parts[0] == b'P6' else 1)
+        return a.astype(np.uint16 if mx > 255 else np.uint8)
+
+    def run(args):
+        r = subprocess.run([ISO_TOOL, *args], capture_output=True, text=True)
+        return r
+
+    def make(name, args, tol, c=3, bits=8, w=47, h=33, raw=False, seed=5, ref='turbo'):
+        """ref: 'turbo' = libjpeg-turbo decode (must work, exact), 'tool' = the reference software's decode."""
+        with tempfile.TemporaryDirectory() as t:
+            src, out, dec = os.path.join(t, 'in.pnm'), os.path.join(t, 'o.jpg'), os.path.join(t, 'o.pnm')
+            a = photo16(w, h, c, bits, seed)
+            pnm(src, a, bits)
+            run([*args, src, out])
+            assert os.path.exists(out) and os.path.getsize(out) > 0, name
+            with open(out, 'rb') as f:
+                data = f.read()
+            if ref == 'turbo':
+                expected = ic.jpeg8_decode(data)
+            else:
+                run([*(['-c'] if raw else []), out, dec])
+                expected = rd(dec)
+            path = os.path.join(iso, f"{name}.t{tol}{'.raw' if raw else ''}.jpg")
+            with open(path, 'wb') as f:
+                f.write(data)
+            write_ref(path + '.ref', expected)
+            return data
+
+    # 12 bit with arithmetic coding / progressive, from a third party writer; libjpeg-turbo reads them
+    make('p12_arith', ['-q', '85', '-a'], 0, bits=12)
+    make('p12_arith_420', ['-q', '85', '-a', '-s', '1x1,2x2,2x2'], 0, bits=12)
+    make('p12_arith_gray', ['-q', '70', '-a'], 0, bits=12, c=1)
+    make('p12_arith_rst', ['-q', '85', '-a', '-z', '3'], 0, bits=12)
+    make('p12_arith_prog', ['-q', '85', '-a', '-v'], 0, bits=12)
+    make('p12_arith_prog_420', ['-q', '85', '-a', '-v', '-s', '1x1,2x2,2x2'], 0, bits=12)
+    make('p12_prog', ['-q', '85', '-v', '-h'], 0, bits=12)
+    make('p12_prog_420', ['-q', '85', '-v', '-h', '-s', '1x1,2x2,2x2'], 0, bits=12)
+    make('p12_prog_gray_rst', ['-q', '60', '-v', '-h', '-z', '5'], 0, bits=12, c=1)
+    make('p8_arith_422', ['-q', '85', '-a', '-s', '1x1,2x1,2x1'], 0)
+    make('p8_arith_prog_420_rst', ['-q', '85', '-a', '-v', '-s', '1x1,2x2,2x2', '-z', '2'], 0)
+
+    # lossless with subsampled components; libjpeg-turbo reads them
+    make('ll_sub420', ['-p', '-c', '-s', '1x1,2x2,2x2'], 0)
+    make('ll_sub422', ['-p', '-c', '-s', '1x1,2x1,2x1'], 0)
+    make('ll_sub420_p12', ['-p', '-c', '-s', '1x1,2x2,2x2'], 0, bits=12)
+    make('ll_sub411_rst', ['-p', '-c', '-s', '1x1,4x1,4x1', '-z', '12'], 0)
+
+    # lossless with arithmetic coding (SOF11): only the reference software reads these; lossless, so exact
+    make('ll_arith', ['-p', '-c', '-a'], 0, ref='tool', raw=True)
+    make('ll_arith_gray', ['-p', '-a'], 0, ref='tool', c=1)
+    make('ll_arith_p12', ['-p', '-c', '-a'], 0, ref='tool', raw=True, bits=12)
+    make('ll_arith_p16_gray', ['-p', '-a'], 0, ref='tool', c=1, bits=16)
+    make('ll_arith_rst', ['-p', '-c', '-a', '-z', '47'], 0, ref='tool', raw=True)
+    make('ll_arith_noise', ['-p', '-a'], 0, ref='tool', c=1, bits=16, seed=77, w=64, h=40)
+
+    # DNL from a third party writer, each with its twin without DNL
+    for name, args, tol, kw in [('dnl_seq', ['-q', '85'], 0, {}), ('dnl_prog', ['-q', '85', '-v', '-h'], 0, {}), ('dnl_arith', ['-q', '85', '-a'], 0, {}),
+                                ('dnl_420_rst', ['-q', '85', '-s', '1x1,2x2,2x2', '-z', '2'], 0, {}), ('dnl_ll', ['-p', '-c'], 0, {'raw': True})]:
+        plain = make(name + '.plain', args, 0, **kw)
+        # reference of the DNL file: the libjpeg-turbo decode of its twin
+        d = make(name, [*args, '-n'], tol, ref='tool', **kw)
+        shutil.copyfile(os.path.join(iso, f"{name}.plain.t0{'.raw' if kw.get('raw') else ''}.jpg.ref"), os.path.join(iso, f"{name}.t{tol}{'.raw' if kw.get('raw') else ''}.jpg.ref"))
+        assert b'\xff\xdc\x00\x04' in d and b'\xff\xdc\x00\x04' not in plain
+
+    # hierarchical mode; only the reference software reads these
+    make('hier_ll', ['-p', '-c', '-h', '-y', '2'], 0, ref='tool', raw=True)
+    make('hier_ll_gray', ['-p', '-h', '-y', '2'], 0, ref='tool', c=1, w=40, h=30)
+    make('hier_ll_p12', ['-p', '-c', '-h', '-y', '2'], 0, ref='tool', raw=True, bits=12)
+    make('hier_ll_arith', ['-p', '-c', '-a', '-y', '2'], 0, ref='tool', raw=True)
+    make('hier_dct_lossless_residual', ['-q', '85', '-h', '-y', '0', '-c'], 6, ref='tool', raw=True)
+    make('hier_dct1', ['-q', '85', '-h', '-y', '1'], 6, ref='tool', raw=True)
+    make('hier_dct2', ['-q', '85', '-h', '-y', '2'], 6, ref='tool', raw=True)
+    make('hier_dct3', ['-q', '85', '-h', '-y', '3'], 8, ref='tool', raw=True, w=90, h=61)
+    make('hier_dct2_gray', ['-q', '85', '-h', '-y', '2'], 6, ref='tool', c=1)
+    make('hier_dct2_arith', ['-q', '85', '-a', '-y', '2'], 6, ref='tool', raw=True)
+    make('hier_dct2_prog', ['-q', '85', '-v', '-h', '-y', '2'], 6, ref='tool', raw=True)
+    make('hier_dct2_arith_prog', ['-q', '85', '-v', '-a', '-y', '2'], 6, ref='tool', raw=True)
+    make('hier_dct2_p12', ['-q', '85', '-h', '-y', '2'], 60, ref='tool', raw=True, bits=12)
+    make('hier_dct2_rst', ['-q', '85', '-h', '-y', '2', '-z', '2'], 6, ref='tool', raw=True)
+    # subsampled chroma: the reference decoder interpolates it differently, hence the wide tolerance
+    make('hier_dct2_420', ['-q', '85', '-h', '-y', '2', '-s', '1x1,2x2,2x2'], 40, ref='tool')
+
+    with open(os.path.join(iso, 'README.txt'), 'w') as f:
+        f.write('These JPEG files were produced by tests/oracle/gen_jpeg.py (function round3) by running the ISO/IEC 10918\n'
+                'reference software ("libjpeg" by Thomas Richter, v1.70, https://github.com/thorfdbg/libjpeg) on synthetic\n'
+                'images generated by that script. No third party image content and no third party code is contained here;\n'
+                'the .ref files hold the decodes of libjpeg-turbo 3 (via imagecodecs) or of the reference software itself.\n')
+
+
 def main():
+    keep = None
     if os.path.isdir(OUT):
+        # the jpeg/iso fixtures need a tool that may not be installed: carry them over
+        if os.path.isdir(os.path.join(OUT, 'iso')):
+            keep = tempfile.mkdtemp()
+            shutil.move(os.path.join(OUT, 'iso'), os.path.join(keep, 'iso'))
         shutil.rmtree(OUT)
     os.makedirs(OUT)
+    if keep:
+        shutil.move(os.path.join(keep, 'iso'), os.path.join(OUT, 'iso'))
+        os.rmdir(keep)
+    round3()
     sizes = [(1, 1), (2, 2), (3, 3), (5, 4), (4, 5), (7, 5), (8, 8), (9, 9), (15, 17), (16, 16), (17, 33), (33, 17), (65, 65), (64, 48)]
 
     # every subsampling mode Pillow writes, across sizes that hit partial MCUs and the upsampling edge cases
@@ -431,15 +564,11 @@ def main():
     old_style('ycc444', pil(photo(40, 40), quality=85, subsampling=0))
     old_style('gray_rst', pil(photo(50, 30, 1), quality=85, restart_marker_rows=1))
 
-    # valid but unsupported
-    d = bytearray(pil(photo(16, 16, 1), quality=80))
-    for m, st, e in segments(bytes(d)):
-        if m == 0xC0:
-            d[st + 1] = 0xC5  # differential sequential frame: hierarchical mode
-    emit('hierarchical_marker', bytes(d), 'unsupported', ref=False)
-    d = bytearray(ic.jpeg8_encode(photo(16, 16, 1), lossless=True))
-    d[d.find(b'\xff\xc3') + 1] = 0xCB  # lossless with arithmetic coding
-    emit('lossless_arithmetic_marker', bytes(d), 'unsupported', ref=False)
+    # valid but unsupported: more than 4 components (a frame header is all it takes)
+    d = pil(photo(16, 16, 1), quality=80)
+    sof = d.find(b'\xff\xc0')
+    frame = b'\xff\xc0' + struct.pack('>HBHHB', 8 + 3 * 5, 8, 16, 16, 5) + b''.join(bytes([i + 1, 0x11, 0]) for i in range(5))
+    emit('five_components', d[:sof] + frame + d[sof + 2 + 11:], 'unsupported', ref=False)
 
     total = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(OUT) for f in fs)
     n = sum(len(fs) for _, _, fs in os.walk(OUT))
