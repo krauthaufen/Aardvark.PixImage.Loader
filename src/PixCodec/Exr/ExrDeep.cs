@@ -1,0 +1,388 @@
+using System;
+using System.Buffers.Binary;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+namespace PixCodec
+{
+    /// <summary>
+    /// A decoded deep part: every pixel has <see cref="SampleCounts"/>[y * Width + x] samples, stored consecutively per
+    /// channel starting at <see cref="SampleOffsets"/>[y * Width + x], in file order (not sorted by depth).
+    /// </summary>
+    public sealed class ExrDeepImage
+    {
+        public ExrHeader Header { get; }
+        public int Width { get; }
+        public int Height { get; }
+        /// <summary>Samples per pixel, row major, top row first.</summary>
+        public int[] SampleCounts { get; }
+        /// <summary>Index of the first sample of each pixel; has Width * Height + 1 entries, the last is <see cref="TotalSamples"/>.</summary>
+        public int[] SampleOffsets { get; }
+        public int TotalSamples => SampleOffsets[^1];
+        public IReadOnlyList<string> ChannelNames { get; }
+        /// <summary>One array of TotalSamples elements per channel: float[] for HALF and FLOAT channels, uint[] for UINT channels.</summary>
+        public IReadOnlyList<Array> ChannelData { get; }
+
+        internal ExrDeepImage(ExrHeader header, int width, int height, int[] counts, int[] offsets, string[] names, Array[] data)
+        {
+            Header = header; Width = width; Height = height; SampleCounts = counts; SampleOffsets = offsets; ChannelNames = names; ChannelData = data;
+        }
+
+        int IndexOf(string name)
+        {
+            for (int i = 0; i < ChannelNames.Count; i++) if (ChannelNames[i] == name) return i;
+            return -1;
+        }
+
+        public bool HasChannel(string name) => IndexOf(name) >= 0;
+
+        /// <summary>Samples of a HALF or FLOAT channel.</summary>
+        public float[] GetFloatChannel(string name)
+        {
+            int i = IndexOf(name);
+            if (i < 0) throw new ArgumentException($"deep image has no channel '{name}'");
+            return ChannelData[i] as float[] ?? throw new InvalidOperationException($"channel '{name}' is UINT, use GetUIntChannel");
+        }
+
+        /// <summary>Samples of a UINT channel.</summary>
+        public uint[] GetUIntChannel(string name)
+        {
+            int i = IndexOf(name);
+            if (i < 0) throw new ArgumentException($"deep image has no channel '{name}'");
+            return ChannelData[i] as uint[] ?? throw new InvalidOperationException($"channel '{name}' is not UINT, use GetFloatChannel");
+        }
+
+        /// <summary>
+        /// Composites the samples of every pixel front to back into a flat Float32 image with the given channels
+        /// (interleaved in that order, <see cref="ColorModel.Other"/> unless they are R,G,B(,A) or Y(,A)).
+        /// <para>
+        /// Samples are sorted by Z, then ZBack (stable; file order if there is no Z channel or sortByDepth is false) and
+        /// combined with "over": every channel c, including A, Z and ZBack if requested, accumulates
+        /// c += (1 - alpha) * sample.c, where alpha is the alpha accumulated before the sample; compositing stops once
+        /// alpha reaches 1. Colour channels are expected to be premultiplied. Without an A channel every sample is
+        /// opaque (the nearest sample wins). UINT channels are composited as float values. Pixels without samples are 0.
+        /// The reference library's CompositeDeepScanLine composites in file order without sorting, so it gives the
+        /// same result (bit for bit) for files whose samples are stored front to back and free of overlapping volumes,
+        /// and for any file when sortByDepth and tidy are false.
+        /// </para>
+        /// <para>
+        /// Volume samples (ZBack > Z) that overlap other samples of the pixel are first made "tidy" as described in
+        /// "Interpreting OpenEXR Deep Pixels" when <paramref name="tidy"/> is true (default): each volume sample is split
+        /// at the depths of the samples inside it (alpha' = 1 - (1 - alpha)^(part / length), colours scaled by
+        /// alpha' / alpha, or by part / length if alpha is 0) and coinciding volume samples are merged. With tidy false
+        /// overlapping samples are composited as they are.
+        /// </para>
+        /// </summary>
+        public RawImage Flatten(IReadOnlyList<string> channels, bool sortByDepth = true, bool tidy = true)
+        {
+            if (channels == null || channels.Count == 0) throw new ArgumentException("no channels given", nameof(channels));
+            int nc = channels.Count;
+            var src = new Array[nc];
+            int alphaSlot = -1;
+            for (int k = 0; k < nc; k++)
+            {
+                int i = IndexOf(channels[k]);
+                if (i < 0) throw new ArgumentException($"deep image has no channel '{channels[k]}'");
+                src[k] = ChannelData[i];
+            }
+            // compositing works on the requested channels plus alpha
+            float[]? alpha = HasChannel("A") ? GetFloatChannel("A") : null;
+            float[]? z = HasChannel("Z") && ChannelData[IndexOf("Z")] is float[] zf ? zf : null;
+            float[]? zb = HasChannel("ZBack") && ChannelData[IndexOf("ZBack")] is float[] zbf ? zbf : null;
+            for (int k = 0; k < nc; k++) if (channels[k] == "A") alphaSlot = k;
+
+            if ((long)Width * Height * nc > 0x7FFFFFC7) throw new ImageNotSupportedException("flattened EXR image is too large for a single array");
+            var result = new float[Width * Height * nc];
+            var order = new List<int>();
+            var work = new List<DeepSample>();
+            var acc = new float[nc];
+            for (int p = 0; p < SampleCounts.Length; p++)
+            {
+                int n = SampleCounts[p], first = SampleOffsets[p];
+                if (n == 0) continue;
+                order.Clear();
+                for (int i = 0; i < n; i++) order.Add(first + i);
+                if (sortByDepth && z != null && n > 1)
+                    order.Sort((a, b) =>
+                    {
+                        int c = z[a].CompareTo(z[b]);
+                        if (c == 0 && zb != null) c = zb[a].CompareTo(zb[b]);
+                        return c != 0 ? c : a.CompareTo(b);
+                    });
+                Array.Clear(acc);
+                float a = 0;
+                if (tidy && sortByDepth && z != null && zb != null && NeedsTidy(order, z, zb))
+                {
+                    Tidy(order, z, zb, alpha, src, work);
+                    foreach (var s in work)
+                    {
+                        if (a >= 1) break;
+                        float t = 1 - a;
+                        for (int k = 0; k < nc; k++) acc[k] += t * s.Values[k];
+                        a += t * s.Alpha;
+                    }
+                }
+                else
+                    foreach (int s in order)
+                    {
+                        if (a >= 1) break;
+                        float t = 1 - a;
+                        for (int k = 0; k < nc; k++) acc[k] += t * (src[k] is float[] f ? f[s] : ((uint[])src[k])[s]);
+                        a += t * (alpha != null ? alpha[s] : 1f);
+                    }
+                // the accumulated alpha is the A output (identical to accumulating A like the other channels)
+                if (alphaSlot >= 0) acc[alphaSlot] = a;
+                acc.CopyTo(result, p * nc);
+            }
+            return new RawImage(Width, Height, Exr.NaturalModel(channels), result, nc);
+        }
+
+        sealed class DeepSample
+        {
+            public float Z, ZBack, Alpha;
+            public float[] Values = Array.Empty<float>();
+        }
+
+        static bool NeedsTidy(List<int> order, float[] z, float[] zb)
+        {
+            // sorted by Z: a volume sample overlaps if the next sample starts before it ends
+            for (int i = 0; i + 1 < order.Count; i++)
+            {
+                int s = order[i];
+                if (zb[s] > z[s] && z[order[i + 1]] < zb[s]) return true;
+            }
+            return false;
+        }
+
+        static void Tidy(List<int> order, float[] z, float[] zb, float[]? alpha, Array[] src, List<DeepSample> work)
+        {
+            int nc = src.Length;
+            work.Clear();
+            // every depth at which a sample starts or ends is a potential split position
+            var cuts = new List<float>();
+            foreach (int s in order) { cuts.Add(z[s]); if (zb[s] > z[s]) cuts.Add(zb[s]); }
+            cuts.Sort();
+            foreach (int s in order)
+            {
+                var v = new float[nc];
+                for (int k = 0; k < nc; k++) v[k] = src[k] is float[] f ? f[s] : ((uint[])src[k])[s];
+                float a = alpha != null ? alpha[s] : 1f, z0 = z[s], z1 = zb[s];
+                if (!(z1 > z0)) { work.Add(new DeepSample { Z = z0, ZBack = z0, Alpha = a, Values = v }); continue; }
+                float length = z1 - z0, start = z0;
+                foreach (float c in cuts)
+                {
+                    if (c <= start) continue;
+                    float end = Math.Min(c, z1);
+                    work.Add(Part(v, a, (end - start) / length, start, end));
+                    start = end;
+                    if (end >= z1) break;
+                }
+                if (start < z1) work.Add(Part(v, a, (z1 - start) / length, start, z1));
+            }
+            work.Sort((p, q) =>
+            {
+                int c = p.Z.CompareTo(q.Z);
+                return c != 0 ? c : p.ZBack.CompareTo(q.ZBack);
+            });
+            // merge volume samples that now cover exactly the same interval
+            for (int i = 0; i + 1 < work.Count;)
+            {
+                var p = work[i]; var q = work[i + 1];
+                if (p.ZBack > p.Z && p.Z == q.Z && p.ZBack == q.ZBack)
+                {
+                    Merge(p, q);
+                    work.RemoveAt(i + 1);
+                }
+                else i++;
+            }
+        }
+
+        static DeepSample Part(float[] v, float a, float fraction, float z0, float z1)
+        {
+            var r = new float[v.Length];
+            float na, scale;
+            if (a >= 1) { na = 1; scale = 1; }
+            else if (a <= 0) { na = 0; scale = fraction; }
+            else { na = (float)(1 - Math.Pow(1 - (double)a, fraction)); scale = na / a; }
+            for (int k = 0; k < v.Length; k++) r[k] = v[k] * scale;
+            return new DeepSample { Z = z0, ZBack = z1, Alpha = na, Values = r };
+        }
+
+        static void Merge(DeepSample p, DeepSample q)
+        {
+            double a1 = Math.Clamp(p.Alpha, 0f, 1f), a2 = Math.Clamp(q.Alpha, 0f, 1f);
+            double am = a1 + a2 - a1 * a2;
+            for (int k = 0; k < p.Values.Length; k++)
+            {
+                double c1 = p.Values[k], c2 = q.Values[k], c;
+                if (a1 >= 1 && a2 >= 1) c = (c1 + c2) / 2;
+                else if (a1 >= 1) c = c1;
+                else if (a2 >= 1) c = c2;
+                else
+                {
+                    double u1 = -Math.Log(1 - a1), u2 = -Math.Log(1 - a2);
+                    double v1 = a1 > 0 ? u1 / a1 : 1, v2 = a2 > 0 ? u2 / a2 : 1;
+                    double w = am > 0 ? am / (u1 + u2) : 1;
+                    c = (c1 * v1 + c2 * v2) * w;
+                }
+                p.Values[k] = (float)c;
+            }
+            p.Alpha = (float)am;
+        }
+    }
+
+    internal static class ExrDeepDecoder
+    {
+        const long MaxRatio = 2048;
+
+        public static ExrDeepImage Decode(ReadOnlySpan<byte> data, ExrFileStructure file, int partIndex, int[] sel, ExrDecodeOptions opt)
+        {
+            var part = file.Parts[partIndex];
+            if (!part.IsDeep) throw new ArgumentException("EXR part is not deep; use Exr.Decode");
+            var comp = part.Compression;
+            if (comp != ExrCompression.None && comp != ExrCompression.Rle && comp != ExrCompression.Zips)
+                throw new ImageFormatException($"EXR compression {comp} is not valid for deep data");
+            var chans = part.Chans;
+            foreach (var c in chans)
+                if (c.XS != 1 || c.YS != 1) throw new ImageFormatException("EXR deep part has subsampled channels");
+            int lx = opt.LevelX, ly = opt.LevelY;
+            if (!part.HasLevel(lx, ly)) throw new ArgumentException($"EXR part has no level ({lx}, {ly})");
+            var (w, h) = part.GetLevelSize(lx, ly);
+            if ((long)w * h >= 0x7FFFFFC7) throw new ImageNotSupportedException("EXR deep image is too large");
+            int minX = part.DataWindow.MinX, minY = part.DataWindow.MinY;
+            bool multi = file.MultiPart, tiled = part.IsTiled;
+
+            int tilesX = tiled ? (w + part.TileWidth - 1) / part.TileWidth : 0;
+            long chunkCount = tiled ? (long)tilesX * ((h + part.TileHeight - 1) / part.TileHeight) : h;
+            // the offset table alone needs 8 bytes per chunk, which bounds everything allocated from the header
+            if (chunkCount * 8 > data.Length || (long)w * h > data.Length * MaxRatio)
+                throw new ImageFormatException("EXR data window is too large for the file size");
+            var offsets = ExrChunkTable.Locate(data, file, partIndex, part.FirstChunkOfLevel(lx, ly), (int)chunkCount, lx, ly);
+
+            int hdrSize = (multi ? 4 : 0) + (tiled ? 16 : 4) + 24;
+            var counts = new int[w * h];
+            var info = new (int pos, long packedData, long unpackedData, int x0, int y0, int cw, int ch)[chunkCount];
+            var s = new ExrScratch();
+            int bytesPerSample = 0;
+            foreach (var c in chans) bytesPerSample += c.Bytes;
+
+            // pass 1: the sample count tables (cumulative counts along each row of the chunk)
+            long total = 0;
+            for (int i = 0; i < chunkCount; i++)
+            {
+                long pos = offsets[i];
+                if (pos <= 0) throw new ImageFormatException("EXR file is incomplete: a chunk is missing");
+                if (pos > data.Length - hdrSize) throw new ImageFormatException("EXR chunk offset is out of range");
+                var hd = data.Slice((int)pos, hdrSize);
+                if (multi)
+                {
+                    if (BinaryPrimitives.ReadInt32LittleEndian(hd) != partIndex) throw new ImageFormatException("EXR chunk belongs to another part");
+                    hd = hd.Slice(4);
+                }
+                int x0 = 0, y0 = i, cw = w, ch = 1;
+                if (tiled)
+                {
+                    int tx = i % tilesX, ty = i / tilesX;
+                    if (BinaryPrimitives.ReadInt32LittleEndian(hd) != tx || BinaryPrimitives.ReadInt32LittleEndian(hd.Slice(4)) != ty
+                        || BinaryPrimitives.ReadInt32LittleEndian(hd.Slice(8)) != lx || BinaryPrimitives.ReadInt32LittleEndian(hd.Slice(12)) != ly)
+                        throw new ImageFormatException("EXR tile coordinates do not match the offset table");
+                    x0 = tx * part.TileWidth; y0 = ty * part.TileHeight;
+                    cw = Math.Min(part.TileWidth, w - x0); ch = Math.Min(part.TileHeight, h - y0);
+                    hd = hd.Slice(16);
+                }
+                else
+                {
+                    if (BinaryPrimitives.ReadInt32LittleEndian(hd) != minY + i) throw new ImageFormatException("EXR scan line chunk does not match the offset table");
+                    hd = hd.Slice(4);
+                }
+                long packedTable = BinaryPrimitives.ReadInt64LittleEndian(hd), packedData = BinaryPrimitives.ReadInt64LittleEndian(hd.Slice(8));
+                long unpackedData = BinaryPrimitives.ReadInt64LittleEndian(hd.Slice(16));
+                pos += hdrSize;
+                long tableSize = (long)cw * ch * 4;
+                if (packedTable < 0 || packedData < 0 || unpackedData < 0 || packedTable > data.Length - pos || packedData > data.Length - pos - packedTable
+                    || packedTable > tableSize || packedData > unpackedData || tableSize > int.MaxValue || unpackedData > int.MaxValue
+                    || (comp == ExrCompression.None && (packedTable != tableSize || packedData != unpackedData))
+                    || tableSize > Math.Max(packedTable, 1) * MaxRatio || unpackedData > Math.Max(packedData, 1) * MaxRatio)
+                    throw new ImageFormatException("EXR deep chunk has impossible sizes");
+
+                ReadOnlySpan<byte> table = data.Slice((int)pos, (int)packedTable);
+                if (packedTable != tableSize)
+                {
+                    var buf = s.Bytes(2, (int)tableSize).AsSpan(0, (int)tableSize);
+                    ExrCodecs.Decode(comp, table, buf, default, s);
+                    table = buf;
+                }
+                long chunkSamples = 0;
+                for (int y = 0; y < ch; y++)
+                {
+                    int prev = 0;
+                    for (int x = 0; x < cw; x++)
+                    {
+                        int cum = BinaryPrimitives.ReadInt32LittleEndian(table.Slice((y * cw + x) * 4));
+                        int n = cum - prev;
+                        if (n < 0) throw new ImageFormatException("EXR deep sample counts are not increasing");
+                        prev = cum;
+                        counts[(y0 + y) * w + x0 + x] = n;
+                        chunkSamples += n;
+                    }
+                }
+                if (chunkSamples * bytesPerSample != unpackedData) throw new ImageFormatException("EXR deep sample data size does not match the sample counts");
+                total += chunkSamples;
+                info[i] = ((int)(pos + packedTable), packedData, unpackedData, x0, y0, cw, ch);
+            }
+            if (total > 0x7FFFFFC7) throw new ImageNotSupportedException("EXR deep image has too many samples for a single array");
+
+            var sampleOffsets = new int[w * h + 1];
+            for (int i = 0; i < counts.Length; i++) sampleOffsets[i + 1] = sampleOffsets[i] + counts[i];
+
+            var names = new string[sel.Length];
+            var arrays = new Array[sel.Length];
+            var slot = new int[chans.Length];
+            Array.Fill(slot, -1);
+            for (int k = 0; k < sel.Length; k++)
+            {
+                names[k] = part.Channels[sel[k]].Name;
+                arrays[k] = chans[sel[k]].Type == 0 ? new uint[total] : new float[total];
+                slot[sel[k]] = k;
+            }
+
+            // pass 2: sample data; per row of the chunk, per channel, the samples of the row's pixels
+            var h2f = ExrHalf.ToFloatBits;
+            for (int i = 0; i < chunkCount; i++)
+            {
+                var (pos, packedData, unpackedData, x0, y0, cw, ch) = info[i];
+                if (unpackedData == 0) continue;
+                ReadOnlySpan<byte> raw = data.Slice(pos, (int)packedData);
+                if (packedData != unpackedData)
+                {
+                    var buf = s.Bytes(2, (int)unpackedData).AsSpan(0, (int)unpackedData);
+                    ExrCodecs.Decode(comp, raw, buf, default, s);
+                    raw = buf;
+                }
+                int p = 0;
+                for (int y = 0; y < ch; y++)
+                {
+                    int firstPixel = (y0 + y) * w + x0;
+                    int first = sampleOffsets[firstPixel], n = sampleOffsets[firstPixel + cw] - first;
+                    for (int ci = 0; ci < chans.Length; ci++)
+                    {
+                        int k = slot[ci], type = chans[ci].Type;
+                        if (k >= 0)
+                        {
+                            if (type == 0) MemoryMarshal.Cast<byte, uint>(raw.Slice(p, n * 4)).CopyTo(((uint[])arrays[k]).AsSpan(first));
+                            else if (type == 2) MemoryMarshal.Cast<byte, float>(raw.Slice(p, n * 4)).CopyTo(((float[])arrays[k]).AsSpan(first));
+                            else
+                            {
+                                var src = MemoryMarshal.Cast<byte, ushort>(raw.Slice(p, n * 2));
+                                var dst = MemoryMarshal.Cast<float, uint>(((float[])arrays[k]).AsSpan(first, n));
+                                for (int j = 0; j < n; j++) dst[j] = h2f[src[j]];
+                            }
+                        }
+                        p += n * chans[ci].Bytes;
+                    }
+                }
+            }
+            return new ExrDeepImage(part, w, h, counts, sampleOffsets, names, arrays);
+        }
+    }
+}

@@ -179,6 +179,11 @@ namespace PixCodec
             }
         }
 
+        /// <summary>Attributes that describe the storage layout; the encoder always writes its own.</summary>
+        internal static bool IsStructural(string name)
+            => name is "channels" or "compression" or "dataWindow" or "lineOrder" or "tiles" or "type" or "chunkCount" or "version"
+                or "dwaCompressionLevel" or "maxSamplesPerPixel";
+
         static void CheckName(string name, string what, ref bool longNames)
         {
             int n = Encoding.UTF8.GetByteCount(name);

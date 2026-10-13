@@ -282,6 +282,78 @@ namespace PixCodec
             }
         }
 
+        /// <summary>Number of resolution levels in x (1 for scan line and ONE_LEVEL parts). MIPMAP parts only have the levels (l, l).</summary>
+        public int LevelCountX => LevelMode == ExrLevelMode.OneLevel ? 1 : LevelCount(LevelMode == ExrLevelMode.MipMap ? Math.Max(Width, Height) : Width);
+        /// <summary>Number of resolution levels in y.</summary>
+        public int LevelCountY => LevelMode == ExrLevelMode.OneLevel ? 1 : LevelCount(LevelMode == ExrLevelMode.MipMap ? Math.Max(Width, Height) : Height);
+
+        int LevelCount(int size)
+        {
+            int l = 0;
+            while ((1 << (l + 1)) <= size) l++;
+            if (LevelRoundUp && (1 << l) < size) l++;
+            return l + 1;
+        }
+
+        /// <summary>True if the part has the level (levelX, levelY): RIPMAP parts have all combinations, MIPMAP parts only levelX == levelY.</summary>
+        public bool HasLevel(int levelX, int levelY)
+            => levelX >= 0 && levelY >= 0 && levelX < LevelCountX && levelY < LevelCountY && (LevelMode == ExrLevelMode.RipMap || levelX == levelY);
+
+        /// <summary>Width and height of a resolution level (level 0 is the full data window).</summary>
+        public (int Width, int Height) GetLevelSize(int levelX, int levelY)
+        {
+            if (!HasLevel(levelX, levelY)) throw new ArgumentException($"EXR part has no level ({levelX}, {levelY})");
+            return (LevelSize(Width, levelX), LevelSize(Height, levelY));
+        }
+
+        int LevelSize(int size, int level)
+            => (int)Math.Max(1, LevelRoundUp ? (size + (1L << level) - 1) >> level : size >> level);
+
+        /// <summary>Tiles of one level, 0 for scan line parts.</summary>
+        internal long TileCount(int lx, int ly)
+            => !IsTiled ? 0 : ((LevelSize(Width, lx) + (long)TileWidth - 1) / TileWidth) * ((LevelSize(Height, ly) + (long)TileHeight - 1) / TileHeight);
+
+        /// <summary>Index of the first chunk of a level in the part's offset table.</summary>
+        internal long FirstChunkOfLevel(int lx, int ly)
+        {
+            long n = 0;
+            if (LevelMode == ExrLevelMode.MipMap)
+                for (int l = 0; l < lx; l++) n += TileCount(l, l);
+            else if (LevelMode == ExrLevelMode.RipMap)
+            {
+                int nx = LevelCountX;
+                for (int y = 0; y < ly; y++) for (int x = 0; x < nx; x++) n += TileCount(x, y);
+                for (int x = 0; x < lx; x++) n += TileCount(x, ly);
+            }
+            return n;
+        }
+
+        /// <summary>Number of chunks of the part as implied by its geometry (all levels); deep scan line parts have one line per chunk.</summary>
+        internal long ComputeChunkCount()
+        {
+            if (!IsTiled)
+            {
+                int lpc = ExrCodecs.LinesPerChunk(Compression);
+                return (Height + (long)lpc - 1) / lpc;
+            }
+            return LevelMode == ExrLevelMode.RipMap ? FirstChunkOfLevel(0, LevelCountY)
+                 : LevelMode == ExrLevelMode.MipMap ? FirstChunkOfLevel(LevelCountX, 0) : TileCount(0, 0);
+        }
+
+        /// <summary>
+        /// The attributes that describe the image rather than its storage: everything except channels, compression,
+        /// dataWindow, lineOrder, tiles, type, name, chunkCount, version and the DWA level. Add them to
+        /// <see cref="ExrEncodeOptions.Attributes"/> to carry pixel aspect ratio, display window, chromaticities,
+        /// comments and custom attributes from a decoded file into a newly encoded one.
+        /// </summary>
+        public IReadOnlyList<ExrAttribute> GetDescriptiveAttributes()
+        {
+            var l = new List<ExrAttribute>();
+            foreach (var a in Attributes)
+                if (!ExrEncoder.IsStructural(a.Name) && a.Name != "name") l.Add(a);
+            return l;
+        }
+
         public ExrAttribute? FindAttribute(string name)
         {
             foreach (var a in Attributes) if (a.Name == name) return a;

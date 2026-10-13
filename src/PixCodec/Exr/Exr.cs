@@ -20,6 +20,16 @@ namespace PixCodec
 
         /// <summary>Decode chunks on multiple threads when the image is large enough (default true).</summary>
         public bool Parallel { get; set; } = true;
+
+        /// <summary>
+        /// Resolution level of a tiled MIPMAP / RIPMAP part to decode (default 0,0 = full resolution). MIPMAP parts only
+        /// have levels with LevelX == LevelY; see <see cref="ExrHeader.LevelCountX"/>, <see cref="ExrHeader.GetLevelSize"/>.
+        /// </summary>
+        public int LevelX { get; set; }
+        public int LevelY { get; set; }
+
+        /// <summary>Sets <see cref="LevelX"/> and <see cref="LevelY"/> to the same value (the usual case, mip level n).</summary>
+        public int Level { set { LevelX = value; LevelY = value; } }
     }
 
     public sealed class ExrEncodeOptions
@@ -106,15 +116,10 @@ namespace PixCodec
         {
             var file = ExrFileStructure.Parse(data);
             var part = file.Parts[0];
-            int[] idx; ColorModel color;
-            try { (idx, color) = SelectDefault(part, null); }
-            catch (ImageNotSupportedException)
-            {
-                idx = new int[part.Channels.Count];
-                for (int i = 0; i < idx.Length; i++) idx[i] = i;
-                color = ColorModel.Other;
-            }
-            return new ImageInfo(ImageFormat.Exr, part.Width, part.Height, idx.Length, OutputType(part, idx, true), color);
+            var (idx, color, yca) = SelectDefault(part, null);
+            int channels = yca ? RawImage.ChannelCount(color) : idx.Length;
+            var type = part.IsDeep || yca ? SampleType.Float32 : OutputType(part, idx, true);
+            return new ImageInfo(ImageFormat.Exr, part.Width, part.Height, channels, type, color);
         }
 
         /// <summary>Parses the headers of all parts (one for ordinary files). Does not touch pixel data.</summary>
@@ -129,8 +134,16 @@ namespace PixCodec
         /// single channel → Gray; otherwise all channels of the layer in file order as <see cref="ColorModel.Other"/>.
         /// With <see cref="ExrDecodeOptions.Layer"/> == null the root layer (names without '.') is used if it has
         /// R,G,B or Y, else the first layer that has them, else all channels of the part are taken (Gray / Other).
-        /// Luminance/chroma files (Y with RY / BY) throw <see cref="ImageNotSupportedException"/>; their channels can
-        /// still be read with <see cref="DecodeChannels"/>.
+        /// </para>
+        /// <para>
+        /// Luminance/chroma images (Y with 2x2 subsampled RY / BY, optional A) are converted to Rgb / Rgba exactly like
+        /// the reference library's RGBA interface does: chroma reconstruction filter, luma weights from the
+        /// "chromaticities" attribute (Rec. 709 if absent) and its saturation correction; the result is identical to
+        /// the reference bit for bit. The raw Y, RY, BY channels remain available through <see cref="DecodeChannels"/>.
+        /// </para>
+        /// <para>
+        /// Deep parts are flattened (see <see cref="ExrDeepImage.Flatten"/>) and always give Float32; use
+        /// <see cref="DecodeDeep"/> for the samples themselves.
         /// </para>
         /// <para>
         /// Sample type: all selected channels HALF → Float32 (or Float16 if HalfAsFloat is false); any FLOAT → Float32;
@@ -143,8 +156,100 @@ namespace PixCodec
             options ??= new ExrDecodeOptions();
             var file = ExrFileStructure.Parse(data);
             var part = GetPart(file, options.PartIndex);
-            var (idx, color) = SelectDefault(part, options.Layer);
+            var (idx, color, yca) = SelectDefault(part, options.Layer);
+            if (part.IsDeep)
+            {
+                // flattening needs alpha and depth besides the requested channels
+                var names = new List<string>();
+                foreach (int i in idx) if (i >= 0) names.Add(part.Channels[i].Name);
+                var need = new List<int>(idx.Length + 3);
+                foreach (int i in idx) if (i >= 0) need.Add(i);
+                foreach (var extra in new[] { "A", "Z", "ZBack" })
+                {
+                    int i = part.ChannelIndex(extra);
+                    if (i >= 0 && !need.Contains(i)) need.Add(i);
+                }
+                var flat = ExrDeepDecoder.Decode(data, file, options.PartIndex, need.ToArray(), options).Flatten(names);
+                return new RawImage(flat.Width, flat.Height, yca ? ColorModel.Other : color, flat.Data, flat.Channels);
+            }
+            if (yca) return DecodeYca(data, file, part, idx, options);
             return ExrDecoder.Decode(data, file, options.PartIndex, idx, color, options);
+        }
+
+        static RawImage DecodeYca(ReadOnlySpan<byte> data, ExrFileStructure file, ExrHeader part, int[] idx, ExrDecodeOptions options)
+        {
+            // idx: Y, RY, BY, A (-1 = absent)
+            int w = part.Width, h = part.Height;
+            for (int k = 1; k <= 2; k++)
+                if (idx[k] >= 0 && (part.Channels[idx[k]].XSampling != 2 || part.Channels[idx[k]].YSampling != 2))
+                    throw new ImageNotSupportedException("EXR luminance/chroma images need 2x2 subsampled RY / BY channels");
+            if (part.Channels[idx[0]].XSampling != 1 || part.Channels[idx[0]].YSampling != 1
+                || (idx[3] >= 0 && (part.Channels[idx[3]].XSampling != 1 || part.Channels[idx[3]].YSampling != 1)))
+                throw new ImageNotSupportedException("EXR luminance/chroma images need full resolution Y and A channels");
+            if (((w | h | part.DataWindow.MinX | part.DataWindow.MinY) & 1) != 0)
+                throw new ImageFormatException("EXR luminance/chroma image has an odd data window");
+            if (options.LevelX != 0 || options.LevelY != 0) throw new ArgumentException("EXR scan line part has no levels");
+            if ((long)w * h * 4 > 0x7FFFFFC7) throw new ImageNotSupportedException("EXR image is too large for a single array");
+
+            var planes = new ushort[4][];
+            var one = new int[1];
+            for (int k = 0; k < 4; k++)
+            {
+                if (idx[k] < 0) continue;
+                one[0] = idx[k];
+                var img = ExrDecoder.Decode(data, file, options.PartIndex, one, ColorModel.Gray, new ExrDecodeOptions { HalfAsFloat = false, PartIndex = options.PartIndex, Parallel = options.Parallel });
+                // the RGBA interface works on half floats whatever the stored type is
+                planes[k] = img.SampleType switch
+                {
+                    SampleType.Float16 => System.Runtime.InteropServices.MemoryMarshal.Cast<Half, ushort>(img.GetData<Half>()).ToArray(),
+                    SampleType.Float32 => Array.ConvertAll(img.GetData<float>(), ExrHalf.FromFloatIeee),
+                    _ => Array.ConvertAll(img.GetData<uint>(), v => ExrHalf.FromFloatIeee(v)),
+                };
+            }
+            var bits = ExrYca.ToRgb(planes[0], planes[1], planes[2], planes[3], w, h, ExrYca.LumaWeights(part.Chromaticities));
+            var color = planes[3] != null ? ColorModel.Rgba : ColorModel.Rgb;
+            if (!options.HalfAsFloat)
+                return new RawImage(w, h, color, System.Runtime.InteropServices.MemoryMarshal.Cast<ushort, Half>(bits).ToArray());
+            var f = new float[bits.Length];
+            unsafe
+            {
+                fixed (ushort* ps = bits)
+                fixed (float* pf = f) ExrHalf.ToFloat(ps, pf, bits.Length);
+            }
+            return new RawImage(w, h, color, f);
+        }
+
+        /// <summary>
+        /// Decodes a deep part (deep scan line or deep tiled; <see cref="ExrDecodeOptions.PartIndex"/>, LevelX / LevelY
+        /// apply) with its per pixel sample counts and the samples of the given channels (null = all channels).
+        /// </summary>
+        public static ExrDeepImage DecodeDeep(ReadOnlySpan<byte> data, IReadOnlyList<string>? channelNames = null, ExrDecodeOptions? options = null)
+        {
+            options ??= new ExrDecodeOptions();
+            var file = ExrFileStructure.Parse(data);
+            var part = GetPart(file, options.PartIndex);
+            int[] idx;
+            if (channelNames == null)
+            {
+                idx = new int[part.Channels.Count];
+                for (int i = 0; i < idx.Length; i++) idx[i] = i;
+            }
+            else idx = ChannelIndices(part, channelNames);
+            return ExrDeepDecoder.Decode(data, file, options.PartIndex, idx, options);
+        }
+
+        static int[] ChannelIndices(ExrHeader part, IReadOnlyList<string> channelNames)
+        {
+            if (channelNames.Count == 0) throw new ArgumentException("no channels given", nameof(channelNames));
+            var idx = new int[channelNames.Count];
+            var used = new HashSet<int>();
+            for (int i = 0; i < idx.Length; i++)
+            {
+                idx[i] = part.ChannelIndex(channelNames[i]);
+                if (idx[i] < 0) throw new ArgumentException($"EXR part has no channel '{channelNames[i]}'", nameof(channelNames));
+                if (!used.Add(idx[i])) throw new ArgumentException($"channel '{channelNames[i]}' is listed twice", nameof(channelNames));
+            }
+            return idx;
         }
 
         /// <summary>
@@ -160,15 +265,8 @@ namespace PixCodec
             options ??= new ExrDecodeOptions();
             var file = ExrFileStructure.Parse(data);
             var part = GetPart(file, options.PartIndex);
-            var idx = new int[channelNames.Count];
-            var used = new HashSet<int>();
-            for (int i = 0; i < idx.Length; i++)
-            {
-                idx[i] = part.ChannelIndex(channelNames[i]);
-                if (idx[i] < 0) throw new ArgumentException($"EXR part has no channel '{channelNames[i]}'", nameof(channelNames));
-                if (!used.Add(idx[i])) throw new ArgumentException($"channel '{channelNames[i]}' is listed twice", nameof(channelNames));
-            }
-            return ExrDecoder.Decode(data, file, options.PartIndex, idx, NaturalModel(part, idx), options);
+            var idx = ChannelIndices(part, channelNames);
+            return ExrDecoder.Decode(data, file, options.PartIndex, idx, NaturalModel(channelNames), options);
         }
 
         /// <summary>
@@ -231,11 +329,12 @@ namespace PixCodec
             return SampleType.Float32;
         }
 
-        /// <summary>Tries R,G,B(,A) then Y(,A) among the channels of one layer.</summary>
-        static bool TryColor(ExrHeader part, string layer, out int[] idx, out ColorModel color)
+        /// <summary>Tries R,G,B(,A) then Y(,A) among the channels of one layer. Luminance/chroma gives idx = Y, RY, BY, A with -1 for absent ones.</summary>
+        static bool TryColor(ExrHeader part, string layer, out int[] idx, out ColorModel color, out bool yca)
         {
             int Find(string baseName) => part.ChannelIndex(layer.Length == 0 ? baseName : layer + "." + baseName);
             int r = Find("R"), g = Find("G"), b = Find("B"), a = Find("A"), y = Find("Y");
+            yca = false;
             if (r >= 0 && g >= 0 && b >= 0)
             {
                 idx = a >= 0 ? new[] { r, g, b, a } : new[] { r, g, b };
@@ -245,8 +344,14 @@ namespace PixCodec
             // a Y next to an X is a vector component (normals, positions), not luminance
             if (y >= 0 && Find("X") < 0)
             {
-                if (Find("RY") >= 0 || Find("BY") >= 0)
-                    throw new ImageNotSupportedException("EXR luminance/chroma (Y, RY, BY) images are not converted to RGB; use DecodeChannels");
+                int ry = Find("RY"), by = Find("BY");
+                if ((ry >= 0 || by >= 0) && !part.IsDeep)
+                {
+                    yca = true;
+                    idx = new[] { y, ry, by, a };
+                    color = a >= 0 ? ColorModel.Rgba : ColorModel.Rgb;
+                    return true;
+                }
                 idx = a >= 0 ? new[] { y, a } : new[] { y };
                 color = a >= 0 ? ColorModel.GrayAlpha : ColorModel.Gray;
                 return true;
@@ -255,37 +360,41 @@ namespace PixCodec
             return false;
         }
 
-        internal static (int[] idx, ColorModel color) SelectDefault(ExrHeader part, string? layer)
+        internal static (int[] idx, ColorModel color, bool yca) SelectDefault(ExrHeader part, string? layer)
         {
-            int[] idx; ColorModel color;
+            int[] idx; ColorModel color; bool yca;
             var all = new List<int>();
             if (layer != null)
             {
-                if (TryColor(part, layer, out idx, out color)) return (idx, color);
+                if (TryColor(part, layer, out idx, out color, out yca)) return (idx, color, yca);
                 for (int i = 0; i < part.Channels.Count; i++) if (part.Channels[i].Layer == layer) all.Add(i);
                 if (all.Count == 0) throw new ArgumentException($"EXR part has no layer '{layer}'");
             }
             else
             {
-                if (TryColor(part, "", out idx, out color)) return (idx, color);
+                if (TryColor(part, "", out idx, out color, out yca)) return (idx, color, yca);
                 foreach (var l in part.Layers)
-                    if (l.Length > 0 && TryColor(part, l, out idx, out color)) return (idx, color);
+                    if (l.Length > 0 && TryColor(part, l, out idx, out color, out yca)) return (idx, color, yca);
                 for (int i = 0; i < part.Channels.Count; i++) all.Add(i);
             }
-            return (all.ToArray(), all.Count == 1 ? ColorModel.Gray : ColorModel.Other);
+            return (all.ToArray(), all.Count == 1 ? ColorModel.Gray : ColorModel.Other, false);
         }
 
-        static ColorModel NaturalModel(ExrHeader part, int[] idx)
+        /// <summary>Color model for an explicit channel list: R,G,B(,A) / Y,A of one layer in that order, a single channel is Gray.</summary>
+        internal static ColorModel NaturalModel(IReadOnlyList<string> names)
         {
-            if (idx.Length == 1) return ColorModel.Gray;
-            string layer = part.Channels[idx[0]].Layer;
-            var names = new string[idx.Length];
-            for (int i = 0; i < idx.Length; i++)
+            if (names.Count == 1) return ColorModel.Gray;
+            string? layer = null;
+            var bases = new string[names.Count];
+            for (int i = 0; i < bases.Length; i++)
             {
-                if (part.Channels[idx[i]].Layer != layer) return ColorModel.Other;
-                names[i] = part.Channels[idx[i]].BaseName;
+                int dot = names[i].LastIndexOf('.');
+                string l = dot < 0 ? "" : names[i].Substring(0, dot);
+                if (layer != null && l != layer) return ColorModel.Other;
+                layer = l;
+                bases[i] = names[i].Substring(dot + 1);
             }
-            return string.Join(",", names) switch
+            return string.Join(",", bases) switch
             {
                 "R,G,B" => ColorModel.Rgb,
                 "R,G,B,A" => ColorModel.Rgba,
