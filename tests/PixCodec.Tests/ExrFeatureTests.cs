@@ -189,6 +189,18 @@ public class ExrFeatureTests
     }
 
     [Fact]
+    public void LuminanceChromaParallelMatchesSequential()
+    {
+        var img = new RawImage(700, 420, ColorModel.Rgba, Pattern(700, 420, 4, 9, true));
+        var a = Encode(img, new ExrEncodeOptions { LuminanceChroma = true });
+        var b = Encode(img, new ExrEncodeOptions { LuminanceChroma = true, Parallel = false });
+        Assert.Equal(a, b);
+        TestUtil.AssertEqual(Exr.Decode(a, new ExrDecodeOptions { Parallel = false }), Exr.Decode(a));
+        var rgba = RunOracle(a, "rgba {in} {out}");
+        if (rgba != null) TestUtil.AssertEqual(rgba, Exr.Decode(a, new ExrDecodeOptions { HalfAsFloat = false }));
+    }
+
+    [Fact]
     public void LuminanceChromaEncodeRejectsUnsuitableImages()
     {
         var o = new ExrEncodeOptions { LuminanceChroma = true };
@@ -372,6 +384,8 @@ public class ExrFeatureTests
                 TestUtil.AssertEqual(deep.Flatten(new[] { "R", "G", "B", "A" }), img);
             }
             else TestUtil.AssertEqual(deep.Flatten(names), img);
+            var raw = Exr.Decode(data, new ExrDecodeOptions { PartIndex = p, DeepSortByDepth = false, DeepTidy = false });
+            TestUtil.AssertEqual(deep.Flatten(names.Contains("G") ? new[] { "R", "G", "B", "A" } : names, false, false), raw);
             if (p == 0) Assert.Equal((img.Width, img.Height, img.Channels, SampleType.Float32), (Exr.GetInfo(data).Width, Exr.GetInfo(data).Height, Exr.GetInfo(data).Channels, Exr.GetInfo(data).SampleType));
         }
     }
@@ -600,8 +614,10 @@ public class ExrFeatureTests
         if (lvl != null) TestUtil.AssertEqual(lvl, Exr.Decode(data, new ExrDecodeOptions { PartIndex = 1, Level = 2 }));
 
         // a damaged offset table is rebuilt for multi-part files too
-        int table = data.AsSpan().IndexOf("normals"u8);
-        Assert.True(table > 0);
+        var damaged = ZeroOffsetTables(data);
+        TestUtil.AssertEqual(beauty, Exr.Decode(damaged));
+        Assert.Equal(ids, Exr.Decode(damaged, new ExrDecodeOptions { PartIndex = 2 }).GetData<uint>());
+        TestUtil.AssertEqual(Exr.Decode(data, new ExrDecodeOptions { PartIndex = 1, Level = 2 }), Exr.Decode(damaged, new ExrDecodeOptions { PartIndex = 1, Level = 2 }));
 
         // what the format does not allow
         var bad = new MemoryStream();
@@ -615,6 +631,58 @@ public class ExrFeatureTests
         Exr.EncodeParts(new[] { parts[2] }, single);
         Assert.Equal("ids", Exr.ReadHeaders(single.ToArray())[0].Name);
         Assert.Equal(ids, Exr.Decode(single.ToArray()).GetData<uint>());
+    }
+
+    /// <summary>Clears all offset tables (they lie between the headers and the first chunk).</summary>
+    static byte[] ZeroOffsetTables(byte[] file)
+    {
+        bool multi = (file[5] & 0x10) != 0;
+        int p = 8;
+        while (true)
+        {
+            while (file[p] != 0)
+            {
+                p = Array.IndexOf(file, (byte)0, p) + 1;
+                p = Array.IndexOf(file, (byte)0, p) + 1;
+                p += 4 + BinaryPrimitives.ReadInt32LittleEndian(file.AsSpan(p));
+            }
+            p++;
+            if (!multi) break;
+            if (file[p] == 0) { p++; break; }
+        }
+        long first = long.MaxValue;
+        for (int q = p; q < first; q += 8)
+        {
+            long o = BinaryPrimitives.ReadInt64LittleEndian(file.AsSpan(q));
+            if (o > 0) first = Math.Min(first, o);
+        }
+        var d = (byte[])file.Clone();
+        Array.Clear(d, p, (int)first - p);
+        return d;
+    }
+
+    [Theory]
+    [InlineData("deep/multi_zback_zips.exr")]
+    [InlineData("deep/tile_plain_zips.exr")]
+    [InlineData("deep/scan_overlap_zips.exr")]
+    [InlineData("levels/rip_down_zip.exr")]
+    [InlineData("multipart.exr")]
+    public void MissingOffsetTablesAreRebuilt(string name)
+    {
+        var data = File.ReadAllBytes(TestUtil.Fixture("exr/" + name));
+        var damaged = ZeroOffsetTables(data);
+        var headers = Exr.ReadHeaders(data);
+        for (int p = 0; p < headers.Length; p++)
+        {
+            var o = new ExrDecodeOptions { PartIndex = p };
+            TestUtil.AssertEqual(Exr.Decode(data, o), Exr.Decode(damaged, o));
+            if (headers[p].IsDeep) Assert.Equal(Exr.DecodeDeep(data, null, o).SampleCounts, Exr.DecodeDeep(damaged, null, o).SampleCounts);
+            if (headers[p].LevelMode == ExrLevelMode.RipMap)
+            {
+                o = new ExrDecodeOptions { PartIndex = p, LevelX = 2, LevelY = 1 };
+                TestUtil.AssertEqual(Exr.Decode(data, o), Exr.Decode(damaged, o));
+            }
+        }
     }
 
     [Fact]
@@ -697,7 +765,7 @@ public class ExrFeatureTests
         if (oracle != null) TestUtil.AssertEqual(oracle, pixels);
 
         // attributes of a reference written file (including ones we do not interpret) go through as well
-        var fixture = File.ReadAllBytes(TestUtil.Fixture("exr/mixed_dwa_placeholder.exr".Replace("mixed_dwa_placeholder", "mixed_zip")));
+        var fixture = File.ReadAllBytes(TestUtil.Fixture("exr/mixed_zip.exr"));
         var fh = Exr.ReadHeaders(fixture)[0];
         var o3 = new ExrEncodeOptions();
         foreach (var a in fh.GetDescriptiveAttributes()) o3.Attributes.Add(a);

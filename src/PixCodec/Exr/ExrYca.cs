@@ -43,38 +43,38 @@ namespace PixCodec
         /// Converts full resolution planes of half bits (chroma valid at even x and even y only; null = absent) into
         /// interleaved R,G,B(,A) half bits. Width and height must be even.
         /// </summary>
-        public static ushort[] ToRgb(ushort[] luma, ushort[]? ry, ushort[]? by, ushort[]? alpha, int w, int h, (float R, float G, float B) yw)
+        public static ushort[] ToRgb(ushort[] luma, ushort[]? ry, ushort[]? by, ushort[]? alpha, int w, int h, (float R, float G, float B) yw, bool parallel)
         {
             int nc = alpha != null ? 4 : 3;
             var result = new ushort[w * h * nc];
+            parallel &= (long)w * h >= 256 * 1024;
 
             // chroma of the even rows, interpolated horizontally
             int rows2 = h / 2;
             var cr = new ushort[rows2 * w];
             var cb = new ushort[rows2 * w];
-            for (int r2 = 0; r2 < rows2; r2++)
+            For(0, rows2, parallel, r2 =>
             {
                 HorizontalUp(ry, r2 * 2 * w, w, cr.AsSpan(r2 * w, w));
                 HorizontalUp(by, r2 * 2 * w, w, cb.AsSpan(r2 * w, w));
-            }
+            });
 
-            // RGB rows y - 1, y, y + 1 are needed for the saturation fix; rows outside the image repeat edge rows
-            var rgb = new ushort[3][];
-            for (int i = 0; i < 3; i++) rgb[i] = new ushort[w * 3];
-            var tr = new ushort[w];
-            var tb = new ushort[w];
+            // RGB rows -1 .. h (rows outside the image repeat edge rows): chroma interpolated vertically, then converted
+            var rgb = new ushort[(h + 2) * w * 3];
             int Clamp(int r) => r < 0 ? 0 : r > h - 1 ? h - 2 : r;
-            void MakeRow(int r, ushort[] dst)
+            For(-1, h + 1, parallel, r =>
             {
-                if ((r & 1) == 0)
+                var dst = rgb.AsSpan((r + 1) * w * 3, w * 3);
+                int lr = Clamp(r) * w;
+                for (int x = 0; x < w; x++)
                 {
-                    int e = Clamp(r) / 2 * w;
-                    cr.AsSpan(e, w).CopyTo(tr);
-                    cb.AsSpan(e, w).CopyTo(tb);
-                }
-                else
-                {
-                    for (int x = 0; x < w; x++)
+                    ushort hr, hb;
+                    if ((r & 1) == 0)
+                    {
+                        int e = Clamp(r) / 2 * w + x;
+                        hr = cr[e]; hb = cb[e];
+                    }
+                    else
                     {
                         float sr = 0, sb = 0;
                         for (int k = 0; k < 14; k++)
@@ -84,39 +84,37 @@ namespace PixCodec
                             if (k == 0) { sr = F(cr[e]) * c; sb = F(cb[e]) * c; }
                             else { sr += F(cr[e]) * c; sb += F(cb[e]) * c; }
                         }
-                        tr[x] = H(sr); tb[x] = H(sb);
+                        hr = H(sr); hb = H(sb);
                     }
-                }
-                int lr = Clamp(r) * w;
-                for (int x = 0; x < w; x++)
-                {
                     ushort yh = luma[lr + x];
-                    if (F(tr[x]) == 0 && F(tb[x]) == 0)
+                    if (F(hr) == 0 && F(hb) == 0)
                     {
                         dst[x * 3] = dst[x * 3 + 1] = dst[x * 3 + 2] = yh;
                     }
                     else
                     {
                         float Y = F(yh);
-                        float r_ = (F(tr[x]) + 1) * Y;
-                        float b_ = (F(tb[x]) + 1) * Y;
+                        float r_ = (F(hr) + 1) * Y;
+                        float b_ = (F(hb) + 1) * Y;
                         float g_ = (Y - r_ * yw.R - b_ * yw.B) / yw.G;
                         dst[x * 3] = H(r_); dst[x * 3 + 1] = H(g_); dst[x * 3 + 2] = H(b_);
                     }
                 }
-            }
+            });
 
-            MakeRow(-1, rgb[0]);
-            MakeRow(0, rgb[1]);
-            for (int y = 0; y < h; y++)
+            For(0, h, parallel, y =>
             {
-                MakeRow(y + 1, rgb[2]);
-                FixSaturation(rgb[0], rgb[1], rgb[2], w, yw, result.AsSpan(y * w * nc), nc);
+                FixSaturation(rgb.AsSpan(y * w * 3, w * 3), rgb.AsSpan((y + 1) * w * 3, w * 3), rgb.AsSpan((y + 2) * w * 3, w * 3), w, yw, result.AsSpan(y * w * nc), nc);
                 if (alpha != null)
                     for (int x = 0; x < w; x++) result[(y * w + x) * 4 + 3] = alpha[y * w + x];
-                (rgb[0], rgb[1], rgb[2]) = (rgb[1], rgb[2], rgb[0]);
-            }
+            });
             return result;
+        }
+
+        static void For(int from, int to, bool parallel, Action<int> body)
+        {
+            if (parallel && to - from > 1) System.Threading.Tasks.Parallel.For(from, to, body);
+            else for (int i = from; i < to; i++) body(i);
         }
 
         static void HorizontalUp(ushort[]? plane, int row, int w, Span<ushort> dst)
@@ -137,7 +135,7 @@ namespace PixCodec
             }
         }
 
-        static float Saturation(ushort[] row, int x)
+        static float Saturation(ReadOnlySpan<ushort> row, int x)
         {
             float r = F(row[x * 3]), g = F(row[x * 3 + 1]), b = F(row[x * 3 + 2]);
             float max = MathF.Max(r, MathF.Max(g, b)), min = MathF.Min(r, MathF.Min(g, b));
@@ -145,7 +143,7 @@ namespace PixCodec
         }
 
         /// <summary>Limits the saturation of each pixel of the middle row to what its diagonal neighbours suggest.</summary>
-        static void FixSaturation(ushort[] above, ushort[] row, ushort[] below, int w, (float R, float G, float B) yw, Span<ushort> dst, int nc)
+        static void FixSaturation(ReadOnlySpan<ushort> above, ReadOnlySpan<ushort> row, ReadOnlySpan<ushort> below, int w, (float R, float G, float B) yw, Span<ushort> dst, int nc)
         {
             float a2 = Saturation(above, 0), a1 = a2, b2 = Saturation(below, 0), b1 = b2;
             for (int x = 0; x < w; x++)
@@ -188,12 +186,15 @@ namespace PixCodec
         /// resolution RY / BY planes (width / 2 x height / 2). Negative and non finite colours are treated as 0, as
         /// luminance/chroma cannot represent them. Width and height must be even.
         /// </summary>
-        public static void FromRgb(ushort[] rgb, int stride, int w, int h, (float R, float G, float B) yw, int roundY, int roundC, out ushort[] luma, out ushort[] ry, out ushort[] by)
+        public static void FromRgb(ushort[] rgb, int stride, int w, int h, (float R, float G, float B) yw, int roundY, int roundC, bool parallel, out ushort[] luma, out ushort[] ry, out ushort[] by)
         {
-            luma = new ushort[w * h];
+            parallel &= (long)w * h >= 256 * 1024;
+            var lum = luma = new ushort[w * h];
             var fr = new ushort[w * h];
             var fb = new ushort[w * h];
-            for (int i = 0; i < w * h; i++)
+            For(0, h, parallel, row =>
+            {
+            for (int i = row * w; i < (row + 1) * w; i++)
             {
                 float r = F(rgb[i * stride]), g = F(rgb[i * stride + 1]), b = F(rgb[i * stride + 2]);
                 if (!float.IsFinite(r) || r < 0) r = 0;
@@ -202,34 +203,39 @@ namespace PixCodec
                 if (r == g && g == b)
                 {
                     // grey: no chroma, and no rounding of the luminance
-                    luma[i] = H(g);
+                    lum[i] = H(g);
                     continue;
                 }
                 ushort yh = H(r * yw.R + g * yw.G + b * yw.B);
-                luma[i] = yh;
+                lum[i] = yh;
                 float Y = F(yh);
                 fr[i] = MathF.Abs(r - Y) < 65504f * Y ? H((r - Y) / Y) : (ushort)0;
                 fb[i] = MathF.Abs(b - Y) < 65504f * Y ? H((b - Y) / Y) : (ushort)0;
             }
+            });
 
             // low pass and drop every second column, then every second row
             int w2 = w / 2, h2 = h / 2;
             var hr = new ushort[w2 * h];
             var hb = new ushort[w2 * h];
-            for (int y = 0; y < h; y++)
+            For(0, h, parallel, y =>
+            {
                 for (int x2 = 0; x2 < w2; x2++)
                 {
                     hr[y * w2 + x2] = H(Filter(fr, y * w + 2 * x2, 1, 2 * x2, w));
                     hb[y * w2 + x2] = H(Filter(fb, y * w + 2 * x2, 1, 2 * x2, w));
                 }
-            ry = new ushort[w2 * h2];
-            by = new ushort[w2 * h2];
-            for (int y2 = 0; y2 < h2; y2++)
+            });
+            var cry = ry = new ushort[w2 * h2];
+            var cby = by = new ushort[w2 * h2];
+            For(0, h2, parallel, y2 =>
+            {
                 for (int x2 = 0; x2 < w2; x2++)
                 {
-                    ry[y2 * w2 + x2] = Round(H(Filter(hr, 2 * y2 * w2 + x2, w2, 2 * y2, h)), roundC);
-                    by[y2 * w2 + x2] = Round(H(Filter(hb, 2 * y2 * w2 + x2, w2, 2 * y2, h)), roundC);
+                    cry[y2 * w2 + x2] = Round(H(Filter(hr, 2 * y2 * w2 + x2, w2, 2 * y2, h)), roundC);
+                    cby[y2 * w2 + x2] = Round(H(Filter(hb, 2 * y2 * w2 + x2, w2, 2 * y2, h)), roundC);
                 }
+            });
             for (int i = 0; i < luma.Length; i++) luma[i] = Round(luma[i], roundY);
         }
 

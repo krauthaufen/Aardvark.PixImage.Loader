@@ -30,6 +30,14 @@ namespace PixCodec
 
         /// <summary>Sets <see cref="LevelX"/> and <see cref="LevelY"/> to the same value (the usual case, mip level n).</summary>
         public int Level { set { LevelX = value; LevelY = value; } }
+
+        /// <summary>
+        /// How <see cref="Exr.Decode"/> flattens deep parts, see <see cref="ExrDeepImage.Flatten"/>: sort the samples of a
+        /// pixel by depth (default true) and split / merge overlapping volume samples (default true). With both false
+        /// the samples are composited in file order, which is what the reference library's compositor does.
+        /// </summary>
+        public bool DeepSortByDepth { get; set; } = true;
+        public bool DeepTidy { get; set; } = true;
     }
 
     public sealed class ExrEncodeOptions
@@ -174,7 +182,7 @@ namespace PixCodec
             }
             ExrChromaticities? chroma = null;
             foreach (var a in options.Attributes) if (a.Name == "chromaticities") chroma = a.AsChromaticities();
-            ExrYca.FromRgb(bits, nc, w, h, ExrYca.LumaWeights(chroma), options.LuminanceRoundBits, options.ChromaRoundBits, out var luma, out var ry, out var by);
+            ExrYca.FromRgb(bits, nc, w, h, ExrYca.LumaWeights(chroma), options.LuminanceRoundBits, options.ChromaRoundBits, options.Parallel, out var luma, out var ry, out var by);
             Half[] AsHalf(ushort[] u) => System.Runtime.InteropServices.MemoryMarshal.Cast<ushort, Half>(u).ToArray();
             var chans = new List<ExrChannelData>
             {
@@ -223,11 +231,20 @@ namespace PixCodec
     /// <summary>
     /// OpenEXR codec.
     /// <para>
-    /// Decoding supports version 2 scan line and tiled files (level 0 of mip/rip maps), multi-part files, HALF / FLOAT /
-    /// UINT channels and all compressions: None, RLE, ZIPS, ZIP, PIZ, PXR24, B44, B44A, DWAA and DWAB. Deep data
-    /// throws <see cref="ImageNotSupportedException"/>. The decoded image always covers the data window.
-    /// All schemes decode bit exactly like the reference library except DWAA / DWAB, whose float DCT makes a small
-    /// fraction of the samples differ by a rounding step (as it does between builds of the reference library).
+    /// Decoding: version 2 scan line and tiled files with all mip / rip levels, multi-part files, deep scan line and
+    /// deep tiled parts (as samples, or flattened), HALF / FLOAT / UINT channels, subsampled channels and
+    /// luminance/chroma images, and all compressions: None, RLE, ZIPS, ZIP, PIZ, PXR24, B44, B44A, DWAA and DWAB.
+    /// The decoded image always covers the data window (of the selected level). Every scheme decodes bit exactly
+    /// like the reference library; for DWAA / DWAB that means the reference library's AVX code path (its other
+    /// SIMD variants round a few samples per million differently).
+    /// </para>
+    /// <para>
+    /// Encoding: scan line and tiled parts (optionally with generated mip / rip levels), multi-part files, every
+    /// compression, subsampled channels and luminance/chroma. Deep data cannot be written.
+    /// </para>
+    /// <para>
+    /// Like the rest of the library this codec runs on little-endian hosts only: sample data is copied between the
+    /// (little-endian) file layout and typed arrays without byte swapping.
     /// </para>
     /// </summary>
     public static class Exr
@@ -293,7 +310,7 @@ namespace PixCodec
                     int i = part.ChannelIndex(extra);
                     if (i >= 0 && !need.Contains(i)) need.Add(i);
                 }
-                var flat = ExrDeepDecoder.Decode(data, file, options.PartIndex, need.ToArray(), options).Flatten(names);
+                var flat = ExrDeepDecoder.Decode(data, file, options.PartIndex, need.ToArray(), options).Flatten(names, options.DeepSortByDepth, options.DeepTidy);
                 return new RawImage(flat.Width, flat.Height, yca ? ColorModel.Other : color, flat.Data, flat.Channels);
             }
             if (yca) return DecodeYca(data, file, part, idx, options);
@@ -330,7 +347,7 @@ namespace PixCodec
                     _ => Array.ConvertAll(img.GetData<uint>(), v => ExrHalf.FromFloatIeee(v)),
                 };
             }
-            var bits = ExrYca.ToRgb(planes[0], planes[1], planes[2], planes[3], w, h, ExrYca.LumaWeights(part.Chromaticities));
+            var bits = ExrYca.ToRgb(planes[0], planes[1], planes[2], planes[3], w, h, ExrYca.LumaWeights(part.Chromaticities), options.Parallel);
             var color = planes[3] != null ? ColorModel.Rgba : ColorModel.Rgb;
             if (!options.HalfAsFloat)
                 return new RawImage(w, h, color, System.Runtime.InteropServices.MemoryMarshal.Cast<ushort, Half>(bits).ToArray());
