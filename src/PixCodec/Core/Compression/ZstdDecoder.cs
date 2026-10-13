@@ -606,8 +606,16 @@ namespace PixCodec.Compression
                             if (wild && litLen <= 16) Unsafe.WriteUnaligned(o, Unsafe.ReadUnaligned<Vector128<byte>>(l + litPos));
                             else Buffer.MemoryCopy(l + litPos, o, litLen, litLen);
                             litPos += (int)litLen; outPos += (int)litLen; o += litLen;
-                            if (offset > (uint)(outPos - histStart)) throw Bad("offset too far back");
-                            if (wild) LzCopy.MatchWild(o, offset, matchLen);
+                            if (offset > (uint)(outPos - histStart))
+                            {
+                                // reaches in front of the frame: only a dictionary's content lives there
+                                long back = offset - (long)(outPos - histStart);
+                                if (back > dictLength) throw Bad("offset too far back");
+                                uint fromDict = (uint)Math.Min(back, matchLen);
+                                Buffer.MemoryCopy(dictContent + dictLength - back, o, fromDict, fromDict);
+                                if (matchLen > fromDict) LzCopy.Match(o + fromDict, offset, matchLen - fromDict);
+                            }
+                            else if (wild) LzCopy.MatchWild(o, offset, matchLen);
                             else LzCopy.Match(o, offset, matchLen);
                             outPos += (int)matchLen;
                         }
@@ -634,7 +642,57 @@ namespace PixCodec.Compression
         /// a bound derived from the input size); otherwise output that does not fit <paramref name="destination"/>
         /// is an error. Returns the number of bytes written.
         /// </summary>
-        public int Decode(ReadOnlySpan<byte> source, Span<byte> destination, ref byte[]? growable)
+        public int Decode(ReadOnlySpan<byte> source, Span<byte> destination, ref byte[]? growable, ReadOnlySpan<byte> dictionary = default)
+        {
+            // a structured dictionary (magic, id, entropy tables, repeat offsets, content) or plain content
+            uint dictionaryId = 0;
+            bool structured = false;
+            int contentStart = 0;
+            if (dictionary.Length >= 8 && BinaryPrimitives.ReadUInt32LittleEndian(dictionary) == 0xEC30A437)
+            {
+                structured = true;
+                dictionaryId = BinaryPrimitives.ReadUInt32LittleEndian(dictionary.Slice(4));
+                fixed (byte* d = dictionary)
+                fixed (Entry* tl = dictLl, tm = dictMl, to = dictOf)
+                {
+                    int p = 8;
+                    try
+                    {
+                        ReadHuffmanTree(d, dictionary.Length, ref p);
+                        dictOfLog = ReadFse(d, dictionary.Length, ref p, 8, 31, to, 2);
+                        dictMlLog = ReadFse(d, dictionary.Length, ref p, 9, 52, tm, 1);
+                        dictLlLog = ReadFse(d, dictionary.Length, ref p, 9, 35, tl, 0);
+                    }
+                    catch (ImageFormatException e) { throw new ImageFormatException("corrupt zstd dictionary: " + e.Message); }
+                    Array.Copy(huf, dictHuf, huf.Length);
+                    dictHufLog = hufLog;
+                    if (dictionary.Length - p < 12) throw new ImageFormatException("corrupt zstd dictionary: truncated");
+                    contentStart = p + 12;
+                    for (int i = 0; i < 3; i++)
+                    {
+                        dictRep[i] = BinaryPrimitives.ReadUInt32LittleEndian(dictionary.Slice(p + 4 * i));
+                        if (dictRep[i] == 0 || dictRep[i] > (uint)(dictionary.Length - contentStart)) throw new ImageFormatException("corrupt zstd dictionary: bad repeat offset");
+                    }
+                }
+            }
+            fixed (byte* dictP = dictionary)
+            {
+                dictContent = dictP + contentStart;
+                dictLength = dictionary.Length - contentStart;
+                try { return DecodeFrames(source, destination, ref growable, structured, dictionaryId, dictionary.Length != 0); }
+                finally { dictContent = null; dictLength = 0; }
+            }
+        }
+
+        // dictionary state for the duration of one Decode call
+        byte* dictContent;
+        int dictLength;
+        readonly Entry[] dictLl = new Entry[512], dictMl = new Entry[512], dictOf = new Entry[256];
+        readonly ushort[] dictHuf = new ushort[1 << 11];
+        readonly uint[] dictRep = new uint[3];
+        int dictLlLog, dictMlLog, dictOfLog, dictHufLog;
+
+        int DecodeFrames(ReadOnlySpan<byte> source, Span<byte> destination, ref byte[]? growable, bool structured, uint dictionaryId, bool haveDictionary)
         {
             bool grow = growable != null;
             int capacity = grow ? growable!.Length : destination.Length;
@@ -673,7 +731,12 @@ namespace PixCodec.Compression
                     }
                     uint dictId = 0;
                     for (int i = 0; i < dictBytes; i++) dictId |= (uint)src[pos++] << (8 * i);
-                    if (dictId != 0) throw new ImageNotSupportedException("zstd data needs a dictionary (id " + dictId + ")");
+                    if (dictId != 0)
+                    {
+                        if (!haveDictionary) throw new ImageNotSupportedException("zstd data needs a dictionary (id " + dictId + ")");
+                        // plain-content dictionaries have no id and are taken on trust
+                        if (structured && dictId != dictionaryId) throw Bad("frame needs dictionary " + dictId + ", got " + dictionaryId);
+                    }
                     ulong contentSize = ulong.MaxValue;
                     if (fcsBytes > 0)
                     {
@@ -693,6 +756,16 @@ namespace PixCodec.Compression
                     int frameStart = outPos;
                     llSet = mlSet = ofSet = hufSet = false;
                     rep0 = 1; rep1 = 4; rep2 = 8;
+                    if (structured)
+                    {
+                        // the dictionary's tables are what "repeat" modes and tree-less literals refer to at first
+                        Array.Copy(dictHuf, huf, huf.Length); hufLog = dictHufLog;
+                        Array.Copy(dictLl, llTable, llTable.Length); llLog = dictLlLog;
+                        Array.Copy(dictMl, mlTable, mlTable.Length); mlLog = dictMlLog;
+                        Array.Copy(dictOf, ofTable, ofTable.Length); ofLog = dictOfLog;
+                        llSet = mlSet = ofSet = hufSet = true;
+                        rep0 = dictRep[0]; rep1 = dictRep[1]; rep2 = dictRep[2];
+                    }
                     for (; ; )
                     {
                         if (source.Length - pos < 3) throw Bad("truncated block header");

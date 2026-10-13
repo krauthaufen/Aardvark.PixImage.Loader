@@ -286,8 +286,42 @@ public class CompressionDecodeTests
         }
     }
 
+    public static IEnumerable<object[]> ZstdDictFiles => Fixtures(".zstd");
+
+    /// <summary>Frames written by <c>zstd -D</c> with a trained (structured) and a plain-content dictionary.</summary>
+    [Theory, MemberData(nameof(ZstdDictFiles))]
+    public void DecompressZstdWithDictionary(string name)
+    {
+        var z = Load(name);
+        var expected = Expected(name);
+        bool trained = name.Contains("trained");
+        var dict = Load(trained ? "trained.zdict" : "rawcontent.zdict");
+        var other = Load(trained ? "rawcontent.zdict" : "trained.zdict");
+        var dst = new byte[expected.Length];
+        Assert.Equal(expected.Length, Zstd.Decompress(z, dst, dict));
+        Assert.True(expected.AsSpan().SequenceEqual(dst));
+        Assert.True(expected.AsSpan().SequenceEqual(Zstd.DecompressWithDictionary(z, dict)));
+        // without the dictionary, or with the wrong one, the frame must not decode
+        bool hasId = trained && !name.Contains("noid");
+        if (hasId) Assert.Throws<ImageNotSupportedException>(() => Zstd.Decompress(z, dst));
+        else Assert.Throws<ImageFormatException>(() => Zstd.Decompress(z, dst));
+        Assert.Throws<ImageFormatException>(() => Zstd.Decompress(z, dst, other));
+        // damage: same rules as everywhere
+        var rnd = new Random(name.Length);
+        for (int i = 0; i < 150; i++)
+        {
+            var bad = (byte[])z.Clone();
+            bad[rnd.Next(bad.Length)] ^= (byte)(1 << rnd.Next(8));
+            try { Zstd.Decompress(bad, dst, dict); } catch (ImageFormatException) { } catch (ImageNotSupportedException) { }
+            var badDict = (byte[])dict.Clone();
+            badDict[rnd.Next(Math.Min(badDict.Length, 400))] ^= (byte)(1 << rnd.Next(8));
+            try { Zstd.Decompress(z, dst, badDict); } catch (ImageFormatException) { } catch (ImageNotSupportedException) { }
+            try { Zstd.Decompress(z, dst, dict.AsSpan(0, rnd.Next(dict.Length))); } catch (ImageFormatException) { } catch (ImageNotSupportedException) { }
+        }
+    }
+
     [Fact]
-    public void ZstdDictionaryIsNotSupported()
+    public void ZstdDictionaryRules()
     {
         // frame header: magic, descriptor with a 1 byte dictionary id, window descriptor, dictionary id 7
         var z = new byte[] { 0x28, 0xB5, 0x2F, 0xFD, 0x01, 0x00, 0x07, 0x01, 0x00, 0x00 };
@@ -295,6 +329,71 @@ public class CompressionDecodeTests
         // dictionary id 0 means "none"
         z[6] = 0;
         Assert.Equal(0, Zstd.Decompress(z, new byte[10]));
+        // a structured dictionary with another id is refused; frames that need none ignore a supplied dictionary
+        z[6] = 7;
+        var dict = Load("trained.zdict");
+        Assert.Throws<ImageFormatException>(() => Zstd.Decompress(z, new byte[10], dict));
+        var plain = Load("text__l3.zst");
+        Assert.True(Expected("text__l3.zst").AsSpan().SequenceEqual(Zstd.DecompressWithDictionary(plain, dict)));
+    }
+
+    /// <summary>
+    /// Long distance matching: tens of megabytes generated here (not stored in the repository), compressed by the
+    /// zstd tool with a 128 MiB window, so that matches reach far beyond any block or the usual 8 MiB window.
+    /// </summary>
+    [Fact]
+    public void ZstdLongDistanceMatches()
+    {
+        int size = 40_000_000;
+        var data = LongRangeData(size, 9_000_000);
+        var z = ZstdTool(data, "-3", "--long=27");
+        if (z == null) return; // zstd tool not installed
+        Assert.True(z.Length < size / 3, "the tool did not use the far matches: " + z.Length);
+        var dst = new byte[size];
+        Assert.Equal(size, Zstd.Decompress(z, dst));
+        Assert.True(data.AsSpan().SequenceEqual(dst));
+        // our own compressor's large-window levels on the same data
+        var own = Zstd.Compress(data.AsSpan(0, 24_000_000), 13);
+        Assert.True(own.Length < 24_000_000 / 2, "own level 13: " + own.Length);
+        Assert.Equal(24_000_000, Zstd.Decompress(own, dst));
+        Assert.True(data.AsSpan(0, 24_000_000).SequenceEqual(dst.AsSpan(0, 24_000_000)));
+    }
+
+    /// <summary>Random blocks, each later repeated (with small edits) at a distance of about <paramref name="distance"/>.</summary>
+    internal static byte[] LongRangeData(long size, int distance)
+    {
+        var data = new byte[size];
+        var rnd = new Random(99);
+        rnd.NextBytes(data.AsSpan(0, (int)Math.Min(size, distance)));
+        for (long i = distance; i < size;)
+        {
+            int n = (int)Math.Min(size - i, rnd.Next(2000, 200_000));
+            data.AsSpan((int)(i - distance), n).CopyTo(data.AsSpan((int)i));
+            for (int k = 0; k < n; k += rnd.Next(500, 4000)) data[i + k] ^= 0x55;
+            i += n;
+        }
+        return data;
+    }
+
+    internal static byte[]? ZstdTool(byte[] data, params string[] args)
+    {
+        var dir = Path.Combine(TestUtil.FixtureDir, "_tmp");
+        Directory.CreateDirectory(dir);
+        var f = Path.Combine(dir, Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (var fs = File.Create(f)) fs.Write(data);
+            var psi = new System.Diagnostics.ProcessStartInfo("zstd") { RedirectStandardError = true, UseShellExecute = false };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+            foreach (var a in new[] { "-q", "-f", "-T0", f, "-o", f + ".zst" }) psi.ArgumentList.Add(a);
+            using var p = System.Diagnostics.Process.Start(psi)!;
+            var err = p.StandardError.ReadToEnd();
+            p.WaitForExit();
+            Assert.True(p.ExitCode == 0, "zstd failed: " + err);
+            return File.ReadAllBytes(f + ".zst");
+        }
+        catch (System.ComponentModel.Win32Exception) { return null; }
+        finally { File.Delete(f); File.Delete(f + ".zst"); }
     }
 
     [Fact]

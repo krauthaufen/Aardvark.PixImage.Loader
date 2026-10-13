@@ -362,7 +362,6 @@ def gen_zlib(s):
         write("%s__raw.deflate" % name, zl(d, 6, wbits=-15))
     for lv in (2, 3, 4, 5, 7, 8):
         write("text__l%d.zlib" % lv, zl(s["text"], lv))
-    write("big__mem9.zlib", zl(s["big"], 9, mem=9))
     # flushes: empty stored blocks, byte aligned restarts, history resets
     d = s["text"]
     c = zlib.compressobj(6)
@@ -391,6 +390,8 @@ def gen_zstd(s):
     for fast in (1, 3, 10, 50):
         write("mix__fast%d.zst" % fast, zstd_cli(mix, "--fast=%d" % fast))
     for name, data in s.items():
+        if name == "far":  # a deflate window test; the long distance zstd test generates its data at run time
+            continue
         write("%s__l3.zst" % name, zstd_cli(data, "-3"))
         if name not in ("big", "far"):
             write("%s__l3check.zst" % name, zstd_cli(data, "-3", "--check"))
@@ -400,7 +401,6 @@ def gen_zstd(s):
     write("big__long.zst", zstd_cli(big, "-12", "--long=27", "--check"))
     write("big__w10.zst", zstd_cli(big, "-5", "--zstd=wlog=10"))  # smallest window: 1 KiB blocks
     write("text__nolit.zst", zstd_cli(s["text"], "-3", "--no-compress-literals"))
-    write("far__long.zst", zstd_cli(s["far"], "-19", "--long=27"))
     # a file argument stores the content size in the header and "single segment" for small inputs; stdin does not
     tmp = os.path.join(OUT, "_tmp.bin")
     for name in ("text", "one", "empty", "big", "zeros"):
@@ -420,6 +420,48 @@ def gen_zstd(s):
     t = s["text"]
     write("xxlens.bin", b"".join(t[:n] for n in range(0, 101)))
     write("xxlens__multi.zst", b"".join(zstd_cli(t[:n], "-1", "--check") for n in range(0, 101)))
+
+
+def gen_zstd_dict(s):
+    """Dictionaries: one trained by zstd (structured: entropy tables + content) and one of plain content."""
+    import shutil
+    import tempfile
+    r = rng(77)
+
+    def record(i):
+        fields = ["id", "name", "width", "height", "channels", "codec", "created", "tags"]
+        vals = [str(i * 7919 % 100000), WORDS[r.randint(len(WORDS))] + "_" + WORDS[r.randint(len(WORDS))], str(r.randint(8000)), str(r.randint(8000)),
+                str(r.randint(1, 5)), ["png", "jpeg", "tiff", "exr", "gif"][r.randint(5)], "2026-%02d-%02dT%02d:%02d" % (r.randint(1, 13), r.randint(1, 29), r.randint(24), r.randint(60)),
+                "[" + ",".join('"%s"' % WORDS[r.randint(len(WORDS))] for _ in range(r.randint(1, 6))) + "]"]
+        return ("{" + ",".join('"%s":"%s"' % kv for kv in zip(fields, vals)) + "}\n").encode()
+
+    tmp = tempfile.mkdtemp(dir=OUT)
+    try:
+        names = []
+        for i in range(600):
+            n = os.path.join(tmp, "s%04d" % i)
+            with open(n, "wb") as f:
+                f.write(b"".join(record(i * 3 + k) for k in range(1 + r.randint(4))))
+            names.append(n)
+        trained = os.path.join(tmp, "trained")
+        subprocess.run(["zstd", "-q", "--train", "--maxdict=3000", "-o", trained] + names, check=True)
+        write("trained.zdict", open(trained, "rb").read())
+        rawdict = os.path.join(tmp, "raw")
+        with open(rawdict, "wb") as f:
+            f.write(b"".join(record(900000 + k) for k in range(25)))
+        write("rawcontent.zdict", open(rawdict, "rb").read())
+        small = b"".join(record(5000 + k) for k in range(3))
+        large = b"".join(record(7000 + k) for k in range(900))  # several blocks: the dictionary tables only start it off
+        write("dictsmall.bin", small)
+        write("dictlarge.bin", large)
+        for name, data in (("dictsmall", small), ("dictlarge", large)):
+            for tag, d in (("trained", trained), ("rawcontent", rawdict)):
+                for lv in (("1", "3", "19") if name == "dictsmall" else ("3",) if tag == "rawcontent" else ("1", "19")):
+                    write("%s__%s_l%s.zstd" % (name, tag, lv), subprocess.run(["zstd", "-q", "-c", "-" + lv, "--check", "-D", d], input=data, stdout=subprocess.PIPE, check=True).stdout)
+            if name == "dictsmall":
+                write("%s__trained_noid.zstd" % name, subprocess.run(["zstd", "-q", "-c", "-5", "--no-dictID", "-D", trained], input=data, stdout=subprocess.PIPE, check=True).stdout)
+    finally:
+        shutil.rmtree(tmp)
 
 
 def bcj_data():
@@ -477,7 +519,8 @@ def bcj_data():
 
 def gen_xz(s):
     for name, data in s.items():
-        write("%s__p6.xz" % name, lzma.compress(data, lzma.FORMAT_XZ, lzma.CHECK_CRC64, 6))
+        if name != "far":
+            write("%s__p6.xz" % name, lzma.compress(data, lzma.FORMAT_XZ, lzma.CHECK_CRC64, 6))
     d = s["text"]
     for check, tag in ((lzma.CHECK_NONE, "none"), (lzma.CHECK_CRC32, "crc32"), (lzma.CHECK_SHA256, "sha256")):
         write("text__%s.xz" % tag, lzma.compress(d, lzma.FORMAT_XZ, check, 3))
@@ -542,6 +585,7 @@ def main():
         write(name + ".bin", data)
     gen_zlib(s)
     gen_zstd(s)
+    gen_zstd_dict(s)
     gen_xz(s)
     # every fixture must round trip through its own reference decoder
     total = 0
