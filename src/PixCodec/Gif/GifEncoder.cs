@@ -71,14 +71,17 @@ namespace PixCodec
         }
 
         /// <summary>To packed r | g &lt;&lt; 8 | b &lt;&lt; 16 | 255 &lt;&lt; 24, or 0 for pixels below the alpha threshold.</summary>
-        unsafe void Convert(RawImage image, uint[] dst)
+        void Convert(RawImage image, uint[] dst) => Convert(image, 0, _w * _h, dst);
+
+        /// <summary>Converts <paramref name="n"/> pixels starting at pixel <paramref name="first"/> to the start of dst.</summary>
+        unsafe void Convert(RawImage image, int first, int n, uint[] dst)
         {
             byte[] bytes = image.GetData<byte>();
-            int n = _w * _h;
             uint thr = (uint)Math.Clamp(_o.AlphaThreshold, 0, 256);
-            fixed (byte* src = bytes)
+            fixed (byte* src0 = bytes)
             fixed (uint* d = dst)
             {
+                byte* src = src0 + (long)first * image.Channels;
                 switch (image.Color)
                 {
                     case ColorModel.Gray:
@@ -173,12 +176,16 @@ namespace PixCodec
                 if (set.MapAll(buf.AsSpan(0, n), indices.AsSpan(0, n))) _stillIndices = indices;
             }
             else
-                foreach (var f in list)
-                {
-                    Convert(f.Image, buf);
-                    set.AddAll(buf.AsSpan(0, n));
-                    if (set.Overflow) break;
-                }
+            {
+                // Animations mostly repeat themselves: only the pixels that differ from the frame before can bring
+                // new colors.
+                for (int k = 0; k < list.Count && !set.Overflow; k++)
+                    foreach (var (at, len) in ChangedSpans(k == 0 ? null : list[k - 1].Image, list[k].Image))
+                    {
+                        Convert(list[k].Image, at, len, buf);
+                        set.AddAll(buf.AsSpan(0, len));
+                    }
+            }
             // An animation wants a transparent slot for "pixel unchanged"; a still only if it has transparent pixels.
             if (!set.Overflow)
             {
@@ -192,9 +199,64 @@ namespace PixCodec
             _stillIndices = null;
             if (list.Count == 1) q.Add(buf.AsSpan(0, n));
             else
-                foreach (var f in list) { Convert(f.Image, buf); q.Add(buf.AsSpan(0, n)); }
+            {
+                // Every frame counts once in the statistics. Instead of counting all pixels of all frames, the first
+                // frame is counted for the whole length of the animation and each later change is booked for the
+                // frames that remain: the new color is added, the one it replaces taken out. The sums are the same.
+                for (int k = 0; k < list.Count; k++)
+                {
+                    long remaining = list.Count - k;
+                    foreach (var (at, len) in ChangedSpans(k == 0 ? null : list[k - 1].Image, list[k].Image))
+                    {
+                        Convert(list[k].Image, at, len, buf);
+                        q.Add(buf.AsSpan(0, len), remaining);
+                        if (k == 0) continue;
+                        Convert(list[k - 1].Image, at, len, buf);
+                        q.Add(buf.AsSpan(0, len), -remaining);
+                    }
+                }
+            }
             var colors = q.BuildPalette(_maxColors - (slot ? 1 : 0), _o.RefineIterations);
             return new GifPalette(colors, colors.Length, slot, null);
+        }
+
+        /// <summary>
+        /// The runs of pixels (start, length) in which <paramref name="image"/> differs from the frame before it, row
+        /// by row; everything if there is no previous frame.
+        /// </summary>
+        List<(int At, int Length)> ChangedSpans(RawImage? previous, RawImage image)
+        {
+            var spans = new List<(int, int)>();
+            if (previous == null) { spans.Add((0, _w * _h)); return spans; }
+            if (previous.Color != image.Color)
+            {
+                // different layouts cannot be compared byte by byte; go through the converted pixels
+                var a = System.Buffers.ArrayPool<uint>.Shared.Rent(_w);
+                var b = System.Buffers.ArrayPool<uint>.Shared.Rent(_w);
+                for (int y = 0; y < _h; y++)
+                {
+                    Convert(previous, y * _w, _w, a);
+                    Convert(image, y * _w, _w, b);
+                    AddSpan<uint>(spans, a.AsSpan(0, _w), b.AsSpan(0, _w), y, 1);
+                }
+                System.Buffers.ArrayPool<uint>.Shared.Return(a);
+                System.Buffers.ArrayPool<uint>.Shared.Return(b);
+                return spans;
+            }
+            int c = image.Channels, stride = _w * c;
+            byte[] p = previous.GetData<byte>(), q = image.GetData<byte>();
+            for (int y = 0; y < _h; y++) AddSpan<byte>(spans, p.AsSpan(y * stride, stride), q.AsSpan(y * stride, stride), y, c);
+            return spans;
+        }
+
+        void AddSpan<T>(List<(int, int)> spans, ReadOnlySpan<T> a, ReadOnlySpan<T> b, int y, int perPixel) where T : unmanaged, IEquatable<T>
+        {
+            int same = a.CommonPrefixLength(b);
+            if (same == a.Length) return;
+            int end = a.Length;
+            while (a[end - 1].Equals(b[end - 1])) end--;
+            int first = same / perPixel, last = (end - 1) / perPixel;
+            spans.Add((y * _w + first, last - first + 1));
         }
 
         static int BitsFor(int paletteSize)

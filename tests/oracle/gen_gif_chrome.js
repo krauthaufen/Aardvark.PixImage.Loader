@@ -4,8 +4,12 @@
 // conversion), which returns each frame fully composited on the logical screen. Where Chromium can read the file its
 // frames become name.gif.N.ref and name.gif.ref (frame 0; RGB when the first frame has no transparent index and covers
 // the whole screen, the rule Gif.Decode documents). Files Chromium rejects keep the references gen_gif.py wrote.
-// chrome.json records, per fixture, where the references came from, Chromium's frame durations and repetition count
-// and how the earlier (Pillow / ImageMagick / by construction) references compared.
+// chrome.json records, per fixture, where the references came from, Chromium's frame durations and repetition count,
+// what ImageDecoder does when it knows the data is complete (it refuses frames that are not all there, while an <img>
+// and a still running download show them as far as they go), and how the earlier (Pillow / ImageMagick / by
+// construction) references compared. For hand_delay_*cs.gif it also holds "playback": the frame duration measured
+// while an <img> plays the file - ImageDecoder reports the stored delay, the clamping of tiny delays happens in the
+// animation player.
 //
 // usage: node gen_gif_chrome.js [--check]      (--check: compare only, write nothing)
 //
@@ -45,7 +49,11 @@ async function decodeInPage(b64, partial) {
         for (let i = 0; i < track.frameCount; i++) {
             let image;
             try {
-                image = (await decoder.decode({ frameIndex: i, completeFramesOnly: !partial })).image;
+                // an unfinished stream can leave a decode pending forever
+                const pending = decoder.decode({ frameIndex: i, completeFramesOnly: !partial });
+                const result = await Promise.race([pending, new Promise((_, no) => setTimeout(() => no(new Error('no result within 3 s')), 3000))]);
+                pending.catch(() => { });
+                image = result.image;
             } catch (e) {
                 out.failedAt = i; out.error = String(e);
                 break;
@@ -65,6 +73,52 @@ async function decodeInPage(b64, partial) {
         out.error = String(e);
     }
     return out;
+}
+
+// First pixel of a PNG (the first pixel of the first row is stored as is under every filter type).
+function pngFirstPixel(png) {
+    const idat = [];
+    for (let p = 8; p < png.length;) {
+        const len = png.readUInt32BE(p), type = png.toString('latin1', p + 4, p + 8);
+        if (type === 'IDAT') idat.push(png.subarray(p + 8, p + 8 + len));
+        p += 12 + len;
+    }
+    const raw = require('zlib').inflateSync(Buffer.concat(idat));
+    return [raw[1], raw[2], raw[3]];
+}
+
+// Shows the GIF in an <img> and watches the page through the DevTools screencast, which delivers a timestamped picture
+// for every repaint. The fixture's frames are solid colors in palette order, so each picture tells which frame is up;
+// the time per frame is the slope over the whole observation. Returns milliseconds per frame.
+async function measurePlayback(page, bytes, palette, frameCount) {
+    await page.evaluate(async b64 => {
+        const img = new Image();
+        img.id = 'playback';
+        img.style.cssText = 'position:fixed;left:0;top:0;width:64px;height:64px;image-rendering:pixelated';
+        img.src = 'data:image/gif;base64,' + b64;
+        document.body.appendChild(img);
+        await img.decode();
+    }, bytes.toString('base64'));
+    const cdp = await page.target().createCDPSession();
+    const seen = [];
+    cdp.on('Page.screencastFrame', async f => {
+        seen.push([f.metadata.timestamp, Buffer.from(f.data, 'base64')]);
+        await cdp.send('Page.screencastFrameAck', { sessionId: f.sessionId }).catch(() => { });
+    });
+    await cdp.send('Page.startScreencast', { format: 'png', everyNthFrame: 1 });
+    await new Promise(r => setTimeout(r, 4000));
+    await cdp.send('Page.stopScreencast');
+    await cdp.detach();
+    await page.evaluate(() => document.getElementById('playback').remove());
+    let shown = 0, last = -1, t0 = 0, t1 = 0, n = 0;
+    for (const [t, png] of seen) {
+        const px = pngFirstPixel(png);
+        const k = palette.findIndex(c => c[0] === px[0] && c[1] === px[1] && c[2] === px[2]);
+        if (k < 0) continue;
+        if (last < 0) t0 = t; else shown += (k - last + frameCount) % frameCount;
+        last = k; t1 = t; n++;
+    }
+    return { pictures: n, msPerFrame: shown > 0 ? (t1 - t0) * 1000 / shown : null };
 }
 
 function readRef(file) {
@@ -105,7 +159,7 @@ function firstFrameHasAlpha(d) {
     const report = {};
     try {
         await page.setRequestInterception(true);
-        page.on('request', r => r.respond({ status: 200, contentType: 'text/html', body: '<!doctype html><title>gif oracle</title>' }));
+        page.on('request', r => r.respond({ status: 200, contentType: 'text/html', body: '<!doctype html><title>gif oracle</title><body style="margin:0">' }));
         await page.goto(ORIGIN);
         report._chromium = await browser.version();
 
@@ -115,6 +169,7 @@ function firstFrameHasAlpha(d) {
             const file = path.join(OUT, name);
             const bytes = fs.readFileSync(file);
             let r = await page.evaluate(decodeInPage, bytes.toString('base64'), false);
+            const all = r;
             let partial = false;
             if (r.frames.length === 0 || r.error) {
                 const p = await page.evaluate(decodeInPage, bytes.toString('base64'), true);
@@ -123,6 +178,20 @@ function firstFrameHasAlpha(d) {
             const old = [];
             for (let i = 0; fs.existsSync(`${file}.${i}.ref`); i++) old.push(readRef(`${file}.${i}.ref`));
             const entry = report[name] = {};
+            // What ImageDecoder makes of the file when it is told that this is all the data there will be.
+            entry.givenAllData = all.error ? `${all.frames.length} of ${all.count === undefined ? '?' : all.count} frames, then ${all.error}` : `${all.frames.length} frames`;
+            entry.framesGivenAllData = all.frames.length;
+            const delay = /^hand_delay_(\d+)cs\.gif$/.exec(name);
+            if (delay) {
+                // How long an <img> really shows a frame with this stored delay, in whole milliseconds. This is a
+                // measurement: it moves by a millisecond or two from run to run (the only values in this file that do).
+                const palette = [];
+                for (let i = 0; i < 8; i++) palette.push([bytes[13 + i * 3], bytes[14 + i * 3], bytes[15 + i * 3]]);
+                const m = await measurePlayback(page, bytes, palette, 6);
+                if (m.msPerFrame === null) throw new Error(name + ': the animation did not advance');
+                console.log(`${name}: stored delay ${delay[1]} cs plays at ${m.msPerFrame.toFixed(1)} ms per frame (${m.pictures} pictures observed)`);
+                entry.playback = { storedDelayCs: +delay[1], measuredMsPerFrame: Math.round(m.msPerFrame), clampedTo100ms: +delay[1] * 10 < 90 && m.msPerFrame > 90 };
+            }
             if (r.frames.length === 0 || r.error) {
                 entry.source = 'gen_gif.py';
                 entry.chromium = 'cannot decode: ' + (r.error || 'no frames') + (r.failedAt !== undefined ? ` (frame ${r.failedAt} of ${r.count})` : '');
