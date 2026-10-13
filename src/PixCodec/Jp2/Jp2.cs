@@ -144,6 +144,15 @@ namespace PixCodec
         public bool WriteMetadata { get; set; } = true;
         /// <summary>Encode code-blocks and tiles on several threads.</summary>
         public bool Parallel { get; set; } = true;
+
+        /// <summary>Test hook: code the HT cleanup pass one bit plane up and add SigProp and MagRef passes for the plane below.</summary>
+        internal bool HtRefinementPasses { get; set; }
+        /// <summary>
+        /// Test hook: with several layers, put this many sets of placeholder passes in front of every HT block's
+        /// cleanup pass, spread over the layers before the last one (what a transcoder does to keep the layer
+        /// boundaries of a Part 1 codestream, T.814 Annex B).
+        /// </summary>
+        internal int HtPlaceholderSets { get; set; }
     }
 
     /// <summary>One component of a codestream: Width x Height samples that sit at every Dx-th / Dy-th position of the reference grid.</summary>

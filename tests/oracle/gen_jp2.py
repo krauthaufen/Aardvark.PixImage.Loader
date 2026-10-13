@@ -559,6 +559,16 @@ def generate():
     ojph('ht_depths_10_8_4.jhc', None, ['-reversible', 'true'], yuv=(mixed,
          ['-dims', f'{{{w},{h}}}', '-num_comps', '3', '-signed', 'false', '-bit_depth', '10,8,4', '-downsamp', '{1,1}']))
 
+    # float samples as OpenJPH (and OpenEXR's HTJ2K compression) stores them: the bit pattern as a 32 bit signed
+    # integer, negative values as -(magnitude) - 1, announced by an NLT marker segment of type 3. PixCodec returns the
+    # coded integers; the reference is computed from the floats, which OpenJPH has to give back bit for bit.
+    f = ((pattern(24, 20, 1).astype(np.float32) - 100) * np.float32(0.37)).copy()
+    f[0, :6] = [0.0, -0.0, np.inf, -np.inf, 1e-30, -1e30]
+    d = imagecodecs.htj2k_encode(f, reversible=True)
+    assert np.array_equal(imagecodecs.htj2k_decode(d).view(np.uint32), f.view(np.uint32))
+    bits = f.view(np.uint32).astype(np.int64)
+    save('ht_float_nlt.jhc', d, np.where(bits >> 31 != 0, -(bits & 0x7FFFFFFF) - 1, bits).astype(np.int32))
+
     # --- JP2 containers around OpenJPEG codestreams
     cs_g = imagecodecs.jpeg2k_encode(g8, codecformat='j2k', reversible=True, level=0)
     cs_rgb = imagecodecs.jpeg2k_encode(rgb8, codecformat='j2k', reversible=True, level=0)
@@ -614,7 +624,10 @@ def generate():
     container('cmyk.jp2', jp2(cs_cmyk, 4, 8, 30, 26, colr=(1, 12), brand=b'jpx ', compat=(b'jpx ', b'jp2 ')))
     try:
         from PIL import ImageCms
-        icc = ImageCms.ImageCmsProfile(ImageCms.createProfile('sRGB')).tobytes()
+        icc = bytearray(ImageCms.ImageCmsProfile(ImageCms.createProfile('sRGB')).tobytes())
+        icc[24:36] = bytes(12)      # creation date and time: keep the fixture reproducible
+        icc[84:100] = bytes(16)     # profile id (a checksum over the above)
+        icc = bytes(icc)
         container('icc.jp2', jp2(cs_rgb, 3, 8, wr, hr, colr=(2, icc)), ref=rgb8)
         container('icc_gray.jp2', jp2(cs_g, 1, 8, wg, hg, colr=(2, icc[:16] + b'GRAY' + icc[20:])), ref=g8[:, :, None])
     except ImportError:

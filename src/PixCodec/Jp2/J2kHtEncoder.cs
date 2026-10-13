@@ -43,12 +43,18 @@ namespace PixCodec
 
             public void Init(byte* buf) { Buf = buf; Pos = 0; Bits = 0; Max = 8; Tmp = 0; }
 
+            [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
             public void Emit(ulong val, int len)
             {
                 if (len > 32) { Emit(val & 0xFFFFFFFF, 32); val >>= 32; len -= 32; }
-                if (len == 0) return;
                 Tmp |= (val & ((1UL << len) - 1)) << Bits;
                 Bits += len;
+                if (Bits >= 32) Flush();
+            }
+
+            /// <summary>Writes out the complete bytes (after it fewer bits than a byte takes are pending).</summary>
+            public void Flush()
+            {
                 while (Bits >= Max)
                 {
                     uint b = (uint)Tmp & (Max == 8 ? 0xFFu : 0x7Fu);
@@ -82,6 +88,12 @@ namespace PixCodec
             {
                 Acc |= (ulong)cwd << Bits;
                 Bits += len;
+                if (Bits >= 40) Flush();
+            }
+
+            /// <summary>Writes out the complete bytes; afterwards the bits of the byte under construction remain.</summary>
+            public void Flush()
+            {
                 while (Bits >= 7)
                 {
                     uint b = (uint)Acc & 0xFF;
@@ -323,6 +335,7 @@ namespace PixCodec
 
                 // ---- termination and assembly of the cleanup segment (F.4) ----
                 mel.Terminate();
+                ms.Flush(); vlc.Flush();
                 if (ms.Bits > 0)
                 {
                     while (ms.Bits < ms.Max) { ms.Tmp |= 1UL << ms.Bits; ms.Bits++; }
@@ -430,6 +443,7 @@ namespace PixCodec
                 }
             }
             // termSPandMRPackers
+            sp.Flush(); mr.Flush();
             uint spTmp = (uint)sp.Tmp;
             uint spMask = sp.Bits == 0 ? 0u : 0xFFu >> (8 - sp.Bits);
             spMask |= (1u << sp.Max) & 0x80;

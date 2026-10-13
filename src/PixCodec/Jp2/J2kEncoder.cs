@@ -117,15 +117,6 @@ namespace PixCodec
         readonly double[] _compNorm;
         J2kTile[] _tiles = Array.Empty<J2kTile>();
         readonly ConcurrentBag<J2kBlockCoder> _coders = new ConcurrentBag<J2kBlockCoder>();
-        /// <summary>Test hook: code the HT cleanup pass one bit plane up and add SigProp and MagRef passes.</summary>
-        internal static bool HtRefinementPasses;
-        /// <summary>
-        /// Test hook: with several layers, put this many sets of placeholder passes in front of every HT block's
-        /// cleanup pass, spread over the layers before the last one (what a transcoder does to keep the layer
-        /// boundaries of a Part 1 codestream, T.814 Annex B).
-        /// </summary>
-        internal static int HtPlaceholderSets;
-
         // ---------------- entry points ----------------
 
         public static void EncodeImage(RawImage image, Stream output, Jp2EncodeOptions o)
@@ -253,7 +244,7 @@ namespace PixCodec
             if (cbw < 2 || cbw > 10 || cbh < 2 || cbh > 10 || cbw + cbh > 12) throw new ArgumentException("code-block size must be 4..1024 with at most 4096 samples");
             _style = _ht ? J2kCod.Ht | ((int)(o.BlockStyle & Jp2BlockStyle.VerticalCausal)) : (int)o.BlockStyle & 63;
             bool predOnly = (_style & J2kCod.PredTerm) != 0 && (_style & J2kCod.TermAll) == 0;
-            _layers = (_ht && HtPlaceholderSets == 0) || predOnly ? 1 : Math.Clamp(o.Layers, 1, 65535);
+            _layers = (_ht && o.HtPlaceholderSets == 0) || predOnly ? 1 : Math.Clamp(o.Layers, 1, 65535);
             var cod = new J2kCod { Levels = levels, CbW = cbw, CbH = cbh, Style = _style, Reversible = _reversible, PPx = new int[levels + 1], PPy = new int[levels + 1] };
             for (int r = 0; r <= levels; r++)
             {
@@ -499,7 +490,16 @@ namespace PixCodec
         {
             if (b0 is int[] r && b1 is int[] g && b2 is int[] b)
             {
-                for (int i = 0; i < r.Length; i++)
+                int i = 0;
+                if (Vector.IsHardwareAccelerated)
+                    for (; i <= r.Length - Vector<int>.Count; i += Vector<int>.Count)
+                    {
+                        var rr = new Vector<int>(r, i); var gg = new Vector<int>(g, i); var bb = new Vector<int>(b, i);
+                        Vector.ShiftRightArithmetic(rr + gg + gg + bb, 2).CopyTo(r, i);
+                        (bb - gg).CopyTo(g, i);
+                        (rr - gg).CopyTo(b, i);
+                    }
+                for (; i < r.Length; i++)
                 {
                     int rr = r[i], gg = g[i], bb = b[i];
                     r[i] = (rr + 2 * gg + bb) >> 2; g[i] = bb - gg; b[i] = rr - gg;
@@ -515,7 +515,16 @@ namespace PixCodec
             }
             else if (b0 is float[] fr && b1 is float[] fg && b2 is float[] fb)
             {
-                for (int i = 0; i < fr.Length; i++)
+                int i = 0;
+                if (Vector.IsHardwareAccelerated)
+                    for (; i <= fr.Length - Vector<float>.Count; i += Vector<float>.Count)
+                    {
+                        var rr = new Vector<float>(fr, i); var gg = new Vector<float>(fg, i); var bb = new Vector<float>(fb, i);
+                        (0.299f * rr + 0.587f * gg + 0.114f * bb).CopyTo(fr, i);
+                        (-0.168736f * rr - 0.331264f * gg + 0.5f * bb).CopyTo(fg, i);
+                        (0.5f * rr - 0.418688f * gg - 0.081312f * bb).CopyTo(fb, i);
+                    }
+                for (; i < fr.Length; i++)
                 {
                     float rr = fr[i], gg = fg[i], bb = fb[i];
                     fr[i] = 0.299f * rr + 0.587f * gg + 0.114f * bb;
@@ -635,11 +644,11 @@ namespace PixCodec
                 if (_ht)
                 {
                     bool ok = wide
-                        ? J2kHtEncoder.Encode(coder, d64, w, h, HtRefinementPasses ? 1 : 0, HtRefinementPasses, (_style & J2kCod.Causal) != 0, eb)
-                        : J2kHtEncoder.Encode(coder, d32, w, h, HtRefinementPasses ? 1 : 0, HtRefinementPasses, (_style & J2kCod.Causal) != 0, eb);
+                        ? J2kHtEncoder.Encode(coder, d64, w, h, _o.HtRefinementPasses ? 1 : 0, _o.HtRefinementPasses, (_style & J2kCod.Causal) != 0, eb)
+                        : J2kHtEncoder.Encode(coder, d32, w, h, _o.HtRefinementPasses ? 1 : 0, _o.HtRefinementPasses, (_style & J2kCod.Causal) != 0, eb);
                     if (!ok) throw new ImageNotSupportedException("code-block too complex for the HT block coder; use smaller code-blocks");
                     eb.Placeholders = 0;
-                    int sets = HtPlaceholderSets;
+                    int sets = _layers > 1 ? _o.HtPlaceholderSets : 0;
                     if (sets > 0 && eb.Passes > 0)
                     {
                         int add = 3 * sets, n = eb.Passes;
