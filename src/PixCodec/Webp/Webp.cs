@@ -54,8 +54,10 @@ namespace PixCodec
 
         /// <summary>
         /// Speed versus size, 0 (fastest) .. 6 (smallest), the same scale as libwebp's "method".
-        /// Lossless: 0 uses one predictor and greedy matching, higher levels add per-block predictor and cross-color
-        /// selection, an entropy image, lazy matching and trials of several color cache sizes and transform sets.
+        /// Lossless: 0 uses one fixed predictor and short greedy matching; 1 picks predictors per block, adds lazy
+        /// matching, the color cache and the entropy image; from 2 on all predictors and the cross-color transform are
+        /// searched and matches are chosen by a cost model; higher levels search longer, and 5 / 6 also encode with
+        /// alternative transform sets and keep the smallest result.
         /// Lossy: 0 predicts whole macroblocks only; from 1 on 4x4 prediction is tried, with more candidate modes
         /// run through a full encode-and-measure trial the higher the level.
         /// </summary>
