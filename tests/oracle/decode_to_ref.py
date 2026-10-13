@@ -21,6 +21,8 @@ def decode(path):
         import imagecodecs
         with open(path, 'rb') as f:
             return imagecodecs.jpeg8_decode(f.read())
+    if ext == '.webp':
+        return decode_webp(path)
     from PIL import Image
     im = Image.open(path)
     if ext == '.png':
@@ -149,6 +151,19 @@ def decode_tiff(path):
         if pg.planarconfig == 2 and pg.samplesperpixel > 1:
             a = np.moveaxis(a, 0, -1)
         return a
+
+
+def decode_webp(path):
+    """What libwebp shows (through Pillow's binding of its animation decoder): the first frame, RGBA when the file
+    signals alpha by the rule documented in Webp.cs, else RGB. A file named *.anim.webp yields all composited RGBA
+    frames stacked vertically."""
+    from gen_webp import libwebp_frames, output_has_alpha
+    with open(path, 'rb') as f:
+        data = f.read()
+    frames = libwebp_frames(data)[0]
+    if path.lower().endswith('.anim.webp'):
+        return np.concatenate(frames, axis=0)
+    return frames[0] if output_has_alpha(data) else frames[0][:, :, :3]
 
 
 def decode_exr(path):

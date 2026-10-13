@@ -115,7 +115,7 @@ public class TiffTests
     [MemberData(nameof(LzmaFixtures))]
     public void DecodesLzmaFixture(string file) => CheckFixture(file);
 
-    [Theory(Skip = "needs PixCodec.Webp.Decode (stub in this branch)")]
+    [Theory]
     [MemberData(nameof(WebpFixtures))]
     public void DecodesWebpFixture(string file) => CheckFixture(file);
 
