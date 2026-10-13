@@ -585,6 +585,7 @@ namespace PixCodec
                     }
                     // compressed: decode from the top of the chunk, but no further than the last needed row
                     long need = r1 * rowBytes;
+                    CheckPlausible(need, count, r1);
                     if (fullRows && y0 >= _ry)
                     {
                         byte* d = _dst + (y0 - _ry) * _dstRowBytes;
@@ -607,6 +608,7 @@ namespace PixCodec
                     int blockRows = (iy1 - y0 + SubV - 1) / SubV;
                     int decoded = Math.Min(rows, blockRows * SubV);
                     long need = YccBlockRowBytes * blockRows;
+                    if (Compression != 1) CheckPlausible(need, count, decoded);
                     byte* b = (byte*)NativeMemory.Alloc((nuint)(need + (long)ChunkW * decoded * 3));
                     try
                     {
@@ -622,6 +624,7 @@ namespace PixCodec
                 case TiffChunkKind.Jpeg:
                 {
                     long size = (long)cw * crows * ps * Bps;
+                    if (!_oldJpeg) CheckPlausible(size, count, crows);
                     byte[]? srcRent = null;
                     byte* b = (byte*)NativeMemory.Alloc((nuint)size);
                     try
@@ -682,6 +685,7 @@ namespace PixCodec
                     int bpp = Photometric == 32845 ? 4 : 2, rc = RawChannels;
                     int need = iy1 - y0;
                     long enc = (long)ChunkW * need * bpp;
+                    CheckPlausible(enc, count, need);
                     byte[]? srcRent = null;
                     byte* b = (byte*)NativeMemory.Alloc((nuint)(enc + (long)ChunkW * need * rc * 4));
                     try
@@ -710,6 +714,23 @@ namespace PixCodec
                     return;
                 }
             }
+        }
+
+        /// <summary>
+        /// A strip/tile cannot decompress to more than the best ratio of its codec allows. Checked before memory is
+        /// allocated for it, so that a header claiming huge tiles over a few bytes of data is refused cheaply.
+        /// </summary>
+        void CheckPlausible(long decoded, long count, int rows)
+        {
+            if (IsCcitt)
+            {
+                // every coded row takes at least one bit; and nobody scans pages millions of pixels wide
+                if (rows > count * 8 + 8 || ChunkW > 1 << 22) throw new ImageFormatException("TIFF: strip/tile size inconsistent with its data size");
+                return;
+            }
+            long ratio = Compression switch { 32773 => 64, 8 or 32946 => 1040, 50000 or 34925 => 1 << 17, _ => 4096 };
+            if (count < long.MaxValue / (1 << 18) && decoded > count * ratio + 4096)
+                throw new ImageFormatException("TIFF: strip/tile size inconsistent with its data size");
         }
 
         /// <summary>Reads <paramref name="size"/> bytes (possibly more than 2 GB) of uncompressed data and applies FillOrder 2.</summary>

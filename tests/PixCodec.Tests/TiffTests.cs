@@ -1236,31 +1236,42 @@ public class TiffTests
     [Fact]
     public void RejectsLyingHeaders()
     {
-        // an uncompressed 16x16 file that claims to be gigantic must be refused without allocating for it
+        // a 16x16 file that claims to be gigantic (image size, samples, tile size) must be refused without allocating for it
         var img = MakeImage(16, 16, ColorModel.Gray, SampleType.UInt8, 1);
+        var files = new List<(string what, byte[] file)>();
         foreach (var comp in AllCompressions)
         {
-            var file = Encode(img, new TiffEncodeOptions { Compression = comp });
+            files.Add(($"{comp} strips", Encode(img, new TiffEncodeOptions { Compression = comp })));
+            files.Add(($"{comp} tiles", Encode(img, new TiffEncodeOptions { Compression = comp, TileWidth = 16, TileHeight = 16 })));
+        }
+        files.Add(("g4", Encode(img, new TiffEncodeOptions { Compression = TiffCompression.CcittGroup4 })));
+        files.Add(("jpeg", Encode(img, new TiffEncodeOptions { Compression = TiffCompression.Jpeg, TileWidth = 16, TileHeight = 16 })));
+        foreach (var (what, file) in files)
+        {
             int ifd = BitConverter.ToInt32(file, 4);
             int n = BitConverter.ToUInt16(file, ifd);
-            foreach (var (tag, value) in new[] { (256, 60000), (257, 2_000_000_000), (277, 60000) })
+            foreach (var (tag, value) in new[] { (256, 60000), (257, 2_000_000_000), (277, 60000), (322, 1_000_000_000), (323, 1_500_000_000), (278, 2_000_000_000) })
             {
                 var b = (byte[])file.Clone();
+                bool found = false;
                 for (int i = 0; i < n; i++)
                 {
                     int e = ifd + 2 + i * 12;
                     if (BitConverter.ToUInt16(b, e) != tag) continue;
                     BitConverter.TryWriteBytes(b.AsSpan(e + 2), (ushort)4);
                     BitConverter.TryWriteBytes(b.AsSpan(e + 8), value);
+                    found = true;
                 }
+                if (!found || tag == 278) continue; // (RowsPerStrip beyond the image height is legal)
                 long before = GC.GetTotalAllocatedBytes(true);
                 var sw = Stopwatch.StartNew();
-                Assert.ThrowsAny<Exception>(() => Tiff.Decode(b));
-                try { Tiff.Decode(b); }
-                catch (ImageFormatException) { }
-                catch (ImageNotSupportedException) { }
-                Assert.True(GC.GetTotalAllocatedBytes(true) - before < 64 << 20, $"{comp} tag {tag}: allocated too much");
-                Assert.True(sw.Elapsed.TotalSeconds < 2);
+                RawImage? got = null;
+                var ex = Record.Exception(() => got = Tiff.Decode(b));
+                // (an uncompressed tile claiming more rows than it has is fine as long as the rows the image needs are there)
+                if (ex == null) Assert.True(tag == 323 && img.GetBytes().SequenceEqual(got!.GetBytes()), $"{what} tag {tag}: decoded something else");
+                else Assert.True(ex is ImageFormatException || ex is ImageNotSupportedException, $"{what} tag {tag}: {ex.GetType().Name}");
+                Assert.True(GC.GetTotalAllocatedBytes(true) - before < 64 << 20, $"{what} tag {tag}: allocated too much");
+                Assert.True(sw.Elapsed.TotalSeconds < 2, $"{what} tag {tag}: took {sw.Elapsed}");
             }
         }
     }
