@@ -195,11 +195,11 @@ namespace PixCodec
                     1 when Bits <= 8 => SampleType.UInt8,
                     1 when Bits <= 16 => SampleType.UInt16,
                     1 when Bits <= 32 => SampleType.UInt32,
-                    1 when Bits == 64 && UniformBits => SampleType.UInt64,
+                    1 when Bits <= 64 => SampleType.UInt64,
                     2 when Bits <= 8 => SampleType.Int8,
                     2 when Bits <= 16 => SampleType.Int16,
                     2 when Bits <= 32 => SampleType.Int32,
-                    2 when Bits == 64 && UniformBits => SampleType.Int64,
+                    2 when Bits <= 64 => SampleType.Int64,
                     3 when Bits == 16 && UniformBits => SampleType.Float16,
                     3 when (Bits == 24 || Bits == 32) && UniformBits => SampleType.Float32,
                     3 when Bits == 64 && UniformBits => SampleType.Float64,
@@ -382,9 +382,9 @@ namespace PixCodec
             if (Predictor == 1) { }
             else if (!plain || YccPlanar)
             {
-                if (Kind == TiffChunkKind.Packed && !IsCcitt)
-                    throw new ImageNotSupportedException($"TIFF: a predictor on {Bits}-bit samples is not supported");
-                throw new ImageNotSupportedException("TIFF: predictor not supported with this compression");
+                // integers of odd depths: differences modulo 2^bits, undone while unpacking
+                if (!(Kind == TiffChunkKind.Packed && !IsCcitt && Predictor == 2))
+                    throw new ImageNotSupportedException("TIFF: predictor not supported with this compression");
             }
             else if (Predictor == 2)
             {
@@ -1024,7 +1024,7 @@ namespace PixCodec
         {
             int rc = RawChannels, bps = Bps;
             bool contig = ps == rc;
-            if (contig && UniformBits && Bits == 1 && rc == 1)
+            if (contig && UniformBits && Bits == 1 && rc == 1 && Predictor != 2)
             {
                 // bilevel rows: whole bytes at a time
                 byte on = (byte)(_scale[0] ? 255 : 1);
@@ -1048,31 +1048,55 @@ namespace PixCodec
                 return;
             }
             bool signed = Format == 2;
-            long pos = contig ? (long)sx * _pixelBits : (long)sx * BitsPer[plane];
-            for (int x = 0; x < n; x++)
+            // With the horizontal predictor (differences modulo 2^bits between neighbouring pixels) the row has to be
+            // walked from its first pixel even when only a part of it is wanted.
+            bool predict = Predictor == 2;
+            int start = predict ? 0 : sx;
+            long pos = contig ? (long)start * _pixelBits : (long)start * BitsPer[plane];
+            ulong* acc = stackalloc ulong[predict ? Math.Min(ps, 64) : 1];
+            if (predict && ps > 64) throw new ImageNotSupportedException("TIFF: predictor on packed samples with more than 64 samples per pixel is not supported");
+            for (int c = 0; predict && c < ps; c++) acc[c] = 0;
+            for (int x = start; x < sx + n; x++)
                 for (int c = 0; c < ps; c++)
                 {
                     int ch = contig ? c : plane;
                     int b = BitsPer[ch];
-                    // gather the bytes the sample touches (at most 5 for 32 bits at an odd offset)
+                    // gather the bytes the sample touches (up to 9 for 64 bits at an odd offset)
                     long first = pos >> 3;
                     int end = (int)(pos & 7) + b, nb = (end + 7) >> 3;
-                    ulong v = 0;
-                    for (int k = 0; k < nb; k++) v = v << 8 | s[first + k];
-                    v = v >> (nb * 8 - end) & _inMax[ch];
+                    ulong v;
+                    if (nb <= 8)
+                    {
+                        v = 0;
+                        for (int k = 0; k < nb; k++) v = v << 8 | s[first + k];
+                        v = v >> (nb * 8 - end) & _inMax[ch];
+                    }
+                    else
+                    {
+                        UInt128 w = 0;
+                        for (int k = 0; k < nb; k++) w = w << 8 | s[first + k];
+                        v = (ulong)(w >> (nb * 8 - end)) & _inMax[ch];
+                    }
                     pos += b;
+                    if (predict) v = acc[c] = (acc[c] + v) & _inMax[ch];
+                    if (x < sx) continue;
                     if (signed)
                     {
-                        ulong sb = 1UL << (b - 1);
-                        v = (v ^ sb) - sb; // sign extend
+                        if (b < 64)
+                        {
+                            ulong sb = 1UL << (b - 1);
+                            v = (v ^ sb) - sb; // sign extend
+                        }
                     }
-                    else if (_scale[ch]) v = (v * _outMax + _inMax[ch] / 2) / _inMax[ch];
-                    byte* o = d + ((long)x * rc + ch) * bps;
+                    else if (_scale[ch])
+                        v = b <= 32 && bps <= 4 ? (v * _outMax + _inMax[ch] / 2) / _inMax[ch] : (ulong)(((UInt128)v * _outMax + _inMax[ch] / 2) / _inMax[ch]);
+                    byte* o = d + ((long)(x - sx) * rc + ch) * bps;
                     switch (bps)
                     {
                         case 1: *o = (byte)v; break;
                         case 2: *(ushort*)o = (ushort)v; break;
-                        default: *(uint*)o = (uint)v; break;
+                        case 4: *(uint*)o = (uint)v; break;
+                        default: *(ulong*)o = v; break;
                     }
                 }
         }

@@ -238,7 +238,13 @@ def encode_chunk(a, p, e, plane=None):
             b = b[:, :, ::-1]
         raw = np.ascontiguousarray(b).tobytes()
     elif any(w not in (8, 16, 32, 64) for w in widths) or len(set(widths)) > 1:
-        assert pred == 1
+        assert pred in (1, 2)
+        if pred == 2:
+            # differences between neighbouring pixels, modulo 2^bits per sample
+            v = a.astype(np.int64).astype(np.uint64)
+            m = np.array([(1 << w) - 1 for w in widths], np.uint64)
+            v[:, 1:, :] = (v[:, 1:, :] - v[:, :-1, :]) & m
+            a = v
         raw = pack_bits_rows(a.reshape(rows, cols * s), widths * cols)
         row_bytes = raw.shape[1]
         raw = raw.tobytes()
@@ -532,7 +538,13 @@ def third_party(name, path, p, page=0):
         except Exception:
             t = None
         if t is not None and t.size:
-            note('tifffile', t)
+            who = 'tifffile'
+            if p.get('predictor', 1) == 2 and not whole and t.dtype.kind == 'u' and len(set(widths)) == 1:
+                # tifffile undoes the predictor on the unpacked integers without wrapping at the sample depth:
+                # its sums are right modulo 2^bits
+                t = t & t.dtype.type((1 << widths[0]) - 1)
+                who = 'tifffile (masked to the sample depth)'
+            note(who, t)
     # libtiff ignores the Predictor tag for PackBits (tifffile honours it, as does PixCodec), so skip that combination.
     libtiff_ok = not (p.get('compression') == PACKBITS and p.get('predictor', 1) != 1) and p.get('compression', 1) < 34000
     simple = page == 0 and whole and pm in (1, 2) and src.shape[2] in (1, 3) and 'extrasamples' not in p
@@ -1147,6 +1159,23 @@ def gen_depths():
     emit('f24_rgb_planar_lzw', dict(arr=f24, float24=True, sampleformat=3, planar=2, compression=LZW))
     emit('f24_gray_deflate_tiled', dict(arr=np.tile(f24[:, :, :1], (3, 2, 1))[:37, :41], float24=True, sampleformat=3,
                                        compression=DEFLATE, tile=(16, 16)))
+
+    # Integers of 33..63 bits and the horizontal predictor on packed samples: nothing reads these. Tried: tifffile
+    # (returns an empty array), imagecodecs.packints_decode ("bitspersample out of range"), GDAL ("Unsupported TIFF
+    # configuration"), libtiff via OpenCV / Pillow / libvips (no unpacking of odd depths, "predictor not supported").
+    why = 'no decoder unpacks integers wider than 32 bits that are not 64 bits (tifffile, imagecodecs, GDAL, libtiff, libvips tried)'
+    emit('u40_gray', dict(arr=rnd(40), bits=40, rps=5, unverified=why))
+    emit('be_u48_rgb_lzw', dict(arr=rnd(48, 3), bits=48, compression=LZW, unverified=why), byteorder='>')
+    emit('u63_gray_planar2_deflate', dict(arr=rnd(63, 2), bits=63, compression=DEFLATE, planar=2, extrasamples=[0], photometric=1, unverified=why))
+    emit('i36_gray', dict(arr=rnd(36, signed=True), bits=36, unverified=why))
+    # Horizontal predictor on packed samples (differences modulo 2^bits): libtiff and GDAL refuse the combination,
+    # tifffile reads the unsigned cases.
+    emit('gray12bit_lzw_pred2', dict(arr=rnd(12), bits=12, compression=LZW, predictor=2, rps=6))
+    emit('rgb5bit_deflate_pred2_tiled', dict(arr=rnd(5, 3, 41, 37), bits=5, compression=DEFLATE, predictor=2, tile=(16, 16)))
+    emit('be_rgb10bit_planar_lzw_pred2', dict(arr=rnd(10, 3), bits=10, compression=LZW, predictor=2, planar=2), byteorder='>')
+    why = 'horizontal predictor on signed / 1-bit packed samples: tifffile, GDAL and libtiff all refuse it'
+    emit('i12_rgb_planar_lzw_pred2', dict(arr=rnd(12, 3, signed=True), bits=12, compression=LZW, predictor=2, planar=2, unverified=why))
+    emit('gray1_deflate_pred2', dict(arr=rnd(1, 1, 37, 21), bits=1, compression=DEFLATE, predictor=2, unverified=why))
 
     # Signed samples of odd depths and the float predictor on 24-bit floats: tifffile and the libtiff front ends refuse
     # them, GDAL (rasterio) reads them. GDAL unpacks the bits without looking at the sign (it reports unsigned data),
