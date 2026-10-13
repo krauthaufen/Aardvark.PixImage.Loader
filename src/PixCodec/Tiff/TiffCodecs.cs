@@ -21,8 +21,8 @@ namespace PixCodec
             // Old-style LZW (libtiff's "compat" mode) packs codes LSB first, so its 9-bit Clear code reads 00 01.
             if (src.Length >= 2 && src[0] == 0 && (src[1] & 1) != 0) return DecodeOldStyle(src, dst, dstLen);
 
-            int* offs = stackalloc int[MaxCodes];
-            int* lens = stackalloc int[MaxCodes];
+            // per code: output offset of its string << 32 | length
+            ulong* tab = stackalloc ulong[MaxCodes];
             int n = src.Length, sp = 0, op = 0;
             ulong buf = 0;
             int bits = 0, width = 9, next = First;
@@ -56,31 +56,39 @@ namespace PixCodec
                         dst[op] = (byte)code;
                         len = 1;
                     }
+                    else if (code > Eoi)
+                    {
+                        int so;
+                        if (code < next) { ulong e = tab[code]; so = (int)(e >> 32); len = (int)e; }
+                        else if (code == next && prevLen > 0) { so = prevPos; len = prevLen + 1; } // KwKwK: overlaps its own output
+                        else throw new ImageFormatException("TIFF: corrupt LZW data");
+                        byte* d = dst + op, f = dst + so;
+                        if (op + len + 8 <= dstLen && (op - so >= 8 || op - so >= len))
+                        {
+                            // 8 bytes at a time, possibly writing a few bytes too many (they are overwritten by what follows)
+                            byte* end = d + len;
+                            do
+                            {
+                                Unsafe.WriteUnaligned(d, Unsafe.ReadUnaligned<ulong>(f));
+                                d += 8; f += 8;
+                            } while (d < end);
+                        }
+                        else
+                        {
+                            if (len > dstLen - op) len = dstLen - op;
+                            for (int i = 0; i < len; i++) d[i] = f[i];
+                        }
+                    }
                     else if (code == Clear)
                     {
                         width = 9; next = First; prevLen = 0;
                         continue;
                     }
-                    else if (code == Eoi) break;
-                    else
-                    {
-                        int so;
-                        if (code < next) { so = offs[code]; len = lens[code]; }
-                        else if (code == next && prevLen > 0) { so = prevPos; len = prevLen + 1; } // KwKwK: overlaps its own output
-                        else throw new ImageFormatException("TIFF: corrupt LZW data");
-                        if (len > dstLen - op) len = dstLen - op;
-                        byte* d = dst + op, f = dst + so;
-                        if (so + len <= op)
-                        {
-                            if (len <= 8 && op + 8 <= dstLen) Unsafe.WriteUnaligned(d, Unsafe.ReadUnaligned<ulong>(f));
-                            else Buffer.MemoryCopy(f, d, len, len);
-                        }
-                        else
-                            for (int i = 0; i < len; i++) d[i] = f[i];
-                    }
+                    else break; // EOI
+
                     if (prevLen > 0 && next < MaxCodes)
                     {
-                        offs[next] = prevPos; lens[next] = prevLen + 1;
+                        tab[next] = (ulong)prevPos << 32 | (uint)(prevLen + 1);
                         next++;
                         // early change: the width grows one code before the table would actually need it
                         if (next == (1 << width) - 1 && width < 12) width++;
@@ -364,8 +372,21 @@ namespace PixCodec
         public static void UndoFloat(byte* row, int count, int stride, int bps, byte* tmp)
         {
             int n = count * bps;
-            for (int i = stride; i < n; i++) row[i] = (byte)(row[i] + row[i - stride]);
+            if (stride == 1)
+            {
+                byte v = row[0];
+                for (int i = 1; i < n; i++) row[i] = v = (byte)(v + row[i]);
+            }
+            else
+                for (int i = stride; i < n; i++) row[i] = (byte)(row[i] + row[i - stride]);
             Buffer.MemoryCopy(row, tmp, n, n);
+            if (bps == 4 && BitConverter.IsLittleEndian)
+            {
+                byte* p0 = tmp, p1 = tmp + count, p2 = p1 + count, p3 = p2 + count;
+                uint* o = (uint*)row;
+                for (int i = 0; i < count; i++) o[i] = (uint)(p0[i] << 24 | p1[i] << 16 | p2[i] << 8 | p3[i]);
+                return;
+            }
             for (int b = 0; b < bps; b++)
             {
                 byte* plane = tmp + (long)b * count;

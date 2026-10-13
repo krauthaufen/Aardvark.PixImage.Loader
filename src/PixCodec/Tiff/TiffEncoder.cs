@@ -387,11 +387,4 @@ namespace PixCodec
             return b;
         }
     }
-
-    /// <summary>CCITT Group 3 / Group 4 fax decoding (compression 2, 3, 4).</summary>
-    internal static unsafe class TiffCcitt
-    {
-        public static void Decode(ReadOnlySpan<byte> src, byte* dst, int width, int rows, int compression, long options)
-            => throw new ImageNotSupportedException("TIFF: CCITT compression is not supported");
-    }
 }

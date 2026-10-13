@@ -258,7 +258,7 @@ namespace PixCodec
 
             // A header can claim any size. Refuse images that cannot possibly come out of the stored bytes
             // before allocating for them.
-            long raw = ((long)Width * Spp * Bits + 7) / 8 * Height;
+            double raw = Math.Ceiling((double)Width * Spp * Bits / 8) * Height; // double: a lying header may overflow long
             if (IsCcitt)
             {
                 // every coded row needs at least one bit
@@ -269,7 +269,7 @@ namespace PixCodec
                 long ratio = Compression switch { 1 => 1, 32773 => 64, 8 or 32946 => 1040, _ => 4096 };
                 long allowed = sum > long.MaxValue / 8192 ? long.MaxValue : sum * ratio + 1024;
                 if (empty > 0) allowed += Math.Min((long)empty * ChunkBytes(ChunkH, out _), 256L << 20);
-                if (YccPacked) raw = raw / 3 + 2; // at least one luma byte per pixel
+                if (YccPacked) raw /= 3; // at least one luma byte per pixel
                 if (raw > allowed) throw new ImageFormatException("TIFF: image size inconsistent with the data size");
             }
 

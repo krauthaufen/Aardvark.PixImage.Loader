@@ -859,6 +859,79 @@ def gen_jpeg():
     os.remove(src)
 
 
+def gen_ccitt():
+    """Bilevel fax compressions, written by libtiff (Pillow / ImageMagick), references decoded by libtiff (Pillow)."""
+    rng = np.random.default_rng(5)
+
+    def runs_image(w, h, max_run):
+        # random run lengths, rows partly derived from the previous one to exercise the vertical / pass modes
+        a = np.zeros((h, w), bool)
+        for y in range(h):
+            if y and rng.random() < 0.6:
+                row = np.roll(a[y - 1], int(rng.integers(-3, 4)))
+                for _ in range(int(rng.integers(0, 4))):
+                    x = int(rng.integers(0, w))
+                    row[x:x + int(rng.integers(1, 40))] ^= True
+                a[y] = row
+                continue
+            x, v = 0, rng.random() < 0.3
+            while x < w:
+                r = int(rng.integers(0, max_run)) if rng.random() < 0.8 else int(rng.integers(0, 70))
+                a[y, x:x + r] = v
+                x += r
+                v = not v
+        return a
+
+    text = test_pattern(203, 61, 1, np.uint8, 8)[:, :, 0] > 140
+    wide = runs_image(2700, 10, 2700)        # runs beyond 2560 need several make-up codes
+    busy = runs_image(331, 50, 40)
+    cases = [
+        ('ccitt_g4_text', text, 'group4', {}),
+        ('ccitt_g4_wide_runs', wide, 'group4', {}),
+        ('ccitt_g4_busy_multistrip', busy, 'group4', {278: 16}),
+        ('ccitt_g4_white', np.zeros((9, 50), bool), 'group4', {}),
+        ('ccitt_g4_black', np.ones((9, 50), bool), 'group4', {}),
+        ('ccitt_g4_1x1', np.ones((1, 1), bool), 'group4', {}),
+        ('ccitt_g4_miniswhite', text, 'group4', {262: 0}),
+        ('ccitt_g3_2d_miniswhite', busy, 'group3', {262: 0, 292: 1}),
+        ('ccitt_g3_1d_text', text, 'group3', {}),
+        ('ccitt_g3_1d_wide_runs', wide, 'group3', {278: 5}),
+        ('ccitt_g3_2d_busy', busy, 'group3', {292: 1}),
+        ('ccitt_g3_2d_fill_text', text, 'group3', {292: 5, 278: 20}),
+        ('ccitt_g3_1d_fill_busy', busy, 'group3', {292: 4}),
+        ('ccitt_rle_text', text, 'tiff_ccitt', {}),
+        ('ccitt_rle_wide_runs', wide, 'tiff_ccitt', {278: 7}),
+        ('ccitt_rle_busy', busy, 'tiff_ccitt', {}),
+    ]
+    for name, a, comp, info in cases:
+        path = os.path.join(OUT, name + '.tif')
+        Image.fromarray(a).save(path, compression=comp, tiffinfo=info)
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            assert int(pg.compression) == {'group4': 4, 'group3': 3, 'tiff_ccitt': 2}[comp], (name, pg.compression)
+            if 292 in info:
+                assert pg.tags[292].value == info[292], (name, pg.tags[292].value)
+            desc = f'photometric {int(pg.photometric)}, {len(pg.dataoffsets)} strip(s)'
+        ref = np.asarray(Image.open(path).convert('L'))
+        assert np.array_equal(ref > 0, a), name
+        emit_external(name, path, ref, [f'pillow (libtiff), {desc}'])
+    # ImageMagick: MinIsBlack photometric / LSB fill order variants
+    src = os.path.join(OUT, '_src.png')
+    Image.fromarray(busy).save(src)
+    for name, args in [('ccitt_g4_magick', ['-compress', 'Group4']),
+                       ('ccitt_g4_magick_lsb', ['-compress', 'Group4', '-define', 'tiff:fill-order=lsb']),
+                       ('ccitt_g3_magick_lsb', ['-compress', 'Fax', '-define', 'tiff:fill-order=lsb', '-define', 'tiff:rows-per-strip=32'])]:
+        path = os.path.join(OUT, name + '.tif')
+        subprocess.run(['magick', src] + args + [path], check=True)
+        with tifffile.TiffFile(path) as t:
+            pg = t.pages[0]
+            desc = f'compression {int(pg.compression)}, photometric {int(pg.photometric)}, fillorder {int(pg.fillorder)}, {len(pg.dataoffsets)} strip(s)'
+        ref = np.asarray(Image.open(path).convert('L'))
+        assert np.array_equal(ref > 0, busy), name
+        emit_external(name, path, ref, [f'pillow (libtiff), magick-written: {desc}'])
+    os.remove(src)
+
+
 def main():
     if os.path.isdir(OUT):
         for f in os.listdir(OUT):
@@ -873,6 +946,7 @@ def main():
     gen_extras()
     gen_structure()
     gen_external()
+    gen_ccitt()
     gen_ycbcr()
     gen_jpeg()
     unverified = [n for n, by in SUMMARY if not by]
