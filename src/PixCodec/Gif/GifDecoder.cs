@@ -22,9 +22,11 @@ namespace PixCodec
             FirstFrame,
         }
 
-        // An LZW code is at least 3 bits wide and expands to at most 4095 pixels.
+        // Plausibility bound for sizes read from headers: an LZW code is at least 3 bits wide and expands to at most
+        // 4095 pixels, so a file cannot paint more than this many pixels per byte. Any image that fills its canvas
+        // passes by a wide margin; small canvases are always allowed.
         const long MaxPixelsPerByte = 10923;
-        const long AlwaysAllowedPixels = 1L << 24;
+        const long AlwaysAllowedPixels = 1L << 20;
 
         public int Width, Height, FrameCount;
         public readonly Mode FrameMode;

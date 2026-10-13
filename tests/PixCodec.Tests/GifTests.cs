@@ -742,6 +742,37 @@ public class GifTests(ITestOutputHelper output)
             output.WriteLine($"decode that file: {mp / t:F1} MP/s, PSNR {Psnr(photo, back, 255):F1} dB");
         }
         {
+            // where the encoder's time goes
+            var px = new uint[W * H];
+            var src = photo.GetData<byte>();
+            for (int i = 0; i < px.Length; i++) px[i] = src[i * 3] | (uint)src[i * 3 + 1] << 8 | (uint)src[i * 3 + 2] << 16 | 0xFF000000u;
+            output.WriteLine($"  distinct color scan (overflows early): {mp / Best(3, () => new GifColorSet().AddAll(px)):F0} MP/s");
+            var q = new GifQuantizer();
+            output.WriteLine($"  histogram: {mp / Best(3, () => new GifQuantizer().Add(px)):F0} MP/s");
+            q.Add(px);
+            uint[] colors = null!;
+            output.WriteLine($"  palette from histogram: {Best(3, () => colors = q.BuildPalette(256, 3)) * 1000:F1} ms");
+            var idx = new byte[px.Length];
+            output.WriteLine($"  map, no dither: {mp / Best(3, () => new GifPalette(colors, colors.Length, false, null).Map(px, idx, W, H, GifDither.None)):F0} MP/s");
+            output.WriteLine($"  map, Floyd-Steinberg: {mp / Best(3, () => new GifPalette(colors, colors.Length, false, null).Map(px, idx, W, H, GifDither.FloydSteinberg)):F0} MP/s");
+            new GifPalette(colors, colors.Length, false, null).Map(px, idx, W, H, GifDither.None);
+            output.WriteLine($"  LZW encode: {mp / Best(3, () => GifLzw.Encode(idx, 8, new MemoryStream())):F0} MP/s");
+            var lz = new MemoryStream();
+            GifLzw.Encode(idx, 8, lz);
+            var blocks = lz.ToArray();
+            var codes = new MemoryStream();
+            for (int p = 1; blocks[p] != 0; p += blocks[p] + 1) codes.Write(blocks, p + 1, blocks[p]);
+            var stream = codes.ToArray();
+            var outIdx = new byte[idx.Length];
+            output.WriteLine($"  LZW decode: {mp / Best(5, () => GifLzw.Decode(stream, 8, outIdx)):F0} MP/s ({stream.Length * 8.0 / idx.Length:F2} bits per pixel)");
+            var set = new GifColorSet();
+            var q8 = new uint[px.Length];
+            for (int i = 0; i < px.Length; i++) q8[i] = colors[idx[i]];
+            set.AddAll(q8);
+            output.WriteLine($"  distinct color scan (256 colors): {mp / Best(3, () => new GifColorSet().AddAll(q8)):F0} MP/s");
+            output.WriteLine($"  exact map: {mp / Best(3, () => new GifPalette(set.Colors, set.Count, false, set).Map(q8, idx, W, H, GifDither.None)):F0} MP/s");
+        }
+        {
             // an image that already has 256 colors (the decode of the above): lossless path
             var indexed = Gif.Decode(Encode(photo, new GifEncodeOptions { Dither = GifDither.None }));
             byte[] gif = null!;

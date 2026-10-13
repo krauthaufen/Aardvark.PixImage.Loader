@@ -17,34 +17,39 @@ namespace PixCodec
         /// </summary>
         public static int Decode(ReadOnlySpan<byte> src, int minCodeSize, Span<byte> dst)
         {
-            // Table entry: prefix code (bits 0..11) | last byte of the string (16..23) | first byte of the string (24..31).
-            uint* entry = stackalloc uint[MaxCodes];
+            // The string of a table entry is "previous string + first byte of the current one", and exactly those bytes
+            // sit next to each other in the output: where the previous string was written, one byte longer. So an
+            // entry is just (address, length) and emitting a code is a copy from earlier output - no prefix chains.
+            // Single byte root codes point into a small identity table instead.
+            byte** start = stackalloc byte*[MaxCodes];
             ushort* length = stackalloc ushort[MaxCodes];
 
             int clear = 1 << minCodeSize, eoi = clear + 1;
-            for (int i = 0; i < clear; i++)
+            byte* roots = stackalloc byte[clear + 2 + 8];      // 8 bytes of slack for the wide loads below
+            for (int i = 0; i < clear + 2 + 8; i++) roots[i] = (byte)i;
+            for (int i = 0; i < clear + 2; i++)                 // clear/end are never looked up, but defined
             {
-                entry[i] = (uint)(byte)i << 16 | (uint)(byte)i << 24;
+                start[i] = roots + i;
                 length[i] = 1;
             }
-            // Never produced by a valid stream; defined so that corrupt data cannot read uninitialized stack.
-            entry[clear] = entry[eoi] = 0;
-            length[clear] = length[eoi] = 1;
 
             int codeSize = minCodeSize + 1;
             uint mask = (1u << codeSize) - 1;
             int avail = clear + 2;
-            int prev = -1;
+            bool first = true;          // next code is the first after a clear: nothing to add to the table
+            byte* prevStart = null;     // where the previous string went in the output
+            int prevLength = 0;
 
             ulong bits = 0;
             int nbits = 0;
-            int n = dst.Length, op = 0;
+            int n = dst.Length;
             if (n == 0) return 0;
 
             fixed (byte* s0 = src)
             fixed (byte* d0 = dst)
             {
                 byte* sp = s0, send = s0 + src.Length;
+                byte* dp = d0, dend = d0 + n;
                 while (true)
                 {
                     if (nbits < codeSize)
@@ -71,71 +76,76 @@ namespace PixCodec
                         codeSize = minCodeSize + 1;
                         mask = (1u << codeSize) - 1;
                         avail = clear + 2;
-                        prev = -1;
+                        first = true;
                         continue;
                     }
                     if (code == eoi) break;
 
-                    if (prev < 0)
+                    byte* from;
+                    int len;
+                    if (first)
                     {
                         if (code > clear) throw new ImageFormatException("invalid GIF LZW code");
-                        d0[op++] = (byte)code;
-                        prev = code;
-                        if (op == n) break;
+                        first = false;
+                        from = roots + code;
+                        len = 1;
                         // Only with min code size 1: the first table entry (4) already needs a third bit.
                         if (avail == 1 << codeSize) { codeSize++; mask = (1u << codeSize) - 1; }
-                        continue;
-                    }
-
-                    uint pe = entry[prev];
-                    uint firstOfCode;
-                    if (code < avail) firstOfCode = entry[code] >> 24;
-                    else if (code == avail && avail < MaxCodes) firstOfCode = pe >> 24; // the string being defined right now
-                    else throw new ImageFormatException("invalid GIF LZW code");
-
-                    if (avail < MaxCodes)
-                    {
-                        entry[avail] = (uint)prev | firstOfCode << 16 | (pe & 0xFF000000u);
-                        length[avail] = (ushort)(length[prev] + 1);
-                        avail++;
-                        // When the table is full the width stays at 12 bits until the encoder sends a clear code.
-                        if (avail == 1 << codeSize && codeSize < 12)
-                        {
-                            codeSize++;
-                            mask = (1u << codeSize) - 1;
-                        }
-                    }
-
-                    // Strings are written back to front straight into the output.
-                    int len = length[code];
-                    int c = code;
-                    if (len <= n - op)
-                    {
-                        byte* p = d0 + op + len;
-                        op += len;
-                        do
-                        {
-                            uint e = entry[c];
-                            *--p = (byte)(e >> 16);
-                            c = (int)(e & 0xFFF);
-                        } while (--len > 0);
-                        if (op == n) break;
                     }
                     else
                     {
-                        for (int q = op + len - 1; q >= op; q--)
+                        if (code < avail)
                         {
-                            uint e = entry[c];
-                            if (q < n) d0[q] = (byte)(e >> 16);
-                            c = (int)(e & 0xFFF);
+                            from = start[code];
+                            len = length[code];
                         }
-                        op = n;
-                        break;
+                        else if (code == avail && avail < MaxCodes)
+                        {
+                            // The string being defined right now: the previous one plus its own first byte. Its last
+                            // byte is not in the output yet; it is patched in after the copy.
+                            from = prevStart;
+                            len = prevLength + 1;
+                        }
+                        else throw new ImageFormatException("invalid GIF LZW code");
+
+                        if (avail < MaxCodes)
+                        {
+                            start[avail] = prevStart;
+                            length[avail] = (ushort)(prevLength + 1);
+                            avail++;
+                            // When the table is full the width stays at 12 bits until the encoder sends a clear code.
+                            if (avail == 1 << codeSize && codeSize < 12)
+                            {
+                                codeSize++;
+                                mask = (1u << codeSize) - 1;
+                            }
+                        }
                     }
-                    prev = code;
+
+                    prevStart = dp;
+                    prevLength = len;
+                    if (dend - dp >= len + 8)
+                    {
+                        // 8 bytes at a time; what is written beyond the string is overwritten by the next one.
+                        // Source and destination are at least 8 apart whenever a second step is needed.
+                        *(ulong*)dp = *(ulong*)from;
+                        for (int k = 8; k < len; k += 8) *(ulong*)(dp + k) = *(ulong*)(from + k);
+                        if (from + len > dp) dp[len - 1] = *dp;
+                        dp += len;
+                    }
+                    else
+                    {
+                        // Close to the end of the output: bytewise, dropping what does not fit.
+                        int room = (int)(dend - dp);
+                        int m = Math.Min(len, room);
+                        for (int k = 0; k < m; k++) dp[k] = from[k];
+                        if (from + len > dp && len <= room) dp[len - 1] = *dp;
+                        dp += m;
+                        if (dp == dend) break;
+                    }
                 }
+                return (int)(dp - d0);
             }
-            return op;
         }
 
         const int HashBits = 13;

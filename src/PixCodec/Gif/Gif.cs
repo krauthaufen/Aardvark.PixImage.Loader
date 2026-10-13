@@ -47,8 +47,9 @@ namespace PixCodec
 
         /// <summary>
         /// Upper bound for the logical screen and for a single frame, in pixels; larger files are rejected with
-        /// <see cref="ImageNotSupportedException"/>. Independent of this, a canvas or frame of more than 16 megapixels
-        /// that the file is too short to ever fill is rejected as malformed.
+        /// <see cref="ImageNotSupportedException"/>. Independent of this, a canvas or frame of more than one megapixel
+        /// is rejected as malformed when the file is too short to ever fill it (fewer bytes than pixels / 10923, the
+        /// best LZW can do) - that also hits the rare valid file with tiny frames on a huge, mostly empty canvas.
         /// </summary>
         public long MaxPixels { get; set; } = 1L << 28;
     }

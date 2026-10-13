@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 
 namespace PixCodec
 {
@@ -225,22 +226,53 @@ namespace PixCodec
                     cells++;
                 }
 
-            var qr = new float[count]; var qg = new float[count]; var qb = new float[count];
+            int vc = Vector<float>.Count;
+            int padded = (count + vc - 1) / vc * vc;
+            var qr = new float[padded]; var qg = new float[padded]; var qb = new float[padded];
             var sw = new long[count]; var sr = new long[count]; var sg = new long[count]; var sb = new long[count];
+            Span<float> lane = stackalloc float[vc];
+            for (int j = 0; j < vc; j++) lane[j] = j;
+            var iota = new Vector<float>(lane);
             for (int it = 0; it < iterations; it++)
             {
+                qr.AsSpan().Fill(1e6f); qg.AsSpan().Fill(1e6f); qb.AsSpan().Fill(1e6f);
                 for (int j = 0; j < count; j++) { qr[j] = (float)pr[j]; qg[j] = (float)pg[j]; qb[j] = (float)pb[j]; }
                 Array.Clear(sw); Array.Clear(sr); Array.Clear(sg); Array.Clear(sb);
                 for (int c = 0; c < cells; c++)
                 {
                     float r = xr[c], g = xg[c], b = xb[c];
-                    float best = float.MaxValue;
                     int bj = 0;
-                    for (int j = 0; j < count; j++)
+                    if (Vector.IsHardwareAccelerated)
                     {
-                        float dr = r - qr[j], dg = g - qg[j], db = b - qb[j];
-                        float d = dr * dr + dg * dg + db * db;
-                        if (d < best) { best = d; bj = j; }
+                        var vr = new Vector<float>(r); var vg = new Vector<float>(g); var vb = new Vector<float>(b);
+                        var best = new Vector<float>(float.MaxValue);
+                        var bestIndex = Vector<float>.Zero;
+                        var index = iota;
+                        var step = new Vector<float>(vc);
+                        for (int j = 0; j < padded; j += vc)
+                        {
+                            var dr = vr - new Vector<float>(qr, j); var dg = vg - new Vector<float>(qg, j); var db = vb - new Vector<float>(qb, j);
+                            var d = dr * dr + dg * dg + db * db;
+                            var less = Vector.LessThan(d, best);
+                            best = Vector.ConditionalSelect(less, d, best);
+                            bestIndex = Vector.ConditionalSelect(less, index, bestIndex);
+                            index += step;
+                        }
+                        // smaller distance, then smaller index: independent of the vector width
+                        float rd = best[0], ri = bestIndex[0];
+                        for (int k = 1; k < vc; k++)
+                            if (best[k] < rd || (best[k] == rd && bestIndex[k] < ri)) { rd = best[k]; ri = bestIndex[k]; }
+                        bj = (int)ri;
+                    }
+                    else
+                    {
+                        float best = float.MaxValue;
+                        for (int j = 0; j < count; j++)
+                        {
+                            float dr = r - qr[j], dg = g - qg[j], db = b - qb[j];
+                            float d = dr * dr + dg * dg + db * db;
+                            if (d < best) { best = d; bj = j; }
+                        }
                     }
                     int i = ix[c];
                     sw[bj] += cw[i]; sr[bj] += cr[i]; sg[bj] += cg[i]; sb[bj] += cb[i];
@@ -272,26 +304,59 @@ namespace PixCodec
             Colors = colors; ColorCount = count;
             TransparentIndex = transparentSlot ? count : -1;
             _exact = exact;
-            _pr = new int[count]; _pg = new int[count]; _pb = new int[count];
+            // Padded to whole vectors with a color far away from everything.
+            int padded = (count + Vector<int>.Count - 1) / Vector<int>.Count * Vector<int>.Count;
+            _pr = new int[padded]; _pg = new int[padded]; _pb = new int[padded];
+            _pr.AsSpan().Fill(1 << 12); _pg.AsSpan().Fill(1 << 12); _pb.AsSpan().Fill(1 << 12);
             for (int i = 0; i < count; i++)
             {
                 _pr[i] = (int)(colors[i] & 255); _pg[i] = (int)(colors[i] >> 8 & 255); _pb[i] = (int)(colors[i] >> 16 & 255);
             }
         }
 
-        public bool IsExact => _exact != null;
-
+        /// <summary>Index of the closest palette entry (squared RGB distance), the lowest index on ties.</summary>
         int Nearest(int r, int g, int b)
         {
             int[] pr = _pr, pg = _pg, pb = _pb;
-            int best = int.MaxValue, bi = 0;
-            for (int i = 0; i < pr.Length; i++)
+            if (!Vector.IsHardwareAccelerated)
             {
-                int dr = r - pr[i], dg = g - pg[i], db = b - pb[i];
-                int d = dr * dr + dg * dg + db * db;
-                if (d < best) { best = d; bi = i; }
+                int bestD = int.MaxValue, bi = 0;
+                for (int i = 0; i < ColorCount; i++)
+                {
+                    int dr = r - pr[i], dg = g - pg[i], db = b - pb[i];
+                    int d = dr * dr + dg * dg + db * db;
+                    if (d < bestD) { bestD = d; bi = i; }
+                }
+                return bi;
             }
-            return bi;
+            var vr = new Vector<int>(r); var vg = new Vector<int>(g); var vb = new Vector<int>(b);
+            var best = new Vector<int>(int.MaxValue);
+            var bestIndex = Vector<int>.Zero;
+            var index = Iota;
+            var step = new Vector<int>(Vector<int>.Count);
+            for (int i = 0; i < pr.Length; i += Vector<int>.Count)
+            {
+                var dr = vr - new Vector<int>(pr, i); var dg = vg - new Vector<int>(pg, i); var db = vb - new Vector<int>(pb, i);
+                var d = dr * dr + dg * dg + db * db;
+                var less = Vector.LessThan(d, best);
+                best = Vector.ConditionalSelect(less, d, best);
+                bestIndex = Vector.ConditionalSelect(less, index, bestIndex);
+                index += step;
+            }
+            // Reducing with "smaller distance, then smaller index" gives the same answer for every vector width.
+            int rd = best[0], ri = bestIndex[0];
+            for (int k = 1; k < Vector<int>.Count; k++)
+                if (best[k] < rd || (best[k] == rd && bestIndex[k] < ri)) { rd = best[k]; ri = bestIndex[k]; }
+            return ri;
+        }
+
+        static readonly Vector<int> Iota = MakeIota();
+
+        static Vector<int> MakeIota()
+        {
+            Span<int> v = stackalloc int[Vector<int>.Count];
+            for (int i = 0; i < v.Length; i++) v[i] = i;
+            return new Vector<int>(v);
         }
 
         int Lookup(int r, int g, int b)
