@@ -381,7 +381,7 @@ namespace PixCodec
                                 int* row = p + (long)j * w;
                                 Analyze53Row(row, nL, w - nL, a, t);
                                 if (((j + b) & 1) == 0 && nL > 0)
-                                    Buffer.MemoryCopy(row, d + (long)((j + b) >> 1) * lw, nL * 4L, nL * 4L);
+                                    Buffer.MemoryCopy(row, d + (long)((j - b) >> 1) * lw, nL * 4L, nL * 4L);
                             }
                     });
                     break;
@@ -422,7 +422,7 @@ namespace PixCodec
                                 for (int n = 0; n < nH; n++) row[nL + n] = O[n];
                             }
                             if (((j + b) & 1) == 0 && nL > 0)
-                                Buffer.MemoryCopy(row, d + (long)((j + b) >> 1) * lw, nL * 8L, nL * 8L);
+                                Buffer.MemoryCopy(row, d + (long)((j - b) >> 1) * lw, nL * 8L, nL * 8L);
                         }
                     }
                     break;
@@ -441,7 +441,7 @@ namespace PixCodec
                                 float* row = p + (long)j * w;
                                 Analyze97Row(row, nL, w - nL, a, (float*)ti);
                                 if (((j + b) & 1) == 0 && nL > 0)
-                                    Buffer.MemoryCopy(row, d + (long)((j + b) >> 1) * lw, nL * 4L, nL * 4L);
+                                    Buffer.MemoryCopy(row, d + (long)((j - b) >> 1) * lw, nL * 4L, nL * 4L);
                             }
                     });
                     break;
