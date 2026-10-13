@@ -4,6 +4,12 @@ using PixCodec.JpegImpl;
 
 namespace PixCodec
 {
+    /// <summary>
+    /// Decoder settings. Independent of these: files whose components have sampling factors in a non-integer ratio
+    /// (for instance 3:2), which the standard permits but libjpeg, libjpeg-turbo and the ISO reference software all
+    /// refuse to decode, are decoded by bilinear interpolation of the smaller components. No conformance reference
+    /// exists for such files; the result is a faithful picture, not a bit pattern any other decoder defines.
+    /// </summary>
     public sealed class JpegDecodeOptions
     {
         /// <summary>
@@ -66,7 +72,8 @@ namespace PixCodec
         /// <summary>
         /// Use arithmetic coding instead of Huffman coding (sequential or, with <see cref="Progressive"/>, progressive):
         /// 5 to 10 percent smaller files, slower to write and read, and not supported by every decoder (browsers, for
-        /// instance). <see cref="OptimizeHuffman"/> has no meaning then. Not available for <see cref="Lossless"/>.
+        /// instance). <see cref="OptimizeHuffman"/> has no meaning then. Together with <see cref="Lossless"/> it gives
+        /// arithmetic coded lossless JPEG (SOF11), which very few other decoders read.
         /// </summary>
         public bool Arithmetic { get; set; }
 
