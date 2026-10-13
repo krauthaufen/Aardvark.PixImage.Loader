@@ -18,7 +18,7 @@ namespace PixCodec
         static readonly float[] Up = { 0.002128f, -0.007540f, 0.019597f, -0.043159f, 0.087929f, -0.186077f, 0.627123f };
         // decimation: taps at distance 13, 11, ..., 1 and the centre tap
         static readonly float[] Down = { 0.001064f, -0.003771f, 0.009801f, -0.021586f, 0.043978f, -0.093067f, 0.313659f };
-        const float DownCentre = 0.499847f;
+        const float DownCentre = 0.499846f;
 
         /// <summary>Weights of R, G, B in luminance: the Y row of the RGB to XYZ matrix of the primaries, normalised.</summary>
         public static (float R, float G, float B) LumaWeights(ExrChromaticities? chroma)
@@ -206,9 +206,9 @@ namespace PixCodec
                     lum[i] = H(g);
                     continue;
                 }
-                ushort yh = H(r * yw.R + g * yw.G + b * yw.B);
-                lum[i] = yh;
-                float Y = F(yh);
+                float Y = r * yw.R + g * yw.G + b * yw.B;
+                lum[i] = H(Y);
+                Y = F(lum[i]);     // chroma is relative to the luminance as stored
                 fr[i] = MathF.Abs(r - Y) < 65504f * Y ? H((r - Y) / Y) : (ushort)0;
                 fb[i] = MathF.Abs(b - Y) < 65504f * Y ? H((b - Y) / Y) : (ushort)0;
             }
@@ -228,12 +228,28 @@ namespace PixCodec
             });
             var cry = ry = new ushort[w2 * h2];
             var cby = by = new ushort[w2 * h2];
+            var plan = VerticalPlan(h);
             For(0, h2, parallel, y2 =>
             {
+                int[] rows = plan[2 * y2];
                 for (int x2 = 0; x2 < w2; x2++)
                 {
-                    cry[y2 * w2 + x2] = Round(H(Filter(hr, 2 * y2 * w2 + x2, w2, 2 * y2, h)), roundC);
-                    cby[y2 * w2 + x2] = Round(H(Filter(hb, 2 * y2 * w2 + x2, w2, 2 * y2, h)), roundC);
+                    if (rows.Length == 1)
+                    {
+                        cry[y2 * w2 + x2] = Round(hr[rows[0] * w2 + x2], roundC);
+                        cby[y2 * w2 + x2] = Round(hb[rows[0] * w2 + x2], roundC);
+                        continue;
+                    }
+                    float sr = 0, sb = 0;
+                    for (int k = 0; k < 15; k++)
+                    {
+                        int row = rows[k < 7 ? 2 * k : k == 7 ? 13 : 2 * k - 2];
+                        float c = k == 7 ? DownCentre : Down[k < 7 ? k : 14 - k];
+                        float vr = F(hr[row * w2 + x2]) * c, vb = F(hb[row * w2 + x2]) * c;
+                        if (k == 0) { sr = vr; sb = vb; } else { sr += vr; sb += vb; }
+                    }
+                    cry[y2 * w2 + x2] = Round(H(sr), roundC);
+                    cby[y2 * w2 + x2] = Round(H(sb), roundC);
                 }
             });
             for (int i = 0; i < luma.Length; i++) luma[i] = Round(luma[i], roundY);
@@ -250,6 +266,41 @@ namespace PixCodec
             e <<= 9 - n;
             if (e >= 0x7c00) e = ((h & 0x7fff) >> (10 - n)) << (10 - n);
             return (ushort)(s | e);
+        }
+
+        /// <summary>
+        /// Which rows feed the vertical filter for every output line: 27 row indices (the window, top to bottom), or a
+        /// single row whose chroma is taken as it is. This replays the reference writer's line buffer: the first row is
+        /// repeated above the image and row height - 2 below it; images lower than 13 lines come out of its buffer
+        /// handling with unfiltered rows, which is reproduced here so that files are identical for every size.
+        /// </summary>
+        static int[][] VerticalPlan(int h)
+        {
+            var plan = new int[h][];
+            var seq = new System.Collections.Generic.List<int>();
+            int converted = 0, emitted = 0;
+            void Emit()
+            {
+                if (emitted >= h) return;
+                if ((converted & 1) == 0) plan[emitted++] = seq.GetRange(seq.Count - 27, 27).ToArray();
+                else plan[emitted++] = new[] { seq[^14] };
+            }
+            for (int i = 0; i < h; i++)
+            {
+                seq.Add(i);
+                if (converted == 0) for (int j = 0; j < N2; j++) seq.Add(i);
+                converted++;
+                if (converted > N2) Emit();
+                if (converted >= h)
+                {
+                    for (int j = 0; j < N2 - h; j++) seq.Add(seq[^1]);
+                    seq.Add(seq[^2]);
+                    converted++;
+                    Emit();
+                    for (int j = 1; j < Math.Min(h, N2); j++) { seq.Add(seq[^1]); converted++; Emit(); }
+                }
+            }
+            return plan;
         }
 
         /// <summary>

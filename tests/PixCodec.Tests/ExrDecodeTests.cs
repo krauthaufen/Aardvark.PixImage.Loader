@@ -9,7 +9,7 @@ public class ExrDecodeTests
     public static IEnumerable<object[]> Fixtures => TestUtil.Files("exr", ".exr");
     public static IEnumerable<object[]> Dwa => TestUtil.Files(Path.Combine("exr", "dwa"), ".exr");
     public static IEnumerable<object[]> Others =>
-        new[] { "yc", "levels", "deep", "encref" }.SelectMany(d => TestUtil.Files(Path.Combine("exr", d), ".exr"));
+        new[] { "yc", "levels", "deep", "encref", "selfcheck" }.SelectMany(d => TestUtil.Files(Path.Combine("exr", d), ".exr"));
 
     internal static RawImage HalfToFloat(RawImage img)
     {

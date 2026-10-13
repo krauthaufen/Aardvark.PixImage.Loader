@@ -44,6 +44,10 @@ namespace PixCodec
             public byte[][] Chunks = Array.Empty<byte[]>();
             public byte[] Header = Array.Empty<byte>();
             public string? Name;
+            public ExrDeepImage? Deep;
+            public int[] DeepOrder = Array.Empty<int>();    // channel of the deep image for each (sorted) file channel
+            public bool RoundUp;
+            public ExrCompression DeepCompression;
         }
 
         /// <summary>Attributes that describe the storage layout; the encoder always writes its own.</summary>
@@ -83,6 +87,7 @@ namespace PixCodec
                 {
                     for (int c = 0; c < plan.Chunks.Length; c++) jobs.Add((plan, c));
                     foreach (var pc in plan.Chans) bytes += (long)plan.Width * plan.Height * pc.Bytes / (pc.XS * pc.YS);
+                    if (plan.Deep != null) bytes += 4L * plan.Deep.TotalSamples * plan.Chans.Length;
                 }
                 bool parallel = true;
                 foreach (var p in parts) parallel &= p.Options.Parallel;
@@ -111,10 +116,11 @@ namespace PixCodec
             // magic, version, headers
             var head = new MemoryStream();
             var w = new BinaryWriter(head);
-            bool tiledSingle = !multiPart && plans[0].Tiled;
+            bool tiledSingle = !multiPart && plans[0].Tiled && plans[0].Deep == null;
+            bool anyDeep = plans.Exists(p => p.Deep != null);
             w.Write(0x01312f76);
             w.Write(2 | (longNames ? ExrFileStructure.FlagLongNames : 0) | (tiledSingle ? ExrFileStructure.FlagTiled : 0)
-                      | (multiPart ? ExrFileStructure.FlagMultiPart : 0));
+                      | (multiPart ? ExrFileStructure.FlagMultiPart : 0) | (anyDeep ? ExrFileStructure.FlagNonImage : 0));
             foreach (var plan in plans) w.Write(plan.Header);
             if (multiPart) w.Write((byte)0);
 
@@ -129,7 +135,7 @@ namespace PixCodec
                 foreach (int c in FileOrder(plan))
                 {
                     offsets[c] = pos;
-                    pos += partNumberBytes + (plan.Tiled ? 20 : 8) + plan.Chunks[c].Length;
+                    pos += partNumberBytes + (plan.Tiled ? 16 : 4) + (plan.Deep != null ? 0 : 4) + plan.Chunks[c].Length;
                     order.Add((plan, c));
                 }
                 foreach (long o in offsets) w.Write(o);
@@ -157,8 +163,9 @@ namespace PixCodec
                     BinaryPrimitives.WriteInt32LittleEndian(ch.Slice(n), plan.Y0 + c * plan.LinesPerChunk);
                     n += 4;
                 }
-                BinaryPrimitives.WriteInt32LittleEndian(ch.Slice(n), plan.Chunks[c].Length);
-                output.Write(ch.Slice(0, n + 4));
+                // deep chunks start with their own three size fields instead of the single data size
+                if (plan.Deep == null) { BinaryPrimitives.WriteInt32LittleEndian(ch.Slice(n), plan.Chunks[c].Length); n += 4; }
+                output.Write(ch.Slice(0, n));
                 output.Write(plan.Chunks[c]);
             }
         }
@@ -209,6 +216,7 @@ namespace PixCodec
         {
             var opt = src.Options;
             int width = src.Width, height = src.Height;
+            if (src.Deep != null) return PlanDeep(src, index, multiPart, ref longNames);
             if (src.Channels == null || src.Channels.Count == 0) throw new ArgumentException("no channels given");
             if (width <= 0 || height <= 0) throw new ArgumentException("image dimensions must be positive");
             if (opt.Compression < ExrCompression.None || opt.Compression > ExrCompression.Dwab)
@@ -230,7 +238,7 @@ namespace PixCodec
                 Tiled = tiled, TileWidth = opt.TileWidth, TileHeight = opt.TileHeight, LevelMode = opt.LevelMode, Channels = sorted,
                 LineOrder = tiled ? opt.LineOrder : opt.LineOrder == ExrLineOrder.DecreasingY ? ExrLineOrder.DecreasingY : ExrLineOrder.IncreasingY,
                 LinesPerChunk = ExrCodecs.LinesPerChunk(opt.Compression),
-                Chans = new ExrChan[sorted.Count],
+                Chans = new ExrChan[sorted.Count], RoundUp = opt.LevelRoundUp,
             };
             var level0 = new Level { Width = width, Height = height, Sources = new Source[sorted.Count] };
             long lineBytes = 0;
@@ -271,7 +279,7 @@ namespace PixCodec
                 var prev = level0;
                 for (int l = 1; prev.Width > 1 || prev.Height > 1; l++)
                 {
-                    prev = Reduce(prev, prev.Width > 1, prev.Height > 1);
+                    prev = Reduce(prev, prev.Width > 1, prev.Height > 1, p.RoundUp);
                     prev.LevelX = prev.LevelY = l;
                     p.Levels.Add(prev);
                 }
@@ -285,12 +293,12 @@ namespace PixCodec
                     var prev = rowStart;
                     for (int lx = 1; prev.Width > 1; lx++)
                     {
-                        prev = Reduce(prev, true, false);
+                        prev = Reduce(prev, true, false, p.RoundUp);
                         prev.LevelX = lx; prev.LevelY = ly;
                         p.Levels.Add(prev);
                     }
                     if (rowStart.Height <= 1) break;
-                    rowStart = Reduce(rowStart, false, true);
+                    rowStart = Reduce(rowStart, false, true, p.RoundUp);
                     rowStart.LevelX = 0; rowStart.LevelY = ly + 1;
                     p.Levels.Add(rowStart);
                 }
@@ -319,12 +327,14 @@ namespace PixCodec
         }
 
         /// <summary>
-        /// Next coarser level (ROUND_DOWN sizes): floating point channels are averaged over 2 (one direction) or 2x2
-        /// samples, UINT channels take the top left sample because ids cannot be averaged.
+        /// Next coarser level: floating point channels are averaged over the 2 (one direction) or 2x2 samples a pixel
+        /// covers, UINT channels take the top left sample because ids cannot be averaged. With ROUND_UP sizes the last
+        /// pixel of an odd sized level covers a single sample in that direction.
         /// </summary>
-        static Level Reduce(Level src, bool inX, bool inY)
+        static Level Reduce(Level src, bool inX, bool inY, bool roundUp)
         {
-            int w = inX ? Math.Max(1, src.Width / 2) : src.Width, h = inY ? Math.Max(1, src.Height / 2) : src.Height;
+            int Half(int n) => Math.Max(1, roundUp ? (n + 1) / 2 : n / 2);
+            int w = inX ? Half(src.Width) : src.Width, h = inY ? Half(src.Height) : src.Height;
             int sx = inX && src.Width > 1 ? 2 : 1, sy = inY && src.Height > 1 ? 2 : 1;
             var l = new Level { Width = w, Height = h, Sources = new Source[src.Sources.Length] };
             for (int i = 0; i < src.Sources.Length; i++)
@@ -341,26 +351,148 @@ namespace PixCodec
                 else
                 {
                     var r = new float[w * h];
-                    float norm = 1f / (sx * sy);
                     var fa = s.Array as float[];
                     var ha = s.Array as Half[];
                     for (int y = 0; y < h; y++)
                         for (int x = 0; x < w; x++)
                         {
                             float sum = 0;
-                            for (int dy = 0; dy < sy; dy++)
-                                for (int dx = 0; dx < sx; dx++)
+                            int n = 0;
+                            for (int dy = 0; dy < sy && y * sy + dy < src.Height; dy++)
+                                for (int dx = 0; dx < sx && x * sx + dx < src.Width; dx++, n++)
                                 {
                                     long k = At(x * sx + dx, y * sy + dy);
                                     sum += fa != null ? fa[k] : (float)ha![k];
                                 }
-                            r[y * w + x] = sum * norm;
+                            r[y * w + x] = sum * (1f / n);
                         }
                     result = r;
                 }
                 l.Sources[i] = new Source { Array = result, Kind = s.Kind == 0 ? 0 : 2, Offset = 0, Stride = 1, PlaneWidth = w };
             }
             return l;
+        }
+
+        static Part PlanDeep(ExrPart src, int index, bool multiPart, ref bool longNames)
+        {
+            var opt = src.Options;
+            var deep = src.Deep!;
+            var comp = opt.Compression == ExrCompression.Zip ? ExrCompression.Zips : opt.Compression;
+            if (comp != ExrCompression.None && comp != ExrCompression.Rle && comp != ExrCompression.Zips)
+                throw new ImageNotSupportedException($"deep EXR data can only be stored with None, Rle or Zips compression, not {opt.Compression}");
+            const int lim = 1 << 30;
+            if (opt.DataWindowX <= -lim || opt.DataWindowY <= -lim || (long)opt.DataWindowX + deep.Width >= lim || (long)opt.DataWindowY + deep.Height >= lim)
+                throw new ArgumentException("data window is out of range");
+            bool tiled = opt.TileWidth > 0 || opt.TileHeight > 0;
+            if (tiled && (opt.TileWidth <= 0 || opt.TileHeight <= 0)) throw new ArgumentException("TileWidth and TileHeight must both be set");
+            if (opt.LevelMode != ExrLevelMode.OneLevel) throw new ImageNotSupportedException("deep EXR output has a single resolution level");
+            if (opt.LuminanceChroma) throw new ImageNotSupportedException("deep EXR output cannot be luminance/chroma");
+
+            int nc = deep.ChannelNames.Count;
+            var order = new int[nc];
+            for (int i = 0; i < nc; i++) order[i] = i;
+            Array.Sort(order, (a, b) => string.CompareOrdinal(deep.ChannelNames[a], deep.ChannelNames[b]));
+            var p = new Part
+            {
+                Index = index, Width = deep.Width, Height = deep.Height, X0 = opt.DataWindowX, Y0 = opt.DataWindowY, Options = opt, Name = src.Name,
+                Tiled = tiled, TileWidth = opt.TileWidth, TileHeight = opt.TileHeight, LevelMode = ExrLevelMode.OneLevel,
+                LineOrder = tiled ? opt.LineOrder : opt.LineOrder == ExrLineOrder.DecreasingY ? ExrLineOrder.DecreasingY : ExrLineOrder.IncreasingY,
+                LinesPerChunk = 1, Chans = new ExrChan[nc], Deep = deep, DeepOrder = order, DeepCompression = comp,
+                Channels = new List<ExrChannelData>(),
+            };
+            for (int i = 0; i < nc; i++)
+            {
+                string name = deep.ChannelNames[order[i]];
+                CheckName(name, "channel", ref longNames);
+                if (i > 0 && deep.ChannelNames[order[i - 1]] == name) throw new ArgumentException($"channel '{name}' is given twice");
+                var type = deep.ChannelTypes[order[i]];
+                p.Chans[i] = new ExrChan { Name = name, Type = (int)type, XS = 1, YS = 1, Bytes = type == ExrPixelType.Half ? 2 : 4 };
+            }
+            var level = new Level { Width = deep.Width, Height = deep.Height };
+            int chunkCount = deep.Height;
+            if (tiled)
+            {
+                level.TilesX = (deep.Width + opt.TileWidth - 1) / opt.TileWidth;
+                level.TilesY = (deep.Height + opt.TileHeight - 1) / opt.TileHeight;
+                chunkCount = checked(level.TilesX * level.TilesY);
+            }
+            p.Levels.Add(level);
+            p.Chunks = new byte[chunkCount][];
+            p.Header = BuildHeader(p, multiPart, chunkCount, ref longNames);
+            return p;
+        }
+
+        /// <summary>
+        /// A deep chunk: packed size of the sample count table, packed and unpacked size of the sample data (int64
+        /// each), then the table (cumulative counts along each row of the chunk) and the data (per row, per channel,
+        /// the samples of the row's pixels). Either block is stored raw when compression does not shrink it; a raw
+        /// table always has the size of a full tile, which is how readers recognise it.
+        /// </summary>
+        static void EncodeDeepChunk(Part p, int index, ExrScratch s)
+        {
+            var deep = p.Deep!;
+            int w = p.Width, x0 = 0, y0 = index, cw = w, ch = 1;
+            long nominal = (long)w * 4;
+            if (p.Tiled)
+            {
+                var level = p.Levels[0];
+                x0 = index % level.TilesX * p.TileWidth; y0 = index / level.TilesX * p.TileHeight;
+                cw = Math.Min(p.TileWidth, w - x0); ch = Math.Min(p.TileHeight, p.Height - y0);
+                nominal = (long)p.TileWidth * p.TileHeight * 4;
+            }
+            if (nominal > int.MaxValue) throw new ImageNotSupportedException("EXR tiles are too large");
+            var table = new byte[cw * ch * 4];
+            long bytes = 0;
+            int bytesPerSample = 0;
+            foreach (var c in p.Chans) bytesPerSample += c.Bytes;
+            for (int y = 0; y < ch; y++)
+            {
+                int first = (y0 + y) * w + x0, start = deep.SampleOffsets[first];
+                for (int x = 0; x < cw; x++)
+                    BinaryPrimitives.WriteInt32LittleEndian(table.AsSpan((y * cw + x) * 4), deep.SampleOffsets[first + x + 1] - start);
+                bytes += (long)(deep.SampleOffsets[first + cw] - start) * bytesPerSample;
+            }
+            if (bytes > int.MaxValue) throw new ImageNotSupportedException("EXR deep chunk is too large");
+            var data = new byte[bytes];
+            int o = 0;
+            for (int y = 0; y < ch; y++)
+            {
+                int firstPixel = (y0 + y) * w + x0, first = deep.SampleOffsets[firstPixel], n = deep.SampleOffsets[firstPixel + cw] - first;
+                for (int ci = 0; ci < p.Chans.Length; ci++)
+                {
+                    var arr = deep.ChannelData[p.DeepOrder[ci]];
+                    int type = p.Chans[ci].Type;
+                    if (type == 0) MemoryMarshal.AsBytes(((uint[])arr).AsSpan(first, n)).CopyTo(data.AsSpan(o));
+                    else if (type == 2) MemoryMarshal.AsBytes(((float[])arr).AsSpan(first, n)).CopyTo(data.AsSpan(o));
+                    else
+                    {
+                        var f = ((float[])arr).AsSpan(first, n);
+                        var d = MemoryMarshal.Cast<byte, ushort>(data.AsSpan(o, n * 2));
+                        for (int j = 0; j < n; j++) d[j] = ExrHalf.FromFloat(f[j]);
+                    }
+                    o += n * p.Chans[ci].Bytes;
+                }
+            }
+
+            byte[] packedTable = table, packedData = data;
+            if (p.DeepCompression != ExrCompression.None)
+            {
+                packedTable = ExrCodecs.Encode(p.DeepCompression, table, default, s, p.Options.ZipLevel, 0);
+                if (data.Length > 0) packedData = ExrCodecs.Encode(p.DeepCompression, data, default, s, p.Options.ZipLevel, 0);
+            }
+            // not smaller (Encode then returns the input), or by coincidence as long as a raw table: store raw
+            if (packedTable.Length >= table.Length || packedTable.Length == nominal)
+            {
+                packedTable = new byte[nominal];
+                table.CopyTo(packedTable, 0);
+            }
+            var chunk = new byte[24 + packedTable.Length + packedData.Length];
+            BinaryPrimitives.WriteInt64LittleEndian(chunk, packedTable.Length);
+            BinaryPrimitives.WriteInt64LittleEndian(chunk.AsSpan(8), packedData.Length);
+            BinaryPrimitives.WriteInt64LittleEndian(chunk.AsSpan(16), data.Length);
+            packedTable.CopyTo(chunk, 24);
+            packedData.CopyTo(chunk, 24 + packedTable.Length);
+            p.Chunks[index] = chunk;
         }
 
         static byte[] BuildHeader(Part p, bool multiPart, int chunkCount, ref bool longNames)
@@ -401,7 +533,7 @@ namespace PixCodec
             chl.WriteByte(0);
 
             Attr(new ExrAttribute("channels", "chlist", chl.ToArray()));
-            Attr(new ExrAttribute("compression", "compression", new[] { (byte)opt.Compression }));
+            Attr(new ExrAttribute("compression", "compression", new[] { (byte)(p.Deep != null ? p.DeepCompression : opt.Compression) }));
             Attr(ExrAttribute.Box2i("dataWindow", new ExrBox2i(p.X0, p.Y0, p.X0 + p.Width - 1, p.Y0 + p.Height - 1)));
             if (!Has("displayWindow")) Attr(ExrAttribute.Box2i("displayWindow", opt.DisplayWindow ?? new ExrBox2i(0, 0, p.Width - 1, p.Height - 1)));
             Attr(new ExrAttribute("lineOrder", "lineOrder", new[] { (byte)p.LineOrder }));
@@ -414,13 +546,20 @@ namespace PixCodec
                 var t = new byte[9];
                 BinaryPrimitives.WriteInt32LittleEndian(t, p.TileWidth);
                 BinaryPrimitives.WriteInt32LittleEndian(t.AsSpan(4), p.TileHeight);
-                t[8] = (byte)p.LevelMode;      // rounding mode ROUND_DOWN in the high nibble
+                t[8] = (byte)((int)p.LevelMode | (p.RoundUp ? 0x10 : 0));      // level mode, rounding mode in the high nibble
                 Attr(new ExrAttribute("tiles", "tiledesc", t));
             }
-            if (multiPart || p.Tiled)
+            if (multiPart || p.Tiled || p.Deep != null)
             {
-                Attr(ExrAttribute.String("type", p.Tiled ? "tiledimage" : "scanlineimage"));
+                Attr(ExrAttribute.String("type", p.Deep != null ? (p.Tiled ? "deeptile" : "deepscanline") : p.Tiled ? "tiledimage" : "scanlineimage"));
                 Attr(ExrAttribute.Int("chunkCount", chunkCount));
+            }
+            if (p.Deep != null)
+            {
+                int max = 0;
+                foreach (int n in p.Deep.SampleCounts) max = Math.Max(max, n);
+                Attr(ExrAttribute.Int("version", 1));
+                Attr(ExrAttribute.Int("maxSamplesPerPixel", max));
             }
             if (multiPart) Attr(ExrAttribute.String("name", p.Name!));
             foreach (var a in custom) Attr(a);
@@ -431,6 +570,7 @@ namespace PixCodec
 
         static void EncodeChunk(Part p, int index, ExrScratch s)
         {
+            if (p.Deep != null) { EncodeDeepChunk(p, index, s); return; }
             Level level;
             int x0, x1, y0, y1;
             if (p.Tiled)

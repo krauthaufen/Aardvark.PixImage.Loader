@@ -107,30 +107,30 @@ public class ExrFeatureTests
         Assert.Equal((2, 2), (header.FindChannel("RY")!.XSampling, header.FindChannel("RY")!.YSampling));
     }
 
-    [Fact]
-    public void LuminanceChromaEncodeMatchesReferenceEncoder()
+    public static IEnumerable<object[]> EncRef =>
+        TestUtil.Files(Path.Combine("exr", "encref"), ".exr").Where(f => !((string)f[0]).EndsWith(".yc.exr"));
+
+    [Theory]
+    [MemberData(nameof(EncRef))]
+    public void LuminanceChromaEncodeMatchesReferenceEncoder(string file)
     {
-        // the same RGBA image converted by the reference library (rgba_src.yc.exr) and by us
-        var src = Exr.Decode(File.ReadAllBytes(TestUtil.Fixture("exr/encref/rgba_src.exr")));
-        var refData = File.ReadAllBytes(TestUtil.Fixture("exr/encref/rgba_src.yc.exr"));
+        // the same RGB(A) image converted by the reference library (name.yc.exr) and by us: Y, RY, BY and A are
+        // bit identical for every size, including the reference writer's special handling of images lower than 13 lines
+        var path = TestUtil.Fixture(file);
+        var src = Exr.Decode(File.ReadAllBytes(path));
+        var refData = File.ReadAllBytes(Path.ChangeExtension(path, ".yc.exr"));
         var mine = Encode(src, new ExrEncodeOptions { LuminanceChroma = true });
         var h = Exr.ReadHeaders(mine)[0];
-        Assert.Equal(new[] { "A", "BY", "RY", "Y" }, Names(h));
-        Assert.All(h.Channels, c => Assert.Equal(ExrPixelType.Half, c.PixelType));
-        var opt = new ExrDecodeOptions { HalfAsFloat = false };
-        // luminance and alpha are identical; the filtered chroma agrees except for a rare last-step rounding
-        TestUtil.AssertEqual(Exr.DecodeChannels(refData, new[] { "Y", "A" }, opt), Exr.DecodeChannels(mine, new[] { "Y", "A" }, opt));
-        var a = Exr.DecodeChannels(refData, new[] { "RY", "BY" }, opt).GetData<Half>();
-        var b = Exr.DecodeChannels(mine, new[] { "RY", "BY" }, opt).GetData<Half>();
-        int same = 0;
-        for (int i = 0; i < a.Length; i++)
+        var rh = Exr.ReadHeaders(refData)[0];
+        Assert.Equal(Names(rh), Names(h));
+        foreach (var c in rh.Channels)
         {
-            if (a[i] == b[i]) same++;
-            Assert.InRange((float)a[i] - (float)b[i], -0.04f, 0.04f);       // one step of the 5 bit chroma rounding at most
+            var m = h.FindChannel(c.Name)!;
+            Assert.Equal((c.PixelType, c.XSampling, c.YSampling, c.PLinear), (m.PixelType, m.XSampling, m.YSampling, m.PLinear));
         }
-        Assert.True(same >= a.Length * 0.995, $"{same} of {a.Length} chroma samples identical");
-        // and the decoded pictures agree closely
-        Assert.True(TestUtil.MaxDiff(Exr.Decode(refData), Exr.Decode(mine)) < 0.05);
+        var opt = new ExrDecodeOptions { HalfAsFloat = false };
+        TestUtil.AssertEqual(Exr.DecodeChannels(refData, Names(rh), opt), Exr.DecodeChannels(mine, Names(h), opt));
+        TestUtil.AssertEqual(Exr.Decode(refData, opt), Exr.Decode(mine, opt));
     }
 
     [Theory]
@@ -339,6 +339,31 @@ public class ExrFeatureTests
                 continue;
             }
             Assert.Equal(file.Contains("tile") || h.Name == "deeptile" ? ExrPartType.DeepTiled : ExrPartType.DeepScanLine, h.Type);
+            // every level of multi-level deep tiled parts
+            if (h.LevelMode != ExrLevelMode.OneLevel)
+            {
+                int levels = 0;
+                foreach (var (lx, ly) in AllLevels(h))
+                {
+                    if (lx == 0 && ly == 0) continue;
+                    var ld = LoadDeep($"{path}.part{p}.l{lx}_{ly}.deep");
+                    var lv = Exr.DecodeDeep(data, null, new ExrDecodeOptions { PartIndex = p, LevelX = lx, LevelY = ly });
+                    Assert.Equal((ld.Width, ld.Height), h.GetLevelSize(lx, ly));
+                    Assert.Equal((ld.Width, ld.Height), (lv.Width, lv.Height));
+                    Assert.Equal(ld.Counts, lv.SampleCounts);
+                    foreach (var (name, values) in ld.Channels)
+                    {
+                        if (values is uint[] u) Assert.Equal(u, lv.GetUIntChannel(name));
+                        else Assert.True(MemoryMarshal.AsBytes<float>((float[])values).SequenceEqual(MemoryMarshal.AsBytes<float>(lv.GetFloatChannel(name))), name);
+                    }
+                    var flatLevel = Exr.Decode(data, new ExrDecodeOptions { PartIndex = p, LevelX = lx, LevelY = ly });
+                    Assert.Equal((ld.Width, ld.Height), (flatLevel.Width, flatLevel.Height));
+                    levels++;
+                }
+                Assert.Equal(Directory.GetFiles(Path.GetDirectoryName(path)!, Path.GetFileName(path) + ".part*.l*.deep").Length, levels);
+                Assert.True(levels >= 4);
+                Assert.Throws<ArgumentException>(() => Exr.DecodeDeep(data, null, new ExrDecodeOptions { PartIndex = p, LevelX = h.LevelCountX, LevelY = 0 }));
+            }
 
             // the raw samples, as the reference library reads them
             var dump = LoadDeep($"{path}.part{p}.deep");
@@ -370,7 +395,7 @@ public class ExrFeatureTests
             Assert.Equal(fe.Length, fm.Length);
             for (int i = 0; i < fe.Length; i++)
                 Assert.True(Math.Abs(fe[i] - fm[i]) <= 2e-5 * Math.Max(1, Math.Abs(fe[i])), $"{names[i % names.Length]} at {i / names.Length}: {fe[i]} vs {fm[i]}");
-            bool volumes = names.Contains("ZBack") && file.Contains("overlap");
+            bool volumes = file.Contains("overlap");    // volumes that get split, coinciding samples that get merged
             if (!volumes) TestUtil.AssertEqual(flat, mine);        // without splitting nothing is left to rounding
             if (file.Contains("sorted") || file.Contains("zback"))
                 TestUtil.AssertEqual(TestUtil.LoadRef($"{path}.part{p}.fileorder.ref"), mine);    // stored front to back: sorting changes nothing
@@ -414,7 +439,8 @@ public class ExrFeatureTests
             Assert.Equal(accR, plain[p * 2]);
             Assert.Equal(accA, plain[p * 2 + 1]);
             bool overlap = false;
-            for (int k = 0; k + 1 < order.Length; k++) overlap |= zb[order[k]] > z[order[k]] && z[order[k + 1]] < zb[order[k]];
+            for (int k = 0; k + 1 < order.Length; k++)
+                overlap |= (zb[order[k]] > z[order[k]] && z[order[k + 1]] < zb[order[k]]) || (z[order[k]] == z[order[k + 1]] && zb[order[k]] == zb[order[k + 1]]);
             if (!overlap) Assert.Equal(plain[p * 2], tidy[p * 2]);
             else overlapping++;
             // splitting and merging never changes the total opacity (1 - product of (1 - alpha)) unless an opaque sample cuts it short
@@ -442,11 +468,15 @@ public class ExrFeatureTests
         sha.AppendData(MemoryMarshal.AsBytes<int>(deep.SampleCounts));
         foreach (var arr in deep.ChannelData) sha.AppendData(arr is uint[] u ? MemoryMarshal.AsBytes<uint>(u) : MemoryMarshal.AsBytes<float>((float[])arr));
         Assert.Equal(hashes["deep"], Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant());
-        // the reference library's flattened R,G,B,A; the samples of this file are stored front to back, so the default agrees
+        // the reference library's flattened R,G,B,A (file order compositing)
         Assert.Equal(hashes["flat"], Sha(deep.Flatten(new[] { "R", "G", "B", "A" }, sortByDepth: false, tidy: false).GetBytes()));
+        // the samples are stored front to back, so sorting alone changes nothing ...
+        Assert.Equal(hashes["flat"], Sha(deep.Flatten(new[] { "R", "G", "B", "A" }, sortByDepth: true, tidy: false).GetBytes()));
+        Assert.Equal(hashes["flat"], Sha(Exr.Decode(data, new ExrDecodeOptions { DeepTidy = false }).GetBytes()));
+        // ... but some pixels have several samples at the same depth, which the default merges
         var img = Exr.Decode(data);
         Assert.Equal((ColorModel.Rgba, SampleType.Float32), (img.Color, img.SampleType));
-        Assert.Equal(hashes["flat"], Sha(img.GetBytes()));
+        Assert.True(TestUtil.MaxDiff(deep.Flatten(new[] { "R", "G", "B", "A" }, true, false), img) < 0.2);
     }
 
     // ------------------------------------------------------------------ tiled and multi-part output
@@ -458,9 +488,10 @@ public class ExrFeatureTests
                 yield return new object[] { comp, mode };
     }
 
-    static float[] BoxReduce(float[] src, int w, int h, int c, bool inX, bool inY, out int nw, out int nh)
+    static float[] BoxReduce(float[] src, int w, int h, int c, bool inX, bool inY, out int nw, out int nh, bool roundUp = false)
     {
-        nw = inX ? Math.Max(1, w / 2) : w; nh = inY ? Math.Max(1, h / 2) : h;
+        int Half(int n) => Math.Max(1, roundUp ? (n + 1) / 2 : n / 2);
+        nw = inX ? Half(w) : w; nh = inY ? Half(h) : h;
         int sx = inX && w > 1 ? 2 : 1, sy = inY && h > 1 ? 2 : 1;
         var r = new float[nw * nh * c];
         for (int y = 0; y < nh; y++)
@@ -468,9 +499,10 @@ public class ExrFeatureTests
                 for (int k = 0; k < c; k++)
                 {
                     float sum = 0;
-                    for (int dy = 0; dy < sy; dy++)
-                        for (int dx = 0; dx < sx; dx++) sum += src[((y * sy + dy) * w + x * sx + dx) * c + k];
-                    r[(y * nw + x) * c + k] = sum * (1f / (sx * sy));
+                    int n = 0;
+                    for (int dy = 0; dy < sy && y * sy + dy < h; dy++)
+                        for (int dx = 0; dx < sx && x * sx + dx < w; dx++, n++) sum += src[((y * sy + dy) * w + x * sx + dx) * c + k];
+                    r[(y * nw + x) * c + k] = sum * (1f / n);
                 }
         return r;
     }
@@ -481,17 +513,20 @@ public class ExrFeatureTests
     {
         const int w = 45, h = 27;
         bool lossy = comp is ExrCompression.B44A or ExrCompression.Dwaa;
-        foreach (var order in new[] { ExrLineOrder.IncreasingY, ExrLineOrder.DecreasingY, ExrLineOrder.RandomY })
+        foreach (var order in new[] { ExrLineOrder.IncreasingY, ExrLineOrder.DecreasingY, ExrLineOrder.RandomY, (ExrLineOrder)99 })
         {
+            // the fourth round is increasing order again, with level sizes rounded up
+            bool roundUp = (int)order == 99;
+            var lineOrder = roundUp ? ExrLineOrder.IncreasingY : order;
             var f = Pattern(w, h, 4, 6, true);
             var img = new RawImage(w, h, ColorModel.Rgba, f);
             var data = Encode(img, new ExrEncodeOptions
             {
-                Compression = comp, TileWidth = 16, TileHeight = 8, LevelMode = mode, LineOrder = order, PixelType = ExrPixelType.Float,
+                Compression = comp, TileWidth = 16, TileHeight = 8, LevelMode = mode, LineOrder = lineOrder, PixelType = ExrPixelType.Float, LevelRoundUp = roundUp,
                 DataWindowX = 3, DataWindowY = -5, DisplayWindow = new ExrBox2i(0, 0, 63, 47),
             });
             var hd = Exr.ReadHeaders(data)[0];
-            Assert.Equal((ExrPartType.Tiled, 16, 8, mode, order, false), (hd.Type, hd.TileWidth, hd.TileHeight, hd.LevelMode, hd.LineOrder, hd.LevelRoundUp));
+            Assert.Equal((ExrPartType.Tiled, 16, 8, mode, lineOrder, roundUp), (hd.Type, hd.TileWidth, hd.TileHeight, hd.LevelMode, hd.LineOrder, hd.LevelRoundUp));
             Assert.Equal(new ExrBox2i(3, -5, 47, 21), hd.DataWindow);
             var back = Exr.Decode(data);
             if (!lossy && comp != ExrCompression.Pxr24) TestUtil.AssertEqual(img, back);
@@ -505,18 +540,18 @@ public class ExrFeatureTests
             var cur = f; int cw = w, ch = h;
             foreach (var (lx, ly) in AllLevels(hd))
             {
-                if (order != ExrLineOrder.IncreasingY && lx + ly > 2) continue;
+                if (lineOrder != ExrLineOrder.IncreasingY && lx + ly > 2) continue;
                 float[] expected; int ew, eh;
                 if (mode == ExrLevelMode.MipMap)
                 {
-                    if (lx > 0) cur = BoxReduce(cur, cw, ch, 4, true, true, out cw, out ch);
+                    if (lx > 0) cur = BoxReduce(cur, cw, ch, 4, true, true, out cw, out ch, roundUp);
                     expected = cur; ew = cw; eh = ch;
                 }
                 else
                 {
                     expected = f; ew = w; eh = h;
-                    for (int i = 0; i < ly; i++) expected = BoxReduce(expected, ew, eh, 4, false, true, out ew, out eh);
-                    for (int i = 0; i < lx; i++) expected = BoxReduce(expected, ew, eh, 4, true, false, out ew, out eh);
+                    for (int i = 0; i < ly; i++) expected = BoxReduce(expected, ew, eh, 4, false, true, out ew, out eh, roundUp);
+                    for (int i = 0; i < lx; i++) expected = BoxReduce(expected, ew, eh, 4, true, false, out ew, out eh, roundUp);
                 }
                 var o = new ExrDecodeOptions { LevelX = lx, LevelY = ly };
                 var level = Exr.Decode(data, o);
@@ -720,6 +755,74 @@ public class ExrFeatureTests
         Assert.Throws<ArgumentException>(() => Exr.EncodeChannels(w, h, chans, bad, new ExrEncodeOptions { DataWindowX = 1 }));
         Assert.Throws<ArgumentException>(() => Exr.EncodeChannels(w, h, chans, bad, new ExrEncodeOptions { TileWidth = 8, TileHeight = 8 }));
         Assert.Throws<ImageNotSupportedException>(() => Exr.EncodeChannels(4, 4, new[] { new ExrChannelData("i", new int[16]) }, bad));
+    }
+
+    // ------------------------------------------------------------------ image info
+
+    public static IEnumerable<object[]> AllExr =>
+        new[] { "", "dwa", "yc", "levels", "deep", "encref", "official", "selfcheck" }.SelectMany(d => TestUtil.Files(Path.Combine("exr", d), ".exr"));
+
+    [Theory]
+    [MemberData(nameof(AllExr))]
+    public void InfoMatchesDecode(string file)
+    {
+        var data = File.ReadAllBytes(TestUtil.Fixture(file));
+        var info = Exr.GetInfo(data);
+        var headers = Exr.ReadHeaders(data);
+        var img = Exr.Decode(data);
+        Assert.Equal((ImageFormat.Exr, img.Width, img.Height, img.Channels, img.SampleType, img.Color), (info.Format, info.Width, info.Height, info.Channels, info.SampleType, info.Color));
+        Assert.Equal(headers.Length, info.FrameCount);
+        Assert.Equal((0, false, false), (info.Orientation, info.HasIccProfile, info.IsAnimated));
+        Assert.Equal((img.Metadata?.DpiX ?? 0, img.Metadata?.DpiY ?? 0), (info.DpiX, info.DpiY));
+        // bits as stored: 16 if every channel the default decode uses is HALF, 32 otherwise
+        Assert.True(info.BitsPerSample is 16 or 32);
+        if (headers[0].Channels.All(c => c.PixelType == ExrPixelType.Half)) Assert.Equal(16, info.BitsPerSample);
+        if (headers[0].Channels.All(c => c.PixelType != ExrPixelType.Half)) Assert.Equal(32, info.BitsPerSample);
+
+        // any prefix that ends inside the headers is reported as truncated, any longer one gives the same info
+        for (int cut = 0; cut < Math.Min(data.Length, 4000); cut += cut < 64 ? 1 : 37)
+        {
+            ImageInfo? partial = null;
+            try { partial = Exr.GetInfo(data.AsSpan(0, cut)); }
+            catch (ImageFormatException) { }
+            // once the headers are complete the answer never changes
+            if (partial != null) Assert.Equal(info, partial.Value);
+        }
+        Assert.Equal(info, ImageCodec.GetInfo(data));
+    }
+
+    [Fact]
+    public void ResolutionAndBitsInInfo()
+    {
+        ImageInfo Info(RawImage img, ExrEncodeOptions? o = null) => Exr.GetInfo(Encode(img, o ?? new ExrEncodeOptions()));
+        Assert.Equal(16, Info(RawImage.Create(4, 4, ColorModel.Rgb, SampleType.Float32)).BitsPerSample);
+        Assert.Equal(16, Info(RawImage.Create(4, 4, ColorModel.Rgb, SampleType.Float16)).BitsPerSample);
+        Assert.Equal(32, Info(RawImage.Create(4, 4, ColorModel.Rgb, SampleType.Float32), new ExrEncodeOptions { PixelType = ExrPixelType.Float }).BitsPerSample);
+        Assert.Equal(32, Info(RawImage.Create(4, 4, ColorModel.Gray, SampleType.UInt32)).BitsPerSample);
+        Assert.Equal(16, Info(RawImage.Create(4, 4, ColorModel.Rgb, SampleType.Float32), new ExrEncodeOptions { LuminanceChroma = true }).BitsPerSample);
+        // mixed.exr style: default decode uses R,G,B,A (HALF) although the file also has FLOAT and UINT channels
+        Assert.Equal(16, Exr.GetInfo(File.ReadAllBytes(TestUtil.Fixture("exr/mixed_zip.exr"))).BitsPerSample);
+        Assert.Equal(32, Exr.GetInfo(File.ReadAllBytes(TestUtil.Fixture("exr/aov_only_zip.exr"))).BitsPerSample);
+        Assert.Equal(3, Exr.GetInfo(File.ReadAllBytes(TestUtil.Fixture("exr/multipart.exr"))).FrameCount);
+
+        // resolution: image metadata -> xDensity (+ pixelAspectRatio) -> info and metadata of the decoded image
+        var img = RawImage.Create(6, 4, ColorModel.Rgb, SampleType.Float32);
+        img.Metadata = new ImageMetadata { DpiX = 300, DpiY = 150 };
+        var data = Encode(img, new ExrEncodeOptions());
+        var h = Exr.ReadHeaders(data)[0];
+        Assert.Equal((300f, 0.5f), (h.FindAttribute("xDensity")!.AsFloat(), h.PixelAspectRatio));
+        var info = Exr.GetInfo(data);
+        Assert.Equal((300.0, 150.0), (info.DpiX, info.DpiY));
+        var back = Exr.Decode(data);
+        Assert.Equal((300.0, 150.0), (back.Metadata!.DpiX, back.Metadata.DpiY));
+        Assert.Equal((300.0, 150.0), (Exr.DecodeChannels(data, new[] { "G" }).Metadata!.DpiX, Exr.DecodeChannels(data, new[] { "G" }).Metadata!.DpiY));
+        // an explicit attribute wins over the metadata; no density, no metadata
+        var o = new ExrEncodeOptions();
+        o.Attributes.Add(ExrAttribute.Float("xDensity", 72f));
+        Assert.Equal((72.0, 72.0), (Exr.GetInfo(Encode(img, o)).DpiX, Exr.GetInfo(Encode(img, o)).DpiY));
+        Assert.Equal(1, o.Attributes.Count);
+        Assert.Null(Exr.Decode(Encode(RawImage.Create(6, 4, ColorModel.Rgb, SampleType.Float32), new ExrEncodeOptions())).Metadata);
+        Assert.Equal(0.0, Exr.GetInfo(File.ReadAllBytes(TestUtil.Fixture("exr/rgb_half_zip.exr"))).DpiX);
     }
 
     // ------------------------------------------------------------------ attribute pass-through
