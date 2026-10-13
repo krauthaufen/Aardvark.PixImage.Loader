@@ -164,6 +164,7 @@ namespace PixCodec
                 if (marker == SOT) break;
                 if (marker == EOC || marker == SOD) throw Bad("no tile-part");
                 if (marker < 0xFF00) throw Bad("expected a marker in the main header");
+                if (marker >= 0xFF30 && marker <= 0xFF3F) { pos += 2; continue; }   // reserved, no parameters
                 int len = U16(pos + 2);
                 if (len < 2 || pos + 2 + len > Length) throw Bad("truncated marker segment");
                 ReadSegment(marker, pos + 4, len - 2, Main, null, 0);
@@ -206,6 +207,7 @@ namespace PixCodec
                 {
                     marker = Data[p] << 8 | Data[p + 1];
                     if (marker == SOD) { p += 2; sod = true; break; }
+                    if (marker >= 0xFF30 && marker <= 0xFF3F) { p += 2; continue; }
                     if (marker < 0xFF00 || p + 4 > end) throw Bad("expected a marker in the tile-part header");
                     int len = Data[p + 2] << 8 | Data[p + 3];
                     if (len < 2 || p + 2 + len > end)
