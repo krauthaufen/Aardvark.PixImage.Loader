@@ -857,6 +857,157 @@ namespace PixCodec.Compression
             }
         }
 
+        // ---------------------------------------------------------- price based parsing (levels >= 16)
+
+        int[] optPrice = Array.Empty<int>(), optLen = Array.Empty<int>();
+        uint[] optOff = Array.Empty<uint>(), optRep = Array.Empty<uint>();
+
+        // bits (x8) to code a match of this length: its length code's extra bits plus a typical code cost
+        static int MatchLengthPrice(int len) => 8 * (MlBits[len < 131 ? MlCodeSmall[len] : BitOperations.Log2((uint)len - 3) + 36] + 5);
+
+        /// <summary>
+        /// Chooses the sequence of literals and matches with the lowest estimated cost for the whole block (a
+        /// shortest path over positions; prices come from the last block's literal code and from the size of the
+        /// offsets), instead of deciding match by match.
+        /// </summary>
+        int CompressBlockOptimal(byte* src, int start, int length, int window, byte* dst, int capacity)
+        {
+            if (optPrice.Length < BlockSize + 1)
+            {
+                optPrice = new int[BlockSize + 1]; optLen = new int[BlockSize + 1];
+                optOff = new uint[BlockSize + 1]; optRep = new uint[BlockSize + 1];
+            }
+            const int Sufficient = 256; // a match this long is taken without looking for alternatives
+            int nseq = 0, nlit = 0;
+            fixed (int* price = optPrice, mlen = optLen)
+            fixed (uint* moff = optOff, mrep = optRep)
+            fixed (byte* lc = litCost)
+            fixed (Seq* sq = seqs)
+            fixed (byte* lit = lits)
+            {
+                byte* baseP = src + start;
+                int searchEnd = length - 8; // positions that can be hashed
+                for (int i = 1; i <= length; i++) price[i] = int.MaxValue;
+                price[0] = 0; mlen[0] = 0; mrep[0] = rep0;
+                byte* end = baseP + length;
+                for (int i = 0; i < length; i++)
+                {
+                    int here = price[i];
+                    // a literal
+                    int pl = here + 8 * lc[baseP[i]];
+                    if (pl < price[i + 1]) { price[i + 1] = pl; mlen[i + 1] = 0; mrep[i + 1] = mrep[i]; }
+                    if (i >= searchEnd) continue;
+                    byte* p = baseP + i;
+                    int pos = start + i;
+                    uint first = Unsafe.ReadUnaligned<uint>(p);
+                    int covered = 2; // lengths up to this are already priced with a nearer offset
+                    int seqBase = here + 8 * 3; // a new sequence: its literal length code
+                    // the offset of the path's last match again
+                    uint r = mrep[i];
+                    if (r != 0 && r <= (uint)pos && ((Unsafe.ReadUnaligned<uint>(p - r) ^ first) & 0xFFFFFF) == 0)
+                    {
+                        int n = 3 + MatchLength(p - r + 3, p + 3, end);
+                        int from = n >= Sufficient ? n : 3;
+                        for (int l = from; l <= n; l++)
+                        {
+                            int c = seqBase + 8 * 2 + MatchLengthPrice(l);
+                            if (c < price[i + l]) { price[i + l] = c; mlen[i + l] = l; moff[i + l] = r; mrep[i + l] = r; }
+                        }
+                        covered = n;
+                    }
+                    uint h = ChainHash(p);
+                    int cand = chainHead[h];
+                    chain[pos & chainMask] = cand;
+                    chainHead[h] = pos;
+                    int low = Math.Max(0, pos - Math.Min(window, chainMask));
+                    for (int steps = searchDepth; cand >= low && steps > 0 && covered < length - i; steps--)
+                    {
+                        byte* c = src + cand;
+                        if (Unsafe.ReadUnaligned<uint>(c) == first && c[covered] == p[covered])
+                        {
+                            int n = 4 + MatchLength(c + 4, p + 4, end);
+                            if (n > covered)
+                            {
+                                uint off = (uint)(pos - cand);
+                                int offPrice = seqBase + 8 * (BitOperations.Log2(off + 3) + 6);
+                                int from = n >= Sufficient ? n : Math.Max(covered + 1, 4);
+                                for (int l = from; l <= n; l++)
+                                {
+                                    int cst = offPrice + MatchLengthPrice(l);
+                                    if (cst < price[i + l]) { price[i + l] = cst; mlen[i + l] = l; moff[i + l] = off; mrep[i + l] = off; }
+                                }
+                                covered = n;
+                            }
+                        }
+                        int next = chain[cand & chainMask];
+                        if (next >= cand) break;
+                        cand = next;
+                    }
+                    if (covered >= Sufficient)
+                    {
+                        // jump over the long match (its end is priced through this position only)
+                        int stop = Math.Min(i + covered, searchEnd);
+                        for (int q = i + 1; q < stop; q++) { ChainInsert(src, start + q); price[q] = int.MaxValue - (1 << 28); }
+                        i += covered - 1;
+                    }
+                }
+                // walk the cheapest path backwards, then emit it front to back
+                int count = 0;
+                for (int i = length; i > 0;)
+                {
+                    int l = mlen[i];
+                    if (l == 0) { i--; continue; }
+                    optStack[count++] = (i - l, l, moff[i]);
+                    i -= l;
+                }
+                uint r0 = rep0, r1 = rep1, r2 = rep2;
+                int anchor = 0;
+                for (int k = count - 1; k >= 0; k--)
+                {
+                    var (at, matchLen, offset) = optStack[k];
+                    int litLen = at - anchor;
+                    Buffer.MemoryCopy(baseP + anchor, lit + nlit, litLen, litLen);
+                    nlit += litLen;
+                    sq[nseq].LitLen = litLen;
+                    sq[nseq].MatchLen = matchLen;
+                    sq[nseq].OffValue = OffsetValue(offset, litLen, ref r0, ref r1, ref r2);
+                    nseq++;
+                    anchor = at + matchLen;
+                }
+                int tail = length - anchor;
+                Buffer.MemoryCopy(baseP + anchor, lit + nlit, tail, tail);
+                nlit += tail;
+
+                byte* dstEnd = dst + capacity;
+                int a = EncodeLiterals(lit, nlit, dst, dstEnd - capacity / 2);
+                int b = EncodeSequences(nseq, dst + a, dstEnd);
+                if (b < 0 || a + b >= length) return 0;
+                rep0 = r0; rep1 = r1; rep2 = r2;
+                return a + b;
+            }
+        }
+
+        readonly (int at, int len, uint off)[] optStack = new (int, int, uint)[BlockSize / 3 + 8];
+
+        // offset value for the sequence, and the repeat offset history exactly as the decoder will replay it
+        static uint OffsetValue(uint offset, int litLen, ref uint r0, ref uint r1, ref uint r2)
+        {
+            uint value;
+            if (litLen != 0)
+            {
+                if (offset == r0) return 1;
+                if (offset == r1) { value = 2; r1 = r0; r0 = offset; return value; }
+                value = offset == r2 ? 3 : offset + 3;
+            }
+            else
+            {
+                if (offset == r1) { r1 = r0; r0 = offset; return 1; }
+                value = offset == r2 ? 2 : offset == r0 - 1 ? 3 : offset + 3;
+            }
+            r2 = r1; r1 = r0; r0 = offset;
+            return value;
+        }
+
         static bool IsRep(uint offset, int litLen, uint r0, uint r1, uint r2)
             => litLen != 0 ? offset == r0 || offset == r1 || offset == r2 : offset == r1 || offset == r2 || offset == r0 - 1;
 
@@ -938,7 +1089,8 @@ namespace PixCodec.Compression
                     }
                     else
                     {
-                        int c = n < 16 ? 0 : fast ? CompressBlock(src, pos, n, window, wk, WorkSize) : CompressBlockLazy(src, pos, n, window, wk, WorkSize);
+                        int c = n < 16 ? 0 : fast ? CompressBlock(src, pos, n, window, wk, WorkSize)
+                            : level >= 16 ? CompressBlockOptimal(src, pos, n, window, wk, WorkSize) : CompressBlockLazy(src, pos, n, window, wk, WorkSize);
                         if (c > 0)
                         {
                             type = 2; size = c; payload = c;
