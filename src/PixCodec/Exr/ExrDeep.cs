@@ -23,7 +23,7 @@ namespace PixCodec
         public IReadOnlyList<string> ChannelNames { get; }
         /// <summary>One array of TotalSamples elements per channel: float[] for HALF and FLOAT channels, uint[] for UINT channels.</summary>
         public IReadOnlyList<Array> ChannelData { get; }
-        /// <summary>The type each channel has in the file (decoded images) or will be stored with (<see cref="Exr.EncodeDeep"/>).</summary>
+        /// <summary>The type each channel has in the file (decoded images) or will be stored with (<see cref="Exr.EncodeDeep(ExrDeepImage, System.IO.Stream, ExrEncodeOptions)"/>).</summary>
         public IReadOnlyList<ExrPixelType> ChannelTypes { get; }
 
         internal ExrDeepImage(ExrHeader header, int width, int height, int[] counts, int[] offsets, string[] names, Array[] data, ExrPixelType[] types)
@@ -33,7 +33,7 @@ namespace PixCodec
         }
 
         /// <summary>
-        /// Builds a deep image for <see cref="Exr.EncodeDeep"/> or <see cref="Flatten"/>.
+        /// Builds a deep image for <see cref="Exr.EncodeDeep(ExrDeepImage, System.IO.Stream, ExrEncodeOptions)"/> or <see cref="Flatten"/>.
         /// </summary>
         /// <param name="width">Image width.</param>
         /// <param name="height">Image height.</param>

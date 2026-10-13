@@ -7,7 +7,7 @@ public class ExrEncodeTests
 {
     public static IEnumerable<object[]> Compressions =>
         new[] { ExrCompression.None, ExrCompression.Rle, ExrCompression.Zips, ExrCompression.Zip, ExrCompression.Piz,
-                ExrCompression.Pxr24, ExrCompression.B44, ExrCompression.B44A }.Select(c => new object[] { c });
+                ExrCompression.Pxr24, ExrCompression.B44, ExrCompression.B44A, ExrCompression.Zstd }.Select(c => new object[] { c });
 
     static float[] Pattern(int w, int h, int c, int seed)
     {
@@ -337,7 +337,8 @@ public class ExrEncodeTests
         var f = RawImage.Create(4, 4, ColorModel.Rgb, SampleType.Float32);
         Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(f, ms, new ExrEncodeOptions { PixelType = ExrPixelType.UInt }));
         Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(RawImage.Create(4, 4, ColorModel.Gray, SampleType.UInt32), ms, new ExrEncodeOptions { PixelType = ExrPixelType.Half }));
-        Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(f, ms, new ExrEncodeOptions { Compression = (ExrCompression)10 }));
+        Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(f, ms, new ExrEncodeOptions { Compression = ExrCompression.Lj2k }));
+        Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(f, ms, new ExrEncodeOptions { Compression = (ExrCompression)14 }));
         var other = RawImage.Create(4, 4, ColorModel.Other, SampleType.Float32, 5);
         Assert.Throws<ArgumentException>(() => Exr.Encode(other, ms));
         Assert.Throws<ArgumentException>(() => Exr.Encode(other, ms, new ExrEncodeOptions { ChannelNames = new[] { "a", "b" } }));

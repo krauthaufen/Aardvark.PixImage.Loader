@@ -122,6 +122,13 @@ namespace PixCodec
         public bool LevelRoundUp { get; set; }
 
         /// <summary>
+        /// Filter for generated levels: Box (default, each pixel is the mean of the 2x2 samples it covers) or Triangle
+        /// (separable 1-3-3-1 weights over 4x4 samples: smoother, less aliasing, about four times the work).
+        /// UINT channels are never filtered.
+        /// </summary>
+        public ExrLevelFilter LevelFilter { get; set; } = ExrLevelFilter.Box;
+
+        /// <summary>
         /// Store an Rgb / Rgba image as luminance Y plus 2x2 subsampled chroma RY, BY (and A), like the reference
         /// library's WRITE_YC / WRITE_YCA modes: half floats, luma weights from the "chromaticities" attribute in
         /// <see cref="Attributes"/> (Rec. 709 if absent), chroma low-pass filtered before subsampling. Lossy for chroma;
@@ -150,6 +157,9 @@ namespace PixCodec
         }
     }
 
+    /// <summary>Filter for generated mip / rip levels.</summary>
+    public enum ExrLevelFilter { Box, Triangle }
+
     /// <summary>The window a decoded image covers, see <see cref="ExrDecodeOptions.Window"/>.</summary>
     public enum ExrWindow { Data, Display }
 
@@ -163,8 +173,10 @@ namespace PixCodec
         public IReadOnlyList<ExrChannelData> Channels { get; }
         public ExrEncodeOptions Options { get; }
 
-        /// <summary>The samples of a deep part (then <see cref="Channels"/> is empty).</summary>
+        /// <summary>The samples of a deep part, level 0 (then <see cref="Channels"/> is empty).</summary>
         public ExrDeepImage? Deep { get; }
+        /// <summary>All levels of a deep part in offset table order (one entry for ordinary deep parts).</summary>
+        public IReadOnlyList<ExrDeepImage>? DeepLevels { get; }
 
         public ExrPart(string? name, int width, int height, IReadOnlyList<ExrChannelData> channels, ExrEncodeOptions? options = null)
         {
@@ -180,9 +192,26 @@ namespace PixCodec
         public ExrPart(string? name, ExrDeepImage deep, ExrEncodeOptions? options = null)
         {
             Deep = deep ?? throw new ArgumentNullException(nameof(deep));
+            DeepLevels = new[] { deep };
             Name = name; Width = deep.Width; Height = deep.Height;
             Channels = Array.Empty<ExrChannelData>();
             Options = options ?? new ExrEncodeOptions();
+        }
+
+        /// <summary>
+        /// A deep tiled part with several resolution levels. There is no defined way to reduce deep samples, so every
+        /// level is supplied by the caller: for <see cref="ExrLevelMode.MipMap"/> levels 0, 1, 2 ... down to 1x1, for
+        /// <see cref="ExrLevelMode.RipMap"/> all (x level, y level) combinations with the x level varying fastest;
+        /// sizes follow <see cref="ExrEncodeOptions.LevelRoundUp"/> (5 -> 2 -> 1 or 5 -> 3 -> 2 -> 1).
+        /// </summary>
+        public ExrPart(string? name, IReadOnlyList<ExrDeepImage> deepLevels, ExrEncodeOptions options)
+        {
+            if (deepLevels == null || deepLevels.Count == 0 || deepLevels[0] == null) throw new ArgumentException("no deep levels given");
+            Deep = deepLevels[0];
+            DeepLevels = deepLevels;
+            Name = name; Width = Deep.Width; Height = Deep.Height;
+            Channels = Array.Empty<ExrChannelData>();
+            Options = options ?? throw new ArgumentNullException(nameof(options));
         }
 
         /// <summary>A part from an interleaved image, with the channel naming and options of <see cref="Exr.Encode"/>.</summary>
@@ -586,6 +615,13 @@ namespace PixCodec
         /// </summary>
         public static void EncodeDeep(ExrDeepImage image, Stream output, ExrEncodeOptions? options = null)
             => ExrEncoder.Encode(new[] { new ExrPart(null, image, options) }, output, false);
+
+        /// <summary>
+        /// Writes a deep tiled file with several resolution levels, see
+        /// <see cref="ExrPart(string, IReadOnlyList{ExrDeepImage}, ExrEncodeOptions)"/> for the order of the levels.
+        /// </summary>
+        public static void EncodeDeep(IReadOnlyList<ExrDeepImage> levels, Stream output, ExrEncodeOptions options)
+            => ExrEncoder.Encode(new[] { new ExrPart(null, levels, options) }, output, false);
 
         static ExrHeader GetPart(ExrFileStructure file, int index)
         {

@@ -31,8 +31,10 @@ from pxref import write_ref, test_pattern
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fixtures', 'exr')
 COMP = {'none': X.NO_COMPRESSION, 'rle': X.RLE_COMPRESSION, 'zips': X.ZIPS_COMPRESSION, 'zip': X.ZIP_COMPRESSION,
-        'piz': X.PIZ_COMPRESSION, 'pxr24': X.PXR24_COMPRESSION, 'b44': X.B44_COMPRESSION, 'b44a': X.B44A_COMPRESSION}
-CODE = {0: 'none', 1: 'rle', 2: 'zips', 3: 'zip', 4: 'piz', 5: 'pxr24', 6: 'b44', 7: 'b44a', 8: 'dwaa', 9: 'dwab'}
+        'piz': X.PIZ_COMPRESSION, 'pxr24': X.PXR24_COMPRESSION, 'b44': X.B44_COMPRESSION, 'b44a': X.B44A_COMPRESSION,
+        'zstd': X.ZSTD_COMPRESSION}
+CODE = {0: 'none', 1: 'rle', 2: 'zips', 3: 'zip', 4: 'piz', 5: 'pxr24', 6: 'b44', 7: 'b44a', 8: 'dwaa', 9: 'dwab',
+        10: 'htj2k256', 11: 'htj2k32', 12: 'lj2k', 13: 'zstd'}
 
 
 def header_info(path):
@@ -424,6 +426,64 @@ def check_with_oiio(path, names, file_order, flat):
     assert diff < 1e-3, (path, diff)
 
 
+def gen_htj2k():
+    """HTJ2K (OpenEXR 3.4) files in htj2k/: lossless, so .ref / .all.ref as for the other flat fixtures."""
+    d = clean('htj2k')
+    global OUT
+    root, OUT = OUT, d
+    try:
+        for cn, c in (('htj2k256', X.HTJ2K256_COMPRESSION), ('htj2k32', X.HTJ2K32_COMPRESSION)):
+            write('rgb_half_' + cn, {'compression': c}, rgb(35, 37), ['R', 'G', 'B'], expect=[cn])
+            write('mixed_' + cn, {'compression': c}, mixed(19, 34), ['R', 'G', 'B', 'A'], all_ref=True, expect=[cn])
+            write('one_' + cn, {'compression': c}, rgb(1, 1, np.float16, True), ['R', 'G', 'B', 'A'], expect=[cn])
+            write('uint_' + cn, {'compression': c}, {'id': ids(9, 33)}, ['id'], expect=[cn])
+            write('float_rgb_' + cn, {'compression': c}, rgb(13, 18, np.float32), ['R', 'G', 'B'], expect=[cn])
+            write('tall_' + cn, {'compression': c}, rgb(21, 300, np.float16, True, 5), ['R', 'G', 'B', 'A'], expect=[cn])
+            write('tiled_' + cn, {'compression': c, 'type': X.tiledimage, 'tiles': tiles(16, 8)}, rgb(37, 21, np.float16, True), ['R', 'G', 'B', 'A'], expect=[cn])
+        sub = test_pattern(24, 36, 3, np.float32, 8)
+        name = os.path.join(d, 'subsampled_htj2k256.exr')
+        X.File({'compression': X.HTJ2K256_COMPRESSION},
+               {'a': X.Channel('a', sub[..., 0].copy(), 2, 1), 'b': X.Channel('b', sub[..., 1].copy(), 1, 2),
+                'c': X.Channel('c', sub[..., 2].astype(np.float16), 2, 2), 'u': X.Channel('u', ids(24, 36), 2, 2)}).write(name)
+        write_ref(name + '.ref', stack(read_parts(name)[0], ['a', 'b', 'c', 'u']))
+        wide = rgb(300, 40, np.float16, False, 9)
+        write('wide_htj2k32', {'compression': X.HTJ2K32_COMPRESSION}, wide, ['R', 'G', 'B'])
+    finally:
+        OUT = root
+
+
+def gen_attributes():
+    """One file with the standard attribute types the bindings can write (attributes/attributes.exr)."""
+    d = clean('attributes')
+    hdr = {'compression': X.ZIP_COMPRESSION,
+           'timeCode': X.TimeCode(12, 34, 56, 23, 1, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8),
+           'keyCode': X.KeyCode(1, 2, 3, 4, 5, 4, 64),
+           'envmap': X.Envmap(1),
+           'idmanifest': X.IDManifest(),
+           'multiView': ['left', 'right'],
+           'worldToCamera': np.arange(16, dtype=np.float32).reshape(4, 4),
+           'm33': np.arange(9, dtype=np.float32).reshape(3, 3),
+           'v3i': np.array([1, 2, 3], np.int32),
+           'v2d': np.array([1.5, 2.5], np.float64),
+           'v3d': np.array([1.5, 2.5, 3.5], np.float64),
+           'm44d': np.arange(16, dtype=np.float64).reshape(4, 4),
+           'box2f': (np.array([0.5, 1.5], np.float32), np.array([2.5, 3.5], np.float32)),
+           'fv': [1.0, 2.0, 3.5],
+           'whiteLuminance': 100.0,
+           'adoptedNeutral': np.array([0.3127, 0.329], np.float32)}
+    p = X.PreviewImage(5, 3)
+    try:
+        px = p.pixels
+        for y in range(3):
+            for x in range(5):
+                px[y, x] = (10 * y + x, 20, 30 + x, 255 - y)
+        p = X.PreviewImage(px)
+    except Exception:
+        pass
+    hdr['preview'] = p
+    X.File(hdr, {'R': np.zeros((4, 4), 'float16')}).write(os.path.join(d, 'attributes.exr'))
+
+
 def gen_selfcheck():
     """References for files written by OUR encoder (tests/PixCodec.Tests/ExrSelfCheckTests.cs with
     EXR_WRITE_SELFCHECK=1 writes them): every level and every deep sample as the reference library reads it."""
@@ -440,6 +500,13 @@ def gen_selfcheck():
             kind = str(hd.get('type'))
             if 'deep' in kind:
                 oracle('deep', path, i, 0, 0, '%s.part%d.deep' % (path, i))
+                t = hd.get('tiles')
+                if t is not None and t.mode != X.ONE_LEVEL:
+                    dw = hd['dataWindow']
+                    w, h = int(dw[1][0] - dw[0][0] + 1), int(dw[1][1] - dw[0][1] + 1)
+                    for lx, ly in level_list(w, h, 'mipmap' if t.mode == X.MIPMAP_LEVELS else 'ripmap', 'up' if t.roundingMode == X.ROUND_UP else 'down'):
+                        if (lx, ly) != (0, 0):
+                            oracle('deep', path, i, lx, ly, '%s.part%d.l%d_%d.deep' % (path, i, lx, ly))
             elif 'tiles' in hd:
                 t = hd['tiles']
                 dw = hd['dataWindow']
@@ -557,7 +624,7 @@ def main():
     write('b44_mixed_tiny', {'compression': X.B44_COMPRESSION}, mixed(3, 2), RGBA, all_ref=True)
 
     # --- tiled
-    for cn in ('none', 'zip', 'piz', 'b44', 'pxr24', 'rle'):
+    for cn in ('none', 'zip', 'piz', 'b44', 'pxr24', 'rle', 'zstd'):
         write('tiled_' + cn, {'compression': COMP[cn], 'type': X.tiledimage, 'tiles': tiles(16, 8)}, rgb(37, 21, np.float16, True), RGBA, expect=[cn])
     write('tiled_big_tile', {'compression': X.PIZ_COMPRESSION, 'type': X.tiledimage, 'tiles': tiles(64, 64)}, rgb(17, 13), RGB)
     write('tiled_mixed', {'compression': X.ZIP_COMPRESSION, 'type': X.tiledimage, 'tiles': tiles(5, 7)}, mixed(19, 23), RGBA, all_ref=True)
@@ -594,12 +661,12 @@ def main():
 
     # --- subsampled channels with odd factors (luminance/chroma files are in yc/)
     sub = test_pattern(24, 36, 3, np.float32, 8)
-    X.File({'compression': X.ZIP_COMPRESSION, 'dataWindow': window(-12, 36, 24, 36), 'displayWindow': window(0, 0, 24, 36)},
-           {'a': X.Channel('a', sub[..., 0].copy(), 3, 1), 'b': X.Channel('b', sub[..., 1].copy(), 1, 4),
-            'c': X.Channel('c', sub[..., 2].astype(np.float16), 4, 3), 'u': X.Channel('u', ids(24, 36), 2, 2)}
-           ).write(os.path.join(OUT, 'subsampled_zip.exr'))
-    d = read_parts(os.path.join(OUT, 'subsampled_zip.exr'))[0]
-    write_ref(os.path.join(OUT, 'subsampled_zip.exr.ref'), stack(d, ['a', 'b', 'c', 'u']))
+    for cn in ('zip', 'zstd'):
+        name = os.path.join(OUT, 'subsampled_%s.exr' % cn)
+        X.File({'compression': COMP[cn], 'dataWindow': window(-12, 36, 24, 36), 'displayWindow': window(0, 0, 24, 36)},
+               {'a': X.Channel('a', sub[..., 0].copy(), 3, 1), 'b': X.Channel('b', sub[..., 1].copy(), 1, 4),
+                'c': X.Channel('c', sub[..., 2].astype(np.float16), 4, 3), 'u': X.Channel('u', ids(24, 36), 2, 2)}).write(name)
+        write_ref(name + '.ref', stack(read_parts(name)[0], ['a', 'b', 'c', 'u']))
 
     # --- files written by ImageMagick (a second writer on top of OpenEXR 3.1)
     src = os.path.join(OUT, '_src.png')
@@ -636,6 +703,8 @@ def main():
     gen_deep()
     gen_official()
     gen_selfcheck()
+    gen_htj2k()
+    gen_attributes()
 
     total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(OUT) for f in fs)
     print('fixtures: %d files, %.1f kB' % (sum(len(fs) for _, _, fs in os.walk(OUT)), total / 1024))
