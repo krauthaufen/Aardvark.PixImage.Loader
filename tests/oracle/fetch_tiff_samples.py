@@ -11,6 +11,10 @@ writers we know for some layouts: old-style JPEG in tiles (NeXT, with studio ran
 References, per file: libtiff via OpenCV where it returns the stored samples (BGR swapped), libtiff via Pillow or
 ImageMagick where it has to interpret (palette, bilevel, YCbCr, associated alpha), libtiff floats (ctypes) for the
 log encodings. `.tol` = allowed difference per sample, `.mean` = allowed mean difference.
+
+With --aperio it also fetches JP2K-33003-1.svs (64 MB, CC0) from the OpenSlide test data: an Aperio slide whose tiles
+are JPEG 2000 codestreams with YCbCr 4:2:2 components (compression 33003), for TiffTests.AperioJpeg2000Sample.
+References: tifffile + OpenJPEG (which converts the subsampled YCbCr to RGB), for directory 3 and a region of directory 2.
 """
 import hashlib
 import io
@@ -33,6 +37,9 @@ from pxref import write_ref  # noqa: E402
 
 URL = 'https://download.osgeo.org/libtiff/pics-3.8.0.tar.gz'
 SHA256 = 'e0e34732b61e1ce49eff2c7a079994c856d2a5f772f5228c84678272bc6829a9'
+SVS_URL = 'https://openslide.cs.cmu.edu/download/openslide-testdata/Aperio/JP2K-33003-1.svs'
+SVS_SHA256 = '6205ccf75a8fa6c32df7c5c04b7377398971a490fb6b320d50d91f7ba6a0e6fd'
+SVS_REGION = (1024, 768, 700, 500)   # x, y, width, height in directory 2
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fixtures', '_tmp', 'tiff-samples')
 
 
@@ -47,8 +54,26 @@ def pillow(path, mode):
     return a if a.ndim == 3 else a[:, :, None]
 
 
+def aperio():
+    import tifffile
+    path = os.path.join(OUT, 'JP2K-33003-1.svs')
+    if not os.path.exists(path):
+        data = urllib.request.urlopen(SVS_URL, timeout=600).read()
+        assert hashlib.sha256(data).hexdigest() == SVS_SHA256, 'unexpected slide content'
+        with open(path, 'wb') as f:
+            f.write(data)
+    x, y, w, h = SVS_REGION
+    with tifffile.TiffFile(path) as t:
+        assert t.pages[3].compression == 33003 and t.pages[2].compression == 33003
+        write_ref(path + '.3.ref', t.pages[3].asarray())
+        write_ref(path + '.2.region.ref', t.pages[2].asarray()[y:y + h, x:x + w])
+    print('JP2K-33003-1.svs   tifffile (OpenJPEG)')
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
+    if '--aperio' in sys.argv:
+        aperio()
     data = urllib.request.urlopen(URL, timeout=120).read()
     assert hashlib.sha256(data).hexdigest() == SHA256, 'unexpected archive content'
     with tarfile.open(fileobj=io.BytesIO(data)) as t:

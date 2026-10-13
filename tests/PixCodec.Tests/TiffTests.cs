@@ -10,7 +10,7 @@ public class TiffTests
     // Fixture folders under tests/fixtures/tiff. The top level and most folders are bit exact against third-party
     // decoders; a fixture with a `.tol` sidecar allows that sample difference (YCbCr / Lab / LogLuv maths, lossy codecs).
     // `unverified` holds the few variants no installed decoder reads (see gen_tiff.py for the list).
-    static readonly string[] ActiveDirs = { "", "ycbcr", "lab", "logluv", "pixarlog", "jpeg", "jpeg12", "jpegll", "ojpeg", "unverified" };
+    static readonly string[] ActiveDirs = { "", "ycbcr", "lab", "logluv", "pixarlog", "jpeg", "jpeg12", "jpegll", "ojpeg", "jp2", "jbig", "unverified" };
 
     static IEnumerable<object[]> Dirs(params string[] dirs) => dirs.SelectMany(d => TestUtil.Files(d.Length == 0 ? "tiff" : Path.Combine("tiff", d), ".tif"));
 
@@ -189,6 +189,27 @@ public class TiffTests
             checkedFiles++;
         }
         Assert.True(checkedFiles >= 20, $"only {checkedFiles} sample files with references found");
+    }
+
+    /// <summary>
+    /// A real Aperio slide with JPEG 2000 tiles holding subsampled YCbCr components (compression 33003), from the
+    /// OpenSlide test data. Fetched by `fetch_tiff_samples.py --aperio` (64 MB); without it this test checks nothing.
+    /// OpenJPEG rounds the 9/7 wavelet and the colour conversion slightly differently.
+    /// </summary>
+    [Fact]
+    public void AperioJpeg2000Sample()
+    {
+        var path = Path.Combine(TestUtil.FixtureDir, "_tmp", "tiff-samples", "JP2K-33003-1.svs");
+        if (!File.Exists(path) || !File.Exists(path + ".3.ref")) return;
+        using var fs = File.OpenRead(path);
+        Assert.Equal(6, Tiff.GetImageCount(fs));
+        var infos = Tiff.GetInfos(fs);
+        Assert.Equal((15374, 17497, 3, ColorModel.Rgb), (infos[0].Width, infos[0].Height, infos[0].Channels, infos[0].Color));
+        var small = Tiff.Decode(fs, new TiffDecodeOptions { ImageIndex = 3 });
+        TestUtil.AssertEqual(TestUtil.LoadRef(path + ".3.ref"), small, 3);
+        TestUtil.AssertEqual(small, Tiff.Decode(fs, new TiffDecodeOptions { ImageIndex = 3, Parallel = false }));
+        var region = Tiff.DecodeRegion(fs, 1024, 768, 700, 500, new TiffDecodeOptions { ImageIndex = 2 });
+        TestUtil.AssertEqual(TestUtil.LoadRef(path + ".2.region.ref"), region, 3);
     }
 
     [Fact]
@@ -760,6 +781,7 @@ public class TiffTests
     [InlineData(TiffCompression.CcittGroup4)]
     [InlineData(TiffCompression.CcittGroup3)]
     [InlineData(TiffCompression.CcittRle)]
+    [InlineData(TiffCompression.Jbig)]
     [InlineData(TiffCompression.None)]
     [InlineData(TiffCompression.Lzw)]
     [InlineData(TiffCompression.Deflate)]
@@ -797,7 +819,8 @@ public class TiffTests
                 var ns = new ForwardOnlyStream();
                 Tiff.Encode(gray, ns, o);
                 Assert.True(file.AsSpan().SequenceEqual(ns.ToArray()), what + ": non-seekable output differs");
-                if (layout == "strips" || layout == "2d" || w == 2700 || w == 1)
+                // (libtiff reads JBIG files of a single strip only)
+                if (compression == TiffCompression.Jbig ? layout is "strip" or "be" : layout == "strips" || layout == "2d" || w == 2700 || w == 1)
                 {
                     // libtiff (through Pillow) shows the same picture
                     var oracle = Oracle(file);
@@ -1304,6 +1327,32 @@ public class TiffTests
         if (oracle != null) TestUtil.AssertEqual(oracle, back);
         Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Gray, SampleType.UInt8, 1), o));
         Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Rgb, SampleType.UInt16, 3), o));
+    }
+
+    // Un-skip once the JPEG 2000 encoder exists (Jp2.EncodeCodestreamPlanes still throws on codec/jp2 7a9e5be).
+    [Theory(Skip = "needs the JPEG 2000 encoder (codec/jp2)")]
+    [InlineData(SampleType.UInt8, 3, 0)]
+    [InlineData(SampleType.UInt8, 1, 32)]
+    [InlineData(SampleType.UInt8, 4, 64)]
+    [InlineData(SampleType.UInt16, 3, 0)]
+    [InlineData(SampleType.Int16, 1, 32)]
+    [InlineData(SampleType.UInt16, 5, 0)]
+    public void EncodesJpeg2000(SampleType type, int channels, int tile)
+    {
+        var img = MakeImage(131, 77, RawImage.DefaultColorModel(channels), type, channels);
+        foreach (bool planar in new[] { false, true })
+        {
+            var o = new TiffEncodeOptions { Compression = TiffCompression.Jpeg2000, TileWidth = tile, TileHeight = tile, RowsPerStrip = 30, Planar = planar };
+            var file = Encode(img, o);
+            Assert.Equal(34712, Tiff.ReadTags(file).Single(t => t.Id == 259).AsIntegers()[0]);
+            var back = Tiff.Decode(file);
+            Assert.Equal((img.Color, img.SampleType), (back.Color, back.SampleType));
+            Assert.True(img.GetBytes().SequenceEqual(back.GetBytes()), "lossless round trip differs");
+            // OpenJPEG (tifffile + imagecodecs) decodes our codestreams to the same samples
+            var oracle = Oracle(file);
+            if (oracle != null) Assert.True(img.GetBytes().SequenceEqual(oracle.GetBytes()), "OpenJPEG decodes other samples");
+        }
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Gray, SampleType.Float32, 1), new TiffEncodeOptions { Compression = TiffCompression.Jpeg2000 }));
     }
 
     [Theory]

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -223,7 +224,31 @@ namespace PixCodec
     /// <summary>The calls into the LERC and JPEG 2000 codecs that the TIFF encoder needs, in one place.</summary>
     internal static class TiffForeignCodecs
     {
-        public static void Encode(int compression, byte[] pixels, int width, int height, int samples, SampleType type, TiffEncodeOptions options, Stream output)
-            => throw new ImageNotSupportedException(compression == 34887 ? "TIFF: LERC encoding is not available yet" : "TIFF: JPEG 2000 encoding is not available yet");
+        /// <summary>
+        /// Encodes width x height pixels of <paramref name="samples"/> interleaved native samples as one strip / tile.
+        /// <paramref name="rgb"/>: the first three samples are RGB (JPEG 2000 then uses its reversible colour transform).
+        /// </summary>
+        public static void Encode(int compression, byte[] pixels, int width, int height, int samples, SampleType type, bool rgb, TiffEncodeOptions options, Stream output)
+        {
+            if (compression != 34712) throw new ImageNotSupportedException("TIFF: LERC encoding is not available yet");
+            int bps = RawImage.BytesPerSample(type);
+            bool signed = type is SampleType.Int8 or SampleType.Int16;
+            var planes = new J2kPlanes { Width = width, Height = height, Planes = new J2kPlane[samples] };
+            int n = width * height;
+            for (int c = 0; c < samples; c++)
+            {
+                var d = new int[n];
+                if (bps == 1)
+                    for (int i = 0, k = c; i < n; i++, k += samples) d[i] = signed ? (sbyte)pixels[k] : pixels[k];
+                else
+                {
+                    var px = MemoryMarshal.Cast<byte, ushort>(pixels);
+                    for (int i = 0, k = c; i < n; i++, k += samples) d[i] = signed ? (short)px[k] : px[k];
+                }
+                planes.Planes[c] = new J2kPlane { Width = width, Height = height, Precision = bps * 8, Signed = signed, Data = d };
+            }
+            // (strips / tiles are encoded in parallel already)
+            output.Write(Jp2.EncodeCodestreamPlanes(planes, new Jp2EncodeOptions { Lossless = true, RawCodestream = true, ColorTransform = rgb && samples >= 3, Parallel = false }));
+        }
     }
 }

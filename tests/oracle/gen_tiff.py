@@ -553,7 +553,7 @@ def third_party(name, path, p, page=0):
                 who = 'tifffile (masked to the sample depth)'
             note(who, t)
     # libtiff ignores the Predictor tag for PackBits (tifffile honours it, as does PixCodec), so skip that combination.
-    libtiff_ok = not (p.get('compression') == PACKBITS and p.get('predictor', 1) != 1) and p.get('compression', 1) < 34000
+    libtiff_ok = not (p.get('compression') == PACKBITS and p.get('predictor', 1) != 1) and p.get('compression', 1) < 33003
     simple = page == 0 and whole and pm in (1, 2) and src.shape[2] in (1, 3) and 'extrasamples' not in p
     if libtiff_ok and simple and src.dtype in (np.uint8, np.uint16):
         r = subprocess.run(['magick', path, '-depth', str(widths[0]), '-endian', 'LSB', ('gray' if src.shape[2] == 1 else 'rgb') + ':-'],
@@ -1244,6 +1244,141 @@ def gen_more_codecs():
         emit_external('webp/' + name, path, ref_tifffile(path), ['tifffile (libwebp)'])
         if 'lossy' in name:
             write_tol(path, 4)
+
+
+def gen_foreign():
+    """Compressions whose codecs live outside the TIFF folder: JPEG 2000 (34712, Aperio 33003 / 33005) and JBIG (34661).
+    JPEG 2000 strips / tiles are raw codestreams from OpenJPEG (imagecodecs) and are read back by tifffile + OpenJPEG;
+    JBIG entities are written and read back by libtiff (jbigkit)."""
+    import imagecodecs
+    kw = dict(subdir='jp2')
+
+    def j2k(a, **args):
+        args.setdefault('codecformat', 'j2k')
+        return imagecodecs.jpeg2k_encode(np.ascontiguousarray(a), **args)
+
+    def chunks_of(a, tile=None, rps=None, planar=False, **args):
+        h, w, c = a.shape
+        cw, ch = tile if tile else (w, rps or h)
+        out = []
+        for plane in (range(c) if planar else [None]):
+            src = a if plane is None else a[:, :, plane:plane + 1]
+            for y in range(0, h, ch):
+                for x in range(0, w, cw):
+                    blk = src[y:y + ch, x:x + cw]
+                    if tile:   # tiles are stored whole: pad by repeating the edge
+                        blk = np.pad(blk, ((0, ch - blk.shape[0]), (0, cw - blk.shape[1]), (0, 0)), mode='edge')
+                    out.append(j2k(blk[:, :, 0] if blk.shape[2] == 1 else blk, **args))
+        return out
+
+    def jp2(name, a, comp=34712, tile=None, rps=None, planar=False, byteorder='<', bigtiff=False, extra=None, **args):
+        page = dict(arr=a, compression=comp, raw_chunks=chunks_of(a, tile, rps, planar, **args))
+        if tile:
+            page['tile'] = tile
+        if rps:
+            page['rps'] = rps
+        if planar:
+            page['planar'] = 2
+        page.update(extra or {})
+        emit(name, page, byteorder=byteorder, bigtiff=bigtiff, **kw)
+
+    jp2('jp2_u8_rgb_strip', pat(3, 'uint8'))
+    jp2('jp2_u8_rgb_strips', pat(3, 'uint8'), rps=8)
+    jp2('jp2_u8_rgb_nomct', pat(3, 'uint8'), mct=False)
+    jp2('jp2_u8_rgb_jp2boxes', pat(3, 'uint8'), codecformat='jp2')
+    jp2('jp2_u8_gray_tiled', pat(1, 'uint8', 50, 37), tile=(32, 16))
+    jp2('jp2_u8_rgba_tiled', pat(4, 'uint8', 50, 37), tile=(32, 32), extra=dict(extrasamples=[2]))
+    jp2('jp2_u16_gray', pat(1, 'uint16'))
+    jp2('jp2_u16_rgb_planar_tiled', pat(3, 'uint16', 50, 37), tile=(32, 32), planar=True)
+    jp2('jp2_be_big_i16_dem_tiled', pat(1, 'int16', 70, 45), tile=(32, 32), byteorder='>', bigtiff=True)
+    jp2('jp2_i8_gray', pat(1, 'int8'))
+    jp2('jp2_gray12bit', pat(1, 'uint16') >> 4, extra=dict(bits=12), bitspersample=12)
+    jp2('jp2_u8_5samples', pat(5, 'uint8'), extra=dict(photometric=1, extrasamples=[0, 0, 0, 0]), mct=False)
+    jp2('jp2_aperio33005_rgb_tiled', pat(3, 'uint8', 50, 37), comp=33005, tile=(32, 32))
+    jp2('jp2_aperio33003_mct_tiled', pat(3, 'uint8', 50, 37), comp=33003, tile=(32, 32))
+    # lossy (9/7 wavelet): decoders differ in rounding
+    for name, a, args in [('jp2_u8_rgb_lossy', pat(3, 'uint8', 70, 50), dict(level=45)),
+                          ('jp2_u16_gray_lossy_tiled', pat(1, 'uint16', 70, 50), dict(level=60, tile=(32, 32)))]:
+        tile = args.pop('tile', None)
+        path = os.path.join(OUT, 'jp2', name + '.tif')
+        page = dict(arr=a, compression=34712, raw_chunks=chunks_of(a, tile, **args))
+        if tile:
+            page['tile'] = tile
+        write_tiff(path, [page])
+        emit_external('jp2/' + name, path, ref_tifffile(path), ['tifffile (OpenJPEG)'])
+        write_tol(path, 2 if a.dtype == np.uint8 else 2 * 257)
+    # YCbCr components in the codestream (no component transform): Aperio's 33003, and the YCbCr photometric.
+    # OpenJPEG returns the components; the reference applies the JFIF conversion to them.
+    rgb = pat(3, 'uint8', 50, 37).astype(np.float64)
+    ycc = np.stack([0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2],
+                    128 - 0.168736 * rgb[..., 0] - 0.331264 * rgb[..., 1] + 0.5 * rgb[..., 2],
+                    128 + 0.5 * rgb[..., 0] - 0.418688 * rgb[..., 1] - 0.081312 * rgb[..., 2]], -1).round().clip(0, 255).astype(np.uint8)
+
+    def to_rgb(c):
+        c = c.astype(np.float64)
+        y, cb, cr = c[..., 0], c[..., 1] - 128, c[..., 2] - 128
+        return np.stack([y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr, y + 1.772 * cb], -1).round().clip(0, 255).astype(np.uint8)
+
+    for name, comp, pm in [('jp2_aperio33003_ycbcr_tiled', 33003, 2), ('jp2_photometric_ycbcr_tiled', 34712, 6)]:
+        path = os.path.join(OUT, 'jp2', name + '.tif')
+        write_tiff(path, [dict(arr=ycc, compression=comp, photometric=pm, tile=(32, 32), raw_chunks=chunks_of(ycc, (32, 32), mct=False),
+                               tags=[(530, 3, [1, 1])] if pm == 6 else [])])
+        with tifffile.TiffFile(path) as t:
+            got = np.zeros((64, 64, 3), np.uint8)
+            pg = t.pages[0]
+            fh = t.filehandle
+            for i, (o, n) in enumerate(zip(pg.dataoffsets, pg.databytecounts)):
+                fh.seek(o)
+                got[i // 2 * 32:i // 2 * 32 + 32, i % 2 * 32:i % 2 * 32 + 32] = imagecodecs.jpeg2k_decode(fh.read(n))
+        assert same(got[:37, :50], ycc)
+        emit_external('jp2/' + name, path, to_rgb(got[:37, :50]), ['OpenJPEG components, YCbCr to RGB by the JFIF formula in gen_tiff.py'])
+        write_tol(path, 1)
+
+    # ---- JBIG
+    os.makedirs(os.path.join(OUT, 'jbig'), exist_ok=True)
+    lib = LibTiff()
+    rng = np.random.default_rng(77)
+
+    def bilevel(w, h):
+        yy, xx = np.mgrid[0:h, 0:w]
+        a = (((xx // 5 + yy // 3) % 2 == 0) ^ (rng.random((h, w)) < 0.08)).astype(np.uint8)
+        a[h // 2] = 1
+        return a
+
+    def bie(bits, fill):
+        """One strip through libtiff's JBIG codec: (the bi-level image entity, libtiff's decoding of it)."""
+        packed = np.packbits(bits, axis=1)
+        tmp = os.path.join(OUT, 'jbig', '_strip.tif')
+        lib.write(tmp, packed[:, :, None], 34661, 0, tags=((256, bits.shape[1]), (258, 1), (266, fill)))
+        back = np.unpackbits(lib.read(tmp, np.uint8, packed.shape), axis=1)[:, :bits.shape[1]]
+        with tifffile.TiffFile(tmp) as t:
+            pg = t.pages[0]
+            t.filehandle.seek(pg.dataoffsets[0])
+            data = t.filehandle.read(pg.databytecounts[0])
+        os.remove(tmp)
+        return data, back
+
+    # libtiff reads and writes single strip JBIG files only; files with several strips are put together from
+    # entities it wrote one by one, and the reference from its reading of each
+    for name, w, h, pm, rps, e, fill in [('jbig_minisblack', 61, 40, 1, None, '<', 1), ('jbig_miniswhite_strips', 131, 53, 0, 8, '<', 1),
+                                         ('jbig_be_strips', 64, 33, 1, 16, '>', 1), ('jbig_1x1', 1, 1, 0, None, '<', 1),
+                                         ('jbig_fillorder2', 77, 30, 0, None, '<', 2), ('jbig_fillorder2_strips', 77, 30, 1, 7, '<', 2),
+                                         ('jbig_wide', 900, 70, 0, None, '<', 1)]:
+        bits = bilevel(w, h)
+        parts = [bie(bits[y:y + (rps or h)], fill) for y in range(0, h, rps or h)]
+        back = np.concatenate([b for _, b in parts])
+        assert (back == bits).all(), name
+        path = os.path.join(OUT, 'jbig', name + '.tif')
+        write_tiff(path, [dict(arr=bits[:, :, None], bits=1, photometric=pm, compression=34661, rps=rps or h, raw_chunks=[d for d, _ in parts],
+                               tags=[(266, 3, [fill])] if fill == 2 else [])], byteorder=e)
+        who = 'libtiff (jbigkit)'
+        if rps is None:
+            whole = np.unpackbits(lib.read(path, np.uint8, (h, (w + 7) // 8)), axis=1)[:, :w]
+            assert (whole == bits).all(), name
+        else:
+            who += ', strip by strip'
+        emit_external('jbig/' + name, path, ((back if pm == 1 else 1 - back) * 255).astype(np.uint8)[:, :, None], [who])
+    # (ImageMagick cannot write JBIG in TIFF: libtiff's codec has no scanline interface)
 
 
 def gen_ccitt_uncompressed():
@@ -2105,6 +2240,7 @@ def main():
     gen_external()
     gen_depths()
     gen_more_codecs()
+    gen_foreign()
     gen_lab()
     gen_logluv()
     gen_pixarlog()

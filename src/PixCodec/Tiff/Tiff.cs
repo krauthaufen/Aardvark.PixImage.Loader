@@ -596,7 +596,12 @@ namespace PixCodec
         CcittRle,
         /// <summary>LERC (compression 34887): all integer and float types, lossless or with <see cref="TiffEncodeOptions.LercMaxError"/>.</summary>
         Lerc,
-        /// <summary>JPEG 2000 (compression 34712), lossless.</summary>
+        /// <summary>JPEG 2000 (compression 34712), lossless: 8 or 16 bit integer samples.</summary>
         Jpeg2000,
+        /// <summary>
+        /// JBIG (compression 34661): 1-bit bilevel output from an 8-bit Gray image, one bi-level image entity per strip,
+        /// stored the way libtiff does. One strip unless RowsPerStrip is set (libtiff reads single strip files only).
+        /// </summary>
+        Jbig,
     }
 }

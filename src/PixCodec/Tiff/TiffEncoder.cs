@@ -28,7 +28,7 @@ namespace PixCodec
 
         const string TooBig = "TIFF: the output exceeds 4 GB, which needs BigTiff (leave BigTiff unset or set it to true)";
         const int None = 1, CcittRle = 2, Ccitt3 = 3, Ccitt4 = 4, Lzw = 5, JpegComp = 7, Deflate = 8, PackBits = 32773,
-            ZstdComp = 50000, LzmaComp = 34925, WebpComp = 50001, LercComp = 34887, Jp2Comp = 34712;
+            ZstdComp = 50000, LzmaComp = 34925, WebpComp = 50001, LercComp = 34887, Jp2Comp = 34712, JbigComp = 34661;
 
         /// <summary>Everything derived from one image and its options before a byte is written.</summary>
         sealed class Layout
@@ -72,12 +72,13 @@ namespace PixCodec
                     TiffCompression.Webp => WebpComp,
                     TiffCompression.Lerc => LercComp,
                     TiffCompression.Jpeg2000 => Jp2Comp,
+                    TiffCompression.Jbig => JbigComp,
                     _ => throw new ArgumentException("unknown TIFF compression"),
                 };
                 Planar = o.Planar && Spp > 1;
 
                 // ---- bit depth
-                Bilevel = o.Bilevel || IsCcitt;
+                Bilevel = o.Bilevel || IsCcitt || Comp == JbigComp;
                 if (Bilevel && (type != SampleType.UInt8 || Spp != 1))
                     throw new ArgumentException("bilevel TIFF output needs an 8-bit single channel image");
                 Bits = Bilevel ? 1 : o.BitsPerSample > 0 ? o.BitsPerSample : Bps * 8;
@@ -193,6 +194,8 @@ namespace PixCodec
                 {
                     Cw = W;
                     long rps = o.RowsPerStrip > 0 ? o.RowsPerStrip : Math.Max(1, (65536 + RowBytes - 1) / Math.Max(1, RowBytes));
+                    // libtiff reads JBIG files of one strip only
+                    if (Comp == JbigComp && o.RowsPerStrip <= 0) rps = H;
                     // JPEG strips have to hold whole MCU rows, YCbCr strips whole blocks
                     if (Comp == JpegComp) rps = Math.Max(16, (rps + 15) / 16 * 16);
                     if (YccPacked) rps = (rps + SubV - 1) / SubV * SubV;
@@ -715,6 +718,15 @@ namespace PixCodec
                     var src = bytes.AsSpan(0, size);
                     switch (l.Comp)
                     {
+                        case JbigComp:
+                        {
+                            var ms = new MemoryStream();
+                            Jbig.EncodeForTiff(src, l.Cw, rows, new JbigEncodeOptions(), ms);
+                            // libtiff's convention: with FillOrder 1 the bytes of the entity are stored bit-reversed
+                            var bie = ms.GetBuffer().AsSpan(0, (int)ms.Length);
+                            TiffPredict.ReverseBits(bie, bie);
+                            return new Chunk { Buf = ms.GetBuffer(), Len = (int)ms.Length };
+                        }
                         case Lzw:
                         {
                             var dst = ArrayPool<byte>.Shared.Rent(TiffLzw.MaxEncodedSize(size));
@@ -909,7 +921,7 @@ namespace PixCodec
                             new WebpEncodeOptions { Lossless = l.Options.WebpLossless, Quality = l.Options.WebpQuality });
                         break;
                     default:
-                        TiffForeignCodecs.Encode(l.Comp, px, l.Cw, rows, ps, l.Image.SampleType, l.Options, ms);
+                        TiffForeignCodecs.Encode(l.Comp, px, l.Cw, rows, ps, l.Image.SampleType, l.Photometric == 2 && plane < 0, l.Options, ms);
                         break;
                 }
                 return new Chunk { Buf = ms.GetBuffer(), Len = (int)ms.Length };
