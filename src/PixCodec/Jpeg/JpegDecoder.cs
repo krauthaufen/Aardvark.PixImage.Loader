@@ -687,7 +687,8 @@ namespace PixCodec.JpegImpl
                     for (int bx = 0; bx < c.ScanBlocksW; bx++, blk += 64, dst += 8)
                     {
                         ulong* u = (ulong*)blk;
-                        ulong ac = (u[0] & ~0xFFFFUL) | u[1] | u[2] | u[3] | u[4] | u[5] | u[6] | u[7];
+                        ulong ac = (BitConverter.IsLittleEndian ? u[0] & ~0xFFFFUL : u[0] & 0x0000FFFFFFFFFFFFUL) | u[1] | u[2] | u[3] | u[4] | u[5] | u[6] | u[7]
+                            | u[8] | u[9] | u[10] | u[11] | u[12] | u[13] | u[14] | u[15];
                         if (ac == 0) JpegDct.IdctDc(blk[0] * c.Quant[0], dst, stride);
                         else JpegDct.Idct(blk, c.Quant, dst, stride);
                     }
