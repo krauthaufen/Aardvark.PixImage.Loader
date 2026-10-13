@@ -11,7 +11,7 @@ namespace PixCodec
     /// <summary>Reusable per-thread buffers for chunk coding.</summary>
     internal sealed class ExrScratch
     {
-        readonly byte[][] _bytes = new byte[4][];
+        readonly byte[][] _bytes = new byte[6][];
         ushort[]? _words;
         public int[] Nx = Array.Empty<int>(), Ny = Array.Empty<int>();
         public long[] Cursor = Array.Empty<long>();   // per channel positions while (de)interleaving planes
@@ -70,10 +70,11 @@ namespace PixCodec
     {
         public static int LinesPerChunk(ExrCompression c) => c switch
         {
-            ExrCompression.None or ExrCompression.Rle or ExrCompression.Zips => 1,
+            ExrCompression.None or ExrCompression.Rle or ExrCompression.Zips or ExrCompression.Zstd => 1,
             ExrCompression.Zip or ExrCompression.Pxr24 => 16,
             ExrCompression.Piz or ExrCompression.B44 or ExrCompression.B44A or ExrCompression.Dwaa => 32,
-            ExrCompression.Dwab => 256,
+            ExrCompression.Dwab or ExrCompression.Htj2k256 or ExrCompression.Lj2k => 256,
+            ExrCompression.Htj2k32 => 32,
             _ => throw new ImageNotSupportedException($"EXR compression {(int)c} is not supported"),
         };
 
@@ -103,8 +104,21 @@ namespace PixCodec
                 case ExrCompression.B44A: ExrB44.Decode(src, dst, chunk, s); break;
                 case ExrCompression.Dwaa:
                 case ExrCompression.Dwab: ExrDwa.Decode(src, dst, chunk, s); break;
+                case ExrCompression.Zstd: ExrZstd.Decode(src, dst, chunk, s); break;
+                case ExrCompression.Htj2k256:
+                case ExrCompression.Htj2k32: ExrHtj2k.Decode(src, dst, chunk, s); break;
+                case ExrCompression.Lj2k:
+                    throw new ImageNotSupportedException("EXR LJ2K (lossy HTJ2K) compression is not supported");
                 default: throw new ImageNotSupportedException($"EXR compression {comp} is not supported");
             }
+        }
+
+        /// <summary>Decompresses a plain block of bytes (deep sample count tables and deep sample data).</summary>
+        public static void DecodeBytes(ExrCompression comp, ReadOnlySpan<byte> src, Span<byte> dst, ExrScratch s)
+        {
+            if (comp != ExrCompression.Rle && comp != ExrCompression.Zips)
+                throw new ImageNotSupportedException($"EXR {comp} compression of deep data is not supported");
+            Decode(comp, src, dst, default, s);
         }
 
         /// <summary>Compresses a chunk given in the uncompressed line layout. Returns the bytes to store (raw if compression did not help).</summary>
@@ -136,6 +150,9 @@ namespace PixCodec
                 case ExrCompression.B44A: packed = ExrB44.Encode(raw, chunk, s, comp == ExrCompression.B44A); break;
                 case ExrCompression.Dwaa:
                 case ExrCompression.Dwab: packed = ExrDwa.Encode(raw, chunk, s, dwaLevel); break;
+                case ExrCompression.Zstd: packed = ExrZstd.Encode(raw, chunk, s); break;
+                case ExrCompression.Htj2k256:
+                case ExrCompression.Htj2k32: packed = ExrHtj2k.Encode(raw, chunk, s); break;
                 default: throw new ImageNotSupportedException($"EXR compression {comp} is not supported for encoding");
             }
             // The format stores a chunk raw when compression does not shrink it; readers detect this by the size.

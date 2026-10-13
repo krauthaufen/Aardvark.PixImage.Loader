@@ -219,7 +219,7 @@ namespace PixCodec
             if (src.Deep != null) return PlanDeep(src, index, multiPart, ref longNames);
             if (src.Channels == null || src.Channels.Count == 0) throw new ArgumentException("no channels given");
             if (width <= 0 || height <= 0) throw new ArgumentException("image dimensions must be positive");
-            if (opt.Compression < ExrCompression.None || opt.Compression > ExrCompression.Dwab)
+            if (opt.Compression < ExrCompression.None || opt.Compression > ExrCompression.Zstd || opt.Compression == ExrCompression.Lj2k)
                 throw new ImageNotSupportedException($"EXR compression {opt.Compression} is not supported for encoding");
             const int lim = 1 << 30;
             long maxX = (long)opt.DataWindowX + width - 1, maxY = (long)opt.DataWindowY + height - 1;
