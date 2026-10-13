@@ -5,16 +5,16 @@ namespace PixCodec.Tests;
 
 /// <summary>
 /// HTJ2K compression (OpenEXR 3.4, compression values 10 and 11). The codestream coding belongs to the JPEG 2000
-/// codec (Jp2.DecodeCodestreamPlanes / EncodeCodestreamPlanes); while its HT coder is not implemented the pixel
-/// tests are skipped and decoding / encoding throw ImageNotSupportedException.
+/// codec (Jp2.DecodeCodestreamPlanes / EncodeCodestreamPlanes). Decoding is bit exact against the reference; the
+/// encoding test is skipped until the JPEG 2000 codec can encode HT planes.
 /// </summary>
 public class ExrHtj2kTests
 {
-    const string Skip = "needs HT block decoding and plane encoding in the JPEG 2000 codec (Jp2.DecodeCodestreamPlanes / EncodeCodestreamPlanes, called by ExrHtj2k); remove this Skip when they are implemented";
+    const string Skip = "needs HT plane encoding in the JPEG 2000 codec (Jp2.EncodeCodestreamPlanes, called by ExrHtj2k); remove this Skip when it is implemented";
 
     public static IEnumerable<object[]> Fixtures => TestUtil.Files(Path.Combine("exr", "htj2k"), ".exr");
 
-    [Theory(Skip = Skip)]
+    [Theory]
     [MemberData(nameof(Fixtures))]
     public void DecodesLikeReference(string file)
     {
@@ -68,14 +68,9 @@ public class ExrHtj2kTests
     }
 
     [Fact]
-    public void WithoutTheJp2CodecHtj2kIsNotSupported()
+    public void EncodingWaitsForTheJp2Encoder()
     {
-        // delete this test together with the Skip above once the JPEG 2000 codec has its HT coder
-        var file = Fixtures.Select(f => (string)f[0]).First(f => f.Contains("tall_"));      // (tiny files have raw chunks)
-        var data = File.ReadAllBytes(TestUtil.Fixture(file));
-        Assert.True(Exr.ReadHeaders(data)[0].Compression is ExrCompression.Htj2k256 or ExrCompression.Htj2k32);
-        Assert.True(Exr.GetInfo(data).Width > 0);
-        Assert.Throws<ImageNotSupportedException>(() => Exr.Decode(data));
+        // delete this test together with the Skip above once the JPEG 2000 codec can encode HT planes
         Assert.Throws<ImageNotSupportedException>(() => Exr.Encode(RawImage.Create(64, 64, ColorModel.Rgb, SampleType.Float32), new MemoryStream(), new ExrEncodeOptions { Compression = ExrCompression.Htj2k32 }));
     }
 }

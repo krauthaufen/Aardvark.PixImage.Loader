@@ -8,7 +8,9 @@ namespace PixCodec
     /// count and for each codestream component the 16 bit index of the file channel it holds), and one High Throughput
     /// JPEG 2000 codestream: lossless (5/3 wavelet), one component per channel - HALF as signed 16 bit integers,
     /// FLOAT as signed and UINT as unsigned 32 bit integers (the bit patterns) - with the reversible colour transform
-    /// on the first three components when they are R, G, B. The codestream itself is handled by the JPEG 2000 codec.
+    /// on the first three components when they are R, G, B. The float components carry the sign-magnitude
+    /// non-linearity marker (NLT type 3): negative values are stored as the complemented magnitude, which keeps the
+    /// integers in the order of the float values. The codestream itself is handled by the JPEG 2000 codec.
     /// </summary>
     internal static class ExrHtj2k
     {
@@ -31,7 +33,8 @@ namespace PixCodec
                 seen[map[i]] = true;
             }
             // chunks are decoded in parallel by the caller; one chunk is one small codestream
-            var planes = Jp2.DecodeCodestreamPlanes(src.Slice(6 + (int)headerLength), new Jp2DecodeOptions { Parallel = false }).Planes;
+            var decoded = Jp2.DecodeCodestreamPlanes(src.Slice(6 + (int)headerLength), new Jp2DecodeOptions { Parallel = false });
+            var planes = decoded.Planes;
             if (planes.Length != nc) throw Corrupt("component count");
             var byChannel = new J2kPlane[nc];
             for (int i = 0; i < nc; i++)
@@ -42,6 +45,14 @@ namespace PixCodec
                     || p.Precision != c.Chans[ch].Bytes * 8)
                     throw Corrupt("component geometry");
                 byChannel[ch] = p;
+                // Components flagged with the sign-magnitude non-linearity (NLT type 3) hold the float bit patterns as
+                // order preserving integers: negative values are the complemented magnitude.
+                if (decoded.NltSignMagnitude != null && decoded.NltSignMagnitude[i])
+                {
+                    var d = p.Data;
+                    int flip = p.Precision == 16 ? 0x8000 : int.MinValue;
+                    for (int k = 0; k < d.Length; k++) if (d[k] < 0) d[k] = ~d[k] ^ flip;
+                }
             }
 
             var row = new int[nc];
@@ -101,9 +112,19 @@ namespace PixCodec
                         for (int x = 0; x < line.Length; x++, o += 4) line[x] = BinaryPrimitives.ReadInt32LittleEndian(raw.Slice(o));
                 }
             var planes = new J2kPlane[nc];
-            for (int i = 0; i < nc; i++) planes[i] = byChannel[map[i]];
+            var nlt = new bool[nc];
+            for (int i = 0; i < nc; i++)
+            {
+                planes[i] = byChannel[map[i]];
+                // float bit patterns go in as order preserving integers (NLT type 3, as the reference writer does)
+                if (!planes[i].Signed) continue;
+                nlt[i] = true;
+                var d = planes[i].Data!;
+                int flip = planes[i].Precision == 16 ? 0x8000 : int.MinValue;
+                for (int j = 0; j < d.Length; j++) if (d[j] < 0) d[j] = ~d[j] ^ flip;
+            }
             // the parameters of the reference writer: lossless 5/3, HT block coder, 5 levels, 128x32 code blocks, RPCL
-            var codestream = Jp2.EncodeCodestreamPlanes(new J2kPlanes { Width = c.X1 - c.X0 + 1, Height = c.Y1 - c.Y0 + 1, Planes = planes }, new Jp2EncodeOptions
+            var codestream = Jp2.EncodeCodestreamPlanes(new J2kPlanes { Width = c.X1 - c.X0 + 1, Height = c.Y1 - c.Y0 + 1, Planes = planes, NltSignMagnitude = nlt }, new Jp2EncodeOptions
             {
                 Lossless = true, HighThroughput = true, RawCodestream = true, ColorTransform = rct, Levels = 5,
                 CodeBlockWidth = 128, CodeBlockHeight = 32, Progression = Jp2Progression.Rpcl, Parallel = false,
