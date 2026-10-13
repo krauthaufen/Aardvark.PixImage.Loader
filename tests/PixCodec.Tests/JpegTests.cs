@@ -136,6 +136,92 @@ public class JpegTests
         try { Jpeg.Decode(lie); } catch (Exception e) { Assert.True(e is ImageFormatException or ImageNotSupportedException, e.ToString()); }
     }
 
+    // ------------------------------------------------------------------ JPEG in TIFF
+
+    public static IEnumerable<object[]> TiffStreams()
+        => Directory.GetFiles(TestUtil.Fixture("jpeg/tiff"), "*.ref").OrderBy(f => f, StringComparer.Ordinal)
+            .Select(f => new object[] { Path.GetFileNameWithoutExtension(f) });
+
+    static RawImage Crop(RawImage img, int w, int h)
+    {
+        var o = RawImage.Create(w, h, img.Color, SampleType.UInt8, img.Channels);
+        var s = img.GetData<byte>(); var d = o.GetData<byte>();
+        for (int y = 0; y < h; y++) s.AsSpan(y * img.Width * img.Channels, w * img.Channels).CopyTo(d.AsSpan(y * w * img.Channels));
+        return o;
+    }
+
+    /// <summary>Tables-only + abbreviated stream pairs; the name says whether YCbCr is to be converted (_rgb) or samples returned as stored (_raw).</summary>
+    [Theory]
+    [MemberData(nameof(TiffStreams))]
+    public void DecodeForTiff(string name)
+    {
+        var dir = TestUtil.Fixture("jpeg/tiff");
+        var tables = File.ReadAllBytes(Path.Combine(dir, name + ".tables.bin"));
+        var data = File.ReadAllBytes(Path.Combine(dir, name + ".data.bin"));
+        var full = TestUtil.LoadRef(Path.Combine(dir, name + ".ref"));
+        bool convert = name.EndsWith("_rgb");
+        int ch = full.Channels;
+        // whole frame, and strips / tiles smaller than the (padded) frame
+        foreach (var (w, h) in new[] { (full.Width, full.Height), (full.Width - 1, full.Height), (full.Width, full.Height - 3), (17, 9), (1, 1) })
+        {
+            var dst = new byte[w * h * ch];
+            Jpeg.DecodeForTiff(tables, data, w, h, ch, convert, dst);
+            Assert.True(Crop(full, w, h).GetData<byte>().AsSpan().SequenceEqual(dst), $"{name} {w}x{h}");
+        }
+
+        // the abbreviated stream is useless without its tables; wrong geometry or component count is an error
+        var buf = new byte[full.Width * full.Height * ch];
+        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(ReadOnlySpan<byte>.Empty, data, full.Width, full.Height, ch, convert, buf));
+        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(tables, data, full.Width + 1, full.Height, ch, convert, new byte[(full.Width + 1) * full.Height * ch]));
+        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(tables, data, full.Width, full.Height, ch + 1, convert, new byte[full.Width * full.Height * (ch + 1)]));
+        Assert.Throws<ImageFormatException>(() => Jpeg.DecodeForTiff(tables.AsSpan(0, tables.Length / 2), data, full.Width, full.Height, ch, convert, buf));
+
+        // damaged strips never escape with anything but the codec's exceptions
+        var rnd = new Random(name.Length * 31 + data.Length);
+        for (int round = 0; round < 200; round++)
+        {
+            var bad = (byte[])data.Clone();
+            if (round % 2 == 0) bad = bad.AsSpan(0, rnd.Next(bad.Length)).ToArray();
+            else for (int i = 0; i < 3; i++) bad[rnd.Next(bad.Length)] = (byte)rnd.Next(256);
+            try { Jpeg.DecodeForTiff(tables, bad, full.Width, full.Height, ch, convert, buf); }
+            catch (ImageFormatException) { }
+            catch (ImageNotSupportedException) { }
+        }
+    }
+
+    /// <summary>Complete streams with no JPEGTables, markers ignored for the color decision, and concurrent use.</summary>
+    [Fact]
+    public void DecodeForTiffCompleteStreamsAndThreads()
+    {
+        // a JFIF YCbCr file: converted on request, raw YCbCr otherwise (never guessed from the JFIF marker)
+        var ycc = Load("jpeg/photo_420.jpg");
+        var rgb = TestUtil.LoadRef(TestUtil.Fixture("jpeg/photo_420.jpg.ref"));
+        var a = new byte[rgb.Width * rgb.Height * 3]; var b = new byte[a.Length];
+        Jpeg.DecodeForTiff(default, ycc, rgb.Width, rgb.Height, 3, true, a);
+        Assert.Equal(rgb.GetData<byte>(), a);
+        Jpeg.DecodeForTiff(default, ycc, rgb.Width, rgb.Height, 3, false, b);
+        Assert.NotEqual(a, b);
+
+        // an Adobe RGB file decodes the same as stored, and "converting" it applies the YCbCr matrix regardless of the marker
+        var stored = TestUtil.LoadRef(TestUtil.Fixture("jpeg/rgb_adobe.jpg.ref"));
+        var c = new byte[stored.Width * stored.Height * 3];
+        Jpeg.DecodeForTiff(default, Load("jpeg/rgb_adobe.jpg"), stored.Width, stored.Height, 3, false, c);
+        Assert.Equal(stored.GetData<byte>(), c);
+        Jpeg.DecodeForTiff(default, Load("jpeg/rgb_adobe.jpg"), stored.Width, stored.Height, 3, true, c);
+        Assert.NotEqual(stored.GetData<byte>(), c);
+
+        var dir = TestUtil.Fixture("jpeg/tiff");
+        var tables = File.ReadAllBytes(Path.Combine(dir, "ycc420_rgb.tables.bin"));
+        var data = File.ReadAllBytes(Path.Combine(dir, "ycc420_rgb.data.bin"));
+        var expected = TestUtil.LoadRef(Path.Combine(dir, "ycc420_rgb.ref"));
+        Parallel.For(0, 64, i =>
+        {
+            var dst = new byte[expected.Width * expected.Height * 3];
+            Jpeg.DecodeForTiff(tables, data, expected.Width, expected.Height, 3, true, dst);
+            Assert.Equal(expected.GetData<byte>(), dst);
+        });
+    }
+
     // ------------------------------------------------------------------ robustness
 
     static void DecodeDamaged(ReadOnlySpan<byte> data, string what)

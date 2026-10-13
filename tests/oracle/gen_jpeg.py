@@ -189,6 +189,31 @@ def main():
     emit('rst_lost', bytes(cut), 'misc', ref=False)
     emit('rst_lost_full', d, 'misc')
 
+    # JPEG-in-TIFF style streams: <name>.tables.bin (tables only), <name>.data.bin (abbreviated), <name>.ref = the
+    # components as the TIFF reader expects them (see the name: rgb = YCbCr converted, raw = as stored)
+    def tiff(name, im, raw, **kw):
+        d = os.path.join(OUT, 'tiff')
+        os.makedirs(d, exist_ok=True)
+        for ext, st in (('tables', 1), ('data', 2)):
+            with open(os.path.join(d, f'{name}.{ext}.bin'), 'wb') as f:
+                f.write(pil(im, streamtype=st, **kw))
+        full = Image.open(io.BytesIO(pil(im, **kw)))
+        if raw and full.mode == 'RGB' and not kw.get('keep_rgb'):
+            full.draft('YCbCr', full.size)  # libjpeg output without the color conversion
+        full.load()
+        a = np.asarray(full)
+        if full.mode == 'CMYK':
+            a = 255 - a  # Pillow inverts 4 component data; the stored samples are wanted
+        write_ref(os.path.join(d, name + '.ref'), a)
+
+    tiff('ycc420_rgb', photo(70, 52), False, quality=85, subsampling=2)
+    tiff('ycc420_raw', photo(70, 52), True, quality=85, subsampling=2)
+    tiff('ycc422_rgb', photo(41, 33), False, quality=85, subsampling=1)
+    tiff('ycc444_rgb', photo(64, 64), False, quality=90, subsampling=0)
+    tiff('rgb_raw', photo(48, 40), True, quality=90, keep_rgb=True)
+    tiff('gray_raw', photo(50, 30, 1), True, quality=85)
+    tiff('cmyk_raw', cmyk, True, quality=90)
+
     # valid but unsupported
     emit('arithmetic', magick(photo(40, 30), '-define', 'jpeg:arithmetic-coding=on'), 'unsupported', ref=False)
     d = bytearray(pil(photo(16, 16, 1), quality=80))
