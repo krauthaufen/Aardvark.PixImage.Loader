@@ -199,8 +199,7 @@ def decode_exr(path):
 
     Tokens before the extension select what is returned: *.all.exr gives all channels in file (byte-wise
     alphabetical) order, *.partN.exr part N instead of the first (both may be combined: *.part1.all.exr).
-    Subsampled channels are expanded by replication. Uses the official OpenEXR python bindings when installed,
-    otherwise OpenCV (colour channels of the first part only). *.deep.exr describes a deep part as float64: per pixel
+    Subsampled channels are expanded by replication. Needs the official OpenEXR python bindings. *.deep.exr describes a deep part as float64: per pixel
     the sample count, then for every channel (file order) the sum of sample[k] * (k + 1).
     Exits with status 77 when the installed tools cannot read the file (no bindings, or bindings too old for it).
     """
@@ -212,16 +211,8 @@ def decode_exr(path):
     except ImportError:
         OpenEXR = None
     if OpenEXR is None:
-        if want_all or part or 'deep' in tokens:
-            sys.exit(77)
-        os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
-        import cv2
-        im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-        if im is None:
-            raise RuntimeError('OpenCV cannot read ' + path)
-        if im.ndim == 3:
-            im = im[..., [2, 1, 0, 3][:im.shape[2]]]
-        return np.ascontiguousarray(im)
+        # (OpenCV can read some EXR files, but converts and orders channels its own way: not a usable reference)
+        sys.exit(77)
     newer = any(t in tokens for t in ('zstd', 'htj2k', 'deep'))       # need OpenEXR 3.4 / 3.5
     try:
         chans = OpenEXR.File(path, separate_channels=True).parts[part].channels
