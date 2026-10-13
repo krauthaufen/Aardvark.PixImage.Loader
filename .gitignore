@@ -5,3 +5,4 @@ obj/
 tests/fixtures/_tmp/
 __pycache__/
 .tmp/
+tests/oracle/exr_oracle
