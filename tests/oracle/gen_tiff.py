@@ -2,17 +2,21 @@
 
 usage: python3 gen_tiff.py            (from tests/oracle; deterministic, overwrites the fixture directory)
 
-Most files come from the small TIFF writer below because none of the installed tools can produce the whole
-matrix (tifffile lacks LZW / PackBits / floating point predictor without `imagecodecs`, ImageMagick rewrites
-channel layouts and is not an HDRI build). Every file is then decoded by the independent reference decoders
-that can read it - tifffile, OpenCV (libtiff 4.7) and Pillow (libtiff) - and has to match the pixels the
-fixture was built from. Files that none of them can read (e.g. half floats with the floating point predictor,
-5-channel LZW) are listed as "by construction" in the summary: their reference is the source array, with the
-codec path they use being covered by other, verified fixtures.
+Needs tifffile + imagecodecs, OpenCV, Pillow and ImageMagick. Many files come from the small TIFF writer below
+because no single tool produces the whole matrix (odd bit depths with compression, old-style LZW and JPEG, sparse
+tiles, hand-packed YCbCr / LogL ...); others are written by tifffile, libtiff (through Pillow / OpenCV) and
+ImageMagick.
 
-The .ref holds what PixCodec is specified to return, i.e. the reference decoder's samples after the documented
-conversions (MinIsWhite inversion, 1/2/4-bit scaling, palette expansion, naive CMYK, un-premultiplied alpha).
-Those conversions are cross-checked against Pillow / ImageMagick where these implement the same thing.
+Provenance rule: every .ref is what a THIRD-PARTY decoder returned for the file - tifffile + imagecodecs for the
+stored samples, libtiff (OpenCV / Pillow / ImageMagick) where it interprets the data (YCbCr, CCITT, JPEG, LogLuv),
+LittleCMS for Lab - and all decoders that can read a file have to agree with the pixels it was built from. On top
+of the decoded samples only the conversions PixCodec documents are applied (MinIsWhite inversion, 1/2/4-bit
+scaling, palette expansion, naive CMYK, un-premultiplied alpha), each cross-checked against Pillow / ImageMagick
+where those implement the same thing. A `.tol` sidecar gives the allowed difference where bit exactness is not
+defined (float colour maths, lossy WebP).
+
+The few variants that no installed decoder reads go to the `unverified` folder with a reference derived from the
+source data; the script lists them at the end.
 """
 import io
 import os
