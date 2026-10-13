@@ -235,6 +235,70 @@ public class ExrDecodeTests
         Assert.Throws<ImageFormatException>(() => Exr.Decode(zeroed.AsSpan(0, zeroed.Length - 3)));
     }
 
+    [Theory]
+    [InlineData(58)]
+    [InlineData(57)]
+    [InlineData(48)]
+    [InlineData(33)]
+    [InlineData(20)]
+    public void PizHuffmanLongCodes(int M)
+    {
+        // A hand made PIZ chunk whose Huffman code is maximally skewed: symbol k has the k+1 bit code 0..01, the last
+        // data symbol and the run length symbol have M bit codes. Real encoders never produce this, readers must cope.
+        const int width = 256;
+        var ms = new MemoryStream();
+        Exr.Encode(new RawImage(width, 1, ColorModel.Gray, new Half[width]), ms, new ExrEncodeOptions { Compression = ExrCompression.Piz });
+        var file = ms.ToArray();
+        var (_, chunk) = OffsetTable(file);
+
+        var bits = new List<bool>();
+        void Put(ulong value, int count) { for (int i = count - 1; i >= 0; i--) bits.Add(((value >> i) & 1) != 0); }
+        byte[] Pack()
+        {
+            var b = new byte[(bits.Count + 7) / 8];
+            for (int i = 0; i < bits.Count; i++) if (bits[i]) b[i / 8] |= (byte)(0x80 >> (i % 8));
+            return b;
+        }
+        int Len(int sym) => sym <= M - 4 ? sym + 1 : sym == M - 3 ? M - 2 : sym == M - 2 ? M - 1 : M;
+        for (int sym = 0; sym <= M; sym++) Put((ulong)Len(sym), 6);
+        var table = Pack();
+        bits.Clear();
+        var expected = new List<ushort>();
+        void Sym(int sym) { sym = sym * (M - 1) / 57; Put(sym == M - 1 ? 0u : 1u, Len(sym)); expected.Add((ushort)sym); }
+        void Run(int count) { Put(1, M); Put((ulong)count, 8); for (int i = 0; i < count; i++) expected.Add(expected[^1]); }
+        Sym(57); Run(100); Sym(56); Sym(55); Sym(54); Sym(50); Run(3); Sym(45); Sym(13); Sym(14); Sym(15); Sym(16); Sym(12);
+        Sym(0); Sym(57); Sym(57); Sym(1); Run(255 - 131); Sym(30); Sym(2); Sym(56); Sym(3); Sym(57); Sym(40); Sym(0);
+        while (expected.Count < width) Sym(expected.Count % 9);
+        Assert.Equal(width, expected.Count);
+        int nBits = bits.Count;
+        var huf = Pack();
+
+        var w = new BinaryWriter(new MemoryStream());
+        w.Write((ushort)0); w.Write((ushort)25);                       // bitmap bytes 0..25: values 1..200 are present
+        w.Write((byte)0xfe); w.Write(Enumerable.Repeat((byte)0xff, 24).ToArray()); w.Write((byte)1);
+        w.Write(20 + table.Length + huf.Length);
+        w.Write(0); w.Write(M); w.Write(table.Length); w.Write(nBits); w.Write(0);
+        w.Write(table); w.Write(huf);
+        var data = ((MemoryStream)w.BaseStream).ToArray();
+        Assert.True(data.Length < width * 2);
+
+        var crafted = file.AsSpan(0, chunk + 4).ToArray().Concat(BitConverter.GetBytes(data.Length)).Concat(data).ToArray();
+        var img = Exr.Decode(crafted, new ExrDecodeOptions { HalfAsFloat = false });
+        Assert.Equal(expected, img.GetData<Half>().Select(BitConverter.HalfToUInt16Bits));
+        // (OpenEXR 3.5 itself rejects tables with 58 bit codes, the longest the format allows; 57 bits it reads)
+        var oracle = M < 58 ? TestUtil.OracleDecode(crafted, ".exr") : null;
+        if (oracle != null) TestUtil.AssertEqual(oracle, Exr.Decode(crafted));
+
+        // the same stream cut short or with a wrong bit count must fail cleanly
+        for (int cut = 1; cut < 40; cut += 3)
+        {
+            var d2 = data.AsSpan(0, data.Length - cut).ToArray();
+            BitConverter.TryWriteBytes(d2.AsSpan(30), d2.Length - 34);
+            var bad = file.AsSpan(0, chunk + 4).ToArray().Concat(BitConverter.GetBytes(d2.Length)).Concat(d2).ToArray();
+            Assert.Throws<ImageFormatException>(() => Exr.Decode(bad));
+        }
+    }
+
     [Fact]
     public void LyingHeadersAreRejected()
     {

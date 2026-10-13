@@ -13,7 +13,7 @@ namespace PixCodec
         const int BitmapSize = 8192;
         const int EncSize = 65537;       // 65536 word values + run length symbol
         const int MaxCodeLen = 58;
-        const int TabBits = 12;
+        const int TabBits = 14;        // 4 * TabBits <= 56, the bits guaranteed after a refill
 
         internal sealed class Tables
         {
@@ -159,7 +159,8 @@ namespace PixCodec
                 if (l == 0) continue;
                 int idx = fill[l]++;
                 sorted[idx] = i;
-                if (l <= TabBits)
+                // the run length symbol stays out of the fast table so that the fast loop only sees plain symbols
+                if (l <= TabBits && i != iM)
                 {
                     int cv = (int)bas[l] + (idx - offset[l]);
                     fast.AsSpan(cv << (TabBits - l), 1 << (TabBits - l)).Fill((i << 6) | l);
@@ -173,6 +174,8 @@ namespace PixCodec
             buf.AsSpan(dataLen, 32).Clear();
             long endBit = nBits;
             int rlc = iM, total = dst.Length;
+            int rlcLen = len[rlc];
+            long rlcCode = rlcLen == 0 ? 0 : bas[rlcLen] + count[rlcLen] - 1;   // the highest symbol has the last code of its length
             fixed (byte* b = buf)
             fixed (ushort* pd = dst)
             fixed (int* pf = fast)
@@ -182,6 +185,27 @@ namespace PixCodec
                 long bp = 0;      // next byte to load
                 while (true)
                 {
+                    // fast path: four table symbols per refill while far enough from both ends
+                    while (n + 4 <= total)
+                    {
+                        bb |= BinaryPrimitives.ReverseEndianness(*(ulong*)(b + bp)) >> bc;
+                        bp += (63 - bc) >> 3;
+                        bc |= 56;
+                        if (8 * bp - bc + 4 * TabBits > endBit) break;
+                        int f = pf[(int)(bb >> (64 - TabBits))];
+                        if (f == 0) break;
+                        bb <<= f & 63; bc -= f & 63; pd[n++] = (ushort)(f >> 6);
+                        f = pf[(int)(bb >> (64 - TabBits))];
+                        if (f == 0) break;
+                        bb <<= f & 63; bc -= f & 63; pd[n++] = (ushort)(f >> 6);
+                        f = pf[(int)(bb >> (64 - TabBits))];
+                        if (f == 0) break;
+                        bb <<= f & 63; bc -= f & 63; pd[n++] = (ushort)(f >> 6);
+                        f = pf[(int)(bb >> (64 - TabBits))];
+                        if (f == 0) break;
+                        bb <<= f & 63; bc -= f & 63; pd[n++] = (ushort)(f >> 6);
+                    }
+
                     bb |= BinaryPrimitives.ReverseEndianness(*(ulong*)(b + bp)) >> bc;
                     bp += (63 - bc) >> 3;
                     bc |= 56;
@@ -191,25 +215,29 @@ namespace PixCodec
                     if (l != 0) { bb <<= l; bc -= l; }
                     else
                     {
-                        // long code: take 64 bits at the absolute position and search by length
-                        long bytePos = pos >> 3; int sh = (int)(pos & 7);
-                        ulong w = BinaryPrimitives.ReverseEndianness(*(ulong*)(b + bytePos)) << sh;
-                        if (sh != 0) w |= (ulong)b[bytePos + 8] >> (8 - sh);
+                        // long code or run length symbol: after the refill all 64 bits of bb are stream bits; search by length
                         sym = -1;
-                        for (l = TabBits + 1; l <= MaxCodeLen; l++)
-                        {
-                            if (count[l] == 0) continue;
-                            long v = (long)(w >> (64 - l)) - bas[l];
-                            if (v >= 0) { if (v < count[l]) sym = sorted[offset[l] + (int)v]; break; }
-                        }
+                        if (rlcLen != 0 && (long)(bb >> (64 - rlcLen)) == rlcCode) { sym = rlc; l = rlcLen; }
+                        else
+                            for (l = TabBits + 1; l <= MaxCodeLen; l++)
+                            {
+                                long v = (long)(bb >> (64 - l)) - bas[l];
+                                if (v >= 0 && count[l] != 0) { if (v < count[l]) sym = sorted[offset[l] + (int)v]; break; }
+                            }
                         if (sym < 0) throw Corrupt("invalid huffman code");
-                        pos += l;
-                        if (pos > endBit) throw Corrupt("huffman data overruns");
-                        // reload at the new position; keep the invariant that the bc valid bits end at byte bp, bc <= 56
-                        bp = pos >> 3; sh = (int)(pos & 7);
-                        bb = BinaryPrimitives.ReverseEndianness(*(ulong*)(b + bp)) << sh;
-                        bc = 56 - sh;
-                        bp += 7;
+                        if (pos + l > endBit) throw Corrupt("huffman data overruns");
+                        if (l <= bc - 8) { bb <<= l; bc -= l; }
+                        else
+                        {
+                            // (codes this long do not occur in practice) reload at the new position, keeping the
+                            // invariant that the bc valid bits end at byte bp
+                            pos += l;
+                            bp = pos >> 3;
+                            int sh = (int)(pos & 7);
+                            bb = BinaryPrimitives.ReverseEndianness(*(ulong*)(b + bp)) << sh;
+                            bc = 56 - sh;
+                            bp += 7;
+                        }
                     }
                     if (sym == rlc)
                     {
