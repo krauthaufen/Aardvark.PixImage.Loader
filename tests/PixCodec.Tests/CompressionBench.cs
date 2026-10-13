@@ -142,6 +142,22 @@ public class CompressionBench
             }
         }
 
+        if (only == "" || only.Contains("zstd"))
+        {
+            Out("");
+            Out("| data | Zstd.Compress size | ratio | enc MB/s | own dec MB/s |");
+            Out("|---|---|---|---|---|");
+            foreach (var (name, data) in sets)
+            {
+                byte[] z = Array.Empty<byte>();
+                double te = Best(() => z = Zstd.Compress(data), 3);
+                var dst = new byte[data.Length];
+                double td = Best(() => Zstd.Decompress(z, dst), 3);
+                Assert.True(data.AsSpan().SequenceEqual(dst));
+                Out($"| {name} | {z.Length} | {100.0 * z.Length / data.Length:F1}% | {data.Length / 1e6 / te:F0} | {data.Length / 1e6 / td:F0} |");
+            }
+        }
+
         if (only == "" || only.Contains("checksum"))
         {
             var data = sets[0].data;

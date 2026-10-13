@@ -213,6 +213,49 @@ public class CompressionDecodeTests
             Assert.Throws<ImageFormatException>(() => Xz.DecompressLzma(z, new byte[expected.Length - 1]));
     }
 
+    /// <summary>Random data shapes compressed by the reference libraries with random settings (needs python).</summary>
+    [Fact]
+    public void ReferenceEncodersOnRandomData()
+    {
+        var rnd = new Random(77);
+        var items = new List<byte[]>();
+        for (int i = 0; i < 120 * FuzzScale; i++) items.Add(Fuzz(rnd));
+        // per item: xz with a random preset / filter chain / check, .lzma, and (when imagecodecs is there) zstd
+        var py = PythonBatch(
+            "import random\nrandom.seed(5)\n" +
+            "try:\n import imagecodecs\n zs=imagecodecs.zstd_encode\nexcept Exception:\n zs=None\n" +
+            "results=[]\n" +
+            "for x in items:\n" +
+            " f=[]\n" +
+            " if random.random()<0.4: f.append({'id':lzma.FILTER_DELTA,'dist':random.choice([1,2,3,4,6,8,100,256])})\n" +
+            " lc=random.randint(0,4); lp=random.randint(0,4-lc)\n" +
+            " f.append({'id':lzma.FILTER_LZMA2,'preset':random.randint(0,9),'lc':lc,'lp':lp,'pb':random.randint(0,4),'dict_size':random.choice([4096,65536,1<<20])})\n" +
+            " results.append(lzma.compress(x,lzma.FORMAT_XZ,random.choice([lzma.CHECK_NONE,lzma.CHECK_CRC32,lzma.CHECK_CRC64,lzma.CHECK_SHA256]),filters=f))\n" +
+            " results.append(lzma.compress(x,lzma.FORMAT_ALONE,preset=random.randint(0,9)))\n" +
+            " results.append(zs(x,level=random.choice([-5,-1,1,2,3,4,5,7,9,12,15,19,22])) if zs else b'')\n" +
+            " results.append(zlib.compress(x,random.randint(0,9)))\n", items);
+        if (py == null) return;
+        Assert.Equal(items.Count * 4, py.Count);
+        for (int i = 0; i < items.Count; i++)
+        {
+            var data = items[i];
+            Assert.True(data.AsSpan().SequenceEqual(Xz.Decompress(py[4 * i])), $"xz item {i} ({data.Length} bytes)");
+            var dst = new byte[data.Length];
+            Assert.Equal(data.Length, Xz.Decompress(py[4 * i], dst));
+            Assert.True(data.AsSpan().SequenceEqual(dst), $"xz item {i}");
+            Assert.True(data.AsSpan().SequenceEqual(Xz.DecompressLzma(py[4 * i + 1])), $"lzma item {i} ({data.Length} bytes)");
+            Assert.Equal(data.Length, Xz.DecompressLzma(py[4 * i + 1], dst));
+            Assert.True(data.AsSpan().SequenceEqual(dst), $"lzma item {i}");
+            if (py[4 * i + 2].Length > 0)
+            {
+                Assert.True(data.AsSpan().SequenceEqual(Zstd.Decompress(py[4 * i + 2])), $"zstd item {i} ({data.Length} bytes)");
+                Assert.Equal(data.Length, Zstd.Decompress(py[4 * i + 2], dst));
+                Assert.True(data.AsSpan().SequenceEqual(dst), $"zstd item {i}");
+            }
+            Assert.True(data.AsSpan().SequenceEqual(InflateCore.Decompress(py[4 * i + 3], 0, true, true)), $"zlib item {i} ({data.Length} bytes)");
+        }
+    }
+
     [Fact]
     public void XzUnsupportedFilter()
     {

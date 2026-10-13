@@ -263,7 +263,11 @@ namespace PixCodec.Compression
 
         // ---------------------------------------------------------------------------------------- Huffman
 
-        void ReadHuffmanTree(byte* src, int length, ref int pos)
+        // (also used by the encoder to check the tree descriptions it writes)
+        internal int HuffmanLog => hufLog;
+        internal int HuffmanEntry(int index) => huf[index];
+
+        internal void ReadHuffmanTree(byte* src, int length, ref int pos)
         {
             if (pos >= length) throw Bad("truncated literals");
             int header = src[pos++];

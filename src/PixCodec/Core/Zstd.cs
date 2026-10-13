@@ -3,9 +3,9 @@ using System;
 namespace PixCodec.Compression
 {
     /// <summary>
-    /// Zstandard (RFC 8878) decompression, fully managed. Supports all block types, FSE and Huffman coded
-    /// literals and sequences, repeat offsets, multiple and skippable frames and the xxHash64 content checksum.
-    /// Dictionaries are not supported.
+    /// Zstandard (RFC 8878), fully managed. The decoder supports all block types, FSE and Huffman coded literals
+    /// and sequences, repeat offsets, multiple and skippable frames and the xxHash64 content checksum; dictionaries
+    /// are not supported. The compressor is a simple fast one with a single setting (see <see cref="Compress"/>).
     /// </summary>
     public static class Zstd
     {
@@ -34,5 +34,13 @@ namespace PixCodec.Compression
             if (n != buffer!.Length) Array.Resize(ref buffer, n);
             return buffer;
         }
+
+        /// <summary>
+        /// Compresses to a single zstd frame (with the content size in its header) that any zstd decoder reads.
+        /// This is a simple fast compressor - greedy matching, Huffman literals, FSE sequences, raw/RLE block
+        /// fallback - with one fixed speed/ratio trade-off; it is not a replacement for the reference
+        /// implementation's higher levels. <paramref name="checksum"/> appends the xxHash64 content checksum.
+        /// </summary>
+        public static byte[] Compress(ReadOnlySpan<byte> source, bool checksum = false) => ZstdEncoder.Compress(source, checksum);
     }
 }
