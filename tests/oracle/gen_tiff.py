@@ -207,7 +207,8 @@ def write_tiff(path, pages, byteorder='<', bigtiff=False):
     """pages: list of dicts with 'arr' (H,W,C) and options:
     bits, compression, predictor, planar(1|2), tile(tw,th), rps, photometric, extrasamples, colormap,
     fillorder, lzw_old, sampleformat, tags [(id, type, values)], no_bytecounts, zero_bytecounts, sparse (set of chunk indices),
-    raw_chunks (pre-encoded strips, used for hand-built YCbCr data)."""
+    raw_chunks (pre-encoded strips, used for hand-built YCbCr / JPEG data), prefix (bytes placed right after the
+    header, for tags holding absolute offsets), strips ((offsets, counts) overriding the strip tags)."""
     e = byteorder
     f = io.BytesIO()
     f.write((b'II' if e == '<' else b'MM') + struct.pack(e + 'H', 43 if bigtiff else 42))
@@ -242,6 +243,7 @@ def write_tiff(path, pages, byteorder='<', bigtiff=False):
                             blk = pad
                         chunks.append(encode_chunk(np.ascontiguousarray(blk), p, e, plane))
         offsets, counts = [], []
+        f.write(p.get('prefix', b''))   # data that tags point to by absolute offset (written right after the header)
         for i, ch in enumerate(chunks):
             if i in p.get('sparse', ()):
                 offsets.append(0)
@@ -252,6 +254,8 @@ def write_tiff(path, pages, byteorder='<', bigtiff=False):
             f.write(ch)
         if f.tell() & 1:
             f.write(b'\0')
+        if 'strips' in p:
+            offsets, counts = p['strips']   # strips that live inside the prefix
 
         kind = a.dtype.kind
         tags = [(256, 4, [w]), (257, 4, [h]), (258, 3, bits), (259, 3, [p.get('compression', NONE)]),
@@ -992,7 +996,6 @@ def gen_jpeg():
         err = float(np.abs(ref.astype(int) - orig.astype(int)).mean())
         assert err < 15, (name, err)  # the reference really is the picture (4:2:0 at q90 alone costs ~12 on this pattern)
         write_ref(path + '.ref', ref)
-        write_tol(path, 3)
         SUMMARY.append(('jpeg/' + name, [f'pillow (libtiff/libjpeg): {desc}, mean error vs. source {err:.2f}']))
     os.remove(src)
 
@@ -1276,6 +1279,132 @@ def gen_logluv():
     SUMMARY.append(('unverified/logl16', ['UNVERIFIED: ' + reason]))
 
 
+def parse_jpeg(b):
+    """Splits a baseline JPEG into the pieces an old-style JPEG TIFF spreads over tags."""
+    p = 2
+    q, dc, ac, sof, dri = {}, {}, {}, None, 0
+    while True:
+        assert b[p] == 0xFF, p
+        m = b[p + 1]
+        n = struct.unpack('>H', b[p + 2:p + 4])[0]
+        seg = b[p + 4:p + 2 + n]
+        if m == 0xDB:
+            for i in range(0, len(seg), 65):
+                q[seg[i] & 15] = seg[i + 1:i + 65]
+        elif m == 0xC4:
+            i = 0
+            while i < len(seg):
+                k = sum(seg[i + 1:i + 17])
+                (dc if seg[i] >> 4 == 0 else ac)[seg[i] & 15] = seg[i + 1:i + 17 + k]
+                i += 17 + k
+        elif m == 0xC0:
+            h, w, k = struct.unpack('>HHB', seg[1:6])
+            sof = (h, w, [(seg[6 + 3 * c], seg[7 + 3 * c], seg[8 + 3 * c]) for c in range(k)])
+        elif m == 0xDD:
+            dri = struct.unpack('>H', seg)[0]
+        elif m == 0xDA:
+            sos = {seg[1 + 2 * c]: seg[2 + 2 * c] for c in range(seg[0])}
+            return dict(q=q, dc=dc, ac=ac, sof=sof, sos=sos, dri=dri, scan_start=p + 2 + n, scan_end=b.rindex(b'\xff\xd9'))
+        p += 2 + n
+
+
+def gen_ojpeg():
+    """Old-style JPEG (compression 6), assembled by hand from baseline JPEG files in the three layouts of the TIFF 6.0
+    spec: a complete interchange stream the strip points into, a tables-only interchange stream, and tables in the
+    JPEGQTables / JPEGDCTables / JPEGACTables tags (one strip, or one strip per restart interval).
+
+    Reference: libjpeg-turbo (Pillow) decoding the JPEG stream the file was assembled from. libtiff reads every one
+    of these files too (asserted here), but its old-JPEG codec hands out subsampled YCbCr that is then box-upsampled
+    and converted by libtiff's own tables: identical for 4:4:4 and gray, up to 16 levels off at chroma edges
+    for 4:2:0. The distance to libtiff is reported in the summary."""
+    # a smooth picture, so that libtiff's box-upsampled reading stays comparable
+    rgb = np.asarray(Image.fromarray(test_pattern(14, 11, 3, np.uint8, 31)).resize((70, 52), Image.BICUBIC))
+    gray = np.ascontiguousarray(rgb[:, :, 1])
+
+    def jpg(a, **kw):
+        b = io.BytesIO()
+        Image.fromarray(a).save(b, 'JPEG', quality=90, **kw)
+        return b.getvalue()
+
+    def finish(name, page, j, exp):
+        d = os.path.join(OUT, 'ojpeg')
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name + '.tif')
+        write_tiff(path, [page])
+        lib = np.asarray(Image.open(path).convert('RGB' if exp.ndim == 3 else 'L'))
+        dist = int(np.abs(lib.astype(int) - exp.astype(int)).max())
+        mean = float(np.abs(lib.astype(int) - exp.astype(int)).mean())
+        assert mean < 3, (name, mean)
+        write_ref(path + '.ref', exp)
+        SUMMARY.append(('ojpeg/' + name, [f'libjpeg-turbo on the embedded stream; libtiff (Pillow) reads the file: max {dist}, mean {mean:.2f} away']))
+
+    def layout(j):
+        info = parse_jpeg(j)
+        h, w, comps = info['sof']
+        hv = comps[0][1]
+        tags = [(512, 3, [1])]
+        if len(comps) == 3:
+            tags.append((530, 3, [hv >> 4, hv & 15]))
+        page = dict(arr=np.zeros((h, w, len(comps)), np.uint8), photometric=6 if len(comps) == 3 else 1, compression=6, tags=tags)
+        return info, page, np.asarray(Image.open(io.BytesIO(j)))
+
+    # 1. JPEGInterchangeFormat = the complete stream, the single strip is its scan data
+    for name, j in [('ojpeg_interchange_420', jpg(rgb, subsampling=2)), ('ojpeg_interchange_444', jpg(rgb, subsampling=0)),
+                    ('ojpeg_interchange_gray', jpg(gray))]:
+        info, page, exp = layout(j)
+        page.update(prefix=j, rps=exp.shape[0], raw_chunks=[], strips=([8 + info['scan_start']], [info['scan_end'] + 2 - info['scan_start']]))
+        page['tags'] += [(513, 4, [8]), (514, 4, [len(j)])]
+        finish(name, page, j, exp)
+
+    # 2. tables in tags; raw entropy coded data in the strip(s)
+    def tables_page(j, per_interval):
+        info, page, exp = layout(j)
+        h, w, comps = info['sof']
+        blobs, pos = [], 8
+        offs = {519: [], 520: [], 521: []}
+        for tag, pick in ((519, lambda c: info['q'][c[2]]), (520, lambda c: info['dc'][info['sos'][c[0]] >> 4]),
+                          (521, lambda c: info['ac'][info['sos'][c[0]] & 15])):
+            for c in comps:
+                offs[tag].append(pos)
+                blobs.append(pick(c))
+                pos += len(blobs[-1])
+        scan = j[info['scan_start']:info['scan_end']]
+        parts, rps = [scan], h
+        if per_interval:
+            # one restart interval (= one row of MCUs) per strip; libtiff puts the restart markers back in
+            assert info['dri'] > 0
+            parts, start, i = [], 0, 0
+            while i < len(scan) - 1:
+                if scan[i] == 0xFF and 0xD0 <= scan[i + 1] <= 0xD7:
+                    parts.append(scan[start:i])
+                    start = i = i + 2
+                else:
+                    i += 1
+            parts.append(scan[start:])
+            rps = 8 * (comps[0][1] & 15)
+            assert len(parts) == -(-h // rps), (len(parts), h, rps)
+            page['tags'].append((515, 3, [info['dri']]))
+        page.update(prefix=b''.join(blobs), rps=rps, raw_chunks=parts)
+        page['tags'] += [(tag, 4, o) for tag, o in offs.items()]
+        return page, exp
+
+    for name, j, per in [('ojpeg_tables_444', jpg(rgb, subsampling=0), False), ('ojpeg_tables_420', jpg(rgb, subsampling=2), False),
+                         ('ojpeg_tables_gray', jpg(gray), False),
+                         ('ojpeg_tables_420_restart_strips', jpg(rgb, subsampling=2, restart_marker_rows=1), True),
+                         ('ojpeg_tables_422_restart_strips', jpg(rgb, subsampling=1, restart_marker_rows=1), True),
+                         ('ojpeg_tables_gray_restart_strips', jpg(gray, restart_marker_rows=1), True)]:
+        page, exp = tables_page(j, per)
+        finish(name, page, j, exp)
+
+    # 3. JPEGInterchangeFormat holds only the header with the tables; the strip is the scan data stored elsewhere
+    j = jpg(rgb, subsampling=2)
+    info, page, exp = layout(j)
+    header = j[:info['scan_start']]
+    page.update(prefix=header, rps=exp.shape[0], raw_chunks=[j[info['scan_start']:info['scan_end'] + 2]])
+    page['tags'] += [(513, 4, [8]), (514, 4, [len(header)])]
+    finish('ojpeg_header_then_strip_420', page, j, exp)
+
+
 def gen_ccitt():
     """Bilevel fax compressions, written by libtiff (Pillow / ImageMagick), references decoded by libtiff (Pillow)."""
     rng = np.random.default_rng(5)
@@ -1370,6 +1499,7 @@ def main():
     gen_ccitt()
     gen_ycbcr()
     gen_jpeg()
+    gen_ojpeg()
     for n, by in SUMMARY:
         assert by, n
         print(f'{n:45s} {", ".join(by)}')
