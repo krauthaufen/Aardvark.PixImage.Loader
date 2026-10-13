@@ -185,7 +185,12 @@ def decode_webp(path):
     """What libwebp shows (through Pillow's binding of its animation decoder): the first frame, RGBA when the file
     signals alpha by the rule documented in Webp.cs, else RGB. A file named *.anim.webp yields all composited RGBA
     frames stacked vertically."""
-    from gen_webp import libwebp_frames, output_has_alpha
+    try:
+        from gen_webp import libwebp_frames, output_has_alpha
+        from PIL import _webp
+        _webp.WebPAnimDecoder
+    except (ImportError, AttributeError):
+        sys.exit(77)        # Pillow without (animated) WebP support: cannot be verified here
     with open(path, 'rb') as f:
         data = f.read()
     frames = libwebp_frames(data)[0]

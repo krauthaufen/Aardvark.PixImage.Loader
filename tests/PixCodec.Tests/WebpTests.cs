@@ -19,6 +19,30 @@ public class WebpTests(ITestOutputHelper output)
         return refs;
     }
 
+    /// <summary>
+    /// Decodes with libwebp (Pillow's binding, tests/oracle/decode_to_ref.py). Null when python is missing or the
+    /// oracle says it cannot verify here (exit status 77, e.g. a Pillow built without WebP): the test then checks less.
+    /// </summary>
+    static RawImage? Oracle(byte[] encoded, string extension)
+    {
+        if (!PythonAvailable) return null;
+        var tmp = Path.Combine(FixtureDir, "_tmp");
+        Directory.CreateDirectory(tmp);
+        var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + extension);
+        try
+        {
+            File.WriteAllBytes(f, encoded);
+            var (exit, text) = RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
+            if (exit == 77) return null;
+            Assert.True(exit == 0, "oracle decode failed: " + text);
+            return LoadRef(f + ".ref");
+        }
+        finally
+        {
+            File.Delete(f); File.Delete(f + ".ref");
+        }
+    }
+
     // ------------------------------------------------------------------ decoder vs. references
 
     [Theory, MemberData(nameof(Fixtures))]
@@ -380,7 +404,7 @@ public class WebpTests(ITestOutputHelper output)
             Assert.Equal(expected.Color, back.Color);
             AssertEqual(expected, back);
             Assert.Equal(new ImageInfo(ImageFormat.Webp, img.Width, img.Height, expected.Channels, SampleType.UInt8, expected.Color) { BitsPerSample = 8 }, Webp.GetInfo(data));
-            var oracle = OracleDecode(data, ".webp");
+            var oracle = Oracle(data, ".webp");
             if (oracle == null) return;
             AssertEqual(expected, oracle);
         }
@@ -397,7 +421,7 @@ public class WebpTests(ITestOutputHelper output)
             {
                 var data = Encode(img, opt);
                 AssertEqual(Expanded(img), Webp.Decode(data));
-                var oracle = OracleDecode(data, ".webp");
+                var oracle = Oracle(data, ".webp");
                 if (oracle != null) AssertEqual(Expanded(img), oracle);
             }
         }
@@ -415,7 +439,7 @@ public class WebpTests(ITestOutputHelper output)
                 AssertEqual(img, Webp.Decode(data));
                 if (method == 4)
                 {
-                    var oracle = OracleDecode(data, ".webp");
+                    var oracle = Oracle(data, ".webp");
                     if (oracle != null) AssertEqual(img, oracle);
                 }
             }
@@ -435,7 +459,7 @@ public class WebpTests(ITestOutputHelper output)
             {
                 var data = Encode(img, new WebpEncodeOptions { Lossless = true, Method = method });
                 AssertEqual(img, Webp.Decode(data));
-                var oracle = OracleDecode(data, ".webp");
+                var oracle = Oracle(data, ".webp");
                 if (oracle != null) AssertEqual(img, oracle);
             }
         }
@@ -473,7 +497,7 @@ public class WebpTests(ITestOutputHelper output)
             Assert.Equal(src[i + 3], back[i + 3]);
             if (src[i + 3] != 0) Assert.True(src.AsSpan(i, 3).SequenceEqual(back.AsSpan(i, 3)));
         }
-        var oracle = OracleDecode(loose, ".webp");
+        var oracle = Oracle(loose, ".webp");
         if (oracle != null) AssertEqual(Webp.Decode(loose), oracle);
     }
 
@@ -518,7 +542,7 @@ public class WebpTests(ITestOutputHelper output)
                 double psnr = Psnr(img, back, 255);
                 Assert.True(psnr > (quality >= 95 ? 38 : quality >= 75 ? 33 : quality >= 30 ? 28 : 20), $"PSNR {psnr:F2} at quality {quality}");
             }
-            var oracle = OracleDecode(data, ".webp");
+            var oracle = Oracle(data, ".webp");
             if (oracle == null) return;
             AssertEqual(back, oracle);
         }
@@ -543,7 +567,7 @@ public class WebpTests(ITestOutputHelper output)
             double psnr = Psnr(img, back, 255);
             output.WriteLine($"{name}: {data.Length} bytes, {psnr:F2} dB");
             Assert.True(psnr > 27, name);
-            var oracle = OracleDecode(data, ".webp");
+            var oracle = Oracle(data, ".webp");
             if (oracle != null) AssertEqual(back, oracle);
         }
     }
@@ -600,7 +624,7 @@ public class WebpTests(ITestOutputHelper output)
                     Assert.True(psnr > 30, $"{name}: {psnr:F2} dB");
                     continue;
                 }
-                var oracle = OracleDecode(data, ".webp");
+                var oracle = Oracle(data, ".webp");
                 if (oracle == null) return;
                 Assert.True(oracle.GetBytes().SequenceEqual(back.GetBytes()), $"{name} (method {method}): libwebp decodes other pixels, max difference {MaxDiff(oracle, back)}");
             }
@@ -619,7 +643,7 @@ public class WebpTests(ITestOutputHelper output)
             var a = Webp.Decode(data);
             AssertEqual(Webp.Decode(data, single), a);
             Assert.True(Psnr(img, a, 255) > 28);
-            var oracle = OracleDecode(data, ".webp");
+            var oracle = Oracle(data, ".webp");
             if (oracle != null) AssertEqual(oracle, a);
             // damaged token data: both paths must end the same way, and the parser thread must not outlive the call
             var rng = new Random(5);
@@ -645,6 +669,51 @@ public class WebpTests(ITestOutputHelper output)
         var f2 = Webp.DecodeAnimation(anim, single);
         for (int i = 0; i < 2; i++) AssertEqual(f2.Frames[i].Image, f1.Frames[i].Image);
         Assert.True(new WebpDecodeOptions().Multithreaded);
+    }
+
+    /// <summary>Mean SSIM of the green channel over 8x8 windows at every fourth position.</summary>
+    static double Ssim(RawImage a, RawImage b)
+    {
+        var x = (byte[])a.Data; var y = (byte[])b.Data;
+        int w = a.Width, h = a.Height, ch = a.Channels;
+        double sum = 0;
+        int n = 0;
+        for (int y0 = 0; y0 + 8 <= h; y0 += 4)
+            for (int x0 = 0; x0 + 8 <= w; x0 += 4)
+            {
+                double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+                for (int j = 0; j < 8; j++)
+                    for (int i = 0; i < 8; i++)
+                    {
+                        double p = x[((y0 + j) * w + x0 + i) * ch + 1], q = y[((y0 + j) * w + x0 + i) * ch + 1];
+                        sx += p; sy += q; sxx += p * p; syy += q * q; sxy += p * q;
+                    }
+                double mx = sx / 64, my = sy / 64, vx = sxx / 64 - mx * mx, vy = syy / 64 - my * my, cov = sxy / 64 - mx * my;
+                sum += (2 * mx * my + 6.5025) * (2 * cov + 58.5225) / ((mx * mx + my * my + 6.5025) * (vx + vy + 58.5225));
+                n++;
+            }
+        return sum / n;
+    }
+
+    [Fact]
+    public void SegmentsAreOnByDefaultAndSelectable()
+    {
+        // The default (4 segments) was chosen on measurements with real photographs: slightly lower PSNR, clearly
+        // higher SSIM / MS-SSIM at equal size. Here only the mechanics: both settings work, differ, and report
+        // comparable quality for comparable size.
+        Assert.Equal(4, new WebpEncodeOptions().Segments);
+        var img = Photo(320, 240, ColorModel.Rgb, 9);
+        var d = (byte[])img.Data;
+        for (int y = 0; y < 240; y++) for (int x = 0; x < 160; x++) for (int c = 0; c < 3; c++) d[(y * 320 + x) * 3 + c] = (byte)(100 + x / 4 + y / 8);     // a flat half
+        var one = Encode(img, new WebpEncodeOptions { Quality = 60, Segments = 1 });
+        var four = Encode(img, new WebpEncodeOptions { Quality = 60 });
+        Assert.NotEqual(one.Length, four.Length);
+        var a = Webp.Decode(one); var b = Webp.Decode(four);
+        output.WriteLine($"1 segment: {one.Length} bytes, {Psnr(img, a, 255):F2} dB, SSIM {Ssim(img, a):F4}; 4 segments: {four.Length} bytes, {Psnr(img, b, 255):F2} dB, SSIM {Ssim(img, b):F4}");
+        Assert.True(Ssim(img, a) > 0.85 && Ssim(img, b) > 0.85);
+        Assert.True(Math.Abs(Psnr(img, a, 255) - Psnr(img, b, 255)) < 3);
+        var oracle = Oracle(four, ".webp");
+        if (oracle != null) AssertEqual(b, oracle);
     }
 
     [Fact]
@@ -679,7 +748,7 @@ public class WebpTests(ITestOutputHelper output)
                 var e = (byte[])expected.Data;
                 for (int i = 3; i < e.Length; i += 4) Assert.Equal(e[i], b[i]);      // alpha is stored lossless
                 Assert.True(Psnr(expected, back, 255) > 30);
-                var oracle = OracleDecode(data, ".webp");
+                var oracle = Oracle(data, ".webp");
                 if (oracle != null) AssertEqual(back, oracle);
             }
     }
@@ -712,7 +781,7 @@ public class WebpTests(ITestOutputHelper output)
             }
             if (q == 0) Assert.Equal(2, levels.Count);
             lastSize = data.Length; lastError = maxError;
-            var oracle = OracleDecode(data, ".webp");
+            var oracle = Oracle(data, ".webp");
             if (oracle != null) AssertEqual(Webp.Decode(data), oracle);
         }
     }
@@ -737,7 +806,7 @@ public class WebpTests(ITestOutputHelper output)
             var back = Webp.Decode(data);
             psnr[mode] = Psnr(img, back, 255);
             output.WriteLine($"{mode}: {data.Length} bytes, {psnr[mode]:F2} dB");
-            var oracle = OracleDecode(data, ".webp");
+            var oracle = Oracle(data, ".webp");
             if (oracle != null) AssertEqual(back, oracle);
         }
         Assert.True(psnr[WebpChroma.Sharp] > psnr[WebpChroma.Average] + 0.3);
@@ -775,7 +844,7 @@ public class WebpTests(ITestOutputHelper output)
                 Assert.True(maxError <= limit && maxError > 0, $"max error {maxError} at {q}");
                 Assert.True(data.Length < last, $"{data.Length} >= {last} at {q}");
                 last = data.Length;
-                var oracle = OracleDecode(data, ".webp");
+                var oracle = Oracle(data, ".webp");
                 if (oracle != null) AssertEqual(Webp.Decode(data), oracle);
             }
             Assert.True(last < lossless * 0.6);
@@ -851,7 +920,7 @@ public class WebpTests(ITestOutputHelper output)
             int full = Webp.EncodeAnimation(frames, new WebpEncodeOptions { Lossless = lossless, FrameDifferencing = false, Quality = 85 }).Length;
             Assert.True(data.Length < full);
         }
-        var oracle = OracleDecode(data, ".anim.webp");
+        var oracle = Oracle(data, ".anim.webp");
         if (oracle == null) return;
         Assert.Equal((48, 36 * 6, 4), (oracle.Width, oracle.Height, oracle.Channels));
         var all = new byte[48 * 36 * 6 * 4];
@@ -902,7 +971,7 @@ public class WebpTests(ITestOutputHelper output)
             Assert.Equal(xmp, Webp.GetXmp(data));
             Assert.Equal(ColorModel.Rgb, back.Color);
             // libwebp reads the file with its extended header and odd sized chunks as well
-            var oracle = OracleDecode(data, ".webp");
+            var oracle = Oracle(data, ".webp");
             if (oracle != null) AssertEqual(back, oracle);
 
             var plain = Encode(img, new WebpEncodeOptions { Lossless = lossless, Xmp = xmp, WriteMetadata = false });

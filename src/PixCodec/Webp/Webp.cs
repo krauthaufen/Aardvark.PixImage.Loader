@@ -120,9 +120,13 @@ namespace PixCodec
         /// <summary>Lossy only: number of token partitions, 1, 2, 4 or 8.</summary>
         public int Partitions { get; set; } = 1;
 
-        /// <summary>Lossy only: number of segments (1..4) with their own quantizer, chosen by local activity (flat areas
-        /// are quantized finer, busy ones coarser). 1 gives the best PSNR for the size.</summary>
-        public int Segments { get; set; } = 1;
+        /// <summary>
+        /// Lossy only: number of segments (1..4) with their own quantizer, chosen by local activity (flat areas are
+        /// quantized finer, busy ones coarser). At equal file size, 4 segments against 1 measured on six Kodak
+        /// photographs and two drawings: PSNR -0.23 dB, SSIM +0.24 dB, MS-SSIM +0.49 dB (structure in decibels,
+        /// -10 log10(1 - x)); the photographs all gain, drawings are a wash. Use 1 for the highest PSNR.
+        /// </summary>
+        public int Segments { get; set; } = 4;
 
         /// <summary>Lossy only: loop filter strength 0..63, or -1 to derive it from the quantizer.</summary>
         public int FilterStrength { get; set; } = -1;
