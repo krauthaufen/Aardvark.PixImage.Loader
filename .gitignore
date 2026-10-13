@@ -4,3 +4,4 @@ obj/
 .vs/
 tests/fixtures/_tmp/
 __pycache__/
+.tmp/
