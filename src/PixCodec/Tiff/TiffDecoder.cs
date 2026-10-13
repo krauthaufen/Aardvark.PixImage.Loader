@@ -76,6 +76,7 @@ namespace PixCodec
         readonly int _pixelBits;     // stored bits of one contiguous pixel
         readonly bool _oldJpeg;
         readonly int _storedStrips;
+        readonly long _ifdOffset;
 
         long[] _offsets = Array.Empty<long>(), _counts = Array.Empty<long>();
         ushort[]? _colorMap;
@@ -94,6 +95,7 @@ namespace PixCodec
             options ??= TiffDecodeOptions.Default;
             ConvertToRgb = options.ConvertToRgb;
             File = file;
+            _ifdOffset = ifdOffset;
             var e = Entries = file.ReadIfd(ifdOffset);
             long w = file.Integer(e, 256, 0), h = file.Integer(e, 257, 0);
             if (w <= 0 || h <= 0 || w > int.MaxValue || h > int.MaxValue) throw new ImageFormatException("TIFF: invalid image dimensions");
@@ -516,6 +518,8 @@ namespace PixCodec
                 if (yr != null && yr.Length > 0 && double.IsFinite(yr[0]) && yr[0] > 0) m.DpiY = yr[0] * f;
                 var icc = File.Bytes(e, 34675);
                 if (icc != null && icc.Length > 0) m.IccProfile = icc;
+                // EXIF / GPS directories, repackaged as the standalone EXIF blob other formats carry
+                if (TiffFile.Find(e, 34665, out _) || TiffFile.Find(e, 34853, out _)) m.Exif = TiffExif.Extract(File, _ifdOffset);
             }
             catch (ImageFormatException) { } // broken metadata must not make the pixels unreadable
             return m;

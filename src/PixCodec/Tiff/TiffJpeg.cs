@@ -14,6 +14,10 @@ namespace PixCodec
             else Jpeg.DecodeForTiff(tables, data, width, height, components, ycc, dst);
         }
 
+        /// <summary>Encodes 8-bit interleaved Gray (1) or Rgb (3) pixels as one self-contained JPEG stream (RGB is stored as YCbCr).</summary>
+        public static void Encode(byte[] pixels, int width, int height, int components, JpegEncodeOptions options, Stream output)
+            => Jpeg.Encode(new RawImage(width, height, components == 1 ? ColorModel.Gray : ColorModel.Rgb, pixels), output, options);
+
         public static void Decode16(ReadOnlySpan<byte> tables, ReadOnlySpan<byte> data, int width, int height, int components, bool ycc, Span<ushort> dst)
             => throw new ImageNotSupportedException("TIFF: JPEG compression with more than 8 bits per sample is not supported");
     }

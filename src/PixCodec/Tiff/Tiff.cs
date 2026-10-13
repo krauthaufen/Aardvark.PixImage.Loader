@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace PixCodec
 {
@@ -84,6 +86,49 @@ namespace PixCodec
 
         /// <summary>Compress strips/tiles on several threads.</summary>
         public bool Parallel { get; set; } = true;
+
+        /// <summary>Write a big endian ("MM") file. A file level setting: for multi-page output the value of the options passed to Encode counts.</summary>
+        public bool BigEndian { get; set; }
+
+        /// <summary>
+        /// Write an 8-bit Gray image as a 1-bit bilevel image (samples &gt;= 128 become white). Always the case for
+        /// <see cref="TiffCompression.CcittGroup4"/>.
+        /// </summary>
+        public bool Bilevel { get; set; }
+
+        /// <summary>Quality 1..100 for <see cref="TiffCompression.Jpeg"/>.</summary>
+        public int JpegQuality { get; set; } = 90;
+
+        /// <summary>Chroma subsampling for <see cref="TiffCompression.Jpeg"/> with Rgb images (Auto: 4:4:4 from quality 90, 4:2:0 below).</summary>
+        public JpegSubsampling JpegSubsampling { get; set; } = JpegSubsampling.Auto;
+
+        /// <summary>
+        /// Additional tags to write into the image directory, e.g. the GeoTIFF tags (ModelPixelScale 33550,
+        /// ModelTiepoint 33922, GeoKeyDirectory 34735, GDAL_NODATA 42113) or Software / ImageDescription. They take
+        /// precedence over what the image metadata would produce; tags describing the pixel layout are refused.
+        /// </summary>
+        public IList<TiffTag> ExtraTags { get; set; } = new List<TiffTag>();
+
+        /// <summary>Test seam: zero bytes inserted after the header, pushing every offset (also past 4 GB).</summary>
+        internal long TestPadding;
+    }
+
+    /// <summary>One image of a multi-page TIFF to write.</summary>
+    public sealed class TiffPage
+    {
+        public TiffPage(RawImage image, TiffEncodeOptions? options = null)
+        {
+            Image = image ?? throw new ArgumentNullException(nameof(image));
+            Options = options;
+        }
+
+        public RawImage Image { get; }
+
+        /// <summary>Per image settings (compression, tiling, tags ...); null uses the options passed to Encode.</summary>
+        public TiffEncodeOptions? Options { get; set; }
+
+        /// <summary>Marks the image as a reduced resolution version of another one (NewSubfileType bit 0): an overview / pyramid level.</summary>
+        public bool ReducedResolution { get; set; }
     }
 
     /// <summary>
@@ -216,7 +261,20 @@ namespace PixCodec
 
         /// <summary>Encodes an image as TIFF to the stream (which only needs to be writable, not seekable).</summary>
         public static void Encode(RawImage image, Stream output, TiffEncodeOptions? options = null)
-            => TiffEncoder.Encode(image, output, options ?? new TiffEncodeOptions());
+            => TiffEncoder.Encode(new[] { new TiffPage(image ?? throw new ArgumentNullException(nameof(image))) }, output, options ?? new TiffEncodeOptions());
+
+        /// <summary>
+        /// Writes several images into one TIFF (multi-page file, or a pyramid when the further pages are marked
+        /// <see cref="TiffPage.ReducedResolution"/>). File level settings (BigTiff, BigEndian) come from
+        /// <paramref name="options"/>, everything else can be set per page. The pages are enumerated lazily when
+        /// BigTiff is set explicitly; with the automatic choice all of them are looked at first to size the file.
+        /// </summary>
+        public static void Encode(IEnumerable<TiffPage> pages, Stream output, TiffEncodeOptions? options = null)
+            => TiffEncoder.Encode(pages, output, options ?? new TiffEncodeOptions());
+
+        /// <summary>Writes several images into one multi-page TIFF with the same options.</summary>
+        public static void Encode(IEnumerable<RawImage> pages, Stream output, TiffEncodeOptions? options = null)
+            => TiffEncoder.Encode((pages ?? throw new ArgumentNullException(nameof(pages))).Select(p => new TiffPage(p)), output, options ?? new TiffEncodeOptions());
 
         static ImageInfo InfoCore(TiffSource src)
         {
@@ -279,5 +337,15 @@ namespace PixCodec
 
 namespace PixCodec
 {
-    public enum TiffCompression { None, Lzw, Deflate, PackBits }
+    public enum TiffCompression
+    {
+        None,
+        Lzw,
+        Deflate,
+        PackBits,
+        /// <summary>JPEG (compression 7), 8-bit Gray or Rgb only; Rgb is stored as YCbCr. Lossy.</summary>
+        Jpeg,
+        /// <summary>CCITT Group 4 fax (compression 4): 1-bit bilevel output from an 8-bit Gray image.</summary>
+        CcittGroup4,
+    }
 }

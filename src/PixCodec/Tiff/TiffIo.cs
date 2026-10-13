@@ -34,6 +34,43 @@ namespace PixCodec
             Id = id; Type = type; Count = count; Value = value;
         }
 
+        /// <summary>
+        /// A tag to write with <see cref="TiffEncodeOptions.ExtraTags"/>. <paramref name="value"/> must have the
+        /// type listed above for <paramref name="type"/> (Rational / SRational take a double[] and are stored as
+        /// fractions). The factory methods below cover the common cases.
+        /// </summary>
+        public TiffTag(int id, TiffTagType type, object value)
+        {
+            if (id < 0 || id > 65535) throw new ArgumentOutOfRangeException(nameof(id));
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            var want = type switch
+            {
+                TiffTagType.Byte or TiffTagType.Undefined => typeof(byte[]),
+                TiffTagType.Ascii => typeof(string),
+                TiffTagType.Short => typeof(ushort[]),
+                TiffTagType.Long or TiffTagType.Ifd => typeof(uint[]),
+                TiffTagType.SByte => typeof(sbyte[]),
+                TiffTagType.SShort => typeof(short[]),
+                TiffTagType.SLong => typeof(int[]),
+                TiffTagType.Long8 or TiffTagType.Ifd8 => typeof(ulong[]),
+                TiffTagType.SLong8 => typeof(long[]),
+                TiffTagType.Float => typeof(float[]),
+                TiffTagType.Double or TiffTagType.Rational or TiffTagType.SRational => typeof(double[]),
+                _ => throw new ArgumentException("unknown TIFF field type", nameof(type)),
+            };
+            // exact type test: `value is byte[]` would also accept an sbyte[]
+            if (value.GetType() != want) throw new ArgumentException($"a {type} tag needs a {want.Name} value, got {value.GetType().Name}");
+            Id = id; Type = type; Value = value;
+            Count = value is string s ? Encoding.UTF8.GetByteCount(s) + 1 : ((Array)value).Length;
+        }
+
+        public static TiffTag Ascii(int id, string text) => new TiffTag(id, TiffTagType.Ascii, text);
+        public static TiffTag Shorts(int id, params ushort[] values) => new TiffTag(id, TiffTagType.Short, values);
+        public static TiffTag Longs(int id, params uint[] values) => new TiffTag(id, TiffTagType.Long, values);
+        public static TiffTag Doubles(int id, params double[] values) => new TiffTag(id, TiffTagType.Double, values);
+        public static TiffTag Rationals(int id, params double[] values) => new TiffTag(id, TiffTagType.Rational, values);
+        public static TiffTag Bytes(int id, byte[] values) => new TiffTag(id, TiffTagType.Undefined, values);
+
         /// <summary>The string of an Ascii tag, null for other types.</summary>
         public string? AsString() => Value as string;
 
@@ -298,6 +335,16 @@ namespace PixCodec
             count = (int)e.Count;
             var raw = new byte[bytes];
             Src.Read(e.ValueOffset, raw);
+            return raw;
+        }
+
+        /// <summary>The value bytes of an entry converted to little endian, for copying an entry into another file.</summary>
+        public byte[] RawLittleEndian(in TiffEntry e)
+        {
+            var raw = ReadRaw(e, out _);
+            int unit = TiffField.ElementSize(e.Type);
+            if (BigEndian && unit > 1)
+                for (int i = 0; i + unit <= raw.Length; i += unit) raw.AsSpan(i, unit).Reverse();
             return raw;
         }
 

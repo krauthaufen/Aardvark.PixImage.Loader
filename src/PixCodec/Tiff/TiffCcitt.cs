@@ -252,6 +252,135 @@ namespace PixCodec
             return n;
         }
 
+        // ------------------------------------------------------------------------------------------ Group 4 encoder
+
+        struct BitSink
+        {
+            public byte[] Buf;
+            public int Len;
+            ulong _acc;
+            int _n;
+
+            public void Put(int code, int bits)
+            {
+                _acc = _acc << bits | (uint)code;
+                _n += bits;
+                while (_n >= 8)
+                {
+                    _n -= 8;
+                    if (Len == Buf.Length) Array.Resize(ref Buf, Buf.Length * 2);
+                    Buf[Len++] = (byte)(_acc >> _n);
+                }
+            }
+
+            public void Put(string code) => Put(Convert.ToInt32(code, 2), code.Length);
+
+            public void Flush()
+            {
+                if (_n > 0) Put(0, 8 - _n);
+            }
+        }
+
+        // (code, length) pairs for run lengths, built from the same tables the decoder uses
+        static readonly (int code, int len)[] WhiteCodes = EncodeTable(WhiteTerm, WhiteMakeup), BlackCodes = EncodeTable(BlackTerm, BlackMakeup);
+
+        static (int, int)[] EncodeTable(string[] term, string[] makeup)
+        {
+            // index: 0..63 terminating, 64 + k: make-up for 64 * (k + 1), up to 2560
+            var t = new (int, int)[64 + 40];
+            for (int i = 0; i < 64; i++) t[i] = (Convert.ToInt32(term[i], 2), term[i].Length);
+            for (int i = 0; i < makeup.Length; i++) t[64 + i] = (Convert.ToInt32(makeup[i], 2), makeup[i].Length);
+            for (int i = 0; i < ExtMakeup.Length; i++) t[64 + 27 + i] = (Convert.ToInt32(ExtMakeup[i], 2), ExtMakeup[i].Length);
+            return t;
+        }
+
+        static void PutRun(ref BitSink o, int run, bool black)
+        {
+            var t = black ? BlackCodes : WhiteCodes;
+            while (run >= 2560) { o.Put(t[64 + 39].code, t[64 + 39].len); run -= 2560; }
+            if (run >= 64)
+            {
+                var m = t[64 + run / 64 - 1];
+                o.Put(m.code, m.len);
+                run &= 63;
+            }
+            o.Put(t[run].code, t[run].len);
+        }
+
+        /// <summary>
+        /// Encodes packed bilevel rows (1 bits are black) as CCITT Group 4 / T.6: every row is coded relative to
+        /// the one above (the first against an all white row) with pass, vertical and horizontal modes, ending in EOFB.
+        /// </summary>
+        public static byte[] EncodeG4(byte* src, int width, int rows, int rowBytes, out int length)
+        {
+            var o = new BitSink { Buf = new byte[(int)Math.Min((long)rows * rowBytes / 4 + 64, 1 << 24)] };
+            var rf = new int[width + 2];
+            var cur = new int[width + 2];
+            int refCount = 0;
+            for (int y = 0; y < rows; y++)
+            {
+                // changing elements of this row: positions where the colour differs from the pixel before (white before column 0)
+                byte* row = src + (long)y * rowBytes;
+                int n = 0, prev = 0;
+                for (int x = 0; x < width;)
+                {
+                    int b = row[x >> 3];
+                    if ((x & 7) == 0 && x + 8 <= width && (b == 0 || b == 0xFF) && (b != 0) == (prev != 0)) { x += 8; continue; } // uniform byte
+                    int v = b >> (7 - (x & 7)) & 1;
+                    if (v != prev) { cur[n++] = x; prev = v; }
+                    x++;
+                }
+
+                int a0 = -1, ci = 0, pw = 0, pb = 1;
+                bool black = false;
+                while (a0 < width)
+                {
+                    int a1 = ci < n ? cur[ci] : width;
+                    int i;
+                    if (black) { while (pb < refCount && rf[pb] <= a0) pb += 2; i = pb; }
+                    else { while (pw < refCount && rf[pw] <= a0) pw += 2; i = pw; }
+                    int b1 = i < refCount ? rf[i] : width;
+                    int b2 = i + 1 < refCount ? rf[i + 1] : width;
+                    if (b2 < a1)
+                    {
+                        o.Put(1, 4); // pass
+                        a0 = b2;
+                        continue;
+                    }
+                    int d = a1 - b1;
+                    if (d >= -3 && d <= 3)
+                    {
+                        switch (d)
+                        {
+                            case 0: o.Put(1, 1); break;
+                            case 1: o.Put(3, 3); break;
+                            case -1: o.Put(2, 3); break;
+                            case 2: o.Put(3, 6); break;
+                            case -2: o.Put(2, 6); break;
+                            case 3: o.Put(3, 7); break;
+                            default: o.Put(2, 7); break;
+                        }
+                        a0 = a1;
+                        black = !black;
+                        ci++;
+                        continue;
+                    }
+                    int a2 = ci + 1 < n ? cur[ci + 1] : width;
+                    o.Put(1, 3); // horizontal
+                    PutRun(ref o, a1 - Math.Max(a0, 0), black);
+                    PutRun(ref o, a2 - a1, !black);
+                    a0 = a2;
+                    ci += 2;
+                }
+                (rf, cur) = (cur, rf);
+                refCount = n;
+            }
+            o.Put(1, 12); o.Put(1, 12); // EOFB
+            o.Flush();
+            length = o.Len;
+            return o.Buf;
+        }
+
         static void FillBlack(byte* row, int s, int e)
         {
             int sb = s >> 3, eb = e >> 3;
