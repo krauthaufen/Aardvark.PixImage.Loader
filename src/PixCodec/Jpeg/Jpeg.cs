@@ -4,6 +4,7 @@ using PixCodec.JpegImpl;
 
 namespace PixCodec
 {
+    /// <summary>Reserved for decoder settings; there are none yet.</summary>
     public sealed class JpegDecodeOptions
     {
     }
@@ -40,8 +41,14 @@ namespace PixCodec
     }
 
     /// <summary>
-    /// JPEG codec. Decodes baseline, extended sequential and progressive Huffman coded 8 bit JPEG (gray, YCbCr, RGB,
-    /// CMYK / YCCK converted to RGB) and encodes baseline or progressive 8 bit JPEG.
+    /// JPEG codec.
+    /// <para>Decoding: baseline, extended sequential and progressive Huffman coded JPEG with 8 bit samples, any
+    /// sampling factors, restart intervals; grayscale, YCbCr and RGB decode to Gray / Rgb, CMYK and YCCK (Adobe,
+    /// stored inverted) are converted to Rgb with R = (1 - C)(1 - K). The inverse DCT, the 2:1 chroma upsampling
+    /// filters and the color conversion use the same integer arithmetic as libjpeg, so the output is bit identical
+    /// to libjpeg(-turbo) based decoders with default settings. JFIF density, EXIF (incl. orientation) and ICC
+    /// profiles are returned as metadata. Not supported: 12 bit samples, lossless, hierarchical and arithmetic coded files.</para>
+    /// <para>Encoding: baseline or progressive JPEG from 8 bit Gray or Rgb images (an alpha channel is dropped).</para>
     /// </summary>
     public static unsafe class Jpeg
     {

@@ -122,7 +122,7 @@ namespace PixCodec.JpegImpl
         int _pos;
         ulong _acc;
         int _accBits;
-        bool _gather; // statistics pass: count symbols instead of writing them
+        bool _gather; // statistics pass of a sequential scan: count symbols instead of writing them
 
         void Reserve(int n)
         {

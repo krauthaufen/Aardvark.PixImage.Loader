@@ -197,8 +197,9 @@ namespace PixCodec.JpegImpl
         void Allocate(int remainingBytes)
         {
             long pixels = (long)Width * Height;
-            // Even a flat image needs about a bit per block; refuse headers that promise far more than the data can hold.
-            if (pixels > 1 << 24 && pixels / 600 > remainingBytes) throw Bad("image dimensions do not fit the amount of data");
+            // Even a flat image needs a bit per block (512 pixels per byte at best); refuse headers that promise far
+            // more than the data can hold. Small images are exempt so that heavily truncated files still decode.
+            if (pixels > 1 << 16 && pixels / 1024 > remainingBytes) throw Bad("image dimensions do not fit the amount of data");
             if (pixels * (Comps.Length == 1 ? 1 : 3) > Array.MaxLength) throw new ImageNotSupportedException("JPEG image is too large");
             foreach (var c in Comps)
             {
