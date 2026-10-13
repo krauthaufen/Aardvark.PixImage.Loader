@@ -950,6 +950,211 @@ public class TiffTests
         AssertRoundTrip(img, Encode(img), "broken exif");
     }
 
+    // ------------------------------------------------------------------------------------------ large files, partial reads
+
+    /// <summary>
+    /// A seekable in-memory stream for files far larger than memory: content is kept in 64 KB blocks, all-zero blocks
+    /// are not stored at all and identical blocks are stored once. Also counts what is read.
+    /// </summary>
+    sealed class SparseStream : Stream
+    {
+        const int Block = 1 << 16;
+        readonly Dictionary<long, byte[]> _blocks = new();
+        readonly Dictionary<ulong, byte[]> _pool = new();
+        long _length, _pos;
+        public long BytesRead, ReadCalls;
+        public int StoredBlocks => _pool.Count;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => true;
+        public override long Length => _length;
+        public override long Position { get => _pos; set => _pos = value; }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => _pos = origin switch { SeekOrigin.Begin => offset, SeekOrigin.Current => _pos + offset, _ => _length + offset };
+        public override void SetLength(long value) => _length = value;
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> d)
+        {
+            int n = (int)Math.Min(d.Length, Math.Max(0, _length - _pos));
+            for (int done = 0; done < n;)
+            {
+                long bi = (_pos + done) / Block; int bo = (int)((_pos + done) % Block);
+                int len = Math.Min(n - done, Block - bo);
+                if (_blocks.TryGetValue(bi, out var b)) b.AsSpan(bo, len).CopyTo(d.Slice(done));
+                else d.Slice(done, len).Clear();
+                done += len;
+            }
+            _pos += n; BytesRead += n; ReadCalls++;
+            return n;
+        }
+
+        static ulong Hash(ReadOnlySpan<byte> s)
+        {
+            ulong h = 14695981039346656037;
+            foreach (ulong v in MemoryMarshal.Cast<byte, ulong>(s)) h = (h ^ v) * 1099511628211 + (h >> 29);
+            return h;
+        }
+
+        public override void Write(ReadOnlySpan<byte> s)
+        {
+            for (int done = 0; done < s.Length;)
+            {
+                long bi = (_pos + done) / Block; int bo = (int)((_pos + done) % Block);
+                int len = Math.Min(s.Length - done, Block - bo);
+                var part = s.Slice(done, len);
+                if (len == Block)
+                {
+                    // whole block: nothing for zeros, a shared copy for content seen before
+                    if (part.IndexOfAnyExcept((byte)0) < 0) _blocks.Remove(bi);
+                    else
+                    {
+                        ulong h = Hash(part);
+                        if (!_pool.TryGetValue(h, out var shared) || !part.SequenceEqual(shared)) _pool[h] = shared = part.ToArray();
+                        _blocks[bi] = shared;
+                    }
+                }
+                else if (_blocks.TryGetValue(bi, out var b) || part.IndexOfAnyExcept((byte)0) >= 0)
+                {
+                    var own = b == null ? new byte[Block] : (byte[])b.Clone(); // copy on write: blocks may be shared
+                    part.CopyTo(own.AsSpan(bo));
+                    _blocks[bi] = own;
+                }
+                done += len;
+            }
+            _pos += s.Length;
+            _length = Math.Max(_length, _pos);
+        }
+    }
+
+    [Theory]
+    [InlineData(TiffCompression.None, 0)]
+    [InlineData(TiffCompression.Lzw, 0)]
+    [InlineData(TiffCompression.Deflate, 64)]
+    public void OffsetsBeyond4GB(TiffCompression compression, int tile)
+    {
+        // The image data and directories are pushed behind 4.3 GB of padding (held by a sparse stream): the automatic
+        // choice has to fall on BigTIFF, and every 64-bit offset has to survive the round trip.
+        const long padding = 4_300_000_000;
+        var pages = new[]
+        {
+            new TiffPage(MakeImage(300, 200, ColorModel.Rgb, SampleType.UInt16, 3)),
+            new TiffPage(MakeImage(150, 100, ColorModel.Gray, SampleType.Float32, 1)) { ReducedResolution = true },
+        };
+        var o = new TiffEncodeOptions { Compression = compression, TileWidth = tile, TileHeight = tile, TestPadding = padding };
+        var s = new SparseStream();
+        Tiff.Encode(pages, s, o);
+        Assert.True(s.Length > padding + 300 * 200 * 6 / 4);
+        Assert.True(s.StoredBlocks < 64, "the padding must not be held in memory");
+
+        s.Position = 0;
+        var head = new byte[16];
+        s.ReadExactly(head);
+        Assert.Equal(43, head[2]);                                        // BigTIFF was chosen automatically
+        Assert.True(BitConverter.ToInt64(head, 8) > uint.MaxValue);       // first directory beyond 4 GB
+        s.Position = 0;
+        Assert.Equal(2, Tiff.GetImageCount(s));
+        var tags = Tiff.ReadTags(s);
+        Assert.True(tags.Single(t => t.Id == (tile > 0 ? 324 : 273)).AsIntegers().All(v => v > uint.MaxValue));
+        for (int i = 0; i < pages.Length; i++)
+        {
+            var back = Tiff.Decode(s, new TiffDecodeOptions { ImageIndex = i });
+            Assert.True(pages[i].Image.GetBytes().SequenceEqual(back.GetBytes()), $"page {i}");
+            TestUtil.AssertEqual(back, Tiff.Decode(s, ForcedParallel(i)));
+        }
+        TestUtil.AssertEqual(Crop(pages[0].Image, 17, 33, 200, 99), Tiff.DecodeRegion(s, 17, 33, 200, 99));
+
+        // a classic TIFF cannot hold this
+        Assert.Throws<InvalidOperationException>(() => Tiff.Encode(pages, new SparseStream(), new TiffEncodeOptions { Compression = compression, TestPadding = padding, BigTiff = false }));
+        // just below the limit the automatic choice stays classic
+        var small = new SparseStream();
+        Tiff.Encode(pages, small, new TiffEncodeOptions { Compression = compression, TestPadding = 100_000_000 });
+        small.Position = 0;
+        small.ReadExactly(head);
+        Assert.Equal(42, head[2]);
+        small.Position = 0;
+        Assert.True(pages[1].Image.GetBytes().SequenceEqual(Tiff.Decode(small, new TiffDecodeOptions { ImageIndex = 1 }).GetBytes()));
+    }
+
+    /// <summary>
+    /// Real multi-gigabyte data (2.2 GB single strip, 6.6 GB file). Needs about 5 GB of RAM and a minute, so it only
+    /// runs with PIXCODEC_BIG_TESTS=1.
+    /// </summary>
+    [Fact]
+    public void RealFilesBeyond4GB()
+    {
+        if (Environment.GetEnvironmentVariable("PIXCODEC_BIG_TESTS") != "1") return;
+        // 33000 x 33000 16-bit gray = 2.18 GB of samples, periodic so that the sparse stream stores it once
+        int w = 33000, h = 33000;
+        var img = RawImage.Create(w, h, ColorModel.Gray, SampleType.UInt16);
+        var a = img.GetData<ushort>();
+        var row = new ushort[32768];
+        for (int i = 0; i < row.Length; i++) row[i] = (ushort)(i * 40503 >> 3);
+        for (long i = 0; i < a.LongLength; i += row.Length) row.AsSpan(0, (int)Math.Min(row.Length, a.LongLength - i)).CopyTo(a.AsSpan((int)i));
+        // three pages, each one uncompressed strip of more than 2 GB: 6.5 GB, BigTIFF chosen automatically
+        var s = new SparseStream();
+        Tiff.Encode(new[] { new TiffPage(img), new TiffPage(img), new TiffPage(img) }, s, new TiffEncodeOptions { Compression = TiffCompression.None, RowsPerStrip = h });
+        Assert.True(s.Length > 6_500_000_000);
+        s.Position = 0;
+        var head = new byte[4];
+        s.ReadExactly(head);
+        Assert.Equal(43, head[2]);
+        s.Position = 0;
+        Assert.Equal(3, Tiff.GetImageCount(s));
+        var last = Tiff.Decode(s, new TiffDecodeOptions { ImageIndex = 2 });          // lies entirely beyond 4 GB
+        Assert.True(MemoryMarshal.AsBytes<ushort>(a.AsSpan(0, 1 << 20)).SequenceEqual(MemoryMarshal.AsBytes<ushort>(last.GetData<ushort>().AsSpan(0, 1 << 20))));
+        Assert.True(a.AsSpan().SequenceEqual(last.GetData<ushort>()));
+        last = null;
+        GC.Collect();
+        // a region out of the middle of the 2 GB strip reads only its rows
+        s.BytesRead = 0;
+        var region = Tiff.DecodeRegion(s, 1000, 20000, 500, 300, new TiffDecodeOptions { ImageIndex = 1 });
+        Assert.True(region.GetData<ushort>().AsSpan(0, 500).SequenceEqual(a.AsSpan(20000 * w + 1000, 500)));
+        Assert.True(s.BytesRead < 300L * w * 2 + 100_000, $"read {s.BytesRead} bytes");
+
+        // LZW strips whose decoded size exceeds 2 GB cannot be written by the encoder (its strips stay below 1 GB),
+        // so only the uncompressed path is exercised here.
+    }
+
+    [Theory]
+    [InlineData(TiffCompression.None, 0, 64)]
+    [InlineData(TiffCompression.None, 0, 100000)]
+    [InlineData(TiffCompression.None, 256, 0)]
+    [InlineData(TiffCompression.Lzw, 0, 64)]
+    [InlineData(TiffCompression.Deflate, 0, 64)]
+    [InlineData(TiffCompression.PackBits, 256, 0)]
+    public void RegionDecodingReadsOnlyWhatItNeeds(TiffCompression compression, int tile, int rowsPerStrip)
+    {
+        var img = MakeImage(2000, 1500, ColorModel.Rgb, SampleType.UInt8, 3);
+        var o = new TiffEncodeOptions { Compression = compression, TileWidth = tile, TileHeight = tile, RowsPerStrip = rowsPerStrip, Predictor = TiffPredictor.None };
+        var s = new SparseStream();
+        Tiff.Encode(img, s, o);
+        long file = s.Length;
+        int strips = tile > 0 ? 0 : (1500 + rowsPerStrip - 1) / rowsPerStrip;
+        int rx = 700, ry = 600, rw = 50, rh = 40; // touches rows 600..639: strip 9 only (rows 576..639), tiles 2,2 .. 2,2
+
+        s.Position = 0;
+        s.BytesRead = 0;
+        var region = Tiff.DecodeRegion(s, rx, ry, rw, rh, Serial);
+        TestUtil.AssertEqual(Crop(img, rx, ry, rw, rh), region);
+        long directory = 4096 + 16L * Math.Max(strips, 48);
+        long expected;
+        if (compression == TiffCompression.None)
+            // uncompressed: just the needed rows of the strip, or of the one tile
+            expected = tile > 0 ? rh * tile * 3 : (long)rh * 2000 * 3;
+        else if (tile > 0) expected = (long)tile * tile * 3 * 3 / 2;               // one tile
+        else expected = (long)rowsPerStrip * 2000 * 3 * 3 / 2;                     // one strip (the noisy test image does not compress)
+        Assert.True(s.BytesRead <= expected + directory, $"read {s.BytesRead} of {file} bytes, expected at most {expected + directory}");
+        Assert.True(s.BytesRead < file / 4);
+
+        // a region spanning two strips / four tiles, parallel
+        s.BytesRead = 0;
+        TestUtil.AssertEqual(Crop(img, 250, 630, 20, 20), Tiff.DecodeRegion(s, 250, 630, 20, 20, ForcedParallel()));
+        Assert.True(s.BytesRead <= (tile > 0 ? 4L * tile * tile * 3 * 3 / 2 : Math.Min(2L * rowsPerStrip, compression == TiffCompression.None ? 20 : 1500) * 2000 * 3 * 3 / 2) + directory);
+    }
+
     sealed class ForwardOnlyStream : Stream
     {
         readonly MemoryStream _ms = new();

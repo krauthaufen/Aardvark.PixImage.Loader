@@ -26,6 +26,7 @@ namespace PixCodec
             public bool Pooled;
         }
 
+        const string TooBig = "TIFF: the output exceeds 4 GB, which needs BigTiff (leave BigTiff unset or set it to true)";
         const int None = 1, Ccitt4 = 4, Lzw = 5, JpegComp = 7, Deflate = 8, PackBits = 32773;
 
         /// <summary>Everything derived from one image and its options before a byte is written.</summary>
@@ -97,13 +98,14 @@ namespace PixCodec
                     Ch = (int)Math.Min(rps, H);
                 }
                 ChunkRowBytes = Bilevel ? (Cw + 7) / 8 : (long)Cw * Spp * Bps;
-                if (ChunkRowBytes * Ch > int.MaxValue / 2)
+                // the pixel array already is the file content
+                Direct = Comp == None && !Tiled && !Bilevel && (!bigEndian || Bps == 1);
+                // (strips written straight from the pixel array may be of any size)
+                if (!Direct && ChunkRowBytes * Ch > int.MaxValue / 2)
                     throw new ArgumentException("TIFF: strip/tile size too large, use smaller strips or tiles");
                 Across = (W + Cw - 1) / Cw; Down = (H + Ch - 1) / Ch;
                 N = checked(Across * Down);
                 RawTotal = RowBytes * H;
-                // the pixel array already is the file content
-                Direct = Comp == None && !Tiled && !Bilevel && (!bigEndian || Bps == 1);
                 Offsets = new long[N]; Counts = new long[N];
             }
 
@@ -141,6 +143,7 @@ namespace PixCodec
             long origin = output.CanSeek ? output.Position : 0;
             long pos = big ? 16 : 8;
             long first = pos + o.TestPadding + (o.TestPadding & 1);
+            if (!big && first > uint.MaxValue) throw new InvalidOperationException(TooBig);
             output.Write(Header(big, be, first));
             if (first > pos)
             {
@@ -154,8 +157,7 @@ namespace PixCodec
                 bool more = e.MoveNext();
                 if (cur?.Image == null) throw new ArgumentException("TIFF: page without an image");
                 pos = WritePage(cur, cur.Options ?? o, output, origin, pos, big, be, more);
-                if (!big && pos > uint.MaxValue - 65536L)
-                    throw new InvalidOperationException("TIFF: output exceeds 4 GB, set BigTiff = true");
+                if (!big && pos > uint.MaxValue) throw new InvalidOperationException(TooBig);
                 if (!more) break;
                 cur = e.Current;
             }
@@ -203,6 +205,7 @@ namespace PixCodec
                         p += l.Counts[i];
                     }
                     long end = p + (p & 1);
+                    if (!big && end > uint.MaxValue) throw new InvalidOperationException(TooBig);
                     output.Write(Finish(node, l, start, more ? end : 0, big, be));
                     if (l.Direct)
                     {
@@ -254,6 +257,7 @@ namespace PixCodec
                     }
                 }
                 long stop = q + (q & 1);
+                if (!big && stop > uint.MaxValue) throw new InvalidOperationException(TooBig);
                 var dir = Finish(node, l, start, more ? stop : 0, big, be);
                 if (buffered)
                 {

@@ -132,17 +132,25 @@ namespace PixCodec
     }
 
     /// <summary>
-    /// TIFF codec: classic TIFF and BigTIFF, strips and tiles, both byte orders.
-    /// <para>Decoding rules worth knowing:</para>
+    /// TIFF codec: classic TIFF and BigTIFF, strips and tiles, both byte orders, multi-page files.
+    /// <para>Decoding:</para>
     /// <list type="bullet">
-    /// <item>1/2/4-bit gray is scaled to the full UInt8 range; MinIsWhite is inverted for unsigned integer data
-    /// (signed and float data is returned as stored).</item>
-    /// <item>Palette images are expanded to UInt8 Rgb; CMYK is converted naively to Rgb.</item>
+    /// <item>Compression: none, LZW, Deflate, PackBits, CCITT RLE / Group 3 / Group 4, JPEG (8 and 12 bit DCT, lossless,
+    /// old-style), ZSTD, LZMA, WebP, SGI LogLuv. Predictors 2 and 3.</item>
+    /// <item>Samples: unsigned and signed integers of 1..32 and 64 bits, floats of 16, 24, 32 and 64 bits. Samples of an
+    /// odd bit depth arrive with their stored values in the next larger type (12 bit: UInt16 0..4095; 24-bit floats:
+    /// Float32); only 1, 2 and 4 bit unsigned samples are stretched to 0..255 by default, see
+    /// <see cref="TiffBitScaling"/>.</item>
+    /// <item>MinIsWhite is inverted for unsigned integer data (signed and float data is returned as stored).</item>
+    /// <item>Palette images are expanded to UInt8 Rgb; YCbCr, CMYK (naively), CIELab / ICCLab / ITULab (to sRGB) and
+    /// LogLuv (to linear Float32 RGB) are converted to Rgb unless <see cref="TiffDecodeOptions.ConvertToRgb"/> is off.</item>
     /// <item>Exactly one extra sample marked as alpha gives GrayAlpha/Rgba (associated alpha is un-premultiplied).
     /// Any other surplus samples (unspecified extras, more than one extra) keep ALL samples as stored and report
     /// <see cref="ColorModel.Other"/>.</item>
-    /// <item>Orientation is reported in the metadata, never applied.</item>
+    /// <item>Orientation is reported in the metadata, never applied. Resolution, ICC profile and EXIF are returned.</item>
     /// </list>
+    /// <para>Encoding: all sample types and colour models; none, LZW, Deflate, PackBits, JPEG and CCITT Group 4;
+    /// strips or tiles; multi-page files and pyramids; either byte order; arbitrary extra tags.</para>
     /// </summary>
     public static unsafe class Tiff
     {
