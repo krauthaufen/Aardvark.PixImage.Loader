@@ -65,6 +65,13 @@ namespace PixCodec
             else Store8(p, Vector128.Narrow(v.AsUInt16(), v.AsUInt16()));
         }
 
+        /// <summary>Per lane: mask ? ifTrue : ifFalse, for masks that are all ones or all zeros per lane.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<short> Select(Vector128<short> mask, Vector128<short> ifTrue, Vector128<short> ifFalse)
+            => Sse41.IsSupported
+                ? Sse41.BlendVariable(ifFalse.AsByte(), ifTrue.AsByte(), mask.AsByte()).AsInt16()
+                : Vector128.ConditionalSelect(mask, ifTrue, ifFalse);
+
         // The serial filters (Sub, Average, Paeth) depend on the pixel to the left, so they cannot be vectorized
         // across pixels. Instead one whole pixel (up to 8 bytes) is kept in a vector register and every channel is
         // processed at once. Each step loads/stores 8 bytes but advances by bpp; lanes beyond bpp hold garbage that
@@ -121,10 +128,11 @@ namespace PixCodec
             if (Vector128.IsHardwareAccelerated)
             {
                 var a = Vector128<short>.Zero;
-                var mask = Vector128.Create((short)0xFF);
                 for (; i + 8 <= n; i += bpp)
                 {
-                    a = (((a + Widen8(prev + i)) >>> 1) + Widen8(src + i)) & mask;
+                    // 9 bit sum halved in 16 bit lanes, then a byte-wise add that wraps the low byte only
+                    var avg = (a + Widen8(prev + i)) >>> 1;
+                    a = (avg.AsByte() + Widen8(src + i).AsByte()).AsInt16();
                     StoreNarrow8(dst + i, a);
                 }
             }
@@ -152,22 +160,24 @@ namespace PixCodec
             }
             if (Vector128.IsHardwareAccelerated)
             {
+                // The row is a chain through 'a' (the pixel just produced), so what counts is the latency from one
+                // 'a' to the next. Everything that only needs the row above is computed off that chain:
+                // pa = |b - c|, and pc = |a + b - 2c| is taken as |a - (2c - b)| so that it does not wait for pb.
                 var a = Vector128<short>.Zero;
                 var c = Vector128<short>.Zero;
-                var mask = Vector128.Create((short)0xFF);
                 for (; i + 8 <= n; i += bpp)
                 {
                     var b = Widen8(prev + i);
-                    var pa = b - c;             // p - a = b - c
-                    var pb = a - c;             // p - b = a - c
-                    var pc = Vector128.Abs(pa + pb);
-                    pa = Vector128.Abs(pa);
-                    pb = Vector128.Abs(pb);
-                    var min = Vector128.Min(pc, Vector128.Min(pa, pb));
+                    var x = Widen8(src + i);
+                    var pa = Vector128.Abs(b - c);
+                    var t = c + c - b;
+                    var pb = Vector128.Abs(a - c);
+                    var pc = Vector128.Abs(a - t);
                     // ties resolve in the order a, b, c
-                    var pred = Vector128.ConditionalSelect(Vector128.Equals(min, pa), a,
-                               Vector128.ConditionalSelect(Vector128.Equals(min, pb), b, c));
-                    a = (pred + Widen8(src + i)) & mask;
+                    var bc = Select(Vector128.GreaterThan(pb, pc), c, b);
+                    var pred = Select(Vector128.GreaterThan(pa, Vector128.Min(pb, pc)), bc, a);
+                    // byte-wise add: wraps the low byte and leaves the high byte of every lane zero
+                    a = (pred.AsByte() + x.AsByte()).AsInt16();
                     c = b;
                     StoreNarrow8(dst + i, a);
                 }

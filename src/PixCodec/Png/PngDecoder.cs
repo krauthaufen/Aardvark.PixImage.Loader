@@ -270,8 +270,8 @@ namespace PixCodec
             OutputFormat(h, !trns.IsEmpty, keepIndexed, out var color, out var sampleType);
             int outChannels = RawImage.ChannelCount(color);
             long outSamples = (long)h.Width * h.Height * outChannels;
-            if (outSamples > Array.MaxLength || rawSize > Array.MaxLength)
-                throw new ImageNotSupportedException("PNG image is too large to decode into a single array");
+            if (outSamples * (h.BitDepth == 16 ? 2 : 1) > int.MaxValue || outSamples > Array.MaxLength || rawSize > Array.MaxLength)
+                throw new ImageNotSupportedException("PNG image is too large (more than 2 GB of pixel data)");
 
             RawImage image;
             byte[]? joined = null;
@@ -594,7 +594,17 @@ namespace PixCodec
                 int mask = (1 << depth) - 1;
                 int perByte = 8 / depth;
                 int x = 0;
-                for (int full = width / perByte; full > 0; full--)
+                if (depth == 1 && BitConverter.IsLittleEndian)
+                {
+                    // Eight pixels per step: replicate the byte, keep bit 7-k in byte k, turn non zero into 1, scale.
+                    for (; x + 8 <= width; x += 8)
+                    {
+                        ulong v = (*src++ * 0x0101010101010101UL) & 0x0102040810204080UL;
+                        v = ((v + 0x7F7F7F7F7F7F7F7FUL) >> 7) & 0x0101010101010101UL;
+                        Unsafe.WriteUnaligned(dst + x, v * (uint)scale);
+                    }
+                }
+                for (int full = (width - x) / perByte; full > 0; full--)
                 {
                     int b = *src++;
                     for (int s = 8 - depth; s >= 0; s -= depth) dst[x++] = (byte)(((b >> s) & mask) * scale);
