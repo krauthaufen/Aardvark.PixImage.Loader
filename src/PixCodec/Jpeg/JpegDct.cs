@@ -476,6 +476,40 @@ namespace PixCodec.JpegImpl
             }
         }
 
+        /// <summary>
+        /// Like <see cref="FdctQuantize"/>, but leaves the 64 coefficients in transposed (column major) order: with
+        /// AVX2 that is how they come out of the transform, and the block coder can walk them through an index table.
+        /// </summary>
+        [SkipLocalsInit]
+        public static void FdctQuantizeTransposed(byte* src, nint stride, float* recip, short* output)
+        {
+            if (!Use8)
+            {
+                short* zz = stackalloc short[64];
+                FdctQuantize(src, stride, recip, zz);
+                byte* order = JpegTables.ZigZagTransposed;
+                for (int i = 0; i < 64; i++) output[order[i]] = zz[i];
+                return;
+            }
+            var bias = new Vector<int>(128);
+            var r0 = LoadRow8(src) - bias; var r1 = LoadRow8(src + stride) - bias;
+            var r2 = LoadRow8(src + 2 * stride) - bias; var r3 = LoadRow8(src + 3 * stride) - bias;
+            var r4 = LoadRow8(src + 4 * stride) - bias; var r5 = LoadRow8(src + 5 * stride) - bias;
+            var r6 = LoadRow8(src + 6 * stride) - bias; var r7 = LoadRow8(src + 7 * stride) - bias;
+            FdctPass(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7, false);
+            Transpose8(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7);
+            FdctPass(ref r0, ref r1, ref r2, ref r3, ref r4, ref r5, ref r6, ref r7, true);
+            StorePair(Quantize(r0, recip), Quantize(r1, recip + 8), output);
+            StorePair(Quantize(r2, recip + 16), Quantize(r3, recip + 24), output + 16);
+            StorePair(Quantize(r4, recip + 32), Quantize(r5, recip + 40), output + 32);
+            StorePair(Quantize(r6, recip + 48), Quantize(r7, recip + 56), output + 48);
+        }
+
+        /// <summary>Two rows of 8 ints to 16 shorts.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void StorePair(Vector<int> a, Vector<int> b, short* dst)
+            => Avx.Store(dst, Avx2.Permute4x64(Avx2.PackSignedSaturate(a.AsVector256(), b.AsVector256()).AsInt64(), 0b11011000).AsInt16());
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static Vector<int> LoadRow8(byte* p)
             => Avx2.ConvertToVector256Int32(Sse2.LoadScalarVector128((ulong*)p).AsByte()).AsVector();

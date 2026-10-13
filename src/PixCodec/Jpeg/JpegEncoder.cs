@@ -413,10 +413,20 @@ namespace PixCodec.JpegImpl
             if (_precision != 8 || _genericSampling) FillPlanesGeneric(image);
             else FillPlanes(image);
             if (!_opt.Progressive) SetupBaselineTables();
-            Transform();
-            WriteHeaders(image.Metadata);
-            if (_opt.Progressive) WriteProgressive();
-            else WriteBaseline();
+            if (SinglePass)
+            {
+                // standard tables, sequential: nothing depends on the whole image, so each MCU is transformed and
+                // coded in one go without ever storing the coefficients
+                WriteHeaders(image.Metadata);
+                EncodeSinglePass();
+            }
+            else
+            {
+                Transform();
+                WriteHeaders(image.Metadata);
+                if (_opt.Progressive) WriteProgressive();
+                else WriteBaseline();
+            }
             Marker(0xD9);
             _out.Write(_buf, 0, _pos);
             _pos = 0;
@@ -625,6 +635,16 @@ namespace PixCodec.JpegImpl
             }
         }
 
+        /// <summary>8 values below 256 in 32 bit lanes to 8 bytes.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void Store8(Vector256<int> v, byte* dst)
+        {
+            var words = Avx2.PackSignedSaturate(v, v);
+            var bytes = Avx2.PackUnsignedSaturate(words, words).AsUInt32();
+            Unsafe.WriteUnaligned(dst, bytes.GetElement(0));
+            Unsafe.WriteUnaligned(dst + 4, bytes.GetElement(4));
+        }
+
         /// <summary>Byte shuffle with a run time mask (Vector128.Shuffle is only accelerated for constant masks). Indices of 0x80 give zero.</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static Vector128<byte> Shuffle(Vector128<byte> v, Vector128<byte> idx)
@@ -638,7 +658,40 @@ namespace PixCodec.JpegImpl
             {
                 byte* s = sp;
                 int x = 0;
-                if ((Ssse3.IsSupported || AdvSimd.Arm64.IsSupported))
+                if (Avx2.IsSupported)
+                {
+                    // 8 pixels per step with 16 bit multiply-adds; the coefficients 38470 (G to Y) and 32768 do not
+                    // fit a signed 16 bit factor, so their 32768 part is added as a shift
+                    var spread3 = Vector128.Create((byte)0, 1, 2, 0x80, 3, 4, 5, 0x80, 6, 7, 8, 0x80, 9, 10, 11, 0x80);
+                    var lowBytes = Vector256.Create(0x00FF00FF).AsInt16();
+                    var yRB = Vector256.Create(19595 | 7471 << 16).AsInt16();
+                    var yG = Vector256.Create(38470 - 32768).AsInt16();
+                    var cbR = Vector256.Create(-11059 & 0xFFFF).AsInt16();
+                    var cbG = Vector256.Create(-21709 & 0xFFFF).AsInt16();
+                    var crG = Vector256.Create(-27439 & 0xFFFF).AsInt16();
+                    var crB = Vector256.Create(-5329 << 16).AsInt16();
+                    var vh = Vector256.Create(half); var vc = Vector256.Create(center);
+                    var byteMask = Vector256.Create(255);
+                    int end8 = w - (ch == 3 ? 10 : 8);
+                    for (; x <= end8; x += 8, s += 8 * ch)
+                    {
+                        var px = ch == 3
+                            ? Vector256.Create(Ssse3.Shuffle(Sse2.LoadVector128(s), spread3), Ssse3.Shuffle(Sse2.LoadVector128(s + 12), spread3))
+                            : Avx.LoadVector256(s);
+                        var rb = Avx2.And(px.AsInt16(), lowBytes);
+                        var g32 = Avx2.And(Avx2.ShiftRightLogical(px.AsInt32(), 8), byteMask); // (the top byte may be alpha)
+                        var g = g32.AsInt16();
+                        var r32 = Avx2.And(px.AsInt32(), byteMask);
+                        var b32 = Avx2.And(Avx2.ShiftRightLogical(px.AsInt32(), 16), byteMask);
+                        var yv = Avx2.Add(Avx2.Add(Avx2.MultiplyAddAdjacent(rb, yRB), Avx2.MultiplyAddAdjacent(g, yG)), Avx2.Add(Avx2.ShiftLeftLogical(g32, 15), vh));
+                        var cb = Avx2.Add(Avx2.Add(Avx2.MultiplyAddAdjacent(rb, cbR), Avx2.MultiplyAddAdjacent(g, cbG)), Avx2.Add(Avx2.ShiftLeftLogical(b32, 15), vc));
+                        var cr = Avx2.Add(Avx2.Add(Avx2.MultiplyAddAdjacent(rb, crB), Avx2.MultiplyAddAdjacent(g, crG)), Avx2.Add(Avx2.ShiftLeftLogical(r32, 15), vc));
+                        Store8(Avx2.ShiftRightLogical(yv, 16), yp + x);
+                        Store8(Avx2.ShiftRightLogical(cb, 16), cbp + x);
+                        Store8(Avx2.ShiftRightLogical(cr, 16), crp + x);
+                    }
+                }
+                else if (Ssse3.IsSupported || AdvSimd.Arm64.IsSupported)
                 {
                     // 4 pixels per step in 32 bit lanes; reads 16 source bytes, so stop while that stays inside the row
                     var spread = ch == 3
@@ -793,6 +846,8 @@ namespace PixCodec.JpegImpl
 
         // ---------------------------------------------------------------- scans
 
+        bool SinglePass => !_opt.Progressive && !_opt.Arithmetic && !OptimizedBaseline && _precision == 8;
+
         bool OptimizedBaseline => !_opt.Progressive && !_opt.Arithmetic && (_opt.OptimizeHuffman || _precision != 8);
 
         /// <summary>The standard tables, or empty ones to be built from the image's statistics (always beyond 8 bit: the standard tables stop at 8 bit magnitudes).</summary>
@@ -808,6 +863,66 @@ namespace PixCodec.JpegImpl
                 _comps[i].Dc = i == 0 ? dc0 : dc1;
                 _comps[i].Ac = i == 0 ? ac0 : ac1;
             }
+        }
+
+        void EncodeSinglePass()
+        {
+            bool color = _comps.Length == 3, single = !color;
+            WriteHuffmanTable(_comps[0].Dc, 0, 0); WriteHuffmanTable(_comps[0].Ac, 1, 0);
+            if (color) { WriteHuffmanTable(_comps[1].Dc, 0, 1); WriteHuffmanTable(_comps[1].Ac, 1, 1); }
+            WriteScanHeader(_comps, color ? [0, 1, 1] : [0], color ? [0, 1, 1] : [0], 0, 63, 0, 0);
+
+            int nc = _comps.Length;
+            float* recips = stackalloc float[2 * 64];
+            for (int t = 0; t < 2; t++)
+                for (int i = 0; i < 64; i++) recips[t * 64 + (i & 7) * 8 + (i >> 3)] = 1f / (8 * _quant[t][i]);
+            short* blk = stackalloc short[64];
+            int mcusX = single ? _comps[0].ScanBlocksW : _mcusX, mcusY = single ? _comps[0].ScanBlocksH : _mcusY;
+            int todo = _restart, rst = 0;
+            foreach (var c in _comps) c.Pred = 0;
+            var c0 = _comps[0]; var c1 = _comps[nc > 1 ? 1 : 0]; var c2 = _comps[nc > 2 ? 2 : 0];
+            fixed (byte* buf = _buf, p0 = c0.Plane, p1 = c1.Plane, p2 = c2.Plane)
+            fixed (uint* dc0 = c0.Dc.Packed, ac0 = c0.Ac.Packed, dc1 = c1.Dc.Packed, ac1 = c1.Ac.Packed)
+            fixed (ulong* acx0 = c0.Ac.Extended, acx1 = c1.Ac.Extended)
+            {
+                byte** planes = stackalloc byte*[3];
+                planes[0] = p0; planes[1] = p1; planes[2] = p2;
+                for (int my = 0; my < mcusY; my++)
+                {
+                    for (int mx = 0; mx < mcusX; mx++)
+                    {
+                        if (_restart != 0)
+                        {
+                            if (todo == 0)
+                            {
+                                FlushBits();
+                                Marker(0xD0 + rst);
+                                rst = (rst + 1) & 7;
+                                todo = _restart;
+                                foreach (var c in _comps) c.Pred = 0;
+                            }
+                            todo--;
+                        }
+                        Reserve(10 * 600);
+                        for (int i = 0; i < nc; i++)
+                        {
+                            var c = _comps[i];
+                            int h = single ? 1 : c.H, v = single ? 1 : c.V;
+                            nint stride = c.Stride;
+                            byte* src = planes[i] + ((nint)my * v * stride + mx * h) * 8;
+                            for (int by = 0; by < v; by++, src += 8 * stride)
+                                for (int bx = 0; bx < h; bx++)
+                                {
+                                    JpegDct.FdctQuantizeTransposed(src + bx * 8, stride, recips + (i == 0 ? 0 : 64), blk);
+                                    ulong mask = JpegTables.TransposedMaskToZigZag(JpegTables.NonZeroMask(blk));
+                                    if (i == 0) EmitBlock(blk, JpegTables.ZigZagTransposed, mask, c, buf, dc0, ac0, acx0);
+                                    else EmitBlock(blk, JpegTables.ZigZagTransposed, mask, c, buf, dc1, ac1, acx1);
+                                }
+                        }
+                    }
+                }
+            }
+            FlushBits();
         }
 
         JpegArithEncoder? _arith;
@@ -1044,7 +1159,7 @@ namespace PixCodec.JpegImpl
         void EncodeBlock(short* blk, Comp c)
         {
             if (_gather) GatherDc(blk, c);
-            else fixed (byte* buf = _buf) fixed (uint* dc = c.Dc.Packed, ac = c.Ac.Packed) fixed (ulong* acx = c.Ac.Extended) EmitBlock(blk, c, buf, dc, ac, acx);
+            else fixed (byte* buf = _buf) fixed (uint* dc = c.Dc.Packed, ac = c.Ac.Packed) fixed (ulong* acx = c.Ac.Extended) EmitBlock(blk, JpegTables.Identity, JpegTables.NonZeroMask(blk), c, buf, dc, ac, acx);
         }
 
         /// <summary>Statistics for optimized tables, DC part: counts the difference categories in scan order.</summary>
@@ -1073,7 +1188,10 @@ namespace PixCodec.JpegImpl
         }
 
         /// <summary>Sequential block coder. The bit accumulator and output pointer live in locals for the duration of the block.</summary>
-        void EmitBlock(short* blk, Comp c, byte* buf, uint* dc, uint* ac, ulong* acx)
+        /// <param name="blk">The coefficients, in any storage order.</param>
+        /// <param name="order">Zigzag position -> index into blk.</param>
+        /// <param name="mask">Nonzero coefficients by zigzag position.</param>
+        void EmitBlock(short* blk, byte* order, ulong mask, Comp c, byte* buf, uint* dc, uint* ac, ulong* acx)
         {
             ulong acc = _acc;
             int n = _accBits;
@@ -1089,7 +1207,7 @@ namespace PixCodec.JpegImpl
             n += len;
             if (n >= 32) { n -= 32; o = Write32(o, (uint)(acc >> n)); }
 
-            ulong mask = JpegTables.NonZeroMask(blk) & ~1UL;
+            mask &= ~1UL;
             int prev = 0; // index of the previous nonzero coefficient
             int maxSize = _maxAcSize;
             uint zrl = ac[0xF0];
@@ -1107,7 +1225,7 @@ namespace PixCodec.JpegImpl
                     if (n >= 32) { n -= 32; o = Write32(o, (uint)(acc >> n)); }
                     run -= 16;
                 }
-                v = blk[k];
+                v = blk[order[k]];
                 int sign = v >> 31;
                 s = BitLength((v ^ sign) - sign);
                 if (s > maxSize) { s = maxSize; v = ((1 << s) - 1 ^ sign) - sign; } // cannot happen for real DCT output, but keep the stream legal
