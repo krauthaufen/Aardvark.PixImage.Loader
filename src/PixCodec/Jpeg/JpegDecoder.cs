@@ -320,8 +320,9 @@ namespace PixCodec.JpegImpl
                 c.HExp = c.HDen / c.HNum;
                 c.VExp = c.VDen / c.VNum;
                 // triangle filters for the 2:1 cases, like libjpeg's "fancy upsampling" (which needs 3+ columns for
-                // the horizontal filter); plain replication otherwise
+                // the horizontal filter and is not used at all at 1/8 scale); plain replication otherwise
                 if (c.HExp == 1 && c.VExp == 1) c.Upsample = JpegUpsample.Direct;
+                else if (_minS == 1) c.Upsample = JpegUpsample.Replicate;
                 else if (c.HExp == 2 && c.VExp == 1 && c.SampledW > 2) c.Upsample = JpegUpsample.H2V1;
                 else if (c.HExp == 2 && c.VExp == 2 && c.SampledW > 2) c.Upsample = JpegUpsample.H2V2;
                 else if (c.HExp == 1 && c.VExp == 2) c.Upsample = JpegUpsample.H1V2;

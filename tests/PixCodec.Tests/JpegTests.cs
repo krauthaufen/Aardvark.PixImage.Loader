@@ -136,6 +136,158 @@ public class JpegTests
         try { Jpeg.Decode(lie); } catch (Exception e) { Assert.True(e is ImageFormatException or ImageNotSupportedException, e.ToString()); }
     }
 
+    // ------------------------------------------------------------------ decode options
+
+    public static IEnumerable<object[]> OptionRefs(string suffix)
+        => Directory.GetFiles(TestUtil.Fixture("jpeg/options"), "*" + suffix + ".ref").OrderBy(f => f, StringComparer.Ordinal)
+            .Select(f => new object[] { Path.GetFileName(f) });
+
+    /// <summary>
+    /// DCT domain downscaling gives exactly what libjpeg-turbo produces for scale 1/2, 1/4 and 1/8 (Pillow's draft mode):
+    /// reduced inverse DCTs, larger DCTs instead of upsampling for subsampled chroma, same filters for what remains.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(OptionRefs), ".s2")]
+    [MemberData(nameof(OptionRefs), ".s4")]
+    [MemberData(nameof(OptionRefs), ".s8")]
+    public void DecodeScaled(string refName)
+    {
+        // <fixture>.s<N>.ref
+        var parts = refName.Split('.');
+        int scale = parts[1][1] - '0';
+        var data = Load("jpeg/" + parts[0] + ".jpg");
+        var expected = TestUtil.LoadRef(TestUtil.Fixture("jpeg/options/" + refName));
+        var o = new JpegDecodeOptions { ScaleDenominator = scale };
+        var actual = Jpeg.Decode(data, o);
+        TestUtil.AssertEqual(expected, actual, 0);
+        var info = Jpeg.GetInfo(data, o);
+        Assert.Equal((actual.Width, actual.Height, actual.Channels), (info.Width, info.Height, info.Channels));
+        var full = Jpeg.GetInfo(data);
+        Assert.Equal(((full.Width + scale - 1) / scale, (full.Height + scale - 1) / scale), (actual.Width, actual.Height));
+    }
+
+    /// <summary>Scaling works for every fixture (12 bit and progressive included) and roughly agrees with shrinking the full decode.</summary>
+    [Theory]
+    [MemberData(nameof(Fixtures))]
+    public void DecodeScaledIsConsistent(string file)
+    {
+        var data = Load(file);
+        var full = Jpeg.Decode(data);
+        foreach (int scale in new[] { 2, 4, 8 })
+        {
+            var small = Jpeg.Decode(data, new JpegDecodeOptions { ScaleDenominator = scale });
+            Assert.Equal(full.SampleType, small.SampleType);
+            Assert.Equal(full.Channels, small.Channels);
+            if (file.Contains("/ll_"))
+            {
+                TestUtil.AssertEqual(full, small, 0); // lossless ignores the scale
+                continue;
+            }
+            Assert.Equal(((full.Width + scale - 1) / scale, (full.Height + scale - 1) / scale), (small.Width, small.Height));
+            if (full.Width % (8 * scale) != 0 || full.Height % (8 * scale) != 0 || full.Width < 32) continue;
+            // box-shrink the full decode; chroma filtering differs a little, so only the mean error is checked
+            double peak = full.SampleType == SampleType.UInt8 ? 255 : 4095, sum = 0;
+            int ch = full.Channels;
+            for (int y = 0; y < small.Height; y++)
+                for (int x = 0; x < small.Width; x++)
+                    for (int c = 0; c < ch; c++)
+                    {
+                        double acc = 0;
+                        for (int j = 0; j < scale; j++)
+                            for (int i = 0; i < scale; i++) acc += Sample(full, x * scale + i, y * scale + j, c);
+                        sum += Math.Abs(acc / (scale * scale) - Sample(small, x, y, c));
+                    }
+            double mean = sum / (small.Width * small.Height * ch) / peak;
+            Assert.True(mean < 0.06, $"{file} scale {scale}: mean abs error {mean:F4}");
+        }
+    }
+
+    static double Sample(RawImage img, int x, int y, int c)
+    {
+        int i = (y * img.Width + x) * img.Channels + c;
+        return img.SampleType == SampleType.UInt8 ? img.GetData<byte>()[i] : img.GetData<ushort>()[i];
+    }
+
+    [Theory]
+    [MemberData(nameof(OptionRefs), ".ycc")]
+    public void DecodeKeepYCbCr(string refName)
+    {
+        var data = Load("jpeg/" + refName.Split('.')[0] + ".jpg");
+        var o = new JpegDecodeOptions { KeepYCbCr = true };
+        var actual = Jpeg.Decode(data, o);
+        Assert.Equal((ColorModel.Other, 3), (actual.Color, actual.Channels));
+        TestUtil.AssertEqual(TestUtil.LoadRef(TestUtil.Fixture("jpeg/options/" + refName)), actual, 0);
+        Assert.Equal((ColorModel.Other, 3), (Jpeg.GetInfo(data, o).Color, Jpeg.GetInfo(data, o).Channels));
+    }
+
+    [Theory]
+    [MemberData(nameof(OptionRefs), ".cmyk")]
+    public void DecodeRawCmyk(string refName)
+    {
+        var data = Load("jpeg/" + refName.Split('.')[0] + ".jpg");
+        var o = new JpegDecodeOptions { RawCmyk = true };
+        var actual = Jpeg.Decode(data, o);
+        Assert.Equal((ColorModel.Other, 4), (actual.Color, actual.Channels));
+        TestUtil.AssertEqual(TestUtil.LoadRef(TestUtil.Fixture("jpeg/options/" + refName)), actual, 0);
+        Assert.Equal(4, Jpeg.GetInfo(data, o).Channels);
+        Assert.Equal(3, Jpeg.GetInfo(data).Channels);
+
+        // the default conversion is the multiplicative model on those samples
+        var rgb = Jpeg.Decode(data).GetData<byte>();
+        var raw = actual.GetData<byte>();
+        for (int i = 0; i < rgb.Length / 3; i++)
+            for (int c = 0; c < 3; c++) Assert.Equal((raw[i * 4 + c] * raw[i * 4 + 3] + 127) / 255, rgb[i * 3 + c]);
+
+        // both options together: no conversion at all
+        var both = Jpeg.Decode(data, new JpegDecodeOptions { RawCmyk = true, KeepYCbCr = true });
+        Assert.Equal(4, both.Channels);
+        if (refName.StartsWith("cmyk")) TestUtil.AssertEqual(actual, both, 0);
+        else Assert.NotEqual(raw, both.GetData<byte>());
+    }
+
+    public static IEnumerable<object[]> OrientFiles() => TestUtil.Files("jpeg/options", ".jpg");
+
+    [Theory]
+    [MemberData(nameof(OrientFiles))]
+    public void DecodeApplyOrientation(string file)
+    {
+        var data = Load(file);
+        int orientation = file[file.IndexOf("orient") + 6] - '0';
+        var plain = Jpeg.Decode(data);
+        Assert.Equal(orientation, plain.Metadata!.Orientation);
+        Assert.Equal((300.0, 100.0), (plain.Metadata.DpiX, plain.Metadata.DpiY));
+
+        var o = new JpegDecodeOptions { ApplyOrientation = true };
+        var upright = Jpeg.Decode(data, o);
+        TestUtil.AssertEqual(TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref"), upright, 0);
+        Assert.Equal(1, upright.Metadata!.Orientation);
+        bool swap = orientation >= 5;
+        Assert.Equal(swap ? (plain.Height, plain.Width) : (plain.Width, plain.Height), (upright.Width, upright.Height));
+        Assert.Equal(swap ? (100.0, 300.0) : (300.0, 100.0), (upright.Metadata.DpiX, upright.Metadata.DpiY));
+        var info = Jpeg.GetInfo(data, o);
+        Assert.Equal((upright.Width, upright.Height), (info.Width, info.Height));
+    }
+
+    [Fact]
+    public void JunkBeforeSoiIsSkipped()
+    {
+        var data = Load("jpeg/rgb_420_17x33.jpg");
+        var expected = Jpeg.Decode(data);
+        var junk = new byte[300];
+        new Random(1).NextBytes(junk);
+        junk[10] = 0xFF; junk[11] = 0xD8; junk[12] = 0x00; // an SOI look-alike that is not followed by a marker
+        var padded = junk.Concat(data).ToArray();
+        Assert.False(Jpeg.IsMatch(padded));
+        TestUtil.AssertEqual(expected, Jpeg.Decode(padded), 0);
+        Assert.Equal(Jpeg.GetInfo(data), Jpeg.GetInfo(padded));
+        var strict = new JpegDecodeOptions { RequireSoiAtStart = true };
+        Assert.Throws<ImageFormatException>(() => Jpeg.Decode(padded, strict));
+        Assert.Throws<ImageFormatException>(() => Jpeg.GetInfo(padded, strict));
+        TestUtil.AssertEqual(expected, Jpeg.Decode(data, strict), 0);
+        Assert.Throws<ImageFormatException>(() => Jpeg.Decode(junk));
+        Assert.Throws<ArgumentException>(() => Jpeg.Decode(data, new JpegDecodeOptions { ScaleDenominator = 3 }));
+    }
+
     // ------------------------------------------------------------------ JPEG in TIFF
 
     public static IEnumerable<object[]> TiffStreams()
