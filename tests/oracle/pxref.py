@@ -2,7 +2,7 @@
 
   magic 'PXRF' | int32 width | int32 height | int32 channels | int32 sampleType | raw little-endian samples
 
-sampleType matches PixCodec.SampleType: 0 u8, 1 u16, 2 u32, 3 i8, 4 i16, 5 i32, 6 f16, 7 f32, 8 f64.
+sampleType matches PixCodec.SampleType: 0 u8, 1 u16, 2 u32, 3 i8, 4 i16, 5 i32, 6 f16, 7 f32, 8 f64, 9 u64, 10 i64.
 Samples are row-major, top row first, channel-interleaved (R,G,B,A order).
 """
 import struct
@@ -10,7 +10,7 @@ import numpy as np
 
 _TYPES = {np.dtype('uint8'): 0, np.dtype('uint16'): 1, np.dtype('uint32'): 2, np.dtype('int8'): 3,
           np.dtype('int16'): 4, np.dtype('int32'): 5, np.dtype('float16'): 6, np.dtype('float32'): 7,
-          np.dtype('float64'): 8}
+          np.dtype('float64'): 8, np.dtype('uint64'): 9, np.dtype('int64'): 10}
 _DTYPES = {v: k for k, v in _TYPES.items()}
 
 

@@ -5,7 +5,7 @@ using PixCodec;
 namespace Aardvark.Base
 {
     /// <summary>
-    /// PixImage loader backed by the fully managed PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR).
+    /// PixImage loader backed by the fully managed PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP).
     /// Register with <see cref="PixImagePixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
     public sealed class PixCodecLoader : IPixLoader
@@ -51,6 +51,14 @@ namespace Aardvark.Base
                     Jpeg.Encode(ToRawImage(image, Target.Byte), stream, new JpegEncodeOptions
                     {
                         Quality = Math.Max(1, (saveParams as PixJpegSaveParams)?.Quality ?? PixJpegSaveParams.DefaultQuality),
+                    });
+                    break;
+                case PixFileFormat.Webp:
+                    var webp = saveParams as PixWebpSaveParams;
+                    Webp.Encode(ToRawImage(image, Target.Byte), stream, new WebpEncodeOptions
+                    {
+                        Quality = webp?.Quality ?? PixWebpSaveParams.DefaultQuality,
+                        Lossless = webp?.Lossless ?? false,
                     });
                     break;
                 case PixFileFormat.Gif:
@@ -103,6 +111,8 @@ namespace Aardvark.Base
             SampleType.Int32 => typeof(int),
             SampleType.Float16 or SampleType.Float32 => typeof(float),
             SampleType.Float64 => typeof(double),
+            SampleType.UInt64 => typeof(ulong),
+            SampleType.Int64 => typeof(long),
             _ => throw new NotSupportedException(),
         };
 
@@ -130,6 +140,8 @@ namespace Aardvark.Base
             SampleType.Int8 => Wrap(img, (sbyte[])img.Data),
             SampleType.Int16 => Wrap(img, (short[])img.Data),
             SampleType.Int32 => Wrap(img, (int[])img.Data),
+            SampleType.UInt64 => Wrap(img, (ulong[])img.Data),
+            SampleType.Int64 => Wrap(img, (long[])img.Data),
             SampleType.Float16 => Wrap(img, Array.ConvertAll((Half[])img.Data, h => (float)h)),
             _ => throw new NotSupportedException($"unsupported sample type {img.SampleType}"),
         };
@@ -196,6 +208,8 @@ namespace Aardvark.Base
                 PixImage<sbyte> p => Raw(p),
                 PixImage<short> p => Raw(p),
                 PixImage<int> p => Raw(p),
+                PixImage<ulong> p => Raw(p),
+                PixImage<long> p => Raw(p),
                 _ => throw new NotSupportedException($"unsupported PixImage type {image.PixFormat}"),
             };
         }

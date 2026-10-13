@@ -16,6 +16,8 @@ namespace PixCodec
         Float16 = 6,
         Float32 = 7,
         Float64 = 8,
+        UInt64 = 9,
+        Int64 = 10,
     }
 
     /// <summary>Meaning of the interleaved channels. Channel order is always as named (R, G, B, A).</summary>
@@ -37,6 +39,7 @@ namespace PixCodec
         Tiff,
         Gif,
         Exr,
+        Webp,
     }
 
     /// <summary>Optional, format independent metadata. Decoders fill in what they find, encoders write what they can.</summary>
@@ -61,7 +64,7 @@ namespace PixCodec
     /// <summary>
     /// A decoded image: tightly packed, row-major (top row first), channel-interleaved samples in a typed array.
     /// <see cref="Data"/> has exactly Width * Height * Channels elements and its element type matches <see cref="SampleType"/>
-    /// (byte[], ushort[], uint[], sbyte[], short[], int[], Half[], float[], double[]).
+    /// (byte[], ushort[], uint[], ulong[], sbyte[], short[], int[], long[], Half[], float[], double[]).
     /// Alpha is never premultiplied.
     /// </summary>
     public sealed class RawImage
@@ -115,6 +118,8 @@ namespace PixCodec
             Half[] a => MemoryMarshal.AsBytes<Half>(a),
             float[] a => MemoryMarshal.AsBytes<float>(a),
             double[] a => MemoryMarshal.AsBytes<double>(a),
+            ulong[] a => MemoryMarshal.AsBytes<ulong>(a),
+            long[] a => MemoryMarshal.AsBytes<long>(a),
             _ => throw new InvalidOperationException(),
         };
 
@@ -141,7 +146,7 @@ namespace PixCodec
             SampleType.UInt8 or SampleType.Int8 => 1,
             SampleType.UInt16 or SampleType.Int16 or SampleType.Float16 => 2,
             SampleType.UInt32 or SampleType.Int32 or SampleType.Float32 => 4,
-            SampleType.Float64 => 8,
+            SampleType.Float64 or SampleType.UInt64 or SampleType.Int64 => 8,
             _ => throw new ArgumentOutOfRangeException(nameof(type)),
         };
 
@@ -156,6 +161,8 @@ namespace PixCodec
             SampleType.Float16 => new Half[length],
             SampleType.Float32 => new float[length],
             SampleType.Float64 => new double[length],
+            SampleType.UInt64 => new ulong[length],
+            SampleType.Int64 => new long[length],
             _ => throw new ArgumentOutOfRangeException(nameof(type)),
         };
 
@@ -170,6 +177,8 @@ namespace PixCodec
             if (t == typeof(Half)) return SampleType.Float16;
             if (t == typeof(float)) return SampleType.Float32;
             if (t == typeof(double)) return SampleType.Float64;
+            if (t == typeof(ulong)) return SampleType.UInt64;
+            if (t == typeof(long)) return SampleType.Int64;
             throw new ArgumentException($"unsupported sample element type {t}");
         }
     }

@@ -75,6 +75,9 @@ public static class TestUtil
         SampleType.Float16 => Array.ConvertAll((Half[])img.Data, x => (double)x),
         SampleType.Float32 => Array.ConvertAll((float[])img.Data, x => (double)x),
         SampleType.Float64 => (double[])img.Data,
+        // 64 bit integers lose precision as double: fine for tolerance checks, exact compares use the byte path
+        SampleType.UInt64 => Array.ConvertAll((ulong[])img.Data, x => (double)x),
+        SampleType.Int64 => Array.ConvertAll((long[])img.Data, x => (double)x),
         _ => throw new InvalidOperationException(),
     };
 

@@ -13,6 +13,7 @@ namespace PixCodec
             if (Gif.IsMatch(header)) return ImageFormat.Gif;
             if (Tiff.IsMatch(header)) return ImageFormat.Tiff;
             if (Exr.IsMatch(header)) return ImageFormat.Exr;
+            if (Webp.IsMatch(header)) return ImageFormat.Webp;
             return ImageFormat.Unknown;
         }
 
@@ -24,6 +25,7 @@ namespace PixCodec
                 ".tif" or ".tiff" => ImageFormat.Tiff,
                 ".gif" => ImageFormat.Gif,
                 ".exr" => ImageFormat.Exr,
+                ".webp" => ImageFormat.Webp,
                 _ => ImageFormat.Unknown,
             };
 
@@ -34,6 +36,7 @@ namespace PixCodec
             ImageFormat.Gif => Gif.GetInfo(data),
             ImageFormat.Tiff => Tiff.GetInfo(data),
             ImageFormat.Exr => Exr.GetInfo(data),
+            ImageFormat.Webp => Webp.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -47,6 +50,7 @@ namespace PixCodec
             ImageFormat.Gif => Gif.Decode(data),
             ImageFormat.Tiff => Tiff.Decode(data),
             ImageFormat.Exr => Exr.Decode(data),
+            ImageFormat.Webp => Webp.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -63,6 +67,7 @@ namespace PixCodec
                 case ImageFormat.Gif: Gif.Encode(image, output); break;
                 case ImageFormat.Tiff: Tiff.Encode(image, output); break;
                 case ImageFormat.Exr: Exr.Encode(image, output); break;
+                case ImageFormat.Webp: Webp.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }
