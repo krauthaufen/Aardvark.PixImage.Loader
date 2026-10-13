@@ -215,7 +215,8 @@ namespace PixCodec
                                 if (q + bytes > b.Length) throw Bad("bad palette box");
                                 long v = 0;
                                 for (int k = 0; k < bytes; k++) v = v << 8 | b[q++];
-                                if ((depth[c] & 0x80) != 0 && bits < 64) v = v << (64 - bits) >> (64 - bits);
+                                if ((depth[c] & 0x80) != 0) v = v << (64 - bits) >> (64 - bits);
+                                else v = Math.Min(v, (1L << bits) - 1);
                                 pal[i * npc + c] = (int)v;
                             }
                         PaletteEntries = ne; PaletteCols = npc; PaletteDepth = depth; Palette = pal;

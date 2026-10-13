@@ -143,6 +143,12 @@ namespace PixCodec
                 bool uniform = true;
                 for (int i = 0; i < colours; i++) uniform &= !ordered[i].Signed && ordered[i].Depth == ordered[0].Depth;
                 if (colours == 3 && (cs == Jp2Header.CsSycc || cs == Jp2Header.CsEsycc || cs == 1 || cs == 3 || cs == 4) && uniform) l.Conversion = 1;
+                // Subsampled second and third components under a full resolution first one are luma and chroma even
+                // if nothing (a raw codestream) or the wrong thing (sRGB) is declared; OpenJPEG decides the same way.
+                if (colours == 3 && (cs < 0 || cs == Jp2Header.CsSrgb) && h.ColorMethod != 2 && uniform
+                    && siz.Dx[ordered[0].Comp] == 1 && siz.Dy[ordered[0].Comp] == 1 && (siz.Dx[ordered[1].Comp] != 1 || siz.Dy[ordered[1].Comp] != 1)
+                    && siz.Dx[ordered[1].Comp] == siz.Dx[ordered[2].Comp] && siz.Dy[ordered[1].Comp] == siz.Dy[ordered[2].Comp]
+                    && ordered[0].PalCol < 0) l.Conversion = 1;
                 if (colours == 4)
                 {
                     if (!uniform)
@@ -161,6 +167,8 @@ namespace PixCodec
                 }
             }
 
+            // Unsigned samples of less than 8 bit are scaled to 8 bit (a bilevel image is 0 / 255), deeper ones stay as stored.
+            if (!raw && !anySigned && maxDepth < 8) { maxDepth = 8; sameDepth = false; }
             l.OutDepth = maxDepth;
             l.OutSigned = anySigned;
             l.Scale = !raw && !sameDepth && !anySigned;
