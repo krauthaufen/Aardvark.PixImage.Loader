@@ -1340,8 +1340,7 @@ public class TiffTests
         Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Rgb, SampleType.UInt16, 3), o));
     }
 
-    // Un-skip once the JPEG 2000 encoder exists (Jp2.EncodeCodestreamPlanes still throws on codec/jp2 7a9e5be).
-    [Theory(Skip = "needs the JPEG 2000 encoder (codec/jp2)")]
+    [Theory]
     [InlineData(SampleType.UInt8, 3, 0)]
     [InlineData(SampleType.UInt8, 1, 32)]
     [InlineData(SampleType.UInt8, 4, 64)]
