@@ -273,20 +273,30 @@ namespace PixCodec
             return (int)(_bp - _start);
         }
 
+        /// <summary>
+        /// The termination of D.4.2 that the predictable termination flag asks for: exactly the bits still in the
+        /// code register are pushed out, so a decoder knows what the unused bits of the last byte must be.
+        /// </summary>
+        public int FlushPredictable()
+        {
+            int k = 11 - _ct + 1;
+            while (k > 0)
+            {
+                _c <<= _ct;
+                _ct = 0;
+                ByteOut();
+                k -= _ct;
+            }
+            if (*_bp != 0xFF) _bp++;
+            return (int)(_bp - _start);
+        }
+
         /// <summary>Starts a new codeword at <paramref name="at"/> (the byte before it must be the previous segment's last byte or scratch).</summary>
         public void Restart(byte* at)
         {
-            _bp = at - 1;
+            _start = at; _bp = at - 1;
             _a = 0x8000; _c = 0; _ct = 12;
             if (*_bp == 0xFF) _ct = 13;
-        }
-
-        /// <summary>Upper bound of the bytes needed to decode everything coded so far (for rate estimates of unterminated passes).</summary>
-        public int EstimateLength()
-        {
-            // bytes written plus the bits pending in the C register
-            int n = (int)(_bp + 1 - _start);
-            return n + (_ct < 5 ? 3 : 2);   // conservative; exact lengths come from terminated passes
         }
     }
 }

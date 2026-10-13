@@ -99,8 +99,12 @@ namespace PixCodec
                     int t = ty * siz.TilesX + tx;
                     if (_cs.Tiles[t] == null || _cs.Tiles[t]!.Parts.Count == 0)
                     {
-                        if (_strict) throw J2kCodestream.Bad("missing tile");
-                        Truncated = true;
+                        // A codestream that is properly closed may leave tiles out (T.803 has such streams); they stay 0.
+                        if (!_cs.SawEoc)
+                        {
+                            if (_strict) throw J2kCodestream.Bad("missing tile");
+                            Truncated = true;
+                        }
                         continue;
                     }
                     tiles.Add(t);
@@ -254,7 +258,6 @@ namespace PixCodec
             int style = tc.Cod.Style;
             bool ht = (style & J2kCod.Ht) != 0 && blk.Phld != 255;
             int numBps = band.Mb + tc.Roi - blk.Zbp;
-            int maxPasses = ht ? int.MaxValue : Math.Max(3 * numBps - 2, 0);
 
             // gather the codeword segments, each followed by two 0xFF bytes
             Span<int> segStart = stackalloc int[192], segLen = stackalloc int[192], segPasses = stackalloc int[192];
@@ -266,7 +269,7 @@ namespace PixCodec
             coder.EnsureBuf((int)total + 2 * 192 + 16);
             fixed (byte* buf = coder.Buf)
             {
-                for (int id = blk.FirstChunk; id != 0 && pass < maxPasses; id = chunks[id - 1].Next)
+                for (int id = blk.FirstChunk; id != 0; id = chunks[id - 1].Next)
                 {
                     ref var ch = ref chunks[id - 1];
                     if (pass >= segEnd)
@@ -286,6 +289,12 @@ namespace PixCodec
                 buf[pos++] = 0xFF; buf[pos++] = 0xFF;
             }
 
+            if (Environment.GetEnvironmentVariable("J2K_DEBUG") != null)
+            {
+                var sb = new System.Text.StringBuilder($"c{tc.Index} o{band.Orient} {w}x{h} Mb={band.Mb} zbp={blk.Zbp} bps={numBps} passes={pass} max={3 * numBps - 2}:");
+                for (int id = blk.FirstChunk; id != 0; id = chunks[id - 1].Next) sb.Append($" {chunks[id - 1].Passes}/{chunks[id - 1].Len}");
+                Console.Error.WriteLine(sb);
+            }
             bool wide = tc.Wide;
             if (wide && (coder.Data64 == null || coder.Data64.Length < w * h)) coder.Data64 = new ulong[Math.Max(w * h, 4096)];
             if (coder.Data32.Length < w * h) coder.Data32 = new uint[w * h];

@@ -37,9 +37,11 @@ namespace PixCodec
     ///
     /// Output mapping. Components up to 8 bit give UInt8, up to 16 bit UInt16, up to 32 bit UInt32 and up to 38 bit
     /// UInt64 samples (Int8 .. Int64 if a component is signed); sample values are returned as stored, i.e. a 12 bit
-    /// image yields values 0..4095 in UInt16 (<see cref="ImageInfo.BitsPerSample"/> tells the depth). When the channels
-    /// of an image differ in depth (e.g. 8 bit colour with 1 bit alpha) the unsigned channels are scaled to the depth
-    /// of the deepest one. One / two / three / four channels are Gray / GrayAlpha / Rgb / Rgba unless a JP2 channel
+    /// image yields values 0..4095 in UInt16 (<see cref="ImageInfo.BitsPerSample"/> tells the depth). Two exceptions,
+    /// both for unsigned data only: images of less than 8 bit are scaled to the full 8 bit range (a bilevel image
+    /// comes out as 0 / 255), and when the channels of an image differ in depth (8 bit colour with 1 bit alpha, say)
+    /// all are scaled to the depth of the deepest one. The image size is that of the reference grid (Xsiz - XOsiz by
+    /// Ysiz - YOsiz), also when every component is subsampled (where OpenJPEG's tools return the component size). One / two / three / four channels are Gray / GrayAlpha / Rgb / Rgba unless a JP2 channel
     /// definition box says otherwise; anything else is <see cref="ColorModel.Other"/>. Palettes are expanded, sYCC
     /// and CMYK are converted to Rgb, premultiplied alpha is undone. Subsampled components are brought to the
     /// reference grid by sample replication, as OpenJPEG does.
