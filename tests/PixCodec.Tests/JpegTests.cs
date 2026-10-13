@@ -279,6 +279,85 @@ public class JpegTests
         TestUtil.AssertEqual(oracle, back, 0);
     }
 
+    /// <summary>More than 32767 blocks with empty AC bands: end-of-band runs and the correction bit buffer have to be split.</summary>
+    [Theory]
+    [InlineData(ColorModel.Gray, 0, false)]
+    [InlineData(ColorModel.Rgb, 0, false)]
+    [InlineData(ColorModel.Gray, 5, false)]
+    [InlineData(ColorModel.Gray, 0, true)]
+    [InlineData(ColorModel.Rgb, 0, true)]
+    public void EncodeProgressiveLongRuns(ColorModel color, int restart, bool flat)
+    {
+        int w = 1808, h = 1210; // 34352 luma blocks
+        var src = RawImage.Create(w, h, color, SampleType.UInt8);
+        var d = src.GetData<byte>();
+        int ch = src.Channels;
+        var rnd = new Random(9);
+        if (flat)
+        {
+            // every AC band is empty up to the very last block
+            Array.Fill(d, (byte)90);
+            d[^1] = 255;
+        }
+        else
+        {
+            // faint texture everywhere: after the first AC passes most blocks only refine existing coefficients,
+            // which piles up correction bits inside long end-of-band runs
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    for (int c = 0; c < ch; c++)
+                        d[(y * w + x) * ch + c] = (byte)(100 + c * 20 + (int)(14 * Math.Sin(x * 0.8) * Math.Sin(y * 0.8)));
+            for (int i = 0; i < 300; i++) d[rnd.Next(d.Length)] = (byte)rnd.Next(256);
+        }
+
+        var bytes = Encode(src, new JpegEncodeOptions { Quality = 92, Progressive = true, RestartInterval = restart, Subsampling = JpegSubsampling.Chroma420 });
+        var back = Jpeg.Decode(bytes);
+        Assert.True(TestUtil.Psnr(src, back, 255) > 30);
+        var oracle = TestUtil.OracleDecode(bytes, ".jpg");
+        if (oracle != null) TestUtil.AssertEqual(oracle, back, 0);
+
+        // the same coefficients written sequentially decode to the same pixels
+        var baseline = Jpeg.Decode(Encode(src, new JpegEncodeOptions { Quality = 92, RestartInterval = restart, Subsampling = JpegSubsampling.Chroma420 }));
+        TestUtil.AssertEqual(baseline, back, 0);
+    }
+
+    /// <summary>
+    /// Blocks whose 63 AC coefficients are all significant from the first pass on: the refinement scans then consist of
+    /// end-of-band runs carrying 63 correction bits per block, which overflows the encoder's correction bit buffer
+    /// and forces it to cut the run.
+    /// </summary>
+    [Fact]
+    public void EncodeProgressiveDenseRefinement()
+    {
+        int w = 320, h = 64;
+        var src = RawImage.Create(w, h, ColorModel.Gray, SampleType.UInt8);
+        var d = src.GetData<byte>();
+        var rnd = new Random(4);
+        for (int by = 0; by < h / 8; by++)
+            for (int bx = 0; bx < w / 8; bx++)
+            {
+                // synthesize the block from AC coefficients of magnitude 24 with random signs
+                var coef = new double[64];
+                for (int i = 1; i < 64; i++) coef[i] = rnd.Next(2) == 0 ? 24 : -24;
+                for (int y = 0; y < 8; y++)
+                    for (int x = 0; x < 8; x++)
+                    {
+                        double v = 0;
+                        for (int vv = 0; vv < 8; vv++)
+                            for (int u = 0; u < 8; u++)
+                                v += (u == 0 ? Math.Sqrt(0.5) : 1) * (vv == 0 ? Math.Sqrt(0.5) : 1) / 4 * coef[vv * 8 + u]
+                                     * Math.Cos((2 * x + 1) * u * Math.PI / 16) * Math.Cos((2 * y + 1) * vv * Math.PI / 16);
+                        d[(by * 8 + y) * w + bx * 8 + x] = (byte)Math.Clamp(Math.Round(v + 128), 0, 255);
+                    }
+            }
+        var bytes = Encode(src, new JpegEncodeOptions { Quality = 100, Progressive = true });
+        var back = Jpeg.Decode(bytes);
+        Assert.True(TestUtil.Psnr(src, back, 255) > 45);
+        TestUtil.AssertEqual(Jpeg.Decode(Encode(src, new JpegEncodeOptions { Quality = 100 })), back, 0);
+        var oracle = TestUtil.OracleDecode(bytes, ".jpg");
+        if (oracle != null) TestUtil.AssertEqual(oracle, back, 0);
+    }
+
     [Fact]
     public void EncodeQualityOrdersSizeAndFidelity()
     {

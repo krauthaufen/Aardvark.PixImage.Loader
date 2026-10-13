@@ -321,6 +321,27 @@ namespace PixCodec.JpegImpl
                     Sse2.Store(dst + 36, p1.GetUpper());
                 }
             }
+            else if (Vector128.IsHardwareAccelerated && BitConverter.IsLittleEndian && !ForceScalar)
+            {
+                // portable variant: 4 pixels per step in 32 bit lanes; each step stores 16 bytes for 12
+                var half = Vector128.Create(32768);
+                var c128 = Vector128.Create(128);
+                var max = Vector128.Create(255);
+                for (; x + 6 <= w; x += 4, dst += 12)
+                {
+                    var yv = Load4(yp + x);
+                    var cb = Load4(cbp + x) - c128;
+                    var cr = Load4(crp + x) - c128;
+                    var r = yv + Vector128.ShiftRightArithmetic(cr * CrR + half, 16);
+                    var g = yv + Vector128.ShiftRightArithmetic(cb * CbG + cr * CrG + half, 16);
+                    var b = yv + Vector128.ShiftRightArithmetic(cb * CbB + half, 16);
+                    r = Vector128.Min(Vector128.Max(r, Vector128<int>.Zero), max);
+                    g = Vector128.Min(Vector128.Max(g, Vector128<int>.Zero), max);
+                    b = Vector128.Min(Vector128.Max(b, Vector128<int>.Zero), max);
+                    var px = (r | Vector128.ShiftLeft(g, 8) | Vector128.ShiftLeft(b, 16)).AsByte();
+                    Vector128.Shuffle(px, Vector128.Create((byte)0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 0x80, 0x80, 0x80, 0x80)).Store(dst);
+                }
+            }
             for (; x < w; x++, dst += 3)
             {
                 int yy = yp[x], cb = cbp[x] - 128, cr = crp[x] - 128;
@@ -329,6 +350,11 @@ namespace PixCodec.JpegImpl
                 dst[2] = Clamp(yy + ((CbB * cb + 32768) >> 16));
             }
         }
+
+        /// <summary>4 bytes zero extended to 32 bit lanes.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<int> Load4(byte* p)
+            => Vector128.WidenLower(Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<uint>(p)).AsByte())).AsInt32();
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static byte Clamp(int v) => (byte)((uint)v <= 255 ? v : v < 0 ? 0 : 255);

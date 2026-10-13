@@ -246,6 +246,7 @@ namespace PixCodec.JpegImpl
         /// Forward DCT of an 8x8 sample block (level shifted by -128) followed by quantization with the reciprocal
         /// table (1 / (8 * q), natural order). Writes the 64 quantized coefficients in zigzag order.
         /// </summary>
+        [SkipLocalsInit]
         public static void FdctQuantize(byte* src, nint stride, float* recip, short* zigzagOut)
         {
             int* m = stackalloc int[64];
@@ -291,11 +292,13 @@ namespace PixCodec.JpegImpl
                     }
                 }
             }
-            byte* zz = JpegTables.ZigZag;
-            for (int i = 0; i < 64; i++)
+            byte* zz = JpegTables.ZigZagTransposed;
+            for (int i = 0; i < 64; i += 4)
             {
-                int n = zz[i];
-                zigzagOut[i] = (short)m[(n & 7) * 8 + (n >> 3)];
+                zigzagOut[i] = (short)m[zz[i]];
+                zigzagOut[i + 1] = (short)m[zz[i + 1]];
+                zigzagOut[i + 2] = (short)m[zz[i + 2]];
+                zigzagOut[i + 3] = (short)m[zz[i + 3]];
             }
         }
 

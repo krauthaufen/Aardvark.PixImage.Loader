@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 namespace PixCodec.JpegImpl
 {
@@ -8,7 +10,10 @@ namespace PixCodec.JpegImpl
         /// <summary>Zigzag index -> natural (row major) index, padded with 16 extra entries so a corrupt run cannot index out of the block.</summary>
         public static readonly byte* ZigZag;
 
-        static readonly byte[] s_zigzag = GC.AllocateArray<byte>(80, pinned: true);
+        /// <summary>Zigzag index -> index into a transposed (column major) block.</summary>
+        public static readonly byte* ZigZagTransposed;
+
+        static readonly byte[] s_zigzag = GC.AllocateArray<byte>(80 + 64, pinned: true);
 
         static JpegTables()
         {
@@ -18,9 +23,30 @@ namespace PixCodec.JpegImpl
                 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
             ];
             zz.CopyTo(s_zigzag);
-            s_zigzag.AsSpan(64).Fill(63);
+            s_zigzag.AsSpan(64, 16).Fill(63);
+            for (int i = 0; i < 64; i++) s_zigzag[80 + i] = (byte)((zz[i] & 7) * 8 + (zz[i] >> 3));
             fixed (byte* p = s_zigzag) ZigZag = p; // pinned object heap: the address is stable
+            ZigZagTransposed = ZigZag + 80;
         }
+
+        /// <summary>Bit i is set when coefficient i of the block is nonzero.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong NonZeroMask(short* blk)
+        {
+            if (Vector128.IsHardwareAccelerated)
+            {
+                ulong zero = 0;
+                for (int i = 0; i < 8; i++)
+                    zero |= (ulong)Vector128.Equals(Vector128.Load(blk + i * 8), Vector128<short>.Zero).ExtractMostSignificantBits() << (i * 8);
+                return ~zero;
+            }
+            ulong m = 0;
+            for (int i = 0; i < 64; i++) if (blk[i] != 0) m |= 1UL << i;
+            return m;
+        }
+
+        /// <summary>Bits ss..se set.</summary>
+        public static ulong BandMask(int ss, int se) => (se == 63 ? ~0UL : (1UL << (se + 1)) - 1) & ~((1UL << ss) - 1);
 
         // Annex K.1, natural order.
         public static ReadOnlySpan<byte> LumaQuant =>

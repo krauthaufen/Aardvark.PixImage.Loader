@@ -590,7 +590,11 @@ namespace PixCodec.JpegImpl
                                     }
                                     else if (br.GetBit() != 0) blk[0] |= (short)(1 << al);
                                 }
-                                else if (ah == 0) DecodeAcFirst(ref br, c.Ac!, blk, ss, se, al, ref eobrun);
+                                else if (ah == 0)
+                                {
+                                    if (eobrun > 0) eobrun--;
+                                    else DecodeAcFirst(ref br, c.Ac!, blk, ss, se, al, ref eobrun);
+                                }
                                 else DecodeAcRefine(ref br, c.Ac!, blk, ss, se, al, ref eobrun);
                             }
                         }
@@ -604,31 +608,98 @@ namespace PixCodec.JpegImpl
             }
         }
 
+        /// <summary>First pass over an AC band (progressive coefficients are stored in zigzag order). The caller handles a pending EOB run.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void DecodeAcFirst(ref JpegBitReader br, HuffDecodeTable table, short* blk, int ss, int se, int al, ref int eobrun)
         {
-            if (eobrun > 0) { eobrun--; return; }
-            byte* zz = JpegTables.ZigZag;
-            for (int k = ss; k <= se;)
+            // same structure as DecodeBlock: bit reader state in locals
+            ulong buf = br.Buf;
+            int cnt = br.Cnt;
+            byte* p = br.P, end = br.End;
+            int* fast = table.Fast;
+            int k = ss;
+            do
             {
-                int sym = br.DecodeSymbol(table), r = sym >> 4, s = sym & 15;
-                if (s == 0)
+                if (cnt < 32)
                 {
-                    if (r == 15) { k += 16; continue; }
-                    // EOBn: this band is finished here and in the next eobrun blocks
-                    eobrun = (1 << r) - 1;
-                    if (r != 0) eobrun += br.GetBits(r);
-                    return;
+                    if (end - p >= 8)
+                    {
+                        ulong w = System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<ulong>(p));
+                        if (((~w - 0x0101010101010101UL) & w & 0x8080808080808080UL) == 0)
+                        {
+                            buf |= w >> cnt;
+                            p += (63 - cnt) >> 3;
+                            cnt |= 56;
+                            goto filled;
+                        }
+                    }
+                    br.Buf = buf; br.Cnt = cnt; br.P = p;
+                    br.RefillSlow();
+                    buf = br.Buf; cnt = br.Cnt; p = br.P;
+                }
+            filled:
+                int e = fast[(int)(buf >> (64 - HuffDecodeTable.LookBits))];
+                int r, s, v;
+                if (e != 0)
+                {
+                    int n = e & 31;
+                    buf <<= n; cnt -= n;
+                    r = (e >> 5) & 15;
+                    s = (e >> 9) & 15;
+                    v = e >> 16;
+                    if ((e & HuffDecodeTable.NoValueFlag) != 0) goto noValue;
+                }
+                else
+                {
+                    int peek = (int)(buf >> 48), len = HuffDecodeTable.LookBits + 1;
+                    int* limit = table.Limit;
+                    while (peek >= limit[len]) len++;
+                    int sym;
+                    if (len > 16) { len = 16; sym = 0; }
+                    else sym = table.Values[((peek >> (16 - len)) + table.Offset[len]) & 255];
+                    buf <<= len; cnt -= len;
+                    r = sym >> 4;
+                    s = sym & 15;
+                    v = 0;
+                    if (s == 0) goto noValue;
                 }
                 k += r;
-                blk[zz[k]] = (short)(br.ReceiveExtend(s) << al);
+                if (s != 0)
+                {
+                    v = (int)(buf >> (64 - s));
+                    buf <<= s; cnt -= s;
+                    v += ((v - (1 << (s - 1))) >> 31) & (1 - (1 << s));
+                }
+                blk[k & 63] = (short)(v << al);
                 k++;
-            }
+                continue;
+
+            noValue:
+                if (r == 15) { k += 16; continue; } // ZRL
+                // EOBn: this band is finished here and in the next eobrun blocks
+                eobrun = (1 << r) - 1;
+                if (r != 0)
+                {
+                    eobrun += (int)(buf >> (64 - r));
+                    buf <<= r; cnt -= r;
+                }
+                break;
+            } while (k <= se);
+            br.Buf = buf; br.Cnt = cnt; br.P = p;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void Refine(ref JpegBitReader br, short* c, int plus, int minus)
+        {
+            // one more magnitude bit for a coefficient that is already nonzero
+            if (br.GetBit() != 0 && (*c & plus) == 0) *c += (short)(*c >= 0 ? plus : minus);
         }
 
         static void DecodeAcRefine(ref JpegBitReader br, HuffDecodeTable table, short* blk, int ss, int se, int al, ref int eobrun)
         {
-            byte* zz = JpegTables.ZigZag;
             int plus = 1 << al, minus = -1 << al;
+            // coefficients of the band that were nonzero before this scan; everything else in it is still zero
+            ulong old = JpegTables.NonZeroMask(blk) & JpegTables.BandMask(ss, se);
             int k = ss;
             if (eobrun == 0)
             {
@@ -647,28 +718,28 @@ namespace PixCodec.JpegImpl
                     }
                     else value = br.GetBit() != 0 ? plus : minus; // a new coefficient always has magnitude 1
 
-                    // step over r still-zero coefficients; every already nonzero one on the way gets a correction bit
-                    for (; k <= se; k++)
+                    // step over r still-zero coefficients, stopping at the one after them; every old nonzero
+                    // coefficient on the way gets a correction bit
+                    while (k <= se)
                     {
-                        short* c = blk + zz[k];
-                        if (*c != 0)
-                        {
-                            if (br.GetBit() != 0 && (*c & plus) == 0) *c += (short)(*c >= 0 ? plus : minus);
-                        }
-                        else if (--r < 0) break;
+                        ulong ahead = old >> k;
+                        int gap = ahead == 0 ? 64 : System.Numerics.BitOperations.TrailingZeroCount(ahead);
+                        if (gap > r) { k += r; break; }
+                        r -= gap;
+                        k += gap;
+                        Refine(ref br, blk + k, plus, minus);
+                        k++;
                     }
-                    if (value != 0 && k <= se) blk[zz[k]] = (short)value;
+                    if (k > se) break;
+                    if (value != 0) blk[k] = (short)value;
                     k++;
                 }
             }
             if (eobrun > 0)
             {
                 // inside an end-of-band run only correction bits remain
-                for (; k <= se; k++)
-                {
-                    short* c = blk + zz[k];
-                    if (*c != 0 && br.GetBit() != 0 && (*c & plus) == 0) *c += (short)(*c >= 0 ? plus : minus);
-                }
+                for (ulong rest = k > 63 ? 0 : old >> k << k; rest != 0; rest &= rest - 1)
+                    Refine(ref br, blk + System.Numerics.BitOperations.TrailingZeroCount(rest), plus, minus);
                 eobrun--;
             }
         }
@@ -676,6 +747,8 @@ namespace PixCodec.JpegImpl
         /// <summary>Progressive: turn the accumulated coefficients into samples once all scans are in.</summary>
         void IdctAll()
         {
+            short* nat = stackalloc short[64];
+            byte* zz = JpegTables.ZigZag;
             foreach (var c in Comps)
             {
                 if (c.Quant == null) continue; // never appeared in a scan: stays gray
@@ -686,11 +759,17 @@ namespace PixCodec.JpegImpl
                     byte* dst = c.Plane + by * 8 * stride;
                     for (int bx = 0; bx < c.ScanBlocksW; bx++, blk += 64, dst += 8)
                     {
-                        ulong* u = (ulong*)blk;
-                        ulong ac = (BitConverter.IsLittleEndian ? u[0] & ~0xFFFFUL : u[0] & 0x0000FFFFFFFFFFFFUL) | u[1] | u[2] | u[3] | u[4] | u[5] | u[6] | u[7]
-                            | u[8] | u[9] | u[10] | u[11] | u[12] | u[13] | u[14] | u[15];
-                        if (ac == 0) JpegDct.IdctDc(blk[0] * c.Quant[0], dst, stride);
-                        else JpegDct.Idct(blk, c.Quant, dst, stride);
+                        ulong mask = JpegTables.NonZeroMask(blk) & ~1UL;
+                        if (mask == 0) { JpegDct.IdctDc(blk[0] * c.Quant[0], dst, stride); continue; }
+                        // zigzag -> natural order
+                        Unsafe.InitBlockUnaligned(nat, 0, 128);
+                        nat[0] = blk[0];
+                        for (; mask != 0; mask &= mask - 1)
+                        {
+                            int k = System.Numerics.BitOperations.TrailingZeroCount(mask);
+                            nat[zz[k]] = blk[k];
+                        }
+                        JpegDct.Idct(nat, c.Quant, dst, stride);
                     }
                 }
             }
