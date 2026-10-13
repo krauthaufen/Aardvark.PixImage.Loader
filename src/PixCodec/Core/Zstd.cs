@@ -64,6 +64,14 @@ namespace PixCodec.Compression
         /// </summary>
         public static byte[] Compress(ReadOnlySpan<byte> source, int level, bool checksum = false) => ZstdEncoder.Compress(source, level, checksum);
 
+        /// <summary>
+        /// Compresses with a dictionary: a structured one (as made by <c>zstd --train</c>; its id is stored in the
+        /// frame) or any bytes used as plain content. The result needs the same dictionary to decompress
+        /// (<c>zstd -D</c>, or <see cref="Decompress(ReadOnlySpan{byte}, Span{byte}, ReadOnlySpan{byte})"/>).
+        /// </summary>
+        public static byte[] Compress(ReadOnlySpan<byte> source, ReadOnlySpan<byte> dictionary, int level = 3, bool checksum = false)
+            => ZstdEncoder.Compress(source, level, checksum, dictionary);
+
         /// <summary>Compresses at the default level (3).</summary>
         public static byte[] Compress(ReadOnlySpan<byte> source, bool checksum = false) => ZstdEncoder.Compress(source, 3, checksum);
     }

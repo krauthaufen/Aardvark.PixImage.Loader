@@ -637,17 +637,14 @@ namespace PixCodec.Compression
         // -------------------------------------------------------------------------------------------- frames
 
         /// <summary>
-        /// Decodes every frame in <paramref name="source"/>. When <paramref name="growable"/> is given, the output
-        /// goes there and the array is enlarged as the data requires (a declared content size is only trusted up to
-        /// a bound derived from the input size); otherwise output that does not fit <paramref name="destination"/>
-        /// is an error. Returns the number of bytes written.
+        /// Looks at a dictionary: a structured one (magic, id, entropy tables, repeat offsets, content) is parsed
+        /// into the dictionary tables and true is returned; anything else is plain content.
         /// </summary>
-        public int Decode(ReadOnlySpan<byte> source, Span<byte> destination, ref byte[]? growable, ReadOnlySpan<byte> dictionary = default)
+        internal bool ParseDictionary(ReadOnlySpan<byte> dictionary, out uint dictionaryId, out int contentStart)
         {
-            // a structured dictionary (magic, id, entropy tables, repeat offsets, content) or plain content
-            uint dictionaryId = 0;
+            dictionaryId = 0;
+            contentStart = 0;
             bool structured = false;
-            int contentStart = 0;
             if (dictionary.Length >= 8 && BinaryPrimitives.ReadUInt32LittleEndian(dictionary) == 0xEC30A437)
             {
                 structured = true;
@@ -675,6 +672,20 @@ namespace PixCodec.Compression
                     }
                 }
             }
+            return structured;
+        }
+
+        internal uint DictionaryRepeatOffset(int index) => dictRep[index];
+
+        /// <summary>
+        /// Decodes every frame in <paramref name="source"/>. When <paramref name="growable"/> is given, the output
+        /// goes there and the array is enlarged as the data requires (a declared content size is only trusted up to
+        /// a bound derived from the input size); otherwise output that does not fit <paramref name="destination"/>
+        /// is an error. Returns the number of bytes written.
+        /// </summary>
+        public int Decode(ReadOnlySpan<byte> source, Span<byte> destination, ref byte[]? growable, ReadOnlySpan<byte> dictionary = default)
+        {
+            bool structured = ParseDictionary(dictionary, out uint dictionaryId, out int contentStart);
             fixed (byte* dictP = dictionary)
             {
                 dictContent = dictP + contentStart;
