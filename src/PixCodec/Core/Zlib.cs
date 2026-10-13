@@ -54,6 +54,7 @@ namespace PixCodec.Compression
         public static int Decompress(ReadOnlySpan<byte> source, Span<byte> destination, bool verifyChecksum)
         {
             if (Backend == ZlibBackend.Managed) return InflateCore.Decompress(source, destination, true, verifyChecksum);
+            if (source.IsEmpty) return 0; // (a null pointer would make UnmanagedMemoryStream throw)
             unsafe
             {
                 fixed (byte* p = source)
@@ -69,6 +70,7 @@ namespace PixCodec.Compression
         public static byte[] Decompress(ReadOnlySpan<byte> source, int sizeHint = 0)
         {
             if (Backend == ZlibBackend.Managed) return InflateCore.Decompress(source, sizeHint, true, true);
+            if (source.IsEmpty) return Array.Empty<byte>(); // (a null pointer would make UnmanagedMemoryStream throw)
             unsafe
             {
                 fixed (byte* p = source)
@@ -86,6 +88,7 @@ namespace PixCodec.Compression
         public static int DecompressRaw(ReadOnlySpan<byte> source, Span<byte> destination)
         {
             if (Backend == ZlibBackend.Managed) return InflateCore.Decompress(source, destination, false, false);
+            if (source.IsEmpty) return 0; // (a null pointer would make UnmanagedMemoryStream throw)
             unsafe
             {
                 fixed (byte* p = source)
@@ -101,6 +104,7 @@ namespace PixCodec.Compression
         public static byte[] DecompressRaw(ReadOnlySpan<byte> source, int sizeHint = 0)
         {
             if (Backend == ZlibBackend.Managed) return InflateCore.Decompress(source, sizeHint, false, false);
+            if (source.IsEmpty) return Array.Empty<byte>(); // (a null pointer would make UnmanagedMemoryStream throw)
             unsafe
             {
                 fixed (byte* p = source)
@@ -117,7 +121,8 @@ namespace PixCodec.Compression
         /// <summary>Compresses to a zlib stream. Level 0..9 (0 = store, 6 = default, 9 = smallest).</summary>
         public static byte[] Compress(ReadOnlySpan<byte> source, int level = 6)
         {
-            if (Backend == ZlibBackend.Managed) return Deflater.Compress(source, level, true);
+            // (for empty input the BCL stream writes nothing at all, not even a header: the managed encoder covers that)
+            if (Backend == ZlibBackend.Managed || source.IsEmpty) return Deflater.Compress(source, level, true);
             using var o = new MemoryStream(source.Length / 2 + 64);
             using (var z = BclCompressor(o, level, true))
                 z.Write(source);
@@ -127,7 +132,7 @@ namespace PixCodec.Compression
         /// <summary>Compresses to raw deflate data (no zlib header or checksum). Level 0..9.</summary>
         public static byte[] CompressRaw(ReadOnlySpan<byte> source, int level = 6)
         {
-            if (Backend == ZlibBackend.Managed) return Deflater.Compress(source, level, false);
+            if (Backend == ZlibBackend.Managed || source.IsEmpty) return Deflater.Compress(source, level, false);
             using var o = new MemoryStream(source.Length / 2 + 64);
             using (var z = BclCompressor(o, level, false))
                 z.Write(source);
@@ -167,6 +172,13 @@ namespace PixCodec.Compression
 
         static int ReadFully(Stream s, Span<byte> destination)
         {
+            if (destination.IsEmpty)
+            {
+                // nothing is wanted, but corrupt data should still be reported as with the managed backend
+                Span<byte> probe = stackalloc byte[1];
+                s.Read(probe);
+                return 0;
+            }
             int total = 0;
             while (total < destination.Length)
             {

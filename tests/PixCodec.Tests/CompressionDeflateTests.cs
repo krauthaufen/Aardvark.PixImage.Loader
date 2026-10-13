@@ -415,6 +415,65 @@ public class CompressionBackendTests
     }
 #endif
 
+    /// <summary>Every public entry point with empty and one byte input: same results on both backends, no stray exception types.</summary>
+    [Fact]
+    public void EmptyAndOneByteInputs()
+    {
+        var old = Zlib.Backend;
+        try
+        {
+            var results = new List<string>();
+            foreach (var backend in new[] { ZlibBackend.Managed, ZlibBackend.Bcl })
+            {
+                Zlib.Backend = backend;
+                var log = new System.Text.StringBuilder();
+                foreach (var input in new[] { Array.Empty<byte>(), new byte[] { 0x78 }, new byte[] { 0x00 }, new byte[] { 0xFF }, new byte[] { 0x03 } })
+                {
+                    string Try(Func<object> f)
+                    {
+                        try { var r = f(); return r is byte[] b ? "bytes:" + b.Length : r.ToString()!; }
+                        catch (Exception e) when (e is ImageFormatException or InvalidDataException or IOException) { return "corrupt"; }
+                    }
+                    var dst = new byte[16];
+                    log.Append(Try(() => Zlib.Decompress(input, dst))).Append(' ');
+                    log.Append(Try(() => Zlib.Decompress(input, dst, false))).Append(' ');
+                    log.Append(Try(() => Zlib.Decompress(input, Span<byte>.Empty))).Append(' ');
+                    log.Append(Try(() => Zlib.Decompress(input))).Append(' ');
+                    log.Append(Try(() => Zlib.Decompress(input, 100))).Append(' ');
+                    log.Append(Try(() => Zlib.DecompressRaw(input, dst))).Append(' ');
+                    log.Append(Try(() => Zlib.DecompressRaw(input, Span<byte>.Empty))).Append(' ');
+                    log.Append(Try(() => Zlib.DecompressRaw(input))).Append(' ');
+                    // compression: any level, always a stream the other side reads back
+                    foreach (int level in new[] { 0, 1, 6, 9 })
+                    {
+                        var z = Zlib.Compress(input, level);
+                        var raw = Zlib.CompressRaw(input, level);
+                        Assert.True(z.Length >= 8 && raw.Length >= 1, $"{backend} level {level}: {z.Length}/{raw.Length} bytes for {input.Length}");
+                        Assert.True(input.AsSpan().SequenceEqual(InflateCore.Decompress(z, 0, true, true)));
+                        Assert.True(input.AsSpan().SequenceEqual(BclDecompress(z)));
+                        Assert.True(input.AsSpan().SequenceEqual(InflateCore.Decompress(raw, 0, false, false)));
+                        Assert.True(input.AsSpan().SequenceEqual(Zlib.Decompress(z)));
+                        Assert.True(input.AsSpan().SequenceEqual(Zlib.DecompressRaw(raw)));
+                        Assert.Equal(input.Length, Zlib.Decompress(z, dst));
+                        Assert.Equal(input.Length, Zlib.DecompressRaw(raw, dst));
+                        var ms = new MemoryStream();
+                        using (var s = Zlib.CreateCompressor(ms, level)) s.Write(input);
+                        // (a BCL compressor stream that was given nothing writes nothing; an empty stream decodes to nothing)
+                        Assert.True(input.AsSpan().SequenceEqual(Zlib.Decompress(ms.ToArray())));
+                    }
+                    Assert.Equal(1u, Zlib.Adler32(default));
+                    Assert.Equal(0u, Zlib.Crc32(default));
+                    log.Append("| ");
+                }
+                results.Add(log.ToString());
+            }
+            Assert.Equal(results[0], results[1]);
+            // empty input is "nothing there": zero bytes, no exception
+            Assert.StartsWith("0 0 0 bytes:0 bytes:0 0 0 bytes:0 |", results[0]);
+        }
+        finally { Zlib.Backend = old; }
+    }
+
     [Fact]
     public void BackendSelection()
     {
