@@ -259,8 +259,9 @@ namespace PixCodec
         {
             int w = f.Width, h = f.Height, uvH = (h + 1) >> 1;
             var chroma = new byte[2 * w + 32];
+            var decoded = new byte[3 * w + 16];
             byte* rgb = stackalloc byte[4];
-            fixed (byte* pc = chroma)
+            fixed (byte* pc = chroma, pdec = decoded)
             {
                 byte* u = pc, v = pc + w + 16;
                 for (int y = 0; y < h; y++)
@@ -271,18 +272,22 @@ namespace PixCodec
                     UpsampleLine(pv + (long)near * f.UVStride, pv + (long)far * f.UVStride, v, w);
                     uint* s = src + (long)y * w;
                     byte* row = py + (long)y * f.YStride;
+                    // what the decoder would show for the row as it is; most pixels are fine already
+                    ConvertLine(row, u, v, pdec, w, 3);
                     for (int x = 0; x < w; x++)
                     {
                         int r = (int)(s[x] >> 16) & 0xff, g = (int)(s[x] >> 8) & 0xff, b = (int)s[x] & 0xff;
                         int best = row[x];
-                        Store(best, u[x], v[x], rgb);
-                        int er = r - rgb[0], eg = g - rgb[1], eb = b - rgb[2];
+                        int er = r - pdec[3 * x], eg = g - pdec[3 * x + 1], eb = b - pdec[3 * x + 2];
+                        // every channel follows luma with gain 1.164, so the step is the mean error over that (147 / 512);
+                        // below a sum of 2 it rounds to nothing
+                        int sum = er + eg + eb;
+                        if ((uint)(sum + 1) <= 2) continue;
                         int err = er * er + eg * eg + eb * eb;
-                        if (err <= 3) continue;
-                        // every channel follows luma with gain 1.164: step by the mean error, keep what helps
                         for (int iter = 0; iter < 2; iter++)
                         {
-                            int cand = Math.Clamp(best + (int)Math.Round((er + eg + eb) / (3 * 1.164)), 0, 255);
+                            sum = er + eg + eb;
+                            int cand = Math.Clamp(best + ((sum * 147 + 256) >> 9), 0, 255);
                             if (cand == best) break;
                             Store(cand, u[x], v[x], rgb);
                             int cr = r - rgb[0], cg = g - rgb[1], cb = b - rgb[2];
