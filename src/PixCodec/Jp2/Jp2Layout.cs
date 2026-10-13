@@ -68,6 +68,11 @@ namespace PixCodec
                 sameDepth &= c.Depth == chans[0].Depth;
             }
             l.BitsPerSample = maxDepth;
+            if (anySigned && !allSigned)
+            {
+                // unsigned values next to signed ones need a sign bit of their own
+                foreach (var c in chans) if (!c.Signed) maxDepth = Math.Max(maxDepth, c.Depth + 1);
+            }
 
             // roles: colour number 1.., -1 straight alpha, -2 premultiplied alpha, 0 anything else
             var role = new int[n];
@@ -163,7 +168,6 @@ namespace PixCodec
                 : maxDepth <= 16 ? (anySigned ? SampleType.Int16 : SampleType.UInt16)
                 : maxDepth <= 32 ? (anySigned ? SampleType.Int32 : SampleType.UInt32)
                 : (anySigned ? SampleType.Int64 : SampleType.UInt64);
-            _ = allSigned;
             return l;
         }
 
