@@ -205,6 +205,88 @@ namespace PixCodec
         }
     }
 
+    /// <summary>
+    /// The LZW encoder as a stream filter, for strips too large to hold in one buffer: write the data in pieces,
+    /// then <see cref="Finish"/>. Produces the same codes as <see cref="TiffLzw.Encode"/>.
+    /// </summary>
+    internal sealed class TiffLzwWriter
+    {
+        const int Clear = 256, Eoi = 257, First = 258, MaxCodes = 4096, HashBits = 13, HashSize = 1 << HashBits;
+        readonly System.IO.Stream _out;
+        readonly int[] _keys = new int[HashSize];
+        readonly ushort[] _vals = new ushort[HashSize];
+        readonly byte[] _buf = new byte[1 << 16];
+        int _n, _nbits, _width = 9, _next = First, _prefix = -1;
+        ulong _acc;
+
+        public TiffLzwWriter(System.IO.Stream output)
+        {
+            _out = output;
+            Array.Fill(_keys, -1);
+            Put(Clear);
+        }
+
+        void Put(int code)
+        {
+            _acc = (_acc << _width) | (uint)code; _nbits += _width;
+            while (_nbits >= 8)
+            {
+                _nbits -= 8;
+                if (_n == _buf.Length) { _out.Write(_buf, 0, _n); _n = 0; }
+                _buf[_n++] = (byte)(_acc >> _nbits);
+            }
+        }
+
+        public void Write(ReadOnlySpan<byte> src)
+        {
+            int i = 0;
+            if (_prefix < 0 && src.Length > 0) _prefix = src[i++];
+            int prefix = _prefix;
+            for (; i < src.Length; i++)
+            {
+                int c = src[i];
+                int key = (prefix << 8) | c;
+                int h = (int)(((uint)key * 0x9E3779B1u) >> (32 - HashBits));
+                while (true)
+                {
+                    int k = _keys[h];
+                    if (k == key) { prefix = _vals[h]; break; }
+                    if (k < 0)
+                    {
+                        Put(prefix);
+                        _keys[h] = key; _vals[h] = (ushort)_next;
+                        _next++;
+                        if (_next == 1 << _width && _width < 12) _width++;
+                        if (_next >= MaxCodes - 2)
+                        {
+                            Put(Clear);
+                            Array.Fill(_keys, -1);
+                            _width = 9; _next = First;
+                        }
+                        prefix = c;
+                        break;
+                    }
+                    h = (h + 1) & (HashSize - 1);
+                }
+            }
+            _prefix = prefix;
+        }
+
+        public void Finish()
+        {
+            if (_prefix >= 0)
+            {
+                Put(_prefix);
+                _next++;
+                if (_next == 1 << _width && _width < 12) _width++;
+            }
+            Put(Eoi);
+            if (_nbits > 0) { if (_n == _buf.Length) { _out.Write(_buf, 0, _n); _n = 0; } _buf[_n++] = (byte)(_acc << (8 - _nbits)); }
+            _out.Write(_buf, 0, _n);
+            _n = 0;
+        }
+    }
+
     /// <summary>Apple PackBits (compression 32773).</summary>
     internal static unsafe class TiffPackBits
     {

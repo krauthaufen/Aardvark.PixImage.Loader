@@ -35,7 +35,7 @@ namespace PixCodec
             public RawImage Image = null!;
             public TiffEncodeOptions Options = null!;
             public int W, H, Spp, Bps, Comp, Pred, Cw, Ch, Across, Down, N;
-            public bool Tiled, Bilevel, Direct;
+            public bool Tiled, Bilevel, Direct, Streamed;
             public long RowBytes, ChunkRowBytes, RawTotal;
             public int SubH = 1, SubV = 1;
             public JpegEncodeOptions? Jpeg;
@@ -98,8 +98,10 @@ namespace PixCodec
                 ChunkRowBytes = Bilevel ? (Cw + 7) / 8 : (long)Cw * Spp * Bps;
                 // the pixel array already is the file content
                 Direct = Comp == None && !Tiled && !Bilevel && (!bigEndian || Bps == 1);
-                // (strips written straight from the pixel array may be of any size)
-                if (!Direct && ChunkRowBytes * Ch > int.MaxValue / 2)
+                // Strips written straight from the pixel array may be of any size; LZW, Deflate and PackBits strips beyond
+                // 1 GB are compressed row by row into the (then necessarily seekable) output.
+                Streamed = !Direct && !Tiled && !Bilevel && ChunkRowBytes * Ch > int.MaxValue / 2 && Comp is Lzw or Deflate or PackBits;
+                if (!Direct && !Streamed && ChunkRowBytes * Ch > int.MaxValue / 2)
                     throw new ArgumentException("TIFF: strip/tile size too large, use smaller strips or tiles");
                 Across = (W + Cw - 1) / Cw; Down = (H + Ch - 1) / Ch;
                 N = checked(Across * Down);
@@ -223,6 +225,27 @@ namespace PixCodec
                         }
                     if ((p & 1) != 0) output.WriteByte(0);
                     return end;
+                }
+
+                if (l.Streamed)
+                {
+                    if (!output.CanSeek) throw new ArgumentException("TIFF: strips larger than 1 GB can only be compressed into a seekable stream");
+                    output.Write(new byte[dirSize]);
+                    long at = dataStart;
+                    for (int i = 0; i < l.N; i++)
+                    {
+                        long before = output.Position;
+                        ctx.CompressStreamed(i, output);
+                        l.Offsets[i] = at; l.Counts[i] = output.Position - before;
+                        at += l.Counts[i];
+                    }
+                    long last = at + (at & 1);
+                    if (!big && last > uint.MaxValue) throw new InvalidOperationException(TooBig);
+                    if ((at & 1) != 0) output.WriteByte(0);
+                    output.Position = origin + start;
+                    output.Write(Finish(node, l, start, more ? last : 0, big, be));
+                    output.Position = origin + last;
+                    return last;
                 }
 
                 bool buffered = !output.CanSeek;
@@ -481,6 +504,32 @@ namespace PixCodec
                 {
                     if (!keepRaw) ArrayPool<byte>.Shared.Return(raw);
                 }
+            }
+
+            /// <summary>Compresses one (huge) strip row by row straight into the output.</summary>
+            public void CompressStreamed(int index, Stream output)
+            {
+                var l = L;
+                int y0 = index * l.Ch, rows = Math.Min(l.Ch, l.H - y0);
+                int rowBytes = (int)l.RowBytes;
+                var row = new byte[rowBytes];
+                var tmp = l.Pred == 3 ? new byte[rowBytes] : null;
+                var packed = l.Comp == PackBits ? new byte[TiffPackBits.MaxEncodedSize(rowBytes, rowBytes)] : null;
+                TiffLzwWriter? lzw = l.Comp == Lzw ? new TiffLzwWriter(output) : null;
+                using Stream? z = l.Comp == Deflate ? Zlib.CreateCompressor(output, l.Options.CompressionLevel) : null;
+                fixed (byte* r = row)
+                fixed (byte* t = tmp)
+                    for (int y = 0; y < rows; y++)
+                    {
+                        Buffer.MemoryCopy(Pixels + (long)(y0 + y) * rowBytes, r, rowBytes, rowBytes);
+                        if (l.Pred == 2) TiffPredict.ApplyHorizontal(r, l.W * l.Spp, l.Spp, l.Bps);
+                        else if (l.Pred == 3) TiffPredict.ApplyFloat(r, l.W * l.Spp, l.Spp, l.Bps, t);
+                        if (BigEndian && l.Bps > 1 && l.Pred != 3) TiffPredict.SwapBytes(r, rowBytes, l.Bps);
+                        if (lzw != null) lzw.Write(row);
+                        else if (z != null) z.Write(row);
+                        else output.Write(packed!, 0, TiffPackBits.Encode(row, rowBytes, packed));
+                    }
+                lzw?.Finish();
             }
 
             /// <summary>One strip/tile as a complete JPEG stream. Tiles are padded by repeating the edge pixels.</summary>

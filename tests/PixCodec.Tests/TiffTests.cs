@@ -1124,8 +1124,48 @@ public class TiffTests
         Assert.True(region.GetData<ushort>().AsSpan(0, 500).SequenceEqual(a.AsSpan(20000 * w + 1000, 500)));
         Assert.True(s.BytesRead < 300L * w * 2 + 100_000, $"read {s.BytesRead} bytes");
 
-        // LZW strips whose decoded size exceeds 2 GB cannot be written by the encoder (its strips stay below 1 GB),
-        // so only the uncompressed path is exercised here.
+    }
+
+    /// <summary>
+    /// Compressed strips that decode to more than 2 GB (LZW, PackBits, Deflate), written row by row and read back
+    /// in one piece. About 5 GB of RAM and a few minutes: only with PIXCODEC_BIG_TESTS=1.
+    /// </summary>
+    [Fact]
+    public void CompressedStripsBeyond2GB()
+    {
+        if (Environment.GetEnvironmentVariable("PIXCODEC_BIG_TESTS") != "1") return;
+        int w = 33000, h = 33000;
+        var img = RawImage.Create(w, h, ColorModel.Gray, SampleType.UInt16);
+        var a = img.GetData<ushort>();
+        var rnd = new Random(9);
+        var row = new ushort[w];
+        // runs of pixels whose two bytes are equal, so that PackBits finds runs as well (its compressed strip has to
+        // stay below 2 GB: compressed data beyond that is not supported)
+        for (int i = 0; i < row.Length; i++) row[i] = (ushort)(((i / 40 * 7 + rnd.Next(2)) & 0xFF) * 0x0101);
+        for (int y = 0; y < h; y++)
+        {
+            row.AsSpan().CopyTo(a.AsSpan(y * w, w));
+            a[y * w + y % w] = (ushort)y;   // every row differs
+            a[y * w + (y * 7 + 13) % w] = (ushort)(y * 31);
+        }
+        foreach (var comp in new[] { TiffCompression.PackBits, TiffCompression.Lzw, TiffCompression.Deflate })
+        {
+            var s = new SparseStream();
+            Tiff.Encode(img, s, new TiffEncodeOptions { Compression = comp, RowsPerStrip = h, BigEndian = comp == TiffCompression.Lzw, CompressionLevel = 1 });
+            s.Position = 0;
+            var tags = Tiff.ReadTags(s);
+            Assert.Single(tags.Single(t => t.Id == 273).AsIntegers());                       // one strip ...
+            Assert.Equal(h, tags.Single(t => t.Id == 278).AsIntegers()[0]);                  // ... of 2.18 GB
+            var back = Tiff.Decode(s);
+            Assert.True(a.AsSpan().SequenceEqual(back.GetData<ushort>()), comp.ToString());
+            back = null;
+            GC.Collect();
+            var region = Tiff.DecodeRegion(s, 5, 31000, 700, 100);
+            Assert.True(region.GetData<ushort>().AsSpan(0, 700).SequenceEqual(a.AsSpan(31000 * w + 5, 700)), comp + " region");
+            // such strips need a seekable target
+            if (comp == TiffCompression.PackBits)
+                Assert.Throws<ArgumentException>(() => Tiff.Encode(img, new ForwardOnlyStream(), new TiffEncodeOptions { Compression = comp, RowsPerStrip = h }));
+        }
     }
 
     [Theory]

@@ -874,6 +874,20 @@ namespace PixCodec
                 {
                     case 5: got = TiffLzw.Decode(src, dst, expected); break;
                     case 32773: got = TiffPackBits.Decode(src, dst, expected); break;
+                    case 8 or 32946 when expected > int.MaxValue:
+                    {
+                        // more than 2 GB out of one deflate stream: pull it through the incremental decoder
+                        var inflater = Zlib.CreateInflater();
+                        int consumed = 0;
+                        got = 0;
+                        while (got < expected)
+                        {
+                            var status = inflater.Inflate(src.Slice(consumed), new Span<byte>(dst + got, (int)Math.Min(expected - got, 1 << 30)), out int c, out int w);
+                            consumed += c; got += w;
+                            if (status == InflateStatus.Done || (c == 0 && w == 0)) break;
+                        }
+                        break;
+                    }
                     case 8: case 32946: case 50000: case 34925:
                         if (expected > int.MaxValue)
                             throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression");
