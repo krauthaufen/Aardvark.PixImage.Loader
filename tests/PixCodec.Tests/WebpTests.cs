@@ -422,6 +422,26 @@ public class WebpTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void LosslessNoise()
+    {
+        // every symbol near the longest code length, in all four channels: the bit reader has to keep up
+        foreach (var color in new[] { ColorModel.Rgb, ColorModel.Rgba })
+        {
+            var img = RawImage.Create(300, 200, color, SampleType.UInt8);
+            var rng = new Random(77);
+            var d = img.GetData<byte>();
+            for (int i = 0; i < d.Length; i++) d[i] = (byte)(rng.Next(7) == 0 ? rng.Next(256) : (int)(128 + 100 * Math.Tan(rng.NextDouble() * 3 - 1.5)));
+            foreach (int method in new[] { 0, 4 })
+            {
+                var data = Encode(img, new WebpEncodeOptions { Lossless = true, Method = method });
+                AssertEqual(img, Webp.Decode(data));
+                var oracle = OracleDecode(data, ".webp");
+                if (oracle != null) AssertEqual(img, oracle);
+            }
+        }
+    }
+
+    [Fact]
     public void LosslessEffortPaysOff()
     {
         var photo = Photo(256, 192, ColorModel.Rgb, 3);

@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Runtime.Intrinsics;
 
 namespace PixCodec
 {
@@ -54,18 +55,7 @@ namespace PixCodec
             {
                 var argb = Vp8lDecoder.Decode(bits, out int w, out int h, maxPixels);
                 var px = GC.AllocateUninitializedArray<byte>(w * h * channels);
-                if (channels == 4)
-                    for (int i = 0, o = 0; i < argb.Length; i++, o += 4)
-                    {
-                        uint v = argb[i];
-                        px[o] = (byte)(v >> 16); px[o + 1] = (byte)(v >> 8); px[o + 2] = (byte)v; px[o + 3] = (byte)(v >> 24);
-                    }
-                else
-                    for (int i = 0, o = 0; i < argb.Length; i++, o += 3)
-                    {
-                        uint v = argb[i];
-                        px[o] = (byte)(v >> 16); px[o + 1] = (byte)(v >> 8); px[o + 2] = (byte)v;
-                    }
+                ArgbToBytes(argb, px, channels);
                 return px;
             }
             var frame = Vp8Decoder.Decode(bits, maxPixels);
@@ -77,6 +67,37 @@ namespace PixCodec
                 for (int i = 0; i < a.Length; i++) dst[4 * i + 3] = a[i];
             }
             return dst;
+        }
+
+        /// <summary>0xAARRGGBB pixels to interleaved R, G, B(, A) bytes.</summary>
+        static unsafe void ArgbToBytes(uint[] argb, byte[] px, int channels)
+        {
+            int i = 0, n = argb.Length;
+            fixed (uint* src = argb)
+            fixed (byte* dst = px)
+            {
+                if (Vector128.IsHardwareAccelerated)
+                {
+                    if (channels == 4)
+                    {
+                        var order = Vector128.Create((byte)2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8, 11, 14, 13, 12, 15);
+                        for (; i + 4 <= n; i += 4) Vector128.Shuffle(Vector128.Load((byte*)(src + i)), order).Store(dst + i * 4);
+                    }
+                    else
+                    {
+                        // 12 bytes per step; the store writes 16, so the last pixels are left to the loop below
+                        var order = Vector128.Create((byte)2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, 255, 255, 255, 255);
+                        for (; i + 6 <= n; i += 4) Vector128.Shuffle(Vector128.Load((byte*)(src + i)), order).Store(dst + i * 3);
+                    }
+                }
+                for (; i < n; i++)
+                {
+                    uint v = src[i];
+                    byte* d = dst + i * channels;
+                    d[0] = (byte)(v >> 16); d[1] = (byte)(v >> 8); d[2] = (byte)v;
+                    if (channels == 4) d[3] = (byte)(v >> 24);
+                }
+            }
         }
 
         public WebpFrame? Next(ReadOnlySpan<byte> data)
