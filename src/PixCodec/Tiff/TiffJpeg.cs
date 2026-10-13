@@ -217,3 +217,13 @@ namespace PixCodec
         }
     }
 }
+
+namespace PixCodec
+{
+    /// <summary>The calls into the LERC and JPEG 2000 codecs that the TIFF encoder needs, in one place.</summary>
+    internal static class TiffForeignCodecs
+    {
+        public static void Encode(int compression, byte[] pixels, int width, int height, int samples, SampleType type, TiffEncodeOptions options, Stream output)
+            => throw new ImageNotSupportedException(compression == 34887 ? "TIFF: LERC encoding is not available yet" : "TIFF: JPEG 2000 encoding is not available yet");
+    }
+}

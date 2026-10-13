@@ -151,6 +151,58 @@ namespace PixCodec
         /// </summary>
         public bool CloudOptimized { get; set; }
 
+        /// <summary>
+        /// PhotometricInterpretation to write. Auto: MinIsBlack for Gray / GrayAlpha / Other, RGB for Rgb / Rgba, YCbCr
+        /// for JPEG compressed Rgb, MinIsWhite for CCITT, Palette when <see cref="Palette"/> is set.
+        /// The explicit values say how the samples of the image are to be understood - see <see cref="TiffPhotometric"/>.
+        /// </summary>
+        public TiffPhotometric Photometric { get; set; } = TiffPhotometric.Auto;
+
+        /// <summary>
+        /// Colormap for a palette image: the image (Gray, UInt8 or UInt16) holds indices, this holds R, G, B triples
+        /// of 16-bit values (0..65535), one per index up to 2^BitsPerSample. See <see cref="PaletteFromRgb8"/>.
+        /// </summary>
+        public ushort[]? Palette { get; set; }
+
+        /// <summary>
+        /// Bits per sample to store, 0 = the full width of the sample type. 1..32 packs integer samples MSB first into
+        /// that many bits (the values have to fit; with <see cref="Bilevel"/> an 8-bit image is thresholded instead).
+        /// No predictor is used on packed samples.
+        /// </summary>
+        public int BitsPerSample { get; set; }
+
+        /// <summary>Write PlanarConfiguration 2: every sample in strips / tiles of its own.</summary>
+        public bool Planar { get; set; }
+
+        /// <summary>
+        /// Meaning of the samples beyond the colour ones. Default: unassociated alpha for GrayAlpha / Rgba, "unspecified"
+        /// for the surplus samples of other images.
+        /// </summary>
+        public TiffExtraSample[]? ExtraSamples { get; set; }
+
+        /// <summary>Two-dimensional coding for <see cref="TiffCompression.CcittGroup3"/> (T4Options bit 0).</summary>
+        public bool Ccitt2D { get; set; }
+
+        /// <summary>For <see cref="TiffCompression.Jpeg"/>: store Rgb images as RGB components instead of YCbCr (larger, but no colour transform).</summary>
+        public bool JpegRgb { get; set; }
+
+        /// <summary>For <see cref="TiffCompression.Webp"/>: lossless (default) or lossy with <see cref="WebpQuality"/>.</summary>
+        public bool WebpLossless { get; set; } = true;
+
+        /// <summary>Quality 0..100 of lossy WebP.</summary>
+        public int WebpQuality { get; set; } = 75;
+
+        /// <summary>For <see cref="TiffCompression.Lerc"/>: largest error allowed per sample, 0 = lossless.</summary>
+        public double LercMaxError { get; set; }
+
+        /// <summary>Colormap entries from 8-bit R, G, B triples.</summary>
+        public static ushort[] PaletteFromRgb8(ReadOnlySpan<byte> rgb)
+        {
+            var p = new ushort[rgb.Length];
+            for (int i = 0; i < p.Length; i++) p[i] = (ushort)(rgb[i] * 257);
+            return p;
+        }
+
         /// <summary>Test seam: zero bytes inserted after the header, pushing every offset (also past 4 GB).</summary>
         internal long TestPadding;
 
@@ -173,6 +225,55 @@ namespace PixCodec
 
         /// <summary>Marks the image as a reduced resolution version of another one (NewSubfileType bit 0): an overview / pyramid level.</summary>
         public bool ReducedResolution { get; set; }
+
+        /// <summary>
+        /// Validity mask of the image: a Gray UInt8 image of the same size, non-zero = valid pixel. Written as a
+        /// 1-bit transparency mask directory (NewSubfileType 4) right after the image - the "internal mask" of GDAL.
+        /// </summary>
+        public RawImage? Mask { get; set; }
+
+        /// <summary>NewSubfileType override for the directories the encoder generates itself (masks).</summary>
+        internal int SubfileType = -1;
+    }
+
+    /// <summary>How the samples of an image to encode are to be understood.</summary>
+    public enum TiffPhotometric
+    {
+        Auto,
+        /// <summary>Gray, 0 = black.</summary>
+        MinIsBlack,
+        /// <summary>
+        /// Gray stored inverted (0 = white). Unsigned samples are inverted on writing, so that decoding gives the
+        /// image back; other sample types are written as they are.
+        /// </summary>
+        MinIsWhite,
+        /// <summary>The first three samples are R, G, B (for ColorModel.Other images with further samples).</summary>
+        Rgb,
+        /// <summary>Indices into <see cref="TiffEncodeOptions.Palette"/>.</summary>
+        Palette,
+        /// <summary>The first four samples are C, M, Y, K ink values (8 or 16 bit unsigned), written as they are.</summary>
+        Cmyk,
+        /// <summary>
+        /// An 8-bit Rgb image converted to YCbCr (full range, ITU-R BT.601) with the chroma resolution of
+        /// <see cref="TiffEncodeOptions.JpegSubsampling"/>; without JPEG compression as the packed layout of TIFF 6.0.
+        /// </summary>
+        YCbCr,
+        /// <summary>The first three samples are CIE L*a*b* in the TIFF encoding (8 or 16 bit), written as they are.</summary>
+        CieLab,
+        /// <summary>L*a*b* in the ICC encoding, written as they are.</summary>
+        IccLab,
+        /// <summary>L*a*b* in the ITU-T T.42 encoding, written as they are.</summary>
+        ItuLab,
+        /// <summary>A 1-bit mask (transparency mask photometric).</summary>
+        TransparencyMask,
+    }
+
+    public enum TiffExtraSample
+    {
+        Unspecified = 0,
+        /// <summary>Alpha the colour samples are already multiplied with. The samples are written as they are.</summary>
+        AssociatedAlpha = 1,
+        UnassociatedAlpha = 2,
     }
 
     /// <summary>
@@ -485,5 +586,17 @@ namespace PixCodec
         CcittGroup4,
         /// <summary>Zstandard (compression 50000), with the same predictors as Deflate. Read by libtiff 4.0.10+ / GDAL.</summary>
         Zstd,
+        /// <summary>LZMA2 in an xz container (compression 34925), with the same predictors as Deflate.</summary>
+        Lzma,
+        /// <summary>WebP (compression 50001): 8-bit Rgb or Rgba, lossless or lossy.</summary>
+        Webp,
+        /// <summary>CCITT Group 3 fax (compression 3), one- or two-dimensional: 1-bit bilevel output from an 8-bit Gray image.</summary>
+        CcittGroup3,
+        /// <summary>CCITT modified Huffman run length coding (compression 2): 1-bit bilevel output from an 8-bit Gray image.</summary>
+        CcittRle,
+        /// <summary>LERC (compression 34887): all integer and float types, lossless or with <see cref="TiffEncodeOptions.LercMaxError"/>.</summary>
+        Lerc,
+        /// <summary>JPEG 2000 (compression 34712), lossless.</summary>
+        Jpeg2000,
     }
 }

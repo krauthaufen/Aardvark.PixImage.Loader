@@ -462,7 +462,7 @@ public class TiffTests
         (ColorModel.Gray, 1), (ColorModel.GrayAlpha, 2), (ColorModel.Rgb, 3), (ColorModel.Rgba, 4), (ColorModel.Other, 2), (ColorModel.Other, 6),
     };
 
-    static readonly TiffCompression[] AllCompressions = { TiffCompression.None, TiffCompression.Lzw, TiffCompression.Deflate, TiffCompression.PackBits, TiffCompression.Zstd };
+    static readonly TiffCompression[] AllCompressions = { TiffCompression.None, TiffCompression.Lzw, TiffCompression.Deflate, TiffCompression.PackBits, TiffCompression.Zstd, TiffCompression.Lzma };
 
     /// <summary>Deterministic image with gradients, noise and (for floats) non-finite values.</summary>
     internal static RawImage MakeImage(int w, int h, ColorModel color, SampleType type, int channels, int seed = 1)
@@ -555,6 +555,8 @@ public class TiffTests
                 ("serial", new TiffEncodeOptions { Parallel = false, RowsPerStrip = 2 }),
                 ("be", new TiffEncodeOptions { BigEndian = true, RowsPerStrip = 6 }),
                 ("bigbetile", new TiffEncodeOptions { BigEndian = true, BigTiff = true, TileWidth = 16, TileHeight = 16 }),
+                ("planar", new TiffEncodeOptions { Planar = true, RowsPerStrip = 5 }),
+                ("planartile", new TiffEncodeOptions { Planar = true, TileWidth = 32, TileHeight = 16 }),
             };
             foreach (var (name, o) in layouts)
             {
@@ -700,8 +702,10 @@ public class TiffTests
             foreach (var comp in AllCompressions)
                 foreach (var (color, channels) in AllModels)
                 {
-                    var o = (k++ % 7) switch
+                    var o = (k++ % 9) switch
                     {
+                        7 => new TiffEncodeOptions { Planar = true, RowsPerStrip = 6 },
+                        8 => new TiffEncodeOptions { Planar = true, TileWidth = 16, TileHeight = 16, BigEndian = k % 2 == 0 },
                         0 => new TiffEncodeOptions(),
                         1 => new TiffEncodeOptions { RowsPerStrip = 4 },
                         2 => new TiffEncodeOptions { TileWidth = 16, TileHeight = 16 },
@@ -754,6 +758,8 @@ public class TiffTests
 
     [Theory]
     [InlineData(TiffCompression.CcittGroup4)]
+    [InlineData(TiffCompression.CcittGroup3)]
+    [InlineData(TiffCompression.CcittRle)]
     [InlineData(TiffCompression.None)]
     [InlineData(TiffCompression.Lzw)]
     [InlineData(TiffCompression.Deflate)]
@@ -762,8 +768,9 @@ public class TiffTests
     {
         var sizes = new[] { (1, 1), (7, 3), (8, 8), (203, 61), (2700, 9), (331, 50), (64, 64) };
         foreach (var (w, h) in sizes)
-            foreach (var layout in new[] { "strip", "strips", "tiles", "be" })
+            foreach (var layout in new[] { "strip", "strips", "tiles", "be", "2d" })
             {
+                if (layout == "2d" && compression != TiffCompression.CcittGroup3) continue;
                 var img = MakeBilevel(w, h, w + h);
                 if (w == 8) Array.Fill(img.GetData<byte>(), (byte)0);          // all black
                 if (w == 64) Array.Fill(img.GetData<byte>(), (byte)255);       // all white
@@ -776,18 +783,21 @@ public class TiffTests
                 if (layout == "strips") o.RowsPerStrip = 7;
                 if (layout == "tiles") { o.TileWidth = 32; o.TileHeight = 16; }
                 if (layout == "be") { o.BigEndian = true; o.BigTiff = true; }
+                if (layout == "2d") { o.Ccitt2D = true; o.RowsPerStrip = 11; }
+                bool fax = compression is TiffCompression.CcittGroup4 or TiffCompression.CcittGroup3 or TiffCompression.CcittRle;
                 var file = Encode(gray, o);
                 string what = $"{compression} {w}x{h} {layout}";
                 var tags = Tiff.ReadTags(file);
                 Assert.Equal(1, tags.Single(t => t.Id == 258).AsIntegers()[0]);
-                Assert.Equal(compression == TiffCompression.CcittGroup4 ? 0 : 1, tags.Single(t => t.Id == 262).AsIntegers()[0]);
+                Assert.Equal(fax ? 0 : 1, tags.Single(t => t.Id == 262).AsIntegers()[0]);
+                if (compression == TiffCompression.CcittGroup3) Assert.Equal(layout == "2d" ? 1 : 0, tags.Single(t => t.Id == 292).AsIntegers()[0]);
                 var back = Tiff.Decode(file);
                 Assert.True(back.Color == ColorModel.Gray && back.SampleType == SampleType.UInt8, what);
                 Assert.True(img.GetData<byte>().AsSpan().SequenceEqual(back.GetData<byte>()), what + ": round trip differs");
                 var ns = new ForwardOnlyStream();
                 Tiff.Encode(gray, ns, o);
                 Assert.True(file.AsSpan().SequenceEqual(ns.ToArray()), what + ": non-seekable output differs");
-                if (layout == "strips" || w == 2700 || w == 1)
+                if (layout == "strips" || layout == "2d" || w == 2700 || w == 1)
                 {
                     // libtiff (through Pillow) shows the same picture
                     var oracle = Oracle(file);
@@ -823,16 +833,20 @@ public class TiffTests
     [InlineData(3, JpegSubsampling.Chroma444, 80, 64)]
     [InlineData(3, JpegSubsampling.Chroma422, 85, 0)]
     [InlineData(3, JpegSubsampling.Chroma420, 85, 48)]
+    [InlineData(3, JpegSubsampling.Auto, -90, 0)]     // negative quality: RGB components (JpegRgb)
+    [InlineData(3, JpegSubsampling.Auto, -80, 64)]
     public void EncodesJpegCompressed(int channels, JpegSubsampling subsampling, int quality, int tile)
     {
+        bool rgbComponents = quality < 0;
+        quality = Math.Abs(quality);
         var img = MakeSmooth(203, 131, channels);
-        var o = new TiffEncodeOptions { Compression = TiffCompression.Jpeg, JpegQuality = quality, JpegSubsampling = subsampling, TileWidth = tile, TileHeight = tile, RowsPerStrip = 40 };
+        var o = new TiffEncodeOptions { Compression = TiffCompression.Jpeg, JpegQuality = quality, JpegSubsampling = subsampling, TileWidth = tile, TileHeight = tile, RowsPerStrip = 40, JpegRgb = rgbComponents };
         var file = Encode(img, o);
         var tags = Tiff.ReadTags(file);
         long Tag(int id) => tags.Single(t => t.Id == id).AsIntegers()[0];
         Assert.Equal(7, Tag(259));
-        Assert.Equal(channels == 3 ? 6 : 1, Tag(262));
-        if (channels == 3)
+        Assert.Equal(rgbComponents ? 2 : channels == 3 ? 6 : 1, Tag(262));
+        if (channels == 3 && !rgbComponents)
         {
             var expected = subsampling switch
             {
@@ -994,7 +1008,10 @@ public class TiffTests
         Assert.Equal(4, count); // 1300x900, 650x450, 325x225, 163x113 (<= 256)
         long header = file[2] == 43 ? 16 : 8;
         long firstIfd = file[2] == 43 ? BitConverter.ToInt64(file, 8) : BitConverter.ToUInt32(file, 4);
-        Assert.Equal(header, firstIfd);
+        // GDAL's structural metadata block sits between the header and the first directory
+        string ghost = System.Text.Encoding.ASCII.GetString(file, (int)header, 183);
+        Assert.StartsWith("GDAL_STRUCTURAL_METADATA_SIZE=000140 bytes\nLAYOUT=IFDS_BEFORE_DATA\nBLOCK_ORDER=ROW_MAJOR\nBLOCK_LEADER=SIZE_AS_UINT4\nBLOCK_TRAILER=LAST_4_BYTES_REPEATED\n", ghost);
+        Assert.Equal(header + 184, firstIfd);
         var firstBlock = new long[count];
         long lastDirectoryEnd = 0, minData = long.MaxValue;
         for (int i = 0; i < count; i++)
@@ -1006,7 +1023,14 @@ public class TiffTests
             Assert.Equal(i > 0, tags.Any(t => t.Id == 254 && t.AsIntegers()[0] == 1));
             Assert.Equal(i == 0, tags.Any(t => t.Id == 34735)); // georeferencing on the full resolution image only
             var offsets = tags.Single(t => t.Id == 324).AsIntegers();
+            var sizes = tags.Single(t => t.Id == 325).AsIntegers();
             Assert.Equal(offsets.OrderBy(v => v), offsets);     // tiles in order
+            for (int k = 0; k < offsets.Length; k++)
+            {
+                // every tile: its size in front, its last four bytes repeated behind
+                Assert.Equal(sizes[k], BitConverter.ToUInt32(file, (int)offsets[k] - 4));
+                Assert.True(file.AsSpan((int)(offsets[k] + sizes[k] - 4), 4).SequenceEqual(file.AsSpan((int)(offsets[k] + sizes[k]), 4)));
+            }
             firstBlock[i] = offsets[0];
             minData = Math.Min(minData, offsets.Min());
         }
@@ -1039,11 +1063,278 @@ public class TiffTests
         var seen = PythonOn(file, string.Join("\n",
             "import rasterio",
             "ds = rasterio.open(PATH)",
-            "print(ds.crs.to_epsg(), ds.transform.a, ds.transform.e, ds.transform.c, ds.transform.f, ds.block_shapes[0], ds.overviews(1), ds.read(1, out_shape=(113, 163)).shape)"));
-        if (seen != null) Assert.Equal("32633 0.5 -0.5 600000.0 5300000.0 (256, 256) [2, 4, 8] (113, 163)", seen);
+            "print(ds.crs.to_epsg(), ds.transform.a, ds.transform.e, ds.transform.c, ds.transform.f, ds.block_shapes[0], ds.overviews(1), ds.read(1, out_shape=(113, 163)).shape, ds.tags(ns='IMAGE_STRUCTURE').get('LAYOUT'))"));
+        if (seen != null) Assert.Equal("32633 0.5 -0.5 600000.0 5300000.0 (256, 256) [2, 4, 8] (113, 163) COG", seen);
+        // rio-cogeo's validator (the checks of GDAL's validate_cloud_optimized_geotiff.py), strict; skipped when it is not installed
+        var valid = PythonOn(file, string.Join("\n",
+            "try:",
+            "    from rio_cogeo.cogeo import cog_validate",
+            "    ok, errors, warn = cog_validate(PATH, strict=True, quiet=True)",
+            "    print(ok, errors, warn)",
+            "except ImportError:",
+            "    print('unavailable')"));
+        if (valid != null && valid != "unavailable") Assert.Equal("True [] []", valid);
 
-        // only one image can be cloud optimized
-        Assert.Throws<ArgumentException>(() => Tiff.Encode(new[] { img, img }, new MemoryStream(), o));
+        // several images: all directories still come first
+        var two = new MemoryStream();
+        Tiff.Encode(new[] { img, MakeImage(700, 300, ColorModel.Gray, SampleType.UInt16, 1) }, two, new TiffEncodeOptions { CloudOptimized = true, TileWidth = 256, TileHeight = 256 });
+        var twoBytes = two.ToArray();
+        Assert.Equal(4 + 3, Tiff.GetImageCount(twoBytes));
+        long firstData = Enumerable.Range(0, 7).Min(i => Tiff.ReadTags(twoBytes, i).Single(t => t.Id == 324).AsIntegers().Min());
+        Assert.True(Tiff.ReadTags(twoBytes, 6).Single(t => t.Id == 324).AsIntegers()[0] == firstData + 4 - 4, "the last directory's tiles come first");
+        Assert.True(MakeImage(700, 300, ColorModel.Gray, SampleType.UInt16, 1).GetBytes().SequenceEqual(Tiff.Decode(twoBytes, new TiffDecodeOptions { ImageIndex = 4 }).GetBytes()));
+    }
+
+    // ------------------------------------------------------------------------------------------ colour spaces, palettes, depths
+
+    /// <summary>Runs python on a file we wrote; the snippet stores an array with write(arr) and it comes back as an image.</summary>
+    static RawImage? PythonImage(byte[] encoded, string code)
+    {
+        if (!TestUtil.PythonAvailable) return null;
+        var tmp = Path.Combine(TestUtil.FixtureDir, "_tmp");
+        Directory.CreateDirectory(tmp);
+        var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + ".tif");
+        try
+        {
+            File.WriteAllBytes(f, encoded);
+            File.WriteAllText(f + ".py", "import sys, os, warnings\nwarnings.filterwarnings('ignore')\nos.environ['OPENCV_LOG_LEVEL'] = 'SILENT'\nsys.path.insert(0, os.getcwd())\nimport numpy as np\nfrom pxref import write_ref\n" +
+                "PATH = sys.argv[1]\ndef write(a):\n    write_ref(PATH + '.ref', np.ascontiguousarray(a))\n" + code);
+            var (exit, output) = TestUtil.RunPython($"\"{f}.py\" \"{f}\"");
+            if (exit == 77) return null; // the snippet's reader is not installed
+            Assert.True(exit == 0, "python failed: " + output);
+            return TestUtil.LoadRef(f + ".ref");
+        }
+        finally
+        {
+            File.Delete(f); File.Delete(f + ".py"); File.Delete(f + ".ref");
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(8)]
+    [InlineData(12)]
+    [InlineData(16)]
+    public void EncodesPalette(int bits)
+    {
+        int n = 1 << bits;
+        var rnd = new Random(bits);
+        var palette = new ushort[3 * n];
+        for (int i = 0; i < palette.Length; i++) palette[i] = (ushort)rnd.Next(65536);
+        var img = RawImage.Create(41, 23, ColorModel.Gray, bits <= 8 ? SampleType.UInt8 : SampleType.UInt16);
+        if (bits <= 8) { var a = img.GetData<byte>(); for (int i = 0; i < a.Length; i++) a[i] = (byte)rnd.Next(n); }
+        else { var a = img.GetData<ushort>(); for (int i = 0; i < a.Length; i++) a[i] = (ushort)rnd.Next(n); }
+        foreach (var comp in new[] { TiffCompression.None, TiffCompression.Lzw, TiffCompression.Deflate })
+            foreach (bool tiles in new[] { false, true })
+            {
+                var o = new TiffEncodeOptions { Palette = palette, BitsPerSample = bits, Compression = comp, TileWidth = tiles ? 16 : 0, TileHeight = tiles ? 16 : 0, RowsPerStrip = 7 };
+                var file = Encode(img, o);
+                var tags = Tiff.ReadTags(file);
+                Assert.Equal(3, tags.Single(t => t.Id == 262).AsIntegers()[0]);
+                Assert.Equal(bits, tags.Single(t => t.Id == 258).AsIntegers()[0]);
+                Assert.Equal(3 * n, tags.Single(t => t.Id == 320).Count);
+                var back = Tiff.Decode(file);
+                Assert.Equal((ColorModel.Rgb, SampleType.UInt8), (back.Color, back.SampleType));
+                var px = back.GetData<byte>();
+                for (int i = 0; i < img.Width * img.Height; i++)
+                {
+                    int idx = bits <= 8 ? img.GetData<byte>()[i] : img.GetData<ushort>()[i];
+                    for (int c = 0; c < 3; c++) Assert.Equal((byte)(palette[idx * 3 + c] >> 8), px[i * 3 + c]);
+                }
+                // tifffile applies the colormap we wrote to the indices we wrote
+                var seen = PythonImage(file, "import tifffile\np = tifffile.TiffFile(PATH).pages[0]\nwrite(np.moveaxis(np.asarray(p.colormap)[:, p.asarray().astype(np.intp)], 0, -1) >> 8)");
+                if (seen != null) Assert.True(seen.GetData<ushort>().Select(v => (byte)v).SequenceEqual(px), $"{bits} bit {comp}: tifffile sees other colours");
+            }
+        Assert.Equal(TiffEncodeOptions.PaletteFromRgb8(new byte[] { 0, 128, 255 }), new ushort[] { 0, 128 * 257, 65535 });
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(4, 4, ColorModel.Gray, SampleType.Float32, 1), new TiffEncodeOptions { Palette = palette }));
+    }
+
+    [Theory]
+    [InlineData(TiffPhotometric.Cmyk, SampleType.UInt8, 4)]
+    [InlineData(TiffPhotometric.Cmyk, SampleType.UInt16, 5)]
+    [InlineData(TiffPhotometric.CieLab, SampleType.UInt8, 3)]
+    [InlineData(TiffPhotometric.CieLab, SampleType.UInt16, 4)]
+    [InlineData(TiffPhotometric.IccLab, SampleType.UInt8, 3)]
+    [InlineData(TiffPhotometric.ItuLab, SampleType.UInt16, 3)]
+    [InlineData(TiffPhotometric.Rgb, SampleType.Float32, 5)]
+    [InlineData(TiffPhotometric.MinIsWhite, SampleType.UInt8, 1)]
+    [InlineData(TiffPhotometric.MinIsWhite, SampleType.UInt16, 2)]
+    [InlineData(TiffPhotometric.MinIsWhite, SampleType.Int16, 1)]
+    public void EncodesPhotometric(TiffPhotometric photometric, SampleType type, int channels)
+    {
+        var img = MakeImage(37, 23, ColorModel.Other, type, channels);
+        int colour = photometric switch { TiffPhotometric.Cmyk => 4, TiffPhotometric.MinIsWhite => 1, _ => 3 };
+        int tag = photometric switch { TiffPhotometric.Cmyk => 5, TiffPhotometric.CieLab => 8, TiffPhotometric.IccLab => 9, TiffPhotometric.ItuLab => 10, TiffPhotometric.Rgb => 2, _ => 0 };
+        foreach (bool planar in new[] { false, true })
+            foreach (var comp in new[] { TiffCompression.None, TiffCompression.Lzw })
+            {
+                var o = new TiffEncodeOptions { Photometric = photometric, Compression = comp, Planar = planar, RowsPerStrip = 6 };
+                if (channels > colour) o.ExtraSamples = Enumerable.Repeat(TiffExtraSample.UnassociatedAlpha, 1).Concat(Enumerable.Repeat(TiffExtraSample.Unspecified, channels - colour - 1)).ToArray();
+                var file = Encode(img, o);
+                var tags = Tiff.ReadTags(file);
+                Assert.Equal(tag, tags.Single(t => t.Id == 262).AsIntegers()[0]);
+                if (channels > colour) Assert.Equal(2, tags.Single(t => t.Id == 338).AsIntegers()[0]);
+                // the samples as we stored them come back with the conversion switched off ...
+                var raw = Tiff.Decode(file, new TiffDecodeOptions { ConvertToRgb = false });
+                Assert.True(img.GetBytes().SequenceEqual(raw.GetBytes()), $"{photometric} {type} planar {planar} {comp}");
+                // ... and the default decode interprets them
+                var shown = Tiff.Decode(file);
+                Assert.Equal(photometric == TiffPhotometric.MinIsWhite ? channels : photometric == TiffPhotometric.Rgb ? channels : channels > colour ? 4 : 3, shown.Channels);
+                // what an independent reader finds in the file
+                var oracle = Oracle(file);
+                if (oracle == null) continue;
+                if (photometric == TiffPhotometric.MinIsWhite && type != SampleType.Int16)
+                {
+                    // stored inverted, so that a reader's inversion restores the image
+                    var e = img.GetBytes().ToArray();
+                    int bps = RawImage.BytesPerSample(type);
+                    for (int i = 0; i < e.Length; i += bps * channels) for (int b = 0; b < bps; b++) e[i + b] = (byte)~e[i + b];
+                    Assert.True(e.AsSpan().SequenceEqual(oracle.GetBytes()), "MinIsWhite data is not stored inverted");
+                }
+                else Assert.True(img.GetBytes().SequenceEqual(oracle.GetBytes()), $"{photometric} {type}: independent decoder disagrees");
+            }
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(4, 4, ColorModel.Rgb, SampleType.UInt8, 3), new TiffEncodeOptions { Photometric = TiffPhotometric.Cmyk }));
+        Assert.Throws<ArgumentException>(() => Encode(img, new TiffEncodeOptions { Photometric = photometric, ExtraSamples = new TiffExtraSample[7] }));
+    }
+
+    [Theory]
+    [InlineData(JpegSubsampling.Chroma444, TiffCompression.None, 0)]
+    [InlineData(JpegSubsampling.Chroma422, TiffCompression.Lzw, 0)]
+    [InlineData(JpegSubsampling.Chroma420, TiffCompression.Deflate, 0)]
+    [InlineData(JpegSubsampling.Auto, TiffCompression.None, 32)]
+    [InlineData(JpegSubsampling.Chroma420, TiffCompression.PackBits, 48)]
+    public void EncodesYCbCrWithoutJpeg(JpegSubsampling subsampling, TiffCompression compression, int tile)
+    {
+        foreach (var (w, h) in new[] { (64, 48), (67, 45), (1, 1), (3, 5) })
+        {
+            var img = w >= 60 ? MakeSmooth(w, h, 3) : MakeImage(w, h, ColorModel.Rgb, SampleType.UInt8, 3);
+            var o = new TiffEncodeOptions { Photometric = TiffPhotometric.YCbCr, JpegSubsampling = subsampling, Compression = compression, TileWidth = tile, TileHeight = tile, RowsPerStrip = 10 };
+            var file = Encode(img, o);
+            var tags = Tiff.ReadTags(file);
+            Assert.Equal(6, tags.Single(t => t.Id == 262).AsIntegers()[0]);
+            var expectedSub = subsampling switch { JpegSubsampling.Chroma444 => new long[] { 1, 1 }, JpegSubsampling.Chroma422 => new long[] { 2, 1 }, _ => new long[] { 2, 2 } };
+            Assert.Equal(expectedSub, tags.Single(t => t.Id == 530).AsIntegers());
+            var back = Tiff.Decode(file);
+            Assert.Equal((w, h, ColorModel.Rgb), (back.Width, back.Height, back.Color));
+            if (w >= 60) Assert.True(TestUtil.Psnr(img, back, 255) > 38, $"PSNR {TestUtil.Psnr(img, back, 255):F1}");
+            var ns = new ForwardOnlyStream();
+            Tiff.Encode(img, ns, o);
+            Assert.True(file.AsSpan().SequenceEqual(ns.ToArray()));
+            // libtiff's YCbCr reading (through OpenCV) of our file is what we decode, up to its fixed point rounding
+            var seen = PythonImage(file, "import cv2\na = cv2.imread(PATH, cv2.IMREAD_UNCHANGED)\nassert a is not None\nwrite(a[:, :, ::-1] if a.ndim == 3 else a)");
+            if (seen != null && seen.Channels == 3) TestUtil.AssertEqual(seen, back, 2);
+        }
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(4, 4, ColorModel.Gray, SampleType.UInt8, 1), new TiffEncodeOptions { Photometric = TiffPhotometric.YCbCr }));
+    }
+
+    [Theory]
+    [InlineData(3, SampleType.UInt8, 1)]
+    [InlineData(5, SampleType.UInt8, 3)]
+    [InlineData(7, SampleType.UInt8, 2)]
+    [InlineData(10, SampleType.UInt16, 1)]
+    [InlineData(12, SampleType.UInt16, 3)]
+    [InlineData(15, SampleType.UInt16, 4)]
+    [InlineData(24, SampleType.UInt32, 1)]
+    [InlineData(31, SampleType.UInt32, 3)]
+    [InlineData(12, SampleType.Int16, 1)]
+    [InlineData(5, SampleType.Int8, 3)]
+    [InlineData(20, SampleType.Int32, 1)]
+    public void EncodesOddBitDepths(int bits, SampleType type, int channels)
+    {
+        bool signed = type is SampleType.Int8 or SampleType.Int16 or SampleType.Int32;
+        var img = RawImage.Create(41, 23, RawImage.DefaultColorModel(channels), type, channels);
+        var rnd = new Random(bits * 10 + channels);
+        long lo = signed ? -(1L << (bits - 1)) : 0, hi = signed ? 1L << (bits - 1) : 1L << bits;
+        var bytes = img.GetBytes();
+        int bps = RawImage.BytesPerSample(type);
+        for (int i = 0; i < bytes.Length; i += bps)
+        {
+            long v = i == 0 ? hi - 1 : i == bps ? lo : rnd.NextInt64(lo, hi);
+            for (int b = 0; b < bps; b++) bytes[i + b] = (byte)(v >> (8 * b));
+        }
+        foreach (bool planar in new[] { false, true })
+            foreach (var comp in new[] { TiffCompression.None, TiffCompression.Lzw, TiffCompression.Deflate })
+                foreach (bool be in new[] { false, true })
+                {
+                    var o = new TiffEncodeOptions { BitsPerSample = bits, Planar = planar, Compression = comp, BigEndian = be, RowsPerStrip = 6, TileWidth = planar ? 16 : 0, TileHeight = planar ? 16 : 0 };
+                    var file = Encode(img, o);
+                    string what = $"{bits} bit {type} x{channels} planar {planar} {comp} be {be}";
+                    Assert.Equal(bits, Tiff.ReadTags(file).Single(t => t.Id == 258).AsIntegers()[0]);
+                    Assert.DoesNotContain(Tiff.ReadTags(file), t => t.Id == 317);
+                    var back = Tiff.Decode(file, new TiffDecodeOptions { BitScaling = TiffBitScaling.None });
+                    Assert.True(back.SampleType == type && bytes.SequenceEqual(back.GetBytes()), what);
+                    if (be || comp == TiffCompression.Deflate) continue;
+                    // tifffile unpacks the unsigned ones, GDAL the signed ones (as unsigned bit patterns)
+                    var seen = signed
+                        ? PythonImage(file, "try:\n    import rasterio\nexcept ImportError:\n    sys.exit(77)\na = np.moveaxis(rasterio.open(PATH).read(), 0, -1)\n" +
+                            $"v = a.astype(np.int64)\nwrite(np.where(v >= {1L << (bits - 1)}, v - {1L << bits}, v).astype(a.dtype.name[1:]))")
+                        : Oracle(file);
+                    if (seen != null) Assert.True(seen.SampleType == type && bytes.SequenceEqual(seen.GetBytes()), what + ": independent decoder disagrees");
+                }
+        Assert.Throws<ArgumentException>(() => Encode(img, new TiffEncodeOptions { BitsPerSample = bps * 8 + 1 }));
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(4, 4, ColorModel.Gray, SampleType.Float32, 1), new TiffEncodeOptions { BitsPerSample = 12 }));
+    }
+
+    [Theory]
+    [InlineData(3, true, 0)]
+    [InlineData(4, true, 32)]
+    [InlineData(3, false, 0)]
+    [InlineData(4, false, 64)]
+    public void EncodesWebp(int channels, bool lossless, int tile)
+    {
+        var img = lossless ? MakeImage(131, 77, channels == 4 ? ColorModel.Rgba : ColorModel.Rgb, SampleType.UInt8, channels) : MakeSmooth(131, 77, 3);
+        if (!lossless && channels == 4)
+        {
+            var rgba = RawImage.Create(131, 77, ColorModel.Rgba, SampleType.UInt8);
+            var s3 = img.GetData<byte>(); var d4 = rgba.GetData<byte>();
+            for (int i = 0; i < 131 * 77; i++) { d4[i * 4] = s3[i * 3]; d4[i * 4 + 1] = s3[i * 3 + 1]; d4[i * 4 + 2] = s3[i * 3 + 2]; d4[i * 4 + 3] = (byte)(i % 131 * 2); }
+            img = rgba;
+        }
+        var o = new TiffEncodeOptions { Compression = TiffCompression.Webp, WebpLossless = lossless, WebpQuality = 85, TileWidth = tile, TileHeight = tile, RowsPerStrip = 25 };
+        var file = Encode(img, o);
+        Assert.Equal(50001, Tiff.ReadTags(file).Single(t => t.Id == 259).AsIntegers()[0]);
+        var back = Tiff.Decode(file);
+        Assert.Equal((img.Width, img.Height, img.Channels, img.Color), (back.Width, back.Height, back.Channels, back.Color));
+        if (lossless) Assert.True(img.GetBytes().SequenceEqual(back.GetBytes()));
+        else Assert.True(TestUtil.Psnr(img, back, 255) > 32, $"PSNR {TestUtil.Psnr(img, back, 255):F1}");
+        // libwebp (tifffile + imagecodecs) decodes our file to the same samples
+        var oracle = Oracle(file);
+        if (oracle != null) TestUtil.AssertEqual(oracle, back);
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Gray, SampleType.UInt8, 1), o));
+        Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Rgb, SampleType.UInt16, 3), o));
+    }
+
+    [Theory]
+    [InlineData(TiffCompression.Deflate, 0, false)]
+    [InlineData(TiffCompression.Lzw, 64, false)]
+    [InlineData(TiffCompression.Deflate, 256, true)]
+    public void WritesMasks(TiffCompression compression, int tile, bool cog)
+    {
+        var img = MakeImage(700, 500, ColorModel.Rgb, SampleType.UInt8, 3);
+        var mask = RawImage.Create(700, 500, ColorModel.Gray, SampleType.UInt8);
+        var m = mask.GetData<byte>();
+        for (int y = 0; y < 500; y++)
+            for (int x = 0; x < 700; x++) m[y * 700 + x] = (byte)((x - 350) * (x - 350) + (y - 250) * (y - 250) < 200 * 200 ? 1 + (x & 7) : 0); // any non-zero = valid
+        var o = new TiffEncodeOptions { Compression = compression, TileWidth = tile, TileHeight = tile, CloudOptimized = cog, OverviewMinSize = 200, BuildOverviews = !cog && tile > 0 };
+        var ms = new MemoryStream();
+        Tiff.Encode(new[] { new TiffPage(img) { Mask = mask } }, ms, o);
+        var file = ms.ToArray();
+        int levels = cog ? 3 : tile > 0 ? 3 : 1;   // 700x500, 350x250, 175x125
+        Assert.Equal(2 * levels, Tiff.GetImageCount(file));
+        Assert.True(img.GetBytes().SequenceEqual(Tiff.Decode(file).GetBytes()));
+        // directory 1 is the mask: 1 bit, transparency mask, the mask subfile type
+        var tags = Tiff.ReadTags(file, 1);
+        Assert.Equal((4L, 1L, 4L), (tags.Single(t => t.Id == 254).AsIntegers()[0], tags.Single(t => t.Id == 258).AsIntegers()[0], tags.Single(t => t.Id == 262).AsIntegers()[0]));
+        var decoded = Tiff.Decode(file, new TiffDecodeOptions { ImageIndex = 1 }).GetData<byte>();
+        for (int i = 0; i < m.Length; i++) Assert.Equal(m[i] != 0 ? 255 : 0, decoded[i]);
+        if (levels > 1) Assert.Equal(5, Tiff.ReadTags(file, 3).Single(t => t.Id == 254).AsIntegers()[0]);   // mask of an overview
+        // GDAL takes it as the internal mask of the dataset
+        var seen = PythonImage(file, "try:\n    import rasterio\nexcept ImportError:\n    sys.exit(77)\nds = rasterio.open(PATH)\n" +
+            "assert [f.name for f in ds.mask_flag_enums[0]] == ['per_dataset'], ds.mask_flag_enums\nassert ds.count == 3 and len(ds.overviews(1)) == " + (levels - 1) + "\nwrite(ds.dataset_mask())");
+        if (seen != null) Assert.True(seen.GetData<byte>().AsSpan().SequenceEqual(decoded), "GDAL reads another mask");
+        Assert.Throws<ArgumentException>(() => Tiff.Encode(new[] { new TiffPage(img) { Mask = MakeImage(10, 10, ColorModel.Gray, SampleType.UInt8, 1) } }, new MemoryStream()));
     }
 
     // ------------------------------------------------------------------------------------------ multi-page, tags, EXIF

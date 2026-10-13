@@ -365,11 +365,90 @@ namespace PixCodec
             o.Put(t[run].code, t[run].len);
         }
 
+        /// <summary>Changing elements of a packed row: positions where the colour differs from the pixel before (white before column 0).</summary>
+        static int Changes(byte* row, int width, int[] cur)
+        {
+            int n = 0, prev = 0;
+            for (int x = 0; x < width;)
+            {
+                int b = row[x >> 3];
+                if ((x & 7) == 0 && x + 8 <= width && (b == 0 || b == 0xFF) && (b != 0) == (prev != 0)) { x += 8; continue; } // uniform byte
+                int v = b >> (7 - (x & 7)) & 1;
+                if (v != prev) { cur[n++] = x; prev = v; }
+                x++;
+            }
+            return n;
+        }
+
+        /// <summary>One-dimensional coding: alternating white and black run lengths, starting with white.</summary>
+        static void Encode1D(ref BitSink o, int[] cur, int n, int width)
+        {
+            int pos = 0;
+            bool black = false;
+            for (int i = 0; i <= n && pos < width; i++)
+            {
+                int next = i < n ? cur[i] : width;
+                PutRun(ref o, next - pos, black);
+                pos = next;
+                black = !black;
+            }
+            if (width == 0) PutRun(ref o, 0, false);
+        }
+
+        /// <summary>Two-dimensional coding of a row against the row above (pass, vertical and horizontal modes).</summary>
+        static void Encode2D(ref BitSink o, int[] rf, int refCount, int[] cur, int n, int width)
+        {
+            int a0 = -1, ci = 0, pw = 0, pb = 1;
+            bool black = false;
+            while (a0 < width)
+            {
+                int a1 = ci < n ? cur[ci] : width;
+                int i;
+                if (black) { while (pb < refCount && rf[pb] <= a0) pb += 2; i = pb; }
+                else { while (pw < refCount && rf[pw] <= a0) pw += 2; i = pw; }
+                int b1 = i < refCount ? rf[i] : width;
+                int b2 = i + 1 < refCount ? rf[i + 1] : width;
+                if (b2 < a1)
+                {
+                    o.Put(1, 4); // pass
+                    a0 = b2;
+                    continue;
+                }
+                int d = a1 - b1;
+                if (d >= -3 && d <= 3)
+                {
+                    switch (d)
+                    {
+                        case 0: o.Put(1, 1); break;
+                        case 1: o.Put(3, 3); break;
+                        case -1: o.Put(2, 3); break;
+                        case 2: o.Put(3, 6); break;
+                        case -2: o.Put(2, 6); break;
+                        case 3: o.Put(3, 7); break;
+                        default: o.Put(2, 7); break;
+                    }
+                    a0 = a1;
+                    black = !black;
+                    ci++;
+                    continue;
+                }
+                int a2 = ci + 1 < n ? cur[ci + 1] : width;
+                o.Put(1, 3); // horizontal
+                PutRun(ref o, a1 - Math.Max(a0, 0), black);
+                PutRun(ref o, a2 - a1, !black);
+                a0 = a2;
+                ci += 2;
+            }
+        }
+
         /// <summary>
-        /// Encodes packed bilevel rows (1 bits are black) as CCITT Group 4 / T.6: every row is coded relative to
-        /// the one above (the first against an all white row) with pass, vertical and horizontal modes, ending in EOFB.
+        /// Encodes packed bilevel rows (1 bits are black).
+        /// compression 4: Group 4 / T.6 - every row against the one above (the first against a white row), ending in EOFB.
+        /// compression 3: Group 3 / T.4 - every row preceded by EOL; with <paramref name="twoD"/> a tag bit follows and
+        /// every fourth row is coded one-dimensionally, the others against the row above.
+        /// compression 2: modified Huffman - one-dimensional rows, each starting on a byte boundary, no EOL.
         /// </summary>
-        public static byte[] EncodeG4(byte* src, int width, int rows, int rowBytes, out int length)
+        public static byte[] Encode(byte* src, int width, int rows, int rowBytes, int compression, bool twoD, out int length)
         {
             var o = new BitSink { Buf = new byte[(int)Math.Min((long)rows * rowBytes / 4 + 64, 1 << 24)] };
             var rf = new int[width + 2];
@@ -377,63 +456,27 @@ namespace PixCodec
             int refCount = 0;
             for (int y = 0; y < rows; y++)
             {
-                // changing elements of this row: positions where the colour differs from the pixel before (white before column 0)
-                byte* row = src + (long)y * rowBytes;
-                int n = 0, prev = 0;
-                for (int x = 0; x < width;)
+                int n = Changes(src + (long)y * rowBytes, width, cur);
+                switch (compression)
                 {
-                    int b = row[x >> 3];
-                    if ((x & 7) == 0 && x + 8 <= width && (b == 0 || b == 0xFF) && (b != 0) == (prev != 0)) { x += 8; continue; } // uniform byte
-                    int v = b >> (7 - (x & 7)) & 1;
-                    if (v != prev) { cur[n++] = x; prev = v; }
-                    x++;
-                }
-
-                int a0 = -1, ci = 0, pw = 0, pb = 1;
-                bool black = false;
-                while (a0 < width)
-                {
-                    int a1 = ci < n ? cur[ci] : width;
-                    int i;
-                    if (black) { while (pb < refCount && rf[pb] <= a0) pb += 2; i = pb; }
-                    else { while (pw < refCount && rf[pw] <= a0) pw += 2; i = pw; }
-                    int b1 = i < refCount ? rf[i] : width;
-                    int b2 = i + 1 < refCount ? rf[i + 1] : width;
-                    if (b2 < a1)
-                    {
-                        o.Put(1, 4); // pass
-                        a0 = b2;
-                        continue;
-                    }
-                    int d = a1 - b1;
-                    if (d >= -3 && d <= 3)
-                    {
-                        switch (d)
-                        {
-                            case 0: o.Put(1, 1); break;
-                            case 1: o.Put(3, 3); break;
-                            case -1: o.Put(2, 3); break;
-                            case 2: o.Put(3, 6); break;
-                            case -2: o.Put(2, 6); break;
-                            case 3: o.Put(3, 7); break;
-                            default: o.Put(2, 7); break;
-                        }
-                        a0 = a1;
-                        black = !black;
-                        ci++;
-                        continue;
-                    }
-                    int a2 = ci + 1 < n ? cur[ci + 1] : width;
-                    o.Put(1, 3); // horizontal
-                    PutRun(ref o, a1 - Math.Max(a0, 0), black);
-                    PutRun(ref o, a2 - a1, !black);
-                    a0 = a2;
-                    ci += 2;
+                    case 4:
+                        Encode2D(ref o, rf, refCount, cur, n, width);
+                        break;
+                    case 3:
+                        o.Put(1, 12); // EOL
+                        if (!twoD) Encode1D(ref o, cur, n, width);
+                        else if (y % 4 == 0) { o.Put(1, 1); Encode1D(ref o, cur, n, width); }
+                        else { o.Put(0, 1); Encode2D(ref o, rf, refCount, cur, n, width); }
+                        break;
+                    default:
+                        Encode1D(ref o, cur, n, width);
+                        o.Flush();
+                        break;
                 }
                 (rf, cur) = (cur, rf);
                 refCount = n;
             }
-            o.Put(1, 12); o.Put(1, 12); // EOFB
+            if (compression == 4) { o.Put(1, 12); o.Put(1, 12); } // EOFB
             o.Flush();
             length = o.Len;
             return o.Buf;
