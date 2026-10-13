@@ -84,7 +84,7 @@ namespace PixCodec
 
                 // channel planes -> line layout
                 int nc = c.Chans.Length;
-                int* cur = stackalloc int[nc];
+                var cur = s.Cursor;
                 off = 0;
                 for (int ci = 0; ci < nc; ci++) { cur[ci] = off; off += c.Nx[ci] * c.Ny[ci] * (c.Chans[ci].Bytes / 2); }
                 byte* d = pd;
@@ -93,7 +93,7 @@ namespace PixCodec
                     {
                         if (!ExrChunk.IsSampled(y, c.Chans[ci].YS)) continue;
                         int bytes = c.Nx[ci] * c.Chans[ci].Bytes;
-                        Buffer.MemoryCopy(w + cur[ci], d, bytes, bytes);
+                        Buffer.MemoryCopy(w + (int)cur[ci], d, bytes, bytes);
                         cur[ci] += bytes / 2;
                         d += bytes;
                     }
@@ -375,7 +375,7 @@ namespace PixCodec
             fixed (ushort* plut = t.Lut)
             {
                 // line layout -> channel planes
-                int* cur = stackalloc int[nc];
+                var cur = s.Cursor;
                 int off = 0;
                 for (int ci = 0; ci < nc; ci++) { cur[ci] = off; off += c.Nx[ci] * c.Ny[ci] * (c.Chans[ci].Bytes / 2); }
                 byte* r = pr;
@@ -384,7 +384,7 @@ namespace PixCodec
                     {
                         if (!ExrChunk.IsSampled(y, c.Chans[ci].YS)) continue;
                         int bytes = c.Nx[ci] * c.Chans[ci].Bytes;
-                        Buffer.MemoryCopy(r, w + cur[ci], bytes, bytes);
+                        Buffer.MemoryCopy(r, w + (int)cur[ci], bytes, bytes);
                         cur[ci] += bytes / 2;
                         r += bytes;
                     }

@@ -159,12 +159,12 @@ namespace PixCodec
             var file = ExrFileStructure.Parse(data);
             var part = GetPart(file, options.PartIndex);
             var idx = new int[channelNames.Count];
+            var used = new HashSet<int>();
             for (int i = 0; i < idx.Length; i++)
             {
                 idx[i] = part.ChannelIndex(channelNames[i]);
                 if (idx[i] < 0) throw new ArgumentException($"EXR part has no channel '{channelNames[i]}'", nameof(channelNames));
-                for (int j = 0; j < i; j++)
-                    if (idx[j] == idx[i]) throw new ArgumentException($"channel '{channelNames[i]}' is listed twice", nameof(channelNames));
+                if (!used.Add(idx[i])) throw new ArgumentException($"channel '{channelNames[i]}' is listed twice", nameof(channelNames));
             }
             return ExrDecoder.Decode(data, file, options.PartIndex, idx, NaturalModel(part, idx), options);
         }
@@ -232,12 +232,7 @@ namespace PixCodec
         /// <summary>Tries R,G,B(,A) then Y(,A) among the channels of one layer.</summary>
         static bool TryColor(ExrHeader part, string layer, out int[] idx, out ColorModel color)
         {
-            int Find(string baseName)
-            {
-                for (int i = 0; i < part.Channels.Count; i++)
-                    if (part.Channels[i].Layer == layer && part.Channels[i].BaseName == baseName) return i;
-                return -1;
-            }
+            int Find(string baseName) => part.ChannelIndex(layer.Length == 0 ? baseName : layer + "." + baseName);
             int r = Find("R"), g = Find("G"), b = Find("B"), a = Find("A"), y = Find("Y");
             if (r >= 0 && g >= 0 && b >= 0)
             {

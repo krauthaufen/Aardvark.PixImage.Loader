@@ -228,6 +228,37 @@ public class ExrEncodeTests
             Assert.Equal(Array.ConvertAll(img.GetData<float>(), v => (float)(Half)v), da.GetData<float>());
     }
 
+    [Theory]
+    [MemberData(nameof(Compressions))]
+    public void ManyChannels(ExrCompression comp)
+    {
+        // AOV heavy files: hundreds of channels, and a pathological count that must not be slow or deep on the stack
+        foreach (var (count, w, h) in new[] { (300, 9, 40), (40000, 2, 1) })
+        {
+            var rnd = new Random(count);
+            var planes = new Half[count][];
+            var chans = new ExrChannelData[count];
+            for (int i = 0; i < count; i++)
+            {
+                planes[i] = new Half[w * h];
+                for (int k = 0; k < planes[i].Length; k++) planes[i][k] = (Half)(float)(rnd.Next(64) / 8.0);   // exact in B44 too
+                chans[i] = new ExrChannelData($"aov{i:D5}.V", planes[i]);
+            }
+            var ms = new MemoryStream();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            Exr.EncodeChannels(w, h, chans, ms, new ExrEncodeOptions { Compression = comp });
+            var data = ms.ToArray();
+            var names = chans.Select(c => c.Name).ToArray();
+            var back = Exr.DecodeChannels(data, names, new ExrDecodeOptions { HalfAsFloat = false });
+            Assert.True(sw.Elapsed.TotalSeconds < 20);
+            Assert.Equal((count, ColorModel.Other), (back.Channels, back.Color));
+            var b = back.GetData<Half>();
+            if (comp is ExrCompression.B44 or ExrCompression.B44A) continue;   // lossy, covered elsewhere
+            for (int i = 0; i < count; i += 7)
+                for (int k = 0; k < w * h; k++) Assert.Equal(planes[i][k], b[k * count + i]);
+        }
+    }
+
     [Fact]
     public void FloatToHalfRounding()
     {

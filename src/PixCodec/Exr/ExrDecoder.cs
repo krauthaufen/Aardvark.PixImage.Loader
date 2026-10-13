@@ -77,7 +77,15 @@ namespace PixCodec
             }
             d._offsets = ReadOffsets(data, file, partIndex, chunks);
 
-            var result = RawImage.Create(w, h, color, outType, sel.Length);
+            // every sample is overwritten unless a subsampled channel leaves gaps, so the (large) array need not be zeroed
+            bool subsampled = false;
+            foreach (int i in sel) subsampled |= chans[i].XS != 1 || chans[i].YS != 1;
+            int count = w * h * sel.Length;
+            Array samples = subsampled ? RawImage.CreateArray(outType, count)
+                : outType == SampleType.UInt32 ? GC.AllocateUninitializedArray<uint>(count)
+                : outType == SampleType.Float16 ? GC.AllocateUninitializedArray<Half>(count)
+                : GC.AllocateUninitializedArray<float>(count);
+            var result = new RawImage(w, h, color, samples, sel.Length);
             fixed (byte* pd = data)
             fixed (byte* po = &MemoryMarshal.GetArrayDataReference(result.Data))
             {

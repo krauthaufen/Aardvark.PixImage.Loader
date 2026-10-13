@@ -14,6 +14,7 @@ namespace PixCodec
         readonly byte[][] _bytes = new byte[4][];
         ushort[]? _words;
         public int[] Nx = Array.Empty<int>(), Ny = Array.Empty<int>();
+        public long[] Cursor = Array.Empty<long>();   // per channel positions while (de)interleaving planes
         public ExrPiz.Tables? Piz;
         public float[]? Row;
 
@@ -44,7 +45,7 @@ namespace PixCodec
 
         public static ExrChunk Create(ExrChan[] chans, int x0, int x1, int y0, int y1, ExrScratch s)
         {
-            if (s.Nx.Length < chans.Length) { s.Nx = new int[chans.Length]; s.Ny = new int[chans.Length]; }
+            if (s.Nx.Length < chans.Length) { s.Nx = new int[chans.Length]; s.Ny = new int[chans.Length]; s.Cursor = new long[chans.Length]; }
             var c = new ExrChunk { Chans = chans, Nx = s.Nx, Ny = s.Ny, X0 = x0, X1 = x1, Y0 = y0, Y1 = y1 };
             long size = 0;
             for (int i = 0; i < chans.Length; i++)

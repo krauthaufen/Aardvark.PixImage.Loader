@@ -94,7 +94,7 @@ namespace PixCodec
                 }
 
                 // channel planes -> line layout
-                long* cur = stackalloc long[nc];
+                var cur = s.Cursor;
                 long off = 0;
                 for (int ci = 0; ci < nc; ci++) { cur[ci] = off; off += (long)c.Nx[ci] * c.Ny[ci] * c.Chans[ci].Bytes; }
                 byte* d = pd;
@@ -216,7 +216,7 @@ namespace PixCodec
             fixed (byte* po = outBuf)
             {
                 // line layout -> channel planes
-                long* cur = stackalloc long[nc];
+                var cur = s.Cursor;
                 long off = 0;
                 for (int ci = 0; ci < nc; ci++) { cur[ci] = off; off += (long)c.Nx[ci] * c.Ny[ci] * c.Chans[ci].Bytes; }
                 byte* r = pr;

@@ -294,26 +294,36 @@ namespace PixCodec
             get
             {
                 var l = new List<string>();
-                foreach (var c in Channels) if (!l.Contains(c.Layer)) l.Add(c.Layer);
+                var seen = new HashSet<string>();
+                foreach (var c in Channels) if (seen.Add(c.Layer)) l.Add(c.Layer);
                 return l;
             }
         }
 
         public ExrChannel? FindChannel(string name)
         {
-            foreach (var c in Channels) if (c.Name == name) return c;
-            return null;
+            int i = ChannelIndex(name);
+            return i < 0 ? null : Channels[i];
         }
+
+        Dictionary<string, int>? _index;
 
         internal int ChannelIndex(string name)
         {
-            for (int i = 0; i < Channels.Count; i++) if (Channels[i].Name == name) return i;
-            return -1;
+            var index = _index;
+            if (index == null)
+            {
+                index = new Dictionary<string, int>(Channels.Count);
+                for (int i = 0; i < Channels.Count; i++) index[Channels[i].Name] = i;
+                _index = index;
+            }
+            return index.TryGetValue(name, out int r) ? r : -1;
         }
 
         static List<ExrChannel> ParseChannels(ReadOnlySpan<byte> v)
         {
             var list = new List<ExrChannel>();
+            var seen = new HashSet<string>();
             int p = 0;
             while (true)
             {
@@ -330,7 +340,7 @@ namespace PixCodec
                 p += 16;
                 if (type < 0 || type > 2) throw new ImageFormatException($"EXR channel '{name}' has an unknown pixel type");
                 if (xs < 1 || ys < 1) throw new ImageFormatException($"EXR channel '{name}' has invalid sampling");
-                foreach (var c in list) if (c.Name == name) throw new ImageFormatException($"EXR channel '{name}' is listed twice");
+                if (!seen.Add(name)) throw new ImageFormatException($"EXR channel '{name}' is listed twice");
                 list.Add(new ExrChannel(name, (ExrPixelType)type, pLinear, xs, ys));
             }
             if (list.Count == 0) throw new ImageFormatException("EXR part has no channels");
