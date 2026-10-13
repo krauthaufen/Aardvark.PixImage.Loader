@@ -99,7 +99,9 @@ namespace PixCodec
 
         /// <summary>The typed sample array. Throws if T does not match <see cref="SampleType"/>.</summary>
         public T[] GetData<T>() where T : unmanaged
-            => Data as T[] ?? throw new InvalidOperationException($"image holds {SampleType} samples, not {typeof(T).Name}");
+            => typeof(T) == Data.GetType().GetElementType() // exact: `as byte[]` would also accept sbyte[]
+                ? (T[])Data
+                : throw new InvalidOperationException($"image holds {SampleType} samples, not {typeof(T).Name}");
 
         /// <summary>The samples reinterpreted as raw bytes in machine byte order.</summary>
         public Span<byte> GetBytes() => Data switch

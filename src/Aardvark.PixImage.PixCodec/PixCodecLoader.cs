@@ -119,17 +119,18 @@ namespace Aardvark.Base
             => new PixImage<T>(ColFormat(img.Color, img.Channels), data.CreateImageVolume(new V3l(img.Width, img.Height, img.Channels)));
 
         /// <summary>Wraps the decoded samples in a PixImage without copying (half floats are widened to float).</summary>
-        public static PixImage ToPixImage(RawImage img) => img.Data switch
+        public static PixImage ToPixImage(RawImage img) => img.SampleType switch
         {
-            byte[] a => Wrap(img, a),
-            ushort[] a => Wrap(img, a),
-            uint[] a => Wrap(img, a),
-            float[] a => Wrap(img, a),
-            double[] a => Wrap(img, a),
-            sbyte[] a => Wrap(img, a),
-            short[] a => Wrap(img, a),
-            int[] a => Wrap(img, a),
-            Half[] a => Wrap(img, Array.ConvertAll(a, h => (float)h)),
+            // by SampleType, not by array pattern: sbyte[] would also match `byte[]` (CLR array covariance)
+            SampleType.UInt8 => Wrap(img, (byte[])img.Data),
+            SampleType.UInt16 => Wrap(img, (ushort[])img.Data),
+            SampleType.UInt32 => Wrap(img, (uint[])img.Data),
+            SampleType.Float32 => Wrap(img, (float[])img.Data),
+            SampleType.Float64 => Wrap(img, (double[])img.Data),
+            SampleType.Int8 => Wrap(img, (sbyte[])img.Data),
+            SampleType.Int16 => Wrap(img, (short[])img.Data),
+            SampleType.Int32 => Wrap(img, (int[])img.Data),
+            SampleType.Float16 => Wrap(img, Array.ConvertAll((Half[])img.Data, h => (float)h)),
             _ => throw new NotSupportedException($"unsupported sample type {img.SampleType}"),
         };
 

@@ -63,17 +63,18 @@ public static class TestUtil
         f.Write(img.GetBytes());
     }
 
-    static double[] ToDoubles(RawImage img) => img.Data switch
+    // switch on SampleType: sbyte[] also matches a `byte[]` pattern (CLR array covariance)
+    static double[] ToDoubles(RawImage img) => img.SampleType switch
     {
-        byte[] a => Array.ConvertAll(a, x => (double)x),
-        sbyte[] a => Array.ConvertAll(a, x => (double)x),
-        ushort[] a => Array.ConvertAll(a, x => (double)x),
-        short[] a => Array.ConvertAll(a, x => (double)x),
-        uint[] a => Array.ConvertAll(a, x => (double)x),
-        int[] a => Array.ConvertAll(a, x => (double)x),
-        Half[] a => Array.ConvertAll(a, x => (double)x),
-        float[] a => Array.ConvertAll(a, x => (double)x),
-        double[] a => a,
+        SampleType.UInt8 => Array.ConvertAll((byte[])img.Data, x => (double)x),
+        SampleType.Int8 => Array.ConvertAll((sbyte[])img.Data, x => (double)x),
+        SampleType.UInt16 => Array.ConvertAll((ushort[])img.Data, x => (double)x),
+        SampleType.Int16 => Array.ConvertAll((short[])img.Data, x => (double)x),
+        SampleType.UInt32 => Array.ConvertAll((uint[])img.Data, x => (double)x),
+        SampleType.Int32 => Array.ConvertAll((int[])img.Data, x => (double)x),
+        SampleType.Float16 => Array.ConvertAll((Half[])img.Data, x => (double)x),
+        SampleType.Float32 => Array.ConvertAll((float[])img.Data, x => (double)x),
+        SampleType.Float64 => (double[])img.Data,
         _ => throw new InvalidOperationException(),
     };
 
