@@ -83,6 +83,8 @@ namespace PixCodec.JpegImpl
         int _padding;
         /// <summary>Set when the code stream turned out to be inconsistent; the rest of the scan is not decodable.</summary>
         public bool Corrupt;
+        /// <summary>JBIG stripes may end long before the decoder stops asking for bytes; there, zeros are supplied without limit.</summary>
+        public bool UnlimitedPadding;
 
         public JpegArith()
         {
@@ -117,7 +119,7 @@ namespace PixCodec.JpegImpl
                 {
                     // A marker (or the end of the data) ends the segment. The coder may have dropped a few trailing
                     // zero bytes, so zeros are supplied - but a decoder that keeps asking has lost the stream.
-                    if (++_padding > 64) Corrupt = true;
+                    if (++_padding > 64 && !UnlimitedPadding) Corrupt = true;
                     return;
                 }
             }
@@ -125,8 +127,12 @@ namespace PixCodec.JpegImpl
             _c += b << 8;
         }
 
+        /// <summary>
+        /// Decodes one binary decision with the adaptive state at st (index | sense of the more probable symbol &lt;&lt; 7,
+        /// initially 0). Also the entry point for other users of the coder (JBIG), which keep their own state arrays.
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        int Decode(byte* st)
+        internal int Decode(byte* st)
         {
             uint sv = *st, e = s_tablePtr[sv], qe = e & 0xFFFF;
             int d = (int)(sv >> 7);
@@ -398,8 +404,9 @@ namespace PixCodec.JpegImpl
             _c &= 0x7FFFF;
         }
 
+        /// <summary>Codes one binary decision with the adaptive state at st (see <see cref="JpegArith.Decode"/>).</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void Encode(byte* st, int bit)
+        internal void Encode(byte* st, int bit)
         {
             uint sv = *st, e = JpegArith.Table[sv], qe = e & 0xFFFF;
             _a -= qe;
