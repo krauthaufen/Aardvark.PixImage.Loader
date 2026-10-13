@@ -85,6 +85,7 @@ namespace PixCodec
         byte[] _jpegTables = Array.Empty<byte>();
         JpegTiffTables? _jpegPrepared;
         TiffOldJpeg? _ojpeg;
+        bool _ojpegTiffYcc;
         long _t4Options;
         float[]? _yccY, _yccCrR, _yccCbB, _yccCrG, _yccCbG;
 
@@ -370,6 +371,9 @@ namespace PixCodec
                 case 1: case 5: case 8: case 32946: case 32773: case 2: case 3: case 4: case 6: case 7:
                 case 50000: case 34925: case 50001: case 32909:
                     break;
+                case 32809:
+                    if (Bits != 4 || Spp != 1) throw new ImageFormatException("TIFF: ThunderScan compression needs 4-bit single sample data");
+                    break;
                 case 34676:
                     if (!IsLogLuv) throw new ImageFormatException("TIFF: SGILOG compression needs a LogL / LogLuv photometric interpretation");
                     break;
@@ -474,7 +478,18 @@ namespace PixCodec
             }
             if (_oldJpeg) _ojpeg = new TiffOldJpeg(this, offs, cnts!, _storedStrips);
             if (IsCcitt) _t4Options = File.Integer(e, Compression == 3 ? 292 : 293, 0);
-            if (Photometric == 6 && (Kind == TiffChunkKind.YccPacked || YccPlanar)) BuildYccTables();
+            if (_oldJpeg && Photometric == 6 && !YccPlanar)
+            {
+                // Old-style JPEG data is YCbCr as the TIFF tags describe it. With the default (full range) reference
+                // values that is what the JPEG decoder converts; anything else - studio range data from old scanners
+                // and NeXT software - goes through the TIFF conversion.
+                var rb = File.Doubles(e, 532);
+                var co = File.Doubles(e, 529);
+                bool fullRange = rb == null || rb.Length < 6 || (rb[0] == 0 && rb[1] == 255 && rb[2] == 128 && rb[3] == 255 && rb[4] == 128 && rb[5] == 255);
+                bool rec601 = co == null || co.Length < 3 || (Math.Abs(co[0] - 0.299) < 1e-3 && Math.Abs(co[1] - 0.587) < 1e-3 && Math.Abs(co[2] - 0.114) < 1e-3);
+                _ojpegTiffYcc = !fullRange || !rec601;
+            }
+            if (Photometric == 6 && (Kind == TiffChunkKind.YccPacked || YccPlanar || _ojpegTiffYcc)) BuildYccTables();
         }
 
         void BuildYccTables()
@@ -692,9 +707,10 @@ namespace PixCodec
                         ReadOnlySpan<byte> src = _oldJpeg ? _ojpeg!.BuildStream(plane, Tiled ? index : -1, cw, crows)
                             : count > int.MaxValue ? throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression")
                             : File.Src.Get(offset, (int)count, ref srcRent);
-                        bool ycc = Photometric == 6 && !YccPlanar;
+                        bool ycc = Photometric == 6 && !YccPlanar && !_ojpegTiffYcc;
                         if (Bps == 1) TiffJpegBridge.Decode8(_jpegPrepared, _jpegTables, src, cw, crows, ps, ycc, new Span<byte>(b, (int)size));
                         else TiffJpegBridge.Decode16(_jpegPrepared, src, cw, crows, ps, ycc, new Span<ushort>(b, (int)(size / 2)));
+                        if (_ojpegTiffYcc && Bps == 1) YccInPlace(b, (long)cw * crows);
                         Transfer(b, (long)cw * ps * Bps, g, TiffChunkKind.Samples);
                     }
                     finally
@@ -873,6 +889,7 @@ namespace PixCodec
                 switch (Compression)
                 {
                     case 5: got = TiffLzw.Decode(src, dst, expected); break;
+                    case 32809: got = TiffThunder.Decode(src, dst, ChunkW, (int)(expected / Math.Max(1, rowBytes))); break;
                     case 32773: got = TiffPackBits.Decode(src, dst, expected); break;
                     case 8 or 32946 when expected > int.MaxValue:
                     {

@@ -659,4 +659,61 @@ namespace PixCodec
             }
         }
     }
+
+    /// <summary>
+    /// ThunderScan (compression 32809): 4-bit gray pixels coded per byte as a run of the last pixel (00, 6-bit count),
+    /// three 2-bit deltas (01), two 3-bit deltas (10) or a literal pixel (11). Delta code "skip" (2 resp. 4) emits nothing.
+    /// Every row starts from pixel value 0 and is packed two pixels per byte.
+    /// </summary>
+    internal static unsafe class TiffThunder
+    {
+        public static long Decode(ReadOnlySpan<byte> src, byte* dst, int width, int rows)
+        {
+            int rowBytes = (width + 1) / 2, sp = 0;
+            new Span<byte>(dst, rowBytes * rows).Clear();
+            ReadOnlySpan<sbyte> two = stackalloc sbyte[] { 0, 1, 0, -1 }, three = stackalloc sbyte[] { 0, 1, 2, 3, 0, -3, -2, -1 };
+            for (int y = 0; y < rows; y++)
+            {
+                byte* row = dst + (long)y * rowBytes;
+                int n = 0, last = 0;
+                void Put(byte* r, int v, ref int count, ref int lastPixel)
+                {
+                    lastPixel = v & 15;
+                    if (count < width) r[count >> 1] |= (byte)((count & 1) == 0 ? lastPixel << 4 : lastPixel);
+                    count++;
+                }
+                while (n < width)
+                {
+                    // Data that ends early leaves the remaining rows at 0: libtiff reads such files (its own sample
+                    // text.tif stops three rows short) and so do we.
+                    if (sp >= src.Length) return (long)rows * rowBytes;
+                    int b = src[sp++], v = b & 0x3F;
+                    switch (b >> 6)
+                    {
+                        case 0:
+                            for (int i = 0; i < v && n < width; i++) Put(row, last, ref n, ref last);
+                            break;
+                        case 1:
+                            for (int shift = 4; shift >= 0; shift -= 2)
+                            {
+                                int d = v >> shift & 3;
+                                if (d != 2) Put(row, last + two[d], ref n, ref last);
+                            }
+                            break;
+                        case 2:
+                            for (int shift = 3; shift >= 0; shift -= 3)
+                            {
+                                int d = v >> shift & 7;
+                                if (d != 4) Put(row, last + three[d], ref n, ref last);
+                            }
+                            break;
+                        default:
+                            Put(row, v, ref n, ref last);
+                            break;
+                    }
+                }
+            }
+            return (long)rows * rowBytes;
+        }
+    }
 }

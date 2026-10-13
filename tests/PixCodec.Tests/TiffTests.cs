@@ -146,6 +146,51 @@ public class TiffTests
         }
     }
 
+    /// <summary>
+    /// libtiff's classic sample pictures - files from real old writers (NeXT and HP old-style JPEG, SGI LogLuv,
+    /// ThunderScan, fax machines). They are not in the repository (no explicit licence): run
+    /// tests/oracle/fetch_tiff_samples.py once to download them and build the third-party references; without them
+    /// this test checks nothing.
+    /// </summary>
+    [Fact]
+    public void RealWorldSamples()
+    {
+        var dir = Path.Combine(TestUtil.FixtureDir, "_tmp", "tiff-samples");
+        if (!Directory.Exists(dir)) return;
+        int checkedFiles = 0;
+        foreach (var path in Directory.GetFiles(dir, "*.tif").OrderBy(f => f, StringComparer.Ordinal))
+        {
+            if (!File.Exists(path + ".ref")) continue;
+            string name = Path.GetFileName(path);
+            var bytes = File.ReadAllBytes(path);
+            var expected = TestUtil.LoadRef(path + ".ref");
+            var img = Tiff.Decode(bytes);
+            double tol = File.Exists(path + ".tol") ? double.Parse(File.ReadAllText(path + ".tol"), System.Globalization.CultureInfo.InvariantCulture) : 0;
+            var compared = img;
+            if (File.Exists(path + ".rows"))
+            {
+                // the reference decoder only gets this far into the file
+                int rows = int.Parse(File.ReadAllText(path + ".rows"));
+                expected = Crop(expected, 0, 0, expected.Width, rows);
+                compared = Crop(img, 0, 0, img.Width, rows);
+            }
+            Assert.True(TestUtil.MaxDiff(expected, compared) <= tol, $"{name}: max difference {TestUtil.MaxDiff(expected, compared)} > {tol}");
+            if (File.Exists(path + ".mean"))
+            {
+                double limit = double.Parse(File.ReadAllText(path + ".mean"), System.Globalization.CultureInfo.InvariantCulture);
+                var e = expected.GetData<byte>(); var a = compared.GetData<byte>();
+                double sum = 0;
+                for (int i = 0; i < e.Length; i++) sum += Math.Abs(e[i] - a[i]);
+                Assert.True(sum / e.Length <= limit, $"{name}: mean difference {sum / e.Length:F2} > {limit}");
+            }
+            TestUtil.AssertEqual(img, Tiff.Decode(bytes, ForcedParallel()));
+            using var fs = File.OpenRead(path);
+            TestUtil.AssertEqual(Crop(img, 3, 5, img.Width - 7, img.Height - 9), Tiff.DecodeRegion(fs, 3, 5, img.Width - 7, img.Height - 9));
+            checkedFiles++;
+        }
+        Assert.True(checkedFiles >= 20, $"only {checkedFiles} sample files with references found");
+    }
+
     [Fact]
     public void GenericEntryPoints()
     {
