@@ -79,7 +79,6 @@ namespace PixCodec
         const int GroupInts = 12;      // per prefix code group: 5 x (table offset, root mask), flags, constant ARGB part
         const int FlagTrivialLiteral = 1, FlagTrivialPixel = 2;
 
-        internal static bool Prof;
         Vp8lBitReader _br;
         readonly long _maxPixels;
         readonly TablePool _scratch = new TablePool(256);
@@ -210,16 +209,13 @@ namespace PixCodec
 
             var groups = new int[numGroups * GroupInts];
             var tables = ReadPrefixCodes(groups, mapping, cacheBits);
-            var swp = System.Diagnostics.Stopwatch.StartNew();
             var pixels = DecodePixels(xsize, ysize, groups, tables, meta, prefixBits, metaWidth, cacheBits);
-            if (level0 && Prof) Console.WriteLine($"  entropy decode {swp.ElapsedMilliseconds} ms (cache {cacheBits}, groups {numGroups})");
 
             if (level0)
             {
                 for (int i = numTransforms - 1; i >= 0; i--)
                 {
                     ref Transform t = ref transforms![i];
-                    swp.Restart();
                     switch (t.Type)
                     {
                         case 0: InversePredictor(pixels, t.XSize, ysize, t.Bits, t.Data); break;
@@ -227,7 +223,6 @@ namespace PixCodec
                         case 2: AddGreen(pixels); break;
                         default: pixels = InverseColorIndexing(pixels, t.XSize, ysize, t.Bits, t.Data); break;
                     }
-                    if (Prof) Console.WriteLine($"  transform {t.Type}: {swp.ElapsedMilliseconds} ms");
                 }
                 if (pixels.Length != (long)fullWidth * ysize) throw Bad("size");
             }

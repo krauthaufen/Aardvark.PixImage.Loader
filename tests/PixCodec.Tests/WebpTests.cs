@@ -355,6 +355,24 @@ public class WebpTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void LosslessBigImages()
+    {
+        // above half a megapixel the encoder probes whether the hash chain is worth building: a drawing says yes,
+        // a photograph no, and both must come back exactly
+        foreach (var img in new[] { Drawing(1100, 520, ColorModel.Rgb, 60, 21), Photo(900, 640, ColorModel.Rgb, 22), Photo(800, 700, ColorModel.Rgba, 23) })
+            foreach (int method in new[] { 1, 4 })
+            {
+                var data = Encode(img, new WebpEncodeOptions { Lossless = true, Method = method });
+                AssertEqual(img, Webp.Decode(data));
+                if (method == 4)
+                {
+                    var oracle = OracleDecode(data, ".webp");
+                    if (oracle != null) AssertEqual(img, oracle);
+                }
+            }
+    }
+
+    [Fact]
     public void LosslessEffortPaysOff()
     {
         var photo = Photo(256, 192, ColorModel.Rgb, 3);

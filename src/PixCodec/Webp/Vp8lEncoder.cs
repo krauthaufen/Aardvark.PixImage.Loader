@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 namespace PixCodec
 {
@@ -110,7 +111,7 @@ namespace PixCodec
                     (predicted, new Config { Palette = true, Predictor = true }),
                     (direct, spatial),
                 };
-                if (_method >= 2)
+                if (_method >= 1)
                 {
                     // a quick trial encode says more than the entropy of the symbols: it sees what LZ77 does
                     var quick = new Vp8lEncoder(0);
@@ -493,7 +494,8 @@ namespace PixCodec
             }
             var model = new CostModel(lit, lay);
 
-            int hashBits = Math.Clamp(BitOperations.Log2((uint)n) + 1, 8, 18);
+            // few positions per bucket: every step along a chain is a cache miss
+            int hashBits = Math.Clamp(BitOperations.Log2((uint)n) + 1, 8, 22);
             var head = new int[1 << hashBits];
             Array.Fill(head, -1);
             var chain = new int[n];
@@ -509,6 +511,17 @@ namespace PixCodec
             fixed (int* ph = head, pc = chain)
             {
                 int pos;
+                // large images at the usual effort: leave the hash chain out when a probe finds it useless
+                if (n >= 1 << 19 && _method <= 4 && !ChainPaysOff(p, pr, n, xsize, ph, pc, hashShift))
+                {
+                    for (pos = 0; pos < n;)
+                    {
+                        int len = Search(p, n, xsize, pos, pc, -1, 0, 0, out int dist);
+                        if (len >= 2 && Worthwhile(p + pos, len, DistanceCode(xsize, dist), model)) { tokens.Add((uint)dist, len); pos += len; }
+                        else tokens.Add(p[pos++], 0);
+                    }
+                    return tokens;
+                }
                 if (matches != null)
                 {
                     // the longest match at every position; inside a long match the tail of the previous one is good enough
@@ -516,8 +529,17 @@ namespace PixCodec
                     for (pos = 0; pos < n; pos++)
                     {
                         int len, dist = 0;
+                        // look the position up and enter it in one go: a single visit to its bucket
+                        int candidate = -1;
+                        if (pos + 1 < n)
+                        {
+                            int h = Hash2(p + pos, pr + pos, hashShift);
+                            candidate = ph[h];
+                            pc[pos] = candidate;
+                            ph[h] = pos;
+                        }
                         if (prevLen > 64) { len = prevLen - 1; dist = prevDist; }
-                        else len = FindMatch(p, pr, n, xsize, pos, ph, pc, hashShift, maxIter, ref inserted, out dist);
+                        else len = Search(p, n, xsize, pos, pc, candidate, Math.Max(0, pos - Window), maxIter, out dist);
                         matches[pos] = len >= 2 ? (uint)len << 20 | (uint)dist : 0;
                         prevLen = len; prevDist = dist;
                         // the match may also reach further back than the search of the earlier positions found
@@ -563,6 +585,10 @@ namespace PixCodec
                 }
                 if (!optimal) return tokens;
             }
+            // photographs: with next to no matches there is nothing for the optimal parse to improve
+            long copied = 0;
+            for (int i = 0; i < tokens.Count; i++) copied += tokens.Len[i];
+            if (copied * 64 < n) return tokens;
 
             var cost = new float[n + 1];
             var step = new ushort[n + 1];
@@ -674,7 +700,13 @@ namespace PixCodec
                 head[h] = i;
             }
             if (limit > inserted) inserted = limit;
+            int candidate = pos + 1 < n ? head[Hash2(p + pos, run + pos, hashShift)] : -1;
+            return Search(p, n, xsize, pos, chain, candidate, Math.Max(0, pos - Window), maxIter, out bestDist);
+        }
 
+        /// <summary>The longest match for the pixels at pos: one row up, one pixel left, then along the hash chain.</summary>
+        static int Search(uint* p, int n, int xsize, int pos, int* chain, int candidate, int minPos, int maxIter, out int bestDist)
+        {
             int maxLen = Math.Min(MaxLength, n - pos);
             int best = 0;
             bestDist = 0;
@@ -692,9 +724,7 @@ namespace PixCodec
                 if (l > best) { best = l; bestDist = 1; }
             }
             if (best >= maxLen) return best;
-            int minPos = Math.Max(0, pos - Window);
-            if (pos + 1 >= n) return best;
-            for (int j = head[Hash2(cur, run + pos, hashShift)]; j >= minPos && maxIter-- > 0; j = chain[j])
+            for (int j = candidate; j >= minPos && maxIter-- > 0; j = chain[j])
             {
                 if (p[j + best] != cur[best] || p[j] != cur[0]) continue;
                 int l = MatchLength(p + j, cur, maxLen);
@@ -705,6 +735,32 @@ namespace PixCodec
                 }
             }
             return best;
+        }
+
+        /// <summary>
+        /// Tries the match search on a few windows spread over the image and tells whether matches beyond plain runs
+        /// occur at all. Photographs have next to none, and the hash chain is the most expensive part of the encoder.
+        /// </summary>
+        static bool ChainPaysOff(uint* p, ushort* run, int n, int xsize, int* head, int* chain, int hashShift)
+        {
+            const int Windows = 16, Size = 8192;
+            long covered = 0;
+            for (int k = 0; k < Windows; k++)
+            {
+                int start = (int)((long)(n - Size) * k / (Windows - 1)), end = start + Size;
+                for (int pos = start; pos < end;)
+                {
+                    int h = Hash2(p + pos, run + pos, hashShift);
+                    int candidate = head[h];
+                    chain[pos] = candidate;
+                    head[h] = pos;
+                    int len = Search(p, end, xsize, pos, chain, candidate, start, 8, out int dist);
+                    if (len >= 4 && dist != 1 && dist != xsize) { covered += len; pos += len; }
+                    else pos++;
+                }
+                for (int pos = start; pos < end; pos++) head[Hash2(p + pos, run + pos, hashShift)] = -1;
+            }
+            return covered * 200 >= (long)Windows * Size;
         }
 
         // ------------------------------------------------------------------ histograms and the entropy image
@@ -953,7 +1009,8 @@ namespace PixCodec
                 hist[b] = new int[256 * 4 + (b == 0 ? 0 : 1 << b)];
             }
             int pos = 0;
-            for (int i = 0; i < t.Count; i++)
+            // the first few megapixels tell enough
+            for (int i = 0; i < t.Count && pos < 3 << 20; i++)
             {
                 int len = t.Len[i];
                 if (len == 0)
@@ -1339,6 +1396,52 @@ namespace PixCodec
             }
             uint* up = cur - w;
             if (x0 == 0) { *dst++ = SubPixels(cur[0], up[0]); x0 = 1; }
+            if (Vector128.IsHardwareAccelerated)
+            {
+                // four pixels at a time; every neighbor is an original pixel, so nothing here depends on the pixel before
+                for (; x0 + 4 <= x1; x0 += 4, dst += 4)
+                {
+                    var c = Vector128.Load((byte*)(cur + x0));
+                    var l = Vector128.Load((byte*)(cur + x0 - 1));
+                    var t = Vector128.Load((byte*)(up + x0));
+                    var tl = Vector128.Load((byte*)(up + x0 - 1));
+                    Vector128<byte> pred;
+                    switch (mode)
+                    {
+                        case 0: pred = Vector128.Create(0xff000000u).AsByte(); break;
+                        case 1: pred = l; break;
+                        case 2: pred = t; break;
+                        case 3: pred = Vector128.Load((byte*)(up + x0 + 1)); break;
+                        case 4: pred = tl; break;
+                        case 5: pred = Avg(Avg(l, Vector128.Load((byte*)(up + x0 + 1))), t); break;
+                        case 6: pred = Avg(l, tl); break;
+                        case 7: pred = Avg(l, t); break;
+                        case 8: pred = Avg(tl, t); break;
+                        case 9: pred = Avg(t, Vector128.Load((byte*)(up + x0 + 1))); break;
+                        case 10: pred = Avg(Avg(l, tl), Avg(t, Vector128.Load((byte*)(up + x0 + 1)))); break;
+                        case 11:
+                        {
+                            // the gradient estimate L + T - TL is as far from L as T is from TL
+                            var toLeft = ChannelSum(Vector128.Max(t, tl) - Vector128.Min(t, tl));
+                            var toTop = ChannelSum(Vector128.Max(l, tl) - Vector128.Min(l, tl));
+                            pred = Vector128.ConditionalSelect(Vector128.LessThan(toLeft.AsInt32(), toTop.AsInt32()).AsByte(), l, t);
+                            break;
+                        }
+                        case 12:
+                            // clamp(L + T - TL): add what T has above TL, take off what it has below
+                            pred = SubSat(AddSat(l, SubSat(t, tl)), SubSat(tl, t));
+                            break;
+                        default:
+                        {
+                            var a = Avg(l, t);
+                            // clamp(a + (a - TL) / 2), the division truncating towards zero
+                            pred = SubSat(AddSat(a, HalfBytes(SubSat(a, tl))), HalfBytes(SubSat(tl, a)));
+                            break;
+                        }
+                    }
+                    (c - pred).Store((byte*)dst);
+                }
+            }
             switch (mode)
             {
                 case 0: for (int x = x0; x < x1; x++) *dst++ = SubPixels(cur[x], 0xff000000); break;
@@ -1356,6 +1459,32 @@ namespace PixCodec
                 case 12: for (int x = x0; x < x1; x++) *dst++ = SubPixels(cur[x], Vp8lDecoder.ClampAddSubFull(cur[x - 1], up[x], up[x - 1])); break;
                 default: for (int x = x0; x < x1; x++) *dst++ = SubPixels(cur[x], Vp8lDecoder.ClampAddSubHalf(Vp8lDecoder.Average2(cur[x - 1], up[x]), up[x - 1])); break;
             }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<byte> HalfBytes(Vector128<byte> a)
+            => Vector128.ShiftRightLogical((a & Vector128.Create((byte)0xfe)).AsUInt16(), 1).AsByte();
+
+        /// <summary>Per byte (a + b) / 2, rounded down.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<byte> Avg(Vector128<byte> a, Vector128<byte> b) => (a & b) + HalfBytes(a ^ b);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<byte> AddSat(Vector128<byte> a, Vector128<byte> b)
+        {
+            var sum = a + b;
+            return sum | Vector128.LessThan(sum, a);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<byte> SubSat(Vector128<byte> a, Vector128<byte> b) => Vector128.Max(a, b) - b;
+
+        /// <summary>The sum of the four bytes of every 32 bit lane.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<uint> ChannelSum(Vector128<byte> a)
+        {
+            var pairs = (a.AsUInt16() & Vector128.Create((ushort)0xff)) + Vector128.ShiftRightLogical(a.AsUInt16(), 8);
+            return (pairs.AsUInt32() & Vector128.Create(0xffffu)) + Vector128.ShiftRightLogical(pairs.AsUInt32(), 16);
         }
 
         static ReadOnlySpan<byte> FastModes => new byte[] { 1, 2, 11, 12, 5, 7 };
@@ -1377,15 +1506,19 @@ namespace PixCodec
             var candidates = _method == 1 ? FastModes : AllModes;
             int size = 1 << bits;
             var acc = new int[1024];
-            Span<int> accN = stackalloc int[4];
-            accN.Clear();
+            // two sparse tile histograms (alpha, red, green, blue residuals): the candidate and the best so far
             var tile = new int[1024];
             var bestTile = new int[1024];
+            var seen = new ushort[1024];
+            var bestSeen = new ushort[1024];
             uint* res = stackalloc uint[size];
             fixed (uint* img = px)
             fixed (int* pt0 = tile, pb0 = bestTile, pacc = acc)
+            fixed (ushort* ps0 = seen, pbs0 = bestSeen)
             {
                 int* pt = pt0, pb = pb0;
+                ushort* ps = ps0, pbs = pbs0;
+                int count = 0, bestCount = 0;
                 for (int by = 0; by < th; by++)
                 {
                     int y0 = by << bits, y1 = Math.Min(h, y0 + size);
@@ -1393,39 +1526,46 @@ namespace PixCodec
                     {
                         int x0 = bx << bits, x1 = Math.Min(w, x0 + size);
                         int left = bx > 0 ? modes[by * tw + bx - 1] : -1, top = by > 0 ? modes[(by - 1) * tw + bx] : -1;
-                        int npx = (x1 - x0) * (y1 - y0);
                         double bestCost = double.MaxValue;
                         int best = 0;
+                        for (int i = 0; i < bestCount; i++) pb[pbs[i]] = 0;
+                        bestCount = 0;
                         foreach (int mode in candidates)
                         {
-                            new Span<int>(pt, 1024).Clear();
+                            for (int i = 0; i < count; i++) pt[ps[i]] = 0;
+                            count = 0;
                             for (int y = y0; y < y1; y++)
                             {
                                 Residuals(img, w, y, x0, x1, mode, res);
                                 for (int i = 0; i < x1 - x0; i++)
                                 {
                                     uint r = res[i];
-                                    pt[r >> 24]++; pt[256 + ((r >> 16) & 0xff)]++; pt[512 + ((r >> 8) & 0xff)]++; pt[768 + (r & 0xff)]++;
+                                    int a = (int)(r >> 24), rr = 256 + (int)((r >> 16) & 0xff), g = 512 + (int)((r >> 8) & 0xff), b = 768 + (int)(r & 0xff);
+                                    if (pt[a]++ == 0) ps[count++] = (ushort)a;
+                                    if (pt[rr]++ == 0) ps[count++] = (ushort)rr;
+                                    if (pt[g]++ == 0) ps[count++] = (ushort)g;
+                                    if (pt[b]++ == 0) ps[count++] = (ushort)b;
                                 }
                             }
+                            // the bits the block adds to an adaptive code that has seen the blocks before it
+                            // (the term for the totals is the same for every mode and left out)
                             double cost = 0;
-                            for (int c = 0; c < 4; c++)
+                            for (int i = 0; i < count; i++)
                             {
-                                cost += XLogX(accN[c] + npx) - XLogX(accN[c]);
-                                int* t = pt + c * 256, a = pacc + c * 256;
-                                for (int i = 0; i < 256; i++)
-                                    if (t[i] != 0) cost -= XLogX(a[i] + t[i]) - XLogX(a[i]);
+                                int k = ps[i];
+                                cost -= XLogX(pacc[k] + pt[k]) - XLogX(pacc[k]);
                             }
                             if (mode == left || mode == top) cost -= 3;
                             if (cost < bestCost)
                             {
                                 bestCost = cost; best = mode;
                                 int* tmp = pt; pt = pb; pb = tmp;
+                                ushort* tmps = ps; ps = pbs; pbs = tmps;
+                                int tc = count; count = bestCount; bestCount = tc;
                             }
                         }
                         modes[by * tw + bx] = (byte)best;
-                        for (int i = 0; i < 1024; i++) pacc[i] += pb[i];
-                        for (int c = 0; c < 4; c++) accN[c] += npx;
+                        for (int i = 0; i < bestCount; i++) pacc[pbs[i]] += pb[pbs[i]];
                     }
                 }
             }
@@ -1466,6 +1606,7 @@ namespace PixCodec
             var r = new sbyte[size * size];
             var b = new sbyte[size * size];
             var tile = new int[256];
+            var seen = new byte[256];
             bool any = false;
             int prevG2r = 0, prevG2b = 0, prevR2b = 0;
             for (int by = 0; by < th; by++)
@@ -1479,15 +1620,15 @@ namespace PixCodec
                         for (int x = x0; x < x1; x++)
                         {
                             uint v = px[y * w + x];
+                            before[(v >> 16) & 0xff]++; before[256 + (v & 0xff)]++;
                             g[n] = (sbyte)(v >> 8); r[n] = (sbyte)(v >> 16); b[n] = (sbyte)v;
-                            before[(byte)r[n]]++; before[256 + (byte)b[n]]++;
                             n++;
                         }
                     if (bx == 0) prevG2r = prevG2b = prevR2b = 0;
 
                     // red from green
                     int g2r = 0;
-                    double best = RedCost(g, r, n, 0, tile, accR, accN, prevG2r);
+                    double best = RedCost(g, r, n, 0, tile, seen, accR, accN, prevG2r);
                     for (int step = 32; step >= 1; step >>= 1)
                     {
                         int center = g2r;
@@ -1495,13 +1636,13 @@ namespace PixCodec
                         {
                             int cand = center + s * step;
                             if (cand < -128 || cand > 127) continue;
-                            double c = RedCost(g, r, n, cand, tile, accR, accN, prevG2r);
+                            double c = RedCost(g, r, n, cand, tile, seen, accR, accN, prevG2r);
                             if (c < best) { best = c; g2r = cand; }
                         }
                     }
                     // blue from green and red
                     int g2b = 0, r2b = 0;
-                    best = BlueCost(g, r, b, n, 0, 0, tile, accB, accN, prevG2b, prevR2b);
+                    best = BlueCost(g, r, b, n, 0, 0, tile, seen, accB, accN, prevG2b, prevR2b);
                     for (int step = 32; step >= 1; step >>= 1)
                     {
                         for (int axis = 0; axis < 2; axis++)
@@ -1511,7 +1652,7 @@ namespace PixCodec
                             {
                                 int ng = axis == 0 ? cg + s * step : cg, nr = axis == 1 ? cr + s * step : cr;
                                 if (ng < -128 || ng > 127 || nr < -128 || nr > 127) continue;
-                                double c = BlueCost(g, r, b, n, ng, nr, tile, accB, accN, prevG2b, prevR2b);
+                                double c = BlueCost(g, r, b, n, ng, nr, tile, seen, accB, accN, prevG2b, prevR2b);
                                 if (c < best) { best = c; g2b = ng; r2b = nr; }
                             }
                         }
@@ -1559,34 +1700,49 @@ namespace PixCodec
             return null;
         }
 
-        static double MarginalCost(int[] tile, int[] acc, int accN, int n)
+        // The tile histograms of the searches are sparse: the values seen are listed, so that costing and clearing a
+        // histogram takes time proportional to the pixels of the block and not to the 256 bins.
+        static double RedCost(sbyte[] g, sbyte[] r, int n, int g2r, int[] tile, byte[] seen, int[] acc, int accN, int prev)
         {
-            double cost = XLogX(accN + n) - XLogX(accN);
-            for (int i = 0; i < 256; i++)
-                if (tile[i] != 0) cost -= XLogX(acc[i] + tile[i]) - XLogX(acc[i]);
-            return cost;
-        }
-
-        static double RedCost(sbyte[] g, sbyte[] r, int n, int g2r, int[] tile, int[] acc, int accN, int prev)
-        {
-            Array.Clear(tile);
-            for (int i = 0; i < n; i++) tile[(byte)(r[i] - ((g2r * g[i]) >> 5))]++;
-            double c = MarginalCost(tile, acc, accN, n);
+            int count = 0;
+            for (int i = 0; i < n; i++)
+            {
+                int v = (byte)(r[i] - ((g2r * g[i]) >> 5));
+                if (tile[v]++ == 0) seen[count++] = (byte)v;
+            }
+            double c = MarginalCost(tile, seen, count, acc, accN, n);
             if (g2r == prev) c -= 3;
             if (g2r == 0) c -= 3;
             return c;
         }
 
-        static double BlueCost(sbyte[] g, sbyte[] r, sbyte[] b, int n, int g2b, int r2b, int[] tile, int[] acc, int accN, int prevG, int prevR)
+        static double BlueCost(sbyte[] g, sbyte[] r, sbyte[] b, int n, int g2b, int r2b, int[] tile, byte[] seen, int[] acc, int accN, int prevG, int prevR)
         {
-            Array.Clear(tile);
-            for (int i = 0; i < n; i++) tile[(byte)(b[i] - ((g2b * g[i]) >> 5) - ((r2b * r[i]) >> 5))]++;
-            double c = MarginalCost(tile, acc, accN, n);
+            int count = 0;
+            for (int i = 0; i < n; i++)
+            {
+                int v = (byte)(b[i] - ((g2b * g[i]) >> 5) - ((r2b * r[i]) >> 5));
+                if (tile[v]++ == 0) seen[count++] = (byte)v;
+            }
+            double c = MarginalCost(tile, seen, count, acc, accN, n);
             if (g2b == prevG) c -= 3;
             if (g2b == 0) c -= 3;
             if (r2b == prevR) c -= 3;
             if (r2b == 0) c -= 3;
             return c;
+        }
+
+        /// <summary>Bits the tile adds to an adaptive code that has seen acc so far; clears the tile.</summary>
+        static double MarginalCost(int[] tile, byte[] seen, int count, int[] acc, int accN, int n)
+        {
+            double cost = XLogX(accN + n) - XLogX(accN);
+            for (int i = 0; i < count; i++)
+            {
+                int v = seen[i];
+                cost -= XLogX(acc[v] + tile[v]) - XLogX(acc[v]);
+                tile[v] = 0;
+            }
+            return cost;
         }
     }
 }
