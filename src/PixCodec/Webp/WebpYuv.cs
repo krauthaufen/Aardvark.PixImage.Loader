@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 namespace PixCodec
 {
@@ -24,42 +25,129 @@ namespace PixCodec
             dst[2] = Clip8(yy + ((u * 33050) >> 8) - 17685);
         }
 
-        /// <summary>Writes the visible part of the frame as interleaved RGB with <paramref name="step"/> bytes per pixel.</summary>
+        /// <summary>Writes the visible part of the frame as interleaved RGB with <paramref name="step"/> bytes per pixel
+        /// (the fourth byte, if any, is set to 255).</summary>
         public static void ToRgb(Vp8Frame f, byte[] dst, int step)
         {
             int w = f.Width, h = f.Height, uvH = (h + 1) >> 1;
-            fixed (byte* py = f.Y, pu = f.U, pv = f.V, pd = dst)
+            var chroma = new byte[2 * w + 32];
+            fixed (byte* py = f.Y, pu = f.U, pv = f.V, pd = dst, pc = chroma)
             {
+                byte* u = pc, v = pc + w + 16;
                 for (int y = 0; y < h; y++)
                 {
                     // rows 2k-1 and 2k lie between the chroma rows k-1 and k; the nearer one weighs three times as much
                     int near = y >> 1, far = (y & 1) != 0 ? near + 1 : near - 1;
                     if (far < 0 || far >= uvH) far = near;
-                    UpsampleRow(py + (long)y * f.YStride, pu + (long)near * f.UVStride, pu + (long)far * f.UVStride,
-                        pv + (long)near * f.UVStride, pv + (long)far * f.UVStride, pd + (long)y * w * step, w, step);
+                    UpsampleLine(pu + (long)near * f.UVStride, pu + (long)far * f.UVStride, u, w);
+                    UpsampleLine(pv + (long)near * f.UVStride, pv + (long)far * f.UVStride, v, w);
+                    ConvertLine(py + (long)y * f.YStride, u, v, pd + (long)y * w * step, w, step);
                 }
             }
         }
 
-        static void UpsampleRow(byte* y, byte* nu, byte* fu, byte* nv, byte* fv, byte* dst, int w, int step)
+        /// <summary>
+        /// Chroma of one output row: every sample is 9/16 of the nearest stored one, 3/16 of its two neighbors and 1/16
+        /// of the diagonal one, rounded in two steps the way libwebp does.
+        /// </summary>
+        static void UpsampleLine(byte* near, byte* far, byte* dst, int w)
         {
-            Store(y[0], (3 * nu[0] + fu[0] + 2) >> 2, (3 * nv[0] + fv[0] + 2) >> 2, dst);
+            dst[0] = (byte)((3 * near[0] + far[0] + 2) >> 2);
             int last = (w - 1) >> 1;
-            for (int x = 1; x <= last; x++)
+            int x = 1;
+            if (Vector128.IsHardwareAccelerated)
             {
-                int nl = nu[x - 1], nr = nu[x], fl = fu[x - 1], fr = fu[x];
-                int avg = nl + nr + fl + fr + 8;
-                int ua = (((avg + 2 * (nr + fl)) >> 3) + nl) >> 1;
-                int ub = (((avg + 2 * (nl + fr)) >> 3) + nr) >> 1;
-                nl = nv[x - 1]; nr = nv[x]; fl = fv[x - 1]; fr = fv[x];
-                avg = nl + nr + fl + fr + 8;
-                int va = (((avg + 2 * (nr + fl)) >> 3) + nl) >> 1;
-                int vb = (((avg + 2 * (nl + fr)) >> 3) + nr) >> 1;
-                Store(y[2 * x - 1], ua, va, dst + (2 * x - 1) * step);
-                Store(y[2 * x], ub, vb, dst + 2 * x * step);
+                var eight = Vector128.Create((ushort)8);
+                for (; x + 7 <= last; x += 8)
+                {
+                    var nl = Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(near + x - 1)).AsByte());
+                    var nr = Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(near + x)).AsByte());
+                    var fl = Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(far + x - 1)).AsByte());
+                    var fr = Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(far + x)).AsByte());
+                    var avg = nl + nr + fl + fr + eight;
+                    var odd = Vector128.ShiftRightLogical(Vector128.ShiftRightLogical(avg + (nr + fl) * (ushort)2, 3) + nl, 1);
+                    var even = Vector128.ShiftRightLogical(Vector128.ShiftRightLogical(avg + (nl + fr) * (ushort)2, 3) + nr, 1);
+                    Vp8LoopFilterSimd.ZipLo8(Vector128.Narrow(odd, odd), Vector128.Narrow(even, even)).Store(dst + 2 * x - 1);
+                }
             }
-            if ((w & 1) == 0)
-                Store(y[w - 1], (3 * nu[last] + fu[last] + 2) >> 2, (3 * nv[last] + fv[last] + 2) >> 2, dst + (w - 1) * step);
+            for (; x <= last; x++)
+            {
+                int nl = near[x - 1], nr = near[x], fl = far[x - 1], fr = far[x];
+                int avg = nl + nr + fl + fr + 8;
+                dst[2 * x - 1] = (byte)((((avg + 2 * (nr + fl)) >> 3) + nl) >> 1);
+                dst[2 * x] = (byte)((((avg + 2 * (nl + fr)) >> 3) + nr) >> 1);
+            }
+            if ((w & 1) == 0) dst[w - 1] = (byte)((3 * near[last] + far[last] + 2) >> 2);
+        }
+
+        /// <summary>(v * c) >> 8 for eight samples in 16 bit lanes: the high and the low byte of c are applied separately.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<ushort> MulHi(Vector128<ushort> v, int c)
+            => v * (ushort)(c >> 8) + Vector128.ShiftRightLogical(v * (ushort)(c & 255), 8);
+
+        /// <summary>Eight pixels: full resolution Y, U, V in 16 bit lanes to R, G, B (0..255 each, still 16 bit).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void Convert8(Vector128<ushort> y, Vector128<ushort> u, Vector128<ushort> v, out Vector128<ushort> r, out Vector128<ushort> g, out Vector128<ushort> b)
+        {
+            var yy = MulHi(y, 19077);
+            var max = Vector128.Create((short)255);
+            // red and green stay inside the signed 16 bit range; blue does not, so it is clamped at zero while unsigned
+            var rs = (yy + MulHi(v, 26149)).AsInt16() - Vector128.Create((short)14234);
+            var gs = (yy + Vector128.Create((ushort)8708)).AsInt16() - (MulHi(u, 6419) + MulHi(v, 13320)).AsInt16();
+            var bu = yy + MulHi(u, 33050);
+            bu = Vector128.Max(bu, Vector128.Create((ushort)17685)) - Vector128.Create((ushort)17685);
+            r = Vector128.Min(Vector128.ShiftRightArithmetic(Vector128.Max(rs, Vector128<short>.Zero), Fix2), max).AsUInt16();
+            g = Vector128.Min(Vector128.ShiftRightArithmetic(Vector128.Max(gs, Vector128<short>.Zero), Fix2), max).AsUInt16();
+            b = Vector128.Min(Vector128.ShiftRightLogical(bu, Fix2), max.AsUInt16());
+        }
+
+        static void ConvertLine(byte* y, byte* u, byte* v, byte* dst, int w, int step)
+        {
+            int x = 0;
+            if (Vector128.IsHardwareAccelerated)
+            {
+                for (; x + 16 <= w; x += 16)
+                {
+                    var (yl, yh) = Vector128.Widen(Vector128.Load(y + x));
+                    var (ul, uh) = Vector128.Widen(Vector128.Load(u + x));
+                    var (vl, vh) = Vector128.Widen(Vector128.Load(v + x));
+                    Convert8(yl, ul, vl, out var rl, out var gl, out var bl);
+                    Convert8(yh, uh, vh, out var rh, out var gh, out var bh);
+                    var r = Vector128.Narrow(rl, rh);
+                    var g = Vector128.Narrow(gl, gh);
+                    var b = Vector128.Narrow(bl, bh);
+                    byte* d = dst + x * step;
+                    if (step == 4)
+                    {
+                        var rg0 = Vp8LoopFilterSimd.ZipLo8(r, g); var rg1 = Vp8LoopFilterSimd.ZipHi8(r, g);
+                        var a = Vector128.Create((byte)255);
+                        var ba0 = Vp8LoopFilterSimd.ZipLo8(b, a); var ba1 = Vp8LoopFilterSimd.ZipHi8(b, a);
+                        Vp8LoopFilterSimd.ZipLo16(rg0, ba0).Store(d);
+                        Vp8LoopFilterSimd.ZipHi16(rg0, ba0).Store(d + 16);
+                        Vp8LoopFilterSimd.ZipLo16(rg1, ba1).Store(d + 32);
+                        Vp8LoopFilterSimd.ZipHi16(rg1, ba1).Store(d + 48);
+                    }
+                    else
+                    {
+                        const byte o = 255;     // selects zero
+                        (Vector128.Shuffle(r, Vector128.Create(0, o, o, 1, o, o, 2, o, o, 3, o, o, 4, o, o, 5))
+                            | Vector128.Shuffle(g, Vector128.Create(o, 0, o, o, 1, o, o, 2, o, o, 3, o, o, 4, o, o))
+                            | Vector128.Shuffle(b, Vector128.Create(o, o, 0, o, o, 1, o, o, 2, o, o, 3, o, o, 4, o))).Store(d);
+                        (Vector128.Shuffle(r, Vector128.Create(o, o, 6, o, o, 7, o, o, 8, o, o, 9, o, o, 10, o))
+                            | Vector128.Shuffle(g, Vector128.Create(5, o, o, 6, o, o, 7, o, o, 8, o, o, 9, o, o, 10))
+                            | Vector128.Shuffle(b, Vector128.Create(o, 5, o, o, 6, o, o, 7, o, o, 8, o, o, 9, o, o))).Store(d + 16);
+                        (Vector128.Shuffle(r, Vector128.Create(o, 11, o, o, 12, o, o, 13, o, o, 14, o, o, 15, o, o))
+                            | Vector128.Shuffle(g, Vector128.Create(o, o, 11, o, o, 12, o, o, 13, o, o, 14, o, o, 15, o))
+                            | Vector128.Shuffle(b, Vector128.Create(10, o, o, 11, o, o, 12, o, o, 13, o, o, 14, o, o, 15))).Store(d + 32);
+                    }
+                }
+            }
+            for (; x < w; x++)
+            {
+                byte* d = dst + x * step;
+                Store(y[x], u[x], v[x], d);
+                if (step == 4) d[3] = 255;
+            }
         }
 
         // ------------------------------------------------------------------ RGB to Y'CbCr (encoder side)

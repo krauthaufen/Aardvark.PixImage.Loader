@@ -8,41 +8,52 @@ namespace PixCodec
     /// which the callers turn into an <see cref="ImageFormatException"/> at their next check.</summary>
     internal unsafe struct Vp8lBitReader
     {
-        readonly byte* _buf;
-        readonly int _len;
-        int _pos;
+        public byte* Cur;
+        public readonly byte* End;
         public ulong Val;
         public int Bits;
 
         public Vp8lBitReader(byte* buf, int len)
         {
-            _buf = buf; _len = len; _pos = 0; Val = 0; Bits = 0;
-            Fill();
+            Cur = buf; End = buf + len; Val = 0; Bits = 0;
+            Fill(ref Val, ref Bits, ref Cur, End);
         }
 
         /// <summary>Tops the window up to at least 57 bits as long as there is input left.</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Fill()
+        public static void Fill(ref ulong val, ref int bits, ref byte* cur, byte* end)
         {
-            if (Bits <= 32) FillSlow();
+            if ((uint)bits <= 32)
+            {
+                if (end - cur >= 8)
+                {
+                    val |= Unsafe.ReadUnaligned<ulong>(cur) << bits;
+                    int n = (63 - bits) >> 3;
+                    cur += n; bits += n * 8;
+                }
+                else
+                {
+                    // through temporaries, so that the caller's variables can stay in registers
+                    ulong v = val;
+                    int b = bits;
+                    cur = FillTail(ref v, ref b, cur, end);
+                    val = v; bits = b;
+                }
+            }
         }
 
-        void FillSlow()
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static byte* FillTail(ref ulong val, ref int bits, byte* cur, byte* end)
         {
-            if (Bits < 0) return;
-            if (_pos + 8 <= _len)
+            while (bits <= 56 && cur < end)
             {
-                Val |= BinaryPrimitives.ReadUInt64LittleEndian(new ReadOnlySpan<byte>(_buf + _pos, 8)) << Bits;
-                int n = (63 - Bits) >> 3;
-                _pos += n; Bits += n * 8;
-                return;
+                val |= (ulong)*cur++ << bits;
+                bits += 8;
             }
-            while (Bits <= 56 && _pos < _len)
-            {
-                Val |= (ulong)_buf[_pos++] << Bits;
-                Bits += 8;
-            }
+            return cur;
         }
+
+        public void Fill() => Fill(ref Val, ref Bits, ref Cur, End);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Skip(int n) { Val >>= n; Bits -= n; }
@@ -68,6 +79,7 @@ namespace PixCodec
         const int GroupInts = 12;      // per prefix code group: 5 x (table offset, root mask), flags, constant ARGB part
         const int FlagTrivialLiteral = 1, FlagTrivialPixel = 2;
 
+        internal static bool Prof;
         Vp8lBitReader _br;
         readonly long _maxPixels;
         readonly TablePool _scratch = new TablePool(256);
@@ -198,13 +210,16 @@ namespace PixCodec
 
             var groups = new int[numGroups * GroupInts];
             var tables = ReadPrefixCodes(groups, mapping, cacheBits);
+            var swp = System.Diagnostics.Stopwatch.StartNew();
             var pixels = DecodePixels(xsize, ysize, groups, tables, meta, prefixBits, metaWidth, cacheBits);
+            if (level0 && Prof) Console.WriteLine($"  entropy decode {swp.ElapsedMilliseconds} ms (cache {cacheBits}, groups {numGroups})");
 
             if (level0)
             {
                 for (int i = numTransforms - 1; i >= 0; i--)
                 {
                     ref Transform t = ref transforms![i];
+                    swp.Restart();
                     switch (t.Type)
                     {
                         case 0: InversePredictor(pixels, t.XSize, ysize, t.Bits, t.Data); break;
@@ -212,6 +227,7 @@ namespace PixCodec
                         case 2: AddGreen(pixels); break;
                         default: pixels = InverseColorIndexing(pixels, t.XSize, ysize, t.Bits, t.Data); break;
                     }
+                    if (Prof) Console.WriteLine($"  transform {t.Type}: {swp.ElapsedMilliseconds} ms");
                 }
                 if (pixels.Length != (long)fullWidth * ysize) throw Bad("size");
             }
@@ -447,28 +463,17 @@ namespace PixCodec
         };
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static uint ReadSymbol(ref Vp8lBitReader br, uint[] tables, int off, int mask)
+        static uint ReadSymbol(ref ulong val, ref int bits, uint* tables, int off, int mask)
         {
-            uint e = tables[off + (int)((uint)br.Val & (uint)mask)];
+            uint e = tables[off + ((uint)val & (uint)mask)];
             if ((e & 0x80) != 0)
             {
-                br.Skip(RootBits);
-                e = tables[off + (int)(e >> 8) + (int)((uint)br.Val & ((1u << (int)(e & 0x7f)) - 1))];
+                val >>= RootBits; bits -= RootBits;
+                e = tables[off + (e >> 8) + ((uint)val & ((1u << (int)(e & 0x7f)) - 1))];
             }
-            br.Skip((int)(e & 0xff));
+            int n = (int)(e & 0xff);
+            val >>= n; bits -= n;
             return e >> 8;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int ReadLz77Value(ref Vp8lBitReader br, int prefix)
-        {
-            if (prefix < 4) return prefix + 1;
-            int extra = (prefix - 2) >> 1;
-            int offset = (2 + (prefix & 1)) << extra;
-            br.Fill();
-            int v = offset + (int)((uint)br.Val & ((1u << extra) - 1)) + 1;
-            br.Skip(extra);
-            return v;
         }
 
         uint[] DecodePixels(int xsize, int ysize, int[] groups, uint[] tables, uint[]? meta, int prefixBits, int metaWidth, int cacheBits)
@@ -483,93 +488,114 @@ namespace PixCodec
             int cacheShift = 32 - cacheBits;
             int blockMask = meta == null ? -1 : (1 << prefixBits) - 1;
 
-            ref Vp8lBitReader br = ref _br;
+            // the reader state lives in locals while the pixels are decoded
+            ulong val = _br.Val;
+            int bits = _br.Bits;
+            byte* cur = _br.Cur, bufEnd = _br.End;
             int pos = 0, x = 0, y = 0;
-            int g = 0;
-            if (meta != null) g = (int)meta[0];
-            int flags = groups[g + 10];
-            uint constant = (uint)groups[g + 11];
-            int gOff = groups[g], gMask = groups[g + 1];
-
-            while (pos < end)
+            fixed (uint* t = tables, pm = meta, pc = cache)
+            fixed (int* gs = groups)
             {
-                if (br.Bits < 0) throw Bad("data ends prematurely");
-                if (meta != null && (x & blockMask) == 0)
+                int* g = gs + (pm != null ? (int)pm[0] : 0);
+                while (pos < end)
                 {
-                    g = (int)meta[(y >> prefixBits) * metaWidth + (x >> prefixBits)];
-                    flags = groups[g + 10];
-                    constant = (uint)groups[g + 11];
-                    gOff = groups[g]; gMask = groups[g + 1];
+                    int limit = Math.Min(end, data.Length);
+                    int pendingLength = 0, pendingDist = 0;
+                    fixed (uint* d = data)
+                    {
+                        while (pos < limit)
+                        {
+                            if (bits < 0) throw Bad("data ends prematurely");
+                            if ((x & blockMask) == 0 && pm != null) g = gs + pm[(y >> prefixBits) * metaWidth + (x >> prefixBits)];
+                            Vp8lBitReader.Fill(ref val, ref bits, ref cur, bufEnd);
+                            uint px;
+                            if ((g[10] & FlagTrivialPixel) != 0) px = (uint)g[11];
+                            else
+                            {
+                                uint sym = ReadSymbol(ref val, ref bits, t, g[0], g[1]);
+                                if (sym < NumLiteral)
+                                {
+                                    if ((g[10] & FlagTrivialLiteral) != 0) px = (uint)g[11] | sym << 8;
+                                    else
+                                    {
+                                        uint r = ReadSymbol(ref val, ref bits, t, g[2], g[3]);
+                                        Vp8lBitReader.Fill(ref val, ref bits, ref cur, bufEnd);
+                                        uint b = ReadSymbol(ref val, ref bits, t, g[4], g[5]);
+                                        uint a = ReadSymbol(ref val, ref bits, t, g[6], g[7]);
+                                        px = a << 24 | r << 16 | sym << 8 | b;
+                                    }
+                                }
+                                else if (sym < NumLiteral + NumLength)
+                                {
+                                    // backward reference: length, then the distance code
+                                    int length = (int)sym - NumLiteral + 1;
+                                    if (length > 4)
+                                    {
+                                        int extra = (length - 3) >> 1;
+                                        length = ((2 + ((length - 1) & 1)) << extra) + (int)((uint)val & ((1u << extra) - 1)) + 1;
+                                        val >>= extra; bits -= extra;
+                                    }
+                                    Vp8lBitReader.Fill(ref val, ref bits, ref cur, bufEnd);
+                                    int dist = (int)ReadSymbol(ref val, ref bits, t, g[8], g[9]) + 1;
+                                    if (dist > 4)
+                                    {
+                                        int extra = (dist - 3) >> 1;
+                                        dist = ((2 + ((dist - 1) & 1)) << extra) + (int)((uint)val & ((1u << extra) - 1)) + 1;
+                                        val >>= extra; bits -= extra;
+                                    }
+                                    if (dist > 120) dist -= 120;
+                                    else
+                                    {
+                                        int m = DistanceMap[dist - 1];
+                                        dist = (m >> 4) * xsize + (8 - (m & 15));
+                                        if (dist < 1) dist = 1;
+                                    }
+                                    if (bits < 0) throw Bad("data ends prematurely");
+                                    if (dist > pos || length > end - pos) throw Bad("backward reference out of range");
+                                    if (length > limit - pos)
+                                    {
+                                        // does not fit the buffer yet: grow it first
+                                        pendingLength = length; pendingDist = dist;
+                                        break;
+                                    }
+                                    uint* dst = d + pos, src = dst - dist;
+                                    if (dist >= length) Buffer.MemoryCopy(src, dst, (long)length * 4, (long)length * 4);
+                                    else if (dist == 1) new Span<uint>(dst, length).Fill(*src);
+                                    else
+                                        for (int i = 0; i < length; i++) dst[i] = src[i];
+                                    if (pc != null)
+                                        for (int i = 0; i < length; i++) pc[(dst[i] * 0x1e35a7bdu) >> cacheShift] = dst[i];
+                                    pos += length;
+                                    x += length;
+                                    if (x >= xsize) { y += x / xsize; x %= xsize; }
+                                    if (pm != null && pos < end) g = gs + pm[(y >> prefixBits) * metaWidth + (x >> prefixBits)];
+                                    continue;
+                                }
+                                else px = pc[sym - (NumLiteral + NumLength)];   // below the cache size by construction of the alphabet
+                            }
+                            d[pos++] = px;
+                            if (pc != null) pc[(px * 0x1e35a7bdu) >> cacheShift] = px;
+                            if (++x == xsize) { x = 0; y++; }
+                        }
+                    }
+                    if (pos >= end) break;
+                    Array.Resize(ref data, (int)Math.Min(end, Math.Max((long)data.Length * 2, (long)pos + pendingLength)));
+                    if (pendingLength > 0)
+                    {
+                        if (pendingDist >= pendingLength) data.AsSpan(pos - pendingDist, pendingLength).CopyTo(data.AsSpan(pos));
+                        else
+                            for (int i = 0; i < pendingLength; i++) data[pos + i] = data[pos + i - pendingDist];
+                        if (pc != null)
+                            for (int i = 0; i < pendingLength; i++) pc[(data[pos + i] * 0x1e35a7bdu) >> cacheShift] = data[pos + i];
+                        pos += pendingLength;
+                        x += pendingLength;
+                        if (x >= xsize) { y += x / xsize; x %= xsize; }
+                        if (pm != null && pos < end) g = gs + pm[(y >> prefixBits) * metaWidth + (x >> prefixBits)];
+                    }
                 }
-                br.Fill();
-                uint sym;
-                uint px;
-                if ((flags & FlagTrivialPixel) != 0) { px = constant; goto literal; }
-                sym = ReadSymbol(ref br, tables, gOff, gMask);
-                if (sym < NumLiteral)
-                {
-                    if ((flags & FlagTrivialLiteral) != 0) px = constant | sym << 8;
-                    else
-                    {
-                        uint r = ReadSymbol(ref br, tables, groups[g + 2], groups[g + 3]);
-                        br.Fill();
-                        uint b = ReadSymbol(ref br, tables, groups[g + 4], groups[g + 5]);
-                        uint a = ReadSymbol(ref br, tables, groups[g + 6], groups[g + 7]);
-                        px = a << 24 | r << 16 | sym << 8 | b;
-                    }
-                    goto literal;
-                }
-                if (sym < NumLiteral + NumLength)
-                {
-                    int length = ReadLz77Value(ref br, (int)sym - NumLiteral);
-                    br.Fill();
-                    int distCode = ReadLz77Value(ref br, (int)ReadSymbol(ref br, tables, groups[g + 8], groups[g + 9]));
-                    int dist;
-                    if (distCode > 120) dist = distCode - 120;
-                    else
-                    {
-                        int m = DistanceMap[distCode - 1];
-                        dist = (m >> 4) * xsize + (8 - (m & 15));
-                        if (dist < 1) dist = 1;
-                    }
-                    if (br.Bits < 0) throw Bad("data ends prematurely");
-                    if (dist > pos || length > end - pos) throw Bad("backward reference out of range");
-                    if (pos + length > data.Length) Array.Resize(ref data, (int)Math.Min(end, Math.Max((long)data.Length * 2, pos + length)));
-                    var dst = data.AsSpan(pos, length);
-                    if (dist >= length) data.AsSpan(pos - dist, length).CopyTo(dst);
-                    else if (dist == 1) dst.Fill(data[pos - 1]);
-                    else
-                    {
-                        ref uint d0 = ref data[pos - dist];
-                        for (int i = 0; i < length; i++) Unsafe.Add(ref d0, i + dist) = Unsafe.Add(ref d0, i);
-                    }
-                    if (cache != null)
-                        for (int i = 0; i < dst.Length; i++) cache[(int)((dst[i] * 0x1e35a7bdu) >> cacheShift)] = dst[i];
-                    pos += length;
-                    x += length;
-                    if (x >= xsize)
-                    {
-                        y += x / xsize; x %= xsize;
-                    }
-                    if (meta != null && pos < end)
-                    {
-                        g = (int)meta[(y >> prefixBits) * metaWidth + (x >> prefixBits)];
-                        flags = groups[g + 10];
-                        constant = (uint)groups[g + 11];
-                        gOff = groups[g]; gMask = groups[g + 1];
-                    }
-                    continue;
-                }
-                // sym - 280 is below the cache size by construction of the alphabet
-                px = cache![(int)sym - (NumLiteral + NumLength)];
-
-            literal:
-                if (pos >= data.Length) Array.Resize(ref data, (int)Math.Min(end, (long)data.Length * 2));
-                data[pos++] = px;
-                if (cache != null) cache[(int)((px * 0x1e35a7bdu) >> cacheShift)] = px;
-                if (++x == xsize) { x = 0; y++; }
             }
-            if (br.Bits < 0) throw Bad("data ends prematurely");
+            if (bits < 0) throw Bad("data ends prematurely");
+            _br.Val = val; _br.Bits = bits; _br.Cur = cur;
             return data;
         }
 

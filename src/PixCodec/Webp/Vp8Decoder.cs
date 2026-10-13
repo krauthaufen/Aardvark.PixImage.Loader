@@ -2,16 +2,18 @@ using System;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 namespace PixCodec
 {
     /// <summary>The boolean entropy decoder of RFC 6386 section 7. Past the end of its data it reads zero bits.</summary>
     internal unsafe struct Vp8BoolReader
     {
-        byte* _cur, _end;
-        ulong _value;       // the low _bits + 8 bits are valid
-        uint _range;        // range - 1, 127..254 when normalized
-        int _bits;
+        // The fields are internal so that the token loop can keep them in registers (see Vp8Decoder.GetCoeffs).
+        internal byte* _cur, _end;
+        internal ulong _value;      // the low _bits + 8 bits are valid
+        internal uint _range;       // range - 1, 127..254 when normalized
+        internal int _bits;
         public bool Eof;
 
         public Vp8BoolReader(byte* data, int length)
@@ -70,6 +72,59 @@ namespace PixCodec
                 _bits -= shift;
             }
             _range = range;
+            return bit;
+        }
+
+        /// <summary>The last bytes of the data one at a time, then zeros.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static ulong LoadTail(ulong value, byte* cur, byte* end, out int consumed)
+        {
+            if (cur < end) { consumed = 1; return (value << 8) | *cur; }
+            consumed = 0;
+            return value << 8;
+        }
+
+        /// <summary><see cref="GetBit"/> on reader state held in locals of the caller.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static int Bit(ref ulong value, ref uint range, ref int bits, ref byte* cur, byte* end, int prob)
+        {
+            if (bits < 0)
+            {
+                if (end - cur >= 8)
+                {
+                    value = (value << 56) | (BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<ulong>(cur)) >> 8);
+                    cur += 7;
+                    bits += 56;
+                }
+                else
+                {
+                    value = LoadTail(value, cur, end, out int n);
+                    cur += n;
+                    bits += 8;
+                }
+            }
+            uint r = range;
+            uint split = (r * (uint)prob) >> 8;
+            uint v = (uint)(value >> bits);
+            int bit;
+            if (v > split)
+            {
+                r -= split + 1;
+                value -= (ulong)(split + 1) << bits;
+                bit = 1;
+            }
+            else
+            {
+                r = split;
+                bit = 0;
+            }
+            if (r < 127)
+            {
+                int shift = BitOperations.LeadingZeroCount(r + 1) - 24;
+                r = ((r + 1) << shift) - 1;
+                bits -= shift;
+            }
+            range = r;
             return bit;
         }
 
@@ -181,7 +236,9 @@ namespace PixCodec
             var frame = new Vp8Frame
             {
                 Width = width, Height = height, YStride = _mbW * 16, UVStride = _mbW * 8,
-                Y = new byte[_mbW * 16 * _mbH * 16], U = new byte[_mbW * 8 * _mbH * 8], V = new byte[_mbW * 8 * _mbH * 8],
+                // every macroblock is written before it is read
+                Y = GC.AllocateUninitializedArray<byte>(_mbW * 16 * _mbH * 16), U = GC.AllocateUninitializedArray<byte>(_mbW * 8 * _mbH * 8),
+                V = GC.AllocateUninitializedArray<byte>(_mbW * 8 * _mbH * 8),
             };
             DecodeMacroblocks(ref br, parts, frame);
             return frame;
@@ -510,41 +567,58 @@ namespace PixCodec
             // probs: [band][context][11] of one block type
             var bands = Vp8Tables.Bands;
             var zigzag = Vp8Tables.Zigzag;
+            // the reader state lives in locals for the whole block: going through the struct in memory for every
+            // bool would more than double the time spent here
+            ulong value = br._value;
+            uint range = br._range;
+            int bits = br._bits;
+            byte* cur = br._cur, end = br._end;
             byte* p = probs + (bands[n] * 3 + ctx) * 11;
             for (; n < 16; n++)
             {
-                if (br.GetBit(p[0]) == 0) return n;         // end of block
-                while (br.GetBit(p[1]) == 0)                // zero; no end of block may follow
+                if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[0]) == 0) break;         // end of block
+                while (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[1]) == 0)             // zero; no end of block may follow
                 {
-                    if (++n == 16) return 16;
+                    if (++n == 16) goto done;
                     p = probs + bands[n] * 33;
                 }
                 byte* next = probs + bands[n + 1] * 33;
                 int v;
-                if (br.GetBit(p[2]) == 0) { v = 1; p = next + 11; }
+                if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[2]) == 0) { v = 1; p = next + 11; }
                 else
                 {
-                    if (br.GetBit(p[3]) == 0) v = br.GetBit(p[4]) == 0 ? 2 : 3 + br.GetBit(p[5]);
-                    else if (br.GetBit(p[6]) == 0)
+                    if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[3]) == 0)
                     {
-                        if (br.GetBit(p[7]) == 0) v = 5 + br.GetBit(159);
-                        else { v = 7 + 2 * br.GetBit(165); v += br.GetBit(145); }
+                        if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[4]) == 0) v = 2;
+                        else v = 3 + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[5]);
+                    }
+                    else if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[6]) == 0)
+                    {
+                        if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[7]) == 0)
+                            v = 5 + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 159);
+                        else
+                        {
+                            v = 7 + 2 * Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 165);
+                            v += Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 145);
+                        }
                     }
                     else
                     {
-                        int b1 = br.GetBit(p[8]);
-                        int cat = 2 * b1 + br.GetBit(p[9 + b1]);
+                        int b1 = Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[8]);
+                        int cat = 2 * b1 + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, p[9 + b1]);
                         var extra = cat == 0 ? Vp8Tables.Cat3 : cat == 1 ? Vp8Tables.Cat4 : cat == 2 ? Vp8Tables.Cat5 : Vp8Tables.Cat6;
                         v = 0;
-                        for (int i = 0; extra[i] != 0; i++) v += v + br.GetBit(extra[i]);
+                        for (int i = 0; extra[i] != 0; i++) v += v + Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, extra[i]);
                         v += 3 + (8 << cat);
                     }
                     p = next + 22;
                 }
-                if (br.GetBit(128) != 0) v = -v;
+                if (Vp8BoolReader.Bit(ref value, ref range, ref bits, ref cur, end, 128) != 0) v = -v;
                 dst[zigzag[n]] = (short)(v * (n > 0 ? dqAc : dqDc));
             }
-            return 16;
+        done:
+            br._value = value; br._range = range; br._bits = bits; br._cur = cur;
+            return n;
         }
 
         // ------------------------------------------------------------------ inverse transforms
@@ -602,6 +676,11 @@ namespace PixCodec
 
         internal static void InverseDctAdd(short* c, byte* dst, int stride)
         {
+            if (Vector128.IsHardwareAccelerated)
+            {
+                InverseDctAddSimd(c, dst, stride);
+                return;
+            }
             int* tmp = stackalloc int[16];
             for (int i = 0; i < 4; i++)
             {
@@ -621,6 +700,40 @@ namespace PixCodec
                 dst[2] = Clip(dst[2] + ((b - cc) >> 3));
                 dst[3] = Clip(dst[3] + ((a - d) >> 3));
             }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<int> Mul1(Vector128<int> a) => Vector128.ShiftRightArithmetic(a * 20091, 16) + a;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<int> Mul2(Vector128<int> a) => Vector128.ShiftRightArithmetic(a * 35468, 16);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<int> Row(short* p) => Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(p)).AsInt16());
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void AddRow(byte* dst, Vector128<int> v)
+        {
+            var px = Vector128.WidenLower(Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<uint>(dst)).AsByte())).AsInt32();
+            var r = Vector128.Min(Vector128.Max(px + Vector128.ShiftRightArithmetic(v, 3), Vector128<int>.Zero), Vector128.Create(255));
+            Unsafe.WriteUnaligned(dst, Vector128.Narrow(Vector128.Narrow(r, r), Vector128.Narrow(r, r)).AsUInt32().ToScalar());
+        }
+
+        /// <summary>The same arithmetic as the scalar version, four lanes at a time.</summary>
+        static void InverseDctAddSimd(short* c, byte* dst, int stride)
+        {
+            // vertical pass: the rows of the coefficient block are the lanes' sources
+            var r0 = Row(c); var r1 = Row(c + 4); var r2 = Row(c + 8); var r3 = Row(c + 12);
+            var a = r0 + r2; var b = r0 - r2;
+            var cc = Mul2(r1) - Mul1(r3); var d = Mul1(r1) + Mul2(r3);
+            var t0 = a + d; var t1 = b + cc; var t2 = b - cc; var t3 = a - d;
+            // horizontal pass on the columns
+            Vp8LoopFilterSimd.Transpose4(ref t0, ref t1, ref t2, ref t3);
+            var dc = t0 + Vector128.Create(4);
+            a = dc + t2; b = dc - t2;
+            cc = Mul2(t1) - Mul1(t3); d = Mul1(t1) + Mul2(t3);
+            var o0 = a + d; var o1 = b + cc; var o2 = b - cc; var o3 = a - d;
+            Vp8LoopFilterSimd.Transpose4(ref o0, ref o1, ref o2, ref o3);
+            AddRow(dst, o0); AddRow(dst + stride, o1); AddRow(dst + 2 * stride, o2); AddRow(dst + 3 * stride, o3);
         }
 
         // ------------------------------------------------------------------ intra prediction
@@ -797,6 +910,40 @@ namespace PixCodec
             bool inner = info >> 24 != 0;
             int ys = f.YStride, uvs = f.UVStride;
             byte* y = fy + (long)mby * 16 * ys + mbx * 16;
+            if (Vp8LoopFilterSimd.IsSupported)
+            {
+                // kinds: 0 simple, 1 between sub-blocks, 2 between macroblocks
+                if (_simpleFilter)
+                {
+                    if (mbx > 0) Vp8LoopFilterSimd.VerticalEdge(y, y + 8 * ys, ys, 0, limit + 4, 0, 0);
+                    if (inner) for (int i = 4; i < 16; i += 4) Vp8LoopFilterSimd.VerticalEdge(y + i, y + i + 8 * ys, ys, 0, limit, 0, 0);
+                    if (mby > 0) Vp8LoopFilterSimd.HorizontalEdge16(y, ys, 0, limit + 4, 0, 0);
+                    if (inner) for (int i = 4; i < 16; i += 4) Vp8LoopFilterSimd.HorizontalEdge16(y + i * ys, ys, 0, limit, 0, 0);
+                    return;
+                }
+                byte* cu = fu + (long)mby * 8 * uvs + mbx * 8, cv = fv + (long)mby * 8 * uvs + mbx * 8;
+                if (mbx > 0)
+                {
+                    Vp8LoopFilterSimd.VerticalEdge(y, y + 8 * ys, ys, 2, limit + 4, interior, hev);
+                    Vp8LoopFilterSimd.VerticalEdge(cu, cv, uvs, 2, limit + 4, interior, hev);
+                }
+                if (inner)
+                {
+                    for (int i = 4; i < 16; i += 4) Vp8LoopFilterSimd.VerticalEdge(y + i, y + i + 8 * ys, ys, 1, limit, interior, hev);
+                    Vp8LoopFilterSimd.VerticalEdge(cu + 4, cv + 4, uvs, 1, limit, interior, hev);
+                }
+                if (mby > 0)
+                {
+                    Vp8LoopFilterSimd.HorizontalEdge16(y, ys, 2, limit + 4, interior, hev);
+                    Vp8LoopFilterSimd.HorizontalEdge8(cu, cv, uvs, 2, limit + 4, interior, hev);
+                }
+                if (inner)
+                {
+                    for (int i = 4; i < 16; i += 4) Vp8LoopFilterSimd.HorizontalEdge16(y + i * ys, ys, 1, limit, interior, hev);
+                    Vp8LoopFilterSimd.HorizontalEdge8(cu + 4 * uvs, cv + 4 * uvs, uvs, 1, limit, interior, hev);
+                }
+                return;
+            }
             int mbLimit = 2 * (limit + 4) + 1, subLimit = 2 * limit + 1;
             if (_simpleFilter)
             {

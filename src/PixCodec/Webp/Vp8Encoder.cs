@@ -1,5 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace PixCodec
 {
@@ -241,6 +243,26 @@ namespace PixCodec
         /// </summary>
         static void ForwardDct(byte* src, int srcStride, byte* pred, int predStride, int* dst)
         {
+            if (Vector128.IsHardwareAccelerated)
+            {
+                // the rows of differences, turned into columns so that the horizontal pass works on whole vectors
+                var d0 = Diff(src, pred); var d1 = Diff(src + srcStride, pred + predStride);
+                var d2 = Diff(src + 2 * srcStride, pred + 2 * predStride); var d3 = Diff(src + 3 * srcStride, pred + 3 * predStride);
+                Vp8LoopFilterSimd.Transpose4(ref d0, ref d1, ref d2, ref d3);
+                var a = d0 + d3; var b = d1 + d2; var c = d1 - d2; var d = d0 - d3;
+                var t0 = (a + b) * 8; var t2 = (a - b) * 8;
+                var t1 = Vector128.ShiftRightArithmetic(d * Cc + c * Ss + Vector128.Create(1 << 12), 13);
+                var t3 = Vector128.ShiftRightArithmetic(d * Ss - c * Cc + Vector128.Create(1 << 12), 13);
+                Vp8LoopFilterSimd.Transpose4(ref t0, ref t1, ref t2, ref t3);
+                a = t0 + t3; b = t1 + t2; c = t1 - t2; d = t0 - t3;
+                var eight = Vector128.Create(8);
+                var round = Vector128.Create(1 << 17);
+                Vector128.ShiftRightArithmetic(a + b + eight, 4).Store(dst);
+                Vector128.ShiftRightArithmetic(d * (Cc >> 2) + c * (Ss >> 2) + round, 18).Store(dst + 4);
+                Vector128.ShiftRightArithmetic(a - b + eight, 4).Store(dst + 8);
+                Vector128.ShiftRightArithmetic(d * (Ss >> 2) - c * (Cc >> 2) + round, 18).Store(dst + 12);
+                return;
+            }
             int* tmp = stackalloc int[16];
             for (int i = 0; i < 4; i++, src += srcStride, pred += predStride)
             {
@@ -256,10 +278,16 @@ namespace PixCodec
                 int a = tmp[i] + tmp[12 + i], b = tmp[4 + i] + tmp[8 + i], c = tmp[4 + i] - tmp[8 + i], d = tmp[i] - tmp[12 + i];
                 dst[i] = (a + b + 8) >> 4;
                 dst[8 + i] = (a - b + 8) >> 4;
-                dst[4 + i] = (int)(((long)d * Cc + (long)c * Ss + (1 << 19)) >> 20);
-                dst[12 + i] = (int)(((long)d * Ss - (long)c * Cc + (1 << 19)) >> 20);
+                // the constants with two bits less, so that the products stay within 32 bits
+                dst[4 + i] = (d * (Cc >> 2) + c * (Ss >> 2) + (1 << 17)) >> 18;
+                dst[12 + i] = (d * (Ss >> 2) - c * (Cc >> 2) + (1 << 17)) >> 18;
             }
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<int> Diff(byte* a, byte* b)
+            => Vector128.WidenLower(Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<uint>(a)).AsByte())).AsInt32()
+             - Vector128.WidenLower(Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<uint>(b)).AsByte())).AsInt32();
 
         /// <summary>Forward Walsh-Hadamard transform of the 16 luma DC values, the inverse of the decoder's.</summary>
         static void ForwardWht(int* src, int* dst)
@@ -294,10 +322,16 @@ namespace PixCodec
             {
                 int j = zigzag[n];
                 int c = coefs[j], q = n == 0 ? dcq : acq;
-                int a = c < 0 ? -c : c;
-                int l = (a + ((q * (n == 0 ? BiasDc : BiasAc)) >> 8)) / q;
+                int a = (c < 0 ? -c : c) + ((q * (n == 0 ? BiasDc : BiasAc)) >> 8);
+                if (a < q)
+                {
+                    // most coefficients end here
+                    levels[n] = 0; dq[j] = 0;
+                    continue;
+                }
+                int l = a / q;
                 if (l > MaxLevel) l = MaxLevel;
-                if (l != 0) last = n + 1;
+                last = n + 1;
                 if (c < 0) l = -l;
                 levels[n] = (short)l;
                 dq[j] = (short)(l * q);
@@ -305,8 +339,28 @@ namespace PixCodec
             return last;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<int> SquaredDifferences(Vector128<byte> a, Vector128<byte> b)
+        {
+            // |a - b| fits a byte; squares of pairs summed into 32 bit lanes
+            var d = Vector128.Max(a, b) - Vector128.Min(a, b);
+            var (lo, hi) = Vector128.Widen(d);
+            if (Sse2.IsSupported) return Sse2.MultiplyAddAdjacent(lo.AsInt16(), lo.AsInt16()) + Sse2.MultiplyAddAdjacent(hi.AsInt16(), hi.AsInt16());
+            var (l0, l1) = Vector128.Widen(lo);
+            var (h0, h1) = Vector128.Widen(hi);
+            return (l0 * l0 + l1 * l1 + h0 * h0 + h1 * h1).AsInt32();
+        }
+
         static int Sse4(byte* a, int aStride, byte* b, int bStride)
         {
+            if (Vector128.IsHardwareAccelerated)
+            {
+                var x = Vector128.Create(Unsafe.ReadUnaligned<uint>(a), Unsafe.ReadUnaligned<uint>(a + aStride),
+                    Unsafe.ReadUnaligned<uint>(a + 2 * aStride), Unsafe.ReadUnaligned<uint>(a + 3 * aStride)).AsByte();
+                var y = Vector128.Create(Unsafe.ReadUnaligned<uint>(b), Unsafe.ReadUnaligned<uint>(b + bStride),
+                    Unsafe.ReadUnaligned<uint>(b + 2 * bStride), Unsafe.ReadUnaligned<uint>(b + 3 * bStride)).AsByte();
+                return Vector128.Sum(SquaredDifferences(x, y));
+            }
             int s = 0;
             for (int j = 0; j < 4; j++, a += aStride, b += bStride)
             {
@@ -318,6 +372,17 @@ namespace PixCodec
 
         static int Sse(byte* a, int aStride, byte* b, int bStride, int size)
         {
+            if (Vector128.IsHardwareAccelerated)
+            {
+                var acc = Vector128<int>.Zero;
+                if (size == 16)
+                    for (int j = 0; j < 16; j++, a += aStride, b += bStride) acc += SquaredDifferences(Vector128.Load(a), Vector128.Load(b));
+                else
+                    for (int j = 0; j < 8; j += 2, a += 2 * aStride, b += 2 * bStride)
+                        acc += SquaredDifferences(Vector128.Create(Unsafe.ReadUnaligned<ulong>(a), Unsafe.ReadUnaligned<ulong>(a + aStride)).AsByte(),
+                            Vector128.Create(Unsafe.ReadUnaligned<ulong>(b), Unsafe.ReadUnaligned<ulong>(b + bStride)).AsByte());
+                return Vector128.Sum(acc);
+            }
             int s = 0;
             for (int j = 0; j < size; j++, a += aStride, b += bStride)
                 for (int i = 0; i < size; i++) { int d = a[i] - b[i]; s += d * d; }
@@ -508,10 +573,10 @@ namespace PixCodec
             byte* topM = stackalloc byte[4];
             byte* leftM = stackalloc byte[4];
             uint* bestPix = stackalloc uint[4];
+            uint* preds = stackalloc uint[40];
             short* uvLevels = stackalloc short[8 * 16];
             int* uvLasts = stackalloc int[8];
             Span<double> rough = stackalloc double[10];
-            Span<int> ranked = stackalloc int[10];
             int skipped = 0;
 
             fixed (byte* sy = _src.Y, su = _src.U, sv = _src.V, probs = _probs)
@@ -567,38 +632,36 @@ namespace PixCodec
                         Unsafe.WriteUnaligned(yb + 7 * Bps + 16, tr4);
                         Unsafe.WriteUnaligned(yb + 11 * Bps + 16, tr4);
 
-                        // ---- luma, 16x16 prediction
+                        // ---- luma, 16x16 prediction: rank the modes by prediction error, encode the best one(s) for real
                         double best16 = double.MaxValue;
                         int mode16 = 0;
-                        if (_method < 2)
+                        for (int m = 0; m < 4; m++)
                         {
-                            // cheap decision on the prediction error alone, then one real encode
-                            for (int m = 0; m < 4; m++)
-                            {
-                                Vp8Decoder.Predict16(yb, m, hasLeft, hasTop);
-                                double j = Sse(srcY, ys, yb, Bps, 16) * 256.0 + q.Lambda * I16ModeCost[m];
-                                if (j < best16) { best16 = j; mode16 = m; }
-                            }
-                            best16 = EncodeI16(srcY, ys, yb, mode16, hasLeft, hasTop, ref q, probs, tnz, leftNz, coefs, bestLevels, dq, bestRecon, bestLasts);
+                            Vp8Decoder.Predict16(yb, m, hasLeft, hasTop);
+                            rough[m] = Sse(srcY, ys, yb, Bps, 16) * 256.0 + q.Lambda * I16ModeCost[m];
                         }
-                        else
+                        int tries16 = _method < 2 ? 1 : _method < 5 ? 2 : 4;
+                        for (int t = 0; t < tries16; t++)
                         {
-                            for (int m = 0; m < 4; m++)
+                            int m = 0;
+                            for (int k = 1; k < 4; k++) if (rough[k] < rough[m]) m = k;
+                            rough[m] = double.MaxValue;
+                            double j = EncodeI16(srcY, ys, yb, m, hasLeft, hasTop, ref q, probs, tnz, leftNz, coefs, levels, dq, recon, lasts);
+                            if (j < best16)
                             {
-                                double j = EncodeI16(srcY, ys, yb, m, hasLeft, hasTop, ref q, probs, tnz, leftNz, coefs, levels, dq, recon, lasts);
-                                if (j < best16)
-                                {
-                                    best16 = j; mode16 = m;
-                                    short* tl = levels; levels = bestLevels; bestLevels = tl;
-                                    byte* tr = recon; recon = bestRecon; bestRecon = tr;
-                                    int* tla = lasts; lasts = bestLasts; bestLasts = tla;
-                                }
+                                best16 = j; mode16 = m;
+                                short* tl = levels; levels = bestLevels; bestLevels = tl;
+                                byte* tr = recon; recon = bestRecon; bestRecon = tr;
+                                int* tla = lasts; lasts = bestLasts; bestLasts = tla;
                             }
                         }
+                        // nothing left to code with whole-block prediction: finer prediction cannot gain much
+                        bool flat16 = bestLasts[0] == 0;
+                        for (int n = 1; n <= 16 && flat16; n++) flat16 = bestLasts[n] <= 1;
 
                         // ---- luma, 4x4 prediction: block after block, each predicted from what was reconstructed before
                         bool i4 = false;
-                        if (_allowI4)
+                        if (_allowI4 && !flat16)
                         {
                             double total = q.Lambda * Cost(0, 145);
                             for (int i = 0; i < 4; i++) { topM[i] = tmodes[i]; leftM[i] = leftModes[i]; }
@@ -616,17 +679,18 @@ namespace PixCodec
                                 for (int m = 0; m < 10; m++)
                                 {
                                     Vp8Decoder.Predict4(dst, m);
+                                    for (int r = 0; r < 4; r++) preds[m * 4 + r] = Unsafe.ReadUnaligned<uint>(dst + r * Bps);
                                     rough[m] = Sse4(s, ys, dst, Bps) * 256.0 + q.Lambda * modeCost[m];
-                                    ranked[m] = m;
                                 }
-                                if (tries < 10) MemoryExtensions.Sort(rough, ranked);
                                 double bestJ = double.MaxValue;
                                 int bestMode = 0, bestLast = 0;
                                 short* bl = levels + 16;        // scratch levels of the candidate
                                 for (int t = 0; t < tries; t++)
                                 {
-                                    int m = ranked[t];
-                                    Vp8Decoder.Predict4(dst, m);
+                                    int m = 0;
+                                    for (int k = 1; k < 10; k++) if (rough[k] < rough[m]) m = k;
+                                    rough[m] = double.MaxValue;
+                                    for (int r = 0; r < 4; r++) Unsafe.WriteUnaligned(dst + r * Bps, preds[m * 4 + r]);
                                     ForwardDct(s, ys, dst, Bps, coefs);
                                     int last = Quantize(coefs, bl, dq, q.Y1Dc, q.Y1Ac, 0);
                                     int rate = CoeffCost(probs + 3 * 264, ctxNz, bl, 0, last) + modeCost[m];

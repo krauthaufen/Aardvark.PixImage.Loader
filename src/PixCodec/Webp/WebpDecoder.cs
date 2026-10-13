@@ -53,7 +53,7 @@ namespace PixCodec
             if (f.Lossless)
             {
                 var argb = Vp8lDecoder.Decode(bits, out int w, out int h, maxPixels);
-                var px = new byte[w * h * channels];
+                var px = GC.AllocateUninitializedArray<byte>(w * h * channels);
                 if (channels == 4)
                     for (int i = 0, o = 0; i < argb.Length; i++, o += 4)
                     {
@@ -69,17 +69,12 @@ namespace PixCodec
                 return px;
             }
             var frame = Vp8Decoder.Decode(bits, maxPixels);
-            var dst = new byte[frame.Width * frame.Height * channels];
+            var dst = GC.AllocateUninitializedArray<byte>(frame.Width * frame.Height * channels);
             WebpYuv.ToRgb(frame, dst, channels);
-            if (channels == 4)
+            if (channels == 4 && f.AlphLength >= 0)
             {
-                if (f.AlphLength >= 0)
-                {
-                    var a = WebpAlpha.Decode(data.Slice(f.AlphOffset, f.AlphLength), frame.Width, frame.Height);
-                    for (int i = 0; i < a.Length; i++) dst[4 * i + 3] = a[i];
-                }
-                else
-                    for (int i = 3; i < dst.Length; i += 4) dst[i] = 255;
+                var a = WebpAlpha.Decode(data.Slice(f.AlphOffset, f.AlphLength), frame.Width, frame.Height);
+                for (int i = 0; i < a.Length; i++) dst[4 * i + 3] = a[i];
             }
             return dst;
         }
