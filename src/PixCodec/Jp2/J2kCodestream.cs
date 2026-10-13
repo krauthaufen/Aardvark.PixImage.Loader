@@ -79,7 +79,6 @@ namespace PixCodec
         public J2kParams? Params;
         public List<J2kTilePart> Parts = new List<J2kTilePart>();
         public List<(int z, int start, int length, int part)>? Ppt;
-        public int NextPart;
     }
 
     /// <summary>Marker level structure of a codestream: main header, tile-part index.</summary>
@@ -196,14 +195,12 @@ namespace PixCodec
                 if (U16(pos + 2) != 10) throw Bad("bad SOT length");
                 int tile = U16(pos + 4);
                 long psot = U32(pos + 6);
-                int tpsot = Data[pos + 10];
                 if (tile >= Tiles.Length) throw Bad("tile index out of range");
                 long end = psot == 0 ? Length : pos + psot;
                 if (psot != 0 && psot < 14) throw Bad("bad tile-part length");
                 if (end > Length) { end = Length; Truncated = true; }
                 var th = Tiles[tile] ??= new J2kTileHeader();
                 int p = pos + 12;
-                bool first = th.Parts.Count == 0;
                 bool sod = false;
                 while (p + 2 <= end)
                 {
@@ -222,7 +219,6 @@ namespace PixCodec
                     ReadSegment(marker, p + 4, len - 2, th.Params!, th, th.Parts.Count);
                     p += 2 + len;
                 }
-                _ = first; _ = tpsot;
                 if (!sod) { Truncated = true; break; }
                 // a tile-part running to the end of the data may be followed by EOC
                 int dataEnd = (int)end;

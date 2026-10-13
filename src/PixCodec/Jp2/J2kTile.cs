@@ -20,8 +20,9 @@ namespace PixCodec
         public int FirstChunk, LastChunk;    // list of codeword pieces in J2kTile.Chunks, 0 = none (index + 1)
         public int Passes;                   // coding passes signalled so far
         public byte Lblock, Zbp;
-        public byte Phld;                    // HT: placeholder pass sets
+        public byte Phld;                    // HT: placeholder pass sets P0 (255: not an HT block, mixed mode)
         public bool Included;
+        public bool HtStarted;               // HT: a non-empty cleanup segment was seen, P0 is final
     }
 
     /// <summary>The part of a codeword segment that one packet contributes.</summary>

@@ -283,6 +283,8 @@ namespace PixCodec
         }
 
         /// <summary>Writes the boxes in front of the codestream box and the header of the codestream box itself.</summary>
+        /// <param name="colours">1 gray, 3 RGB (the first channels); 0: the channels have no colour meaning, they are all declared
+        /// as unassociated so that readers do not take three of them for red, green and blue.</param>
         public static void WriteHeader(Stream s, int width, int height, int[] depth, bool[] signed, int colours, bool alpha, bool ht,
             ImageMetadata? meta, long codestreamLength)
         {
@@ -321,7 +323,7 @@ namespace PixCodec
             {
                 var colr = new byte[7];
                 colr[0] = 1;
-                BinaryPrimitives.WriteUInt32BigEndian(colr.AsSpan(3), colours == 1 ? (uint)CsGray : (uint)CsSrgb);
+                BinaryPrimitives.WriteUInt32BigEndian(colr.AsSpan(3), colours == 1 || (colours == 0 && nc < 3) ? (uint)CsGray : (uint)CsSrgb);
                 Box(jp2h, Colr, colr);
             }
             if (alpha || nc > colours)

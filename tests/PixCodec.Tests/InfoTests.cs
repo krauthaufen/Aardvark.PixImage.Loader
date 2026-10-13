@@ -7,7 +7,7 @@ public class InfoTests
 {
     public static IEnumerable<object[]> AllFixtures()
     {
-        var exts = new HashSet<string> { ".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".exr", ".webp" };
+        var exts = new HashSet<string> { ".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".exr", ".webp", ".jp2", ".j2k", ".j2c", ".jph", ".jhc" };
         return Directory.EnumerateFiles(TestUtil.FixtureDir, "*", SearchOption.AllDirectories)
             .Where(f => exts.Contains(Path.GetExtension(f).ToLowerInvariant()) && !f.Contains("_tmp"))
             .OrderBy(f => f, StringComparer.Ordinal)

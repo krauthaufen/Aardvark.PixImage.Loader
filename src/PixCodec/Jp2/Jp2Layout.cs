@@ -143,10 +143,11 @@ namespace PixCodec
                 bool uniform = true;
                 for (int i = 0; i < colours; i++) uniform &= !ordered[i].Signed && ordered[i].Depth == ordered[0].Depth;
                 if (colours == 3 && (cs == Jp2Header.CsSycc || cs == Jp2Header.CsEsycc || cs == 1 || cs == 3 || cs == 4) && uniform) l.Conversion = 1;
-                // Subsampled second and third components under a full resolution first one are luma and chroma even
-                // if nothing (a raw codestream) or the wrong thing (sRGB) is declared; OpenJPEG decides the same way.
+                // Second and third components subsampled 2 x 1 or 2 x 2 under a full resolution first one are luma and
+                // chroma even if nothing (a raw codestream) or the wrong thing (sRGB) is declared; OpenJPEG decides the
+                // same way, and like there other subsampling layouts are left alone.
                 if (colours == 3 && (cs < 0 || cs == Jp2Header.CsSrgb) && h.ColorMethod != 2 && uniform
-                    && siz.Dx[ordered[0].Comp] == 1 && siz.Dy[ordered[0].Comp] == 1 && (siz.Dx[ordered[1].Comp] != 1 || siz.Dy[ordered[1].Comp] != 1)
+                    && siz.Dx[ordered[0].Comp] == 1 && siz.Dy[ordered[0].Comp] == 1 && siz.Dx[ordered[1].Comp] == 2 && siz.Dy[ordered[1].Comp] <= 2
                     && siz.Dx[ordered[1].Comp] == siz.Dx[ordered[2].Comp] && siz.Dy[ordered[1].Comp] == siz.Dy[ordered[2].Comp]
                     && ordered[0].PalCol < 0) l.Conversion = 1;
                 if (colours == 4)
@@ -179,10 +180,30 @@ namespace PixCodec
             return l;
         }
 
+        /// <summary>
+        /// The direct destination for the decoder if the components are simply the channels: same size, 8 or 16 bit
+        /// unsigned, no palette, conversion or scaling. Null otherwise (then the planes are assembled afterwards).
+        /// </summary>
+        public J2kSink? TrySink(J2kSiz siz)
+        {
+            if (Conversion != 0 || Alpha == 2 || Scale || (Type != SampleType.UInt8 && Type != SampleType.UInt16)) return null;
+            if (Channels.Length != siz.NumComps || OutChannels != Channels.Length) return null;
+            var map = new int[siz.NumComps];
+            Array.Fill(map, -1);
+            for (int i = 0; i < Channels.Length; i++)
+            {
+                var c = Channels[i];
+                if (c.PalCol >= 0 || c.Signed || siz.Dx[c.Comp] != 1 || siz.Dy[c.Comp] != 1 || map[c.Comp] >= 0) return null;
+                map[c.Comp] = i;
+            }
+            return new J2kSink { Type = Type, Channels = OutChannels, ChannelOf = map };
+        }
+
         /// <summary>Interleaves the decoded planes into the output image.</summary>
-        public unsafe RawImage Assemble(J2kPlanes planes, Jp2Header h)
+        public unsafe RawImage Assemble(J2kPlanes planes, Jp2Header h, J2kSink? sink = null)
         {
             int w = planes.Width, hgt = planes.Height;
+            if (sink?.Data != null) return new RawImage(w, hgt, Color, sink.Data, OutChannels);
             int n = Channels.Length;
             if ((long)w * hgt * OutChannels > Array.MaxLength) throw new ImageNotSupportedException("JPEG 2000 image too large for one array");
             var data = RawImage.CreateArray(Type, w * hgt * OutChannels);
@@ -259,15 +280,15 @@ namespace PixCodec
                 }
                 if (Conversion == 1)
                 {
-                    // as OpenJPEG's sycc to rgb: float products truncated toward zero
+                    // as OpenJPEG's sycc to rgb: products truncated toward zero
                     long[] ry = rows[0], rcb = rows[1], rcr = rows[2];
                     int off = 1 << (OutDepth - 1);
                     for (int x = 0; x < w; x++)
                     {
                         int yy = (int)ry[x], cb = (int)rcb[x] - off, cr = (int)rcr[x] - off;
-                        ry[x] = Math.Clamp(yy + (int)(1.402f * cr), 0, outMax);
-                        rcb[x] = Math.Clamp(yy - (int)(0.344f * cb + 0.714f * cr), 0, outMax);
-                        rcr[x] = Math.Clamp(yy + (int)(1.772f * cb), 0, outMax);
+                        ry[x] = Math.Clamp(yy + (int)(1.402 * cr), 0, outMax);
+                        rcb[x] = Math.Clamp(yy - (int)(0.344 * cb + 0.714 * cr), 0, outMax);
+                        rcr[x] = Math.Clamp(yy + (int)(1.772 * cb), 0, outMax);
                     }
                 }
                 else if (Conversion == 2)

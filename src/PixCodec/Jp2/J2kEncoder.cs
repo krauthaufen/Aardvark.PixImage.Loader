@@ -119,6 +119,12 @@ namespace PixCodec
         readonly ConcurrentBag<J2kBlockCoder> _coders = new ConcurrentBag<J2kBlockCoder>();
         /// <summary>Test hook: code the HT cleanup pass one bit plane up and add SigProp and MagRef passes.</summary>
         internal static bool HtRefinementPasses;
+        /// <summary>
+        /// Test hook: with several layers, put this many sets of placeholder passes in front of every HT block's
+        /// cleanup pass, spread over the layers before the last one (what a transcoder does to keep the layer
+        /// boundaries of a Part 1 codestream, T.814 Annex B).
+        /// </summary>
+        internal static int HtPlaceholderSets;
 
         // ---------------- entry points ----------------
 
@@ -166,7 +172,7 @@ namespace PixCodec
             bool rgb = image.Color == ColorModel.Rgb || image.Color == ColorModel.Rgba;
             var enc = new J2kEncoder(planes, o, rgb && o.ColorTransform);
             long extra = 0;
-            int colours = image.Color == ColorModel.Gray || image.Color == ColorModel.GrayAlpha ? 1 : rgb ? 3 : n >= 3 ? 3 : 1;
+            int colours = image.Color == ColorModel.Gray || image.Color == ColorModel.GrayAlpha || n == 1 ? 1 : rgb ? 3 : 0;
             var meta = o.WriteMetadata ? image.Metadata : null;
             if (!o.RawCodestream)
             {
@@ -247,7 +253,7 @@ namespace PixCodec
             if (cbw < 2 || cbw > 10 || cbh < 2 || cbh > 10 || cbw + cbh > 12) throw new ArgumentException("code-block size must be 4..1024 with at most 4096 samples");
             _style = _ht ? J2kCod.Ht | ((int)(o.BlockStyle & Jp2BlockStyle.VerticalCausal)) : (int)o.BlockStyle & 63;
             bool predOnly = (_style & J2kCod.PredTerm) != 0 && (_style & J2kCod.TermAll) == 0;
-            _layers = _ht || predOnly ? 1 : Math.Clamp(o.Layers, 1, 65535);
+            _layers = (_ht && HtPlaceholderSets == 0) || predOnly ? 1 : Math.Clamp(o.Layers, 1, 65535);
             var cod = new J2kCod { Levels = levels, CbW = cbw, CbH = cbh, Style = _style, Reversible = _reversible, PPx = new int[levels + 1], PPy = new int[levels + 1] };
             for (int r = 0; r <= levels; r++)
             {
@@ -318,6 +324,21 @@ namespace PixCodec
             }
         }
 
+        /// <summary>
+        /// Quantizer step (for 8 bit data) of a quality setting. The scale follows the feel of JPEG's: on photographs
+        /// 95 gives about 42 dB, 85 about 40 dB, 75 about 38 dB, 50 about 37 dB and 25 about 35 dB PSNR.
+        /// </summary>
+        static double QualityStep(int quality)
+        {
+            ReadOnlySpan<double> q = stackalloc double[] { 1, 10, 25, 50, 75, 85, 95, 100 };
+            ReadOnlySpan<double> log2 = stackalloc double[] { 7.5, 6.8, 5.75, 4.9, 4.15, 3.65, 2.9, -0.5 };
+            double x = Math.Clamp(quality, 1, 100);
+            int i = 0;
+            while (i < q.Length - 2 && x > q[i + 1]) i++;
+            double t = (x - q[i]) / (q[i + 1] - q[i]);
+            return Math.Pow(2, log2[i] + t * (log2[i + 1] - log2[i]));
+        }
+
         J2kBlockCoder RentCoder() => _coders.TryTake(out var c) ? c : new J2kBlockCoder();
 
         // ---------------- pipeline ----------------
@@ -342,7 +363,7 @@ namespace PixCodec
                 double bps = _o.TargetBitsPerPixel / Math.Max(1, _nc >= 3 ? 1.5 : _nc);
                 baseStep = range / 256.0 * Math.Clamp(Math.Pow(2, 1.0 - bps * 1.2), 1 / 64.0, 2.0);
             }
-            else baseStep = range / 256.0 * Math.Pow(2, (85 - Math.Clamp(_o.Quality, 1, 100)) / 10.0);
+            else baseStep = range / 256.0 * QualityStep(_o.Quality);
 
             _tiles = new J2kTile[nt];
             MemoryStream result;
@@ -617,6 +638,16 @@ namespace PixCodec
                         ? J2kHtEncoder.Encode(coder, d64, w, h, HtRefinementPasses ? 1 : 0, HtRefinementPasses, (_style & J2kCod.Causal) != 0, eb)
                         : J2kHtEncoder.Encode(coder, d32, w, h, HtRefinementPasses ? 1 : 0, HtRefinementPasses, (_style & J2kCod.Causal) != 0, eb);
                     if (!ok) throw new ImageNotSupportedException("code-block too complex for the HT block coder; use smaller code-blocks");
+                    eb.Placeholders = 0;
+                    int sets = HtPlaceholderSets;
+                    if (sets > 0 && eb.Passes > 0)
+                    {
+                        int add = 3 * sets, n = eb.Passes;
+                        var len = new int[add + n]; var term = new bool[add + n];
+                        Array.Copy(eb.PassLen, 0, len, add, n); Array.Copy(eb.PassTerm, 0, term, add, n);
+                        eb.PassLen = len; eb.PassTerm = term; eb.PassDist = new double[add + n];
+                        eb.Passes = add + n; eb.NumBps += sets; eb.Placeholders = sets;
+                    }
                 }
                 else if (wide) coder.Encode(d64, w, h, band.Orient, _style, eb, rateControl);
                 else coder.Encode(d32, w, h, band.Orient, _style, eb, rateControl);
@@ -681,26 +712,35 @@ namespace PixCodec
             foreach (var b in blocks) b.LayerPasses = new int[_layers];
             if (!rateControl)
             {
-                foreach (var b in blocks) Array.Fill(b.LayerPasses, b.Passes);
+                foreach (var b in blocks)
+                {
+                    Array.Fill(b.LayerPasses, b.Passes);
+                    // placeholder passes trickle in two or three at a time, the cleanup pass comes with the last layer
+                    if (b.Placeholders > 0)
+                        for (int l = 0; l < _layers - 1; l++) b.LayerPasses[l] = Math.Min(3 * l + 2, 3 * b.Placeholders);
+                }
                 return;
             }
             long all = 0;
             foreach (var b in blocks) all += b.Passes > 0 ? b.PassLen[b.Passes - 1] : 0;
             // every hull step, steepest first
-            var steps = new List<(float slope, int bytes)>();
-            foreach (var b in blocks)
+            var steps = new List<(float slope, int bytes, int block, int point)>();
+            for (int bi = 0; bi < blocks.Count; bi++)
             {
+                var b = blocks[bi];
                 int prev = 0;
                 for (int i = 0; i < b.Hull.Length; i++)
                 {
                     int len = b.PassLen[b.Hull[i] - 1];
-                    steps.Add((b.Slope[i], len - prev));
+                    steps.Add((b.Slope[i], len - prev, bi, i));
                     prev = len;
                 }
             }
-            steps.Sort((x, y) => y.slope.CompareTo(x.slope));
+            steps.Sort((x, y) => y.slope != x.slope ? y.slope.CompareTo(x.slope) : x.block != y.block ? x.block.CompareTo(y.block) : x.point.CompareTo(y.point));
             bool everythingLast = lastLayerBytes <= 0;
             double last = everythingLast ? all : lastLayerBytes;
+            var taken = new int[blocks.Count];      // hull points included so far
+            var closed = new bool[blocks.Count];
             for (int l = 0; l < _layers; l++)
             {
                 if (l == _layers - 1 && everythingLast)
@@ -708,23 +748,22 @@ namespace PixCodec
                     foreach (var b in blocks) b.LayerPasses[l] = b.Passes;
                     break;
                 }
+                // The steepest steps first; a step that does not fit closes its block for this layer (the steps of
+                // a block come in order), smaller steps of other blocks may still use what is left.
                 double budget = last * Math.Pow(2, l + 1 - _layers);
-                float threshold = float.MaxValue;
                 double sum = 0;
-                bool cut = false;
+                Array.Clear(taken); Array.Clear(closed);
                 foreach (var s in steps)
                 {
-                    if (sum + s.bytes > budget) { cut = true; break; }
+                    if (closed[s.block]) continue;
+                    if (sum + s.bytes > budget) { closed[s.block] = true; continue; }
                     sum += s.bytes;
-                    threshold = s.slope;
+                    taken[s.block] = s.point + 1;
                 }
-                if (!cut) threshold = 0;
-                foreach (var b in blocks)
+                for (int bi = 0; bi < blocks.Count; bi++)
                 {
-                    int passes = 0;
-                    for (int i = 0; i < b.Hull.Length; i++)
-                        if (b.Slope[i] >= threshold && threshold < float.MaxValue) passes = b.Hull[i]; else break;
-                    if (!cut) passes = Math.Max(passes, b.Hull.Length > 0 ? b.Hull[^1] : 0);
+                    var b = blocks[bi];
+                    int passes = taken[bi] > 0 ? b.Hull[taken[bi] - 1] : 0;
                     b.LayerPasses[l] = Math.Max(passes, l > 0 ? b.LayerPasses[l - 1] : 0);
                 }
             }
@@ -752,7 +791,7 @@ namespace PixCodec
                             int qi = r == 0 ? 0 : 3 * (r - 1) + res.Bands[b].Orient;
                             foreach (var prec in res.Precincts)
                                 foreach (var eb in prec!.Bands[b].Enc!)
-                                    guard = Math.Max(guard, eb.MagBits - q.Exp[qi] + 1);
+                                    guard = Math.Max(guard, Math.Max(eb.MagBits, eb.NumBps) - q.Exp[qi] + 1);
                         }
                     }
                 }
@@ -775,13 +814,16 @@ namespace PixCodec
             if (rateControl) foreach (var b in AllBlocks()) BuildHull(b);
 
             var bodies = new byte[nt][];
+            var packed = new byte[nt][];
+            byte[] ppm = Array.Empty<byte>();
             for (int attempt = 0; ; attempt++)
             {
                 AllocateLayers(rateControl, budget);
-                void One(int t) => bodies[t] = WriteTile(_tiles[t]);
+                void One(int t) => bodies[t] = WriteTile(_tiles[t], out packed[t]);
                 if (_parallel && nt > 1) Parallel.For(0, nt, One); else for (int t = 0; t < nt; t++) One(t);
+                if (_o.PacketHeaders == Jp2PacketHeaders.MainHeader) ppm = PackedSegments(J2kCodestream.PPM, packed, true);
                 if (targetBytes <= 0 || !rateControl) break;
-                long total = header.Length + tlmBytes + 2;
+                long total = header.Length + tlmBytes + 2 + ppm.Length;
                 foreach (var b in bodies) total += b.Length;
                 // packet headers are not part of the allocation: take what they cost off the budget and redo
                 if (total <= targetBytes || attempt >= 6 || budget <= 0) break;
@@ -790,6 +832,7 @@ namespace PixCodec
 
             var ms = new MemoryStream();
             header.WriteTo(ms);
+            ms.Write(ppm);
             Span<byte> buf = stackalloc byte[8];
             if (_o.TileLengthMarkers)
             {
@@ -877,11 +920,40 @@ namespace PixCodec
                     }
         }
 
-        /// <summary>One tile-part holding all packets of the tile, with SOT and SOD.</summary>
-        byte[] WriteTile(J2kTile tile)
+        /// <summary>
+        /// Packed packet headers as PPT / PPM marker segments of at most 65535 bytes. For PPM every tile-part's
+        /// headers are preceded by their length (Nppm); the stream of those may be cut anywhere between segments.
+        /// </summary>
+        static byte[] PackedSegments(int marker, byte[][] headers, bool lengths)
+        {
+            var all = new MemoryStream();
+            Span<byte> b4 = stackalloc byte[4];
+            foreach (var h in headers)
+            {
+                if (lengths) { BinaryPrimitives.WriteUInt32BigEndian(b4, (uint)h.Length); all.Write(b4); }
+                all.Write(h);
+            }
+            var data = all.GetBuffer().AsSpan(0, (int)all.Length);
+            var ms = new MemoryStream();
+            int index = 0;
+            for (int pos = 0; pos < data.Length || index == 0; index++)
+            {
+                int n = Math.Min(65532, data.Length - pos);
+                if (index > 255) throw new ImageNotSupportedException("packet headers too large to pack; use Jp2PacketHeaders.InPackets or smaller tiles");
+                ms.WriteByte((byte)(marker >> 8)); ms.WriteByte((byte)marker);
+                ms.WriteByte((byte)((n + 3) >> 8)); ms.WriteByte((byte)(n + 3));
+                ms.WriteByte((byte)index);
+                ms.Write(data.Slice(pos, n));
+                pos += n;
+            }
+            return ms.ToArray();
+        }
+
+        /// <summary>One tile-part holding all packets of the tile, with SOT and SOD. Packed packet headers are returned separately.</summary>
+        byte[] WriteTile(J2kTile tile, out byte[] packedHeaders)
         {
             var ms = new MemoryStream();
-            ms.Write(stackalloc byte[14]);   // SOT (12 bytes) and SOD, filled in below
+            var hs = _o.PacketHeaders != Jp2PacketHeaders.InPackets ? new MemoryStream() : null;
             // tag trees
             foreach (var tc in tile.Comps)
                 for (int r = 0; r <= tc.OutRes; r++)
@@ -958,7 +1030,9 @@ namespace PixCodec
                             int pass = eb.Included, need = 0;
                             while (pass < now)
                             {
-                                int m = Math.Min(now - pass, eb.Ht ? J2kPacketReader.HtSegmentPasses(0, pass) : J2kBlockCoder.SegmentPasses(_style, pass));
+                                // HT: passes before the cleanup pass are placeholders, one empty segment per packet
+                                int m = Math.Min(now - pass, !eb.Ht ? J2kBlockCoder.SegmentPasses(_style, pass)
+                                    : now <= 3 * eb.Placeholders ? now - pass : J2kPacketReader.HtSegmentPasses(eb.Placeholders, pass));
                                 int len = eb.PassLen[pass + m - 1] - (pass == 0 ? 0 : eb.PassLen[pass - 1]);
                                 pieces.Add((m, len));
                                 need = Math.Max(need, 32 - BitOperations.LeadingZeroCount((uint)len) - BitOperations.Log2((uint)m));
@@ -972,8 +1046,9 @@ namespace PixCodec
                             eb.Included = now;
                         }
                 bits.Flush();
-                ms.Write(bits.Buf, 0, bits.Pos);
-                if (_o.PacketMarkers) { ms.WriteByte(0xFF); ms.WriteByte(0x92); }
+                var to = hs ?? ms;
+                to.Write(bits.Buf, 0, bits.Pos);
+                if (_o.PacketMarkers) { to.WriteByte(0xFF); to.WriteByte(0x92); }
                 foreach (var (data, start, len) in bodies) ms.Write(data, start, len);
                 return true;
             }
@@ -982,13 +1057,17 @@ namespace PixCodec
             J2kProgression.Run(tile, _cs.Siz, new J2kPoc { ResStart = 0, CompStart = 0, LayerEnd = _layers, ResEnd = maxRes + 1, CompEnd = _nc, Order = _cs.Main.Order },
                 Packet, ref spin, int.MaxValue);
 
-            var bytes = ms.ToArray();
+            packedHeaders = hs?.ToArray() ?? Array.Empty<byte>();
+            byte[] ppt = _o.PacketHeaders == Jp2PacketHeaders.TileHeader ? PackedSegments(J2kCodestream.PPT, new[] { packedHeaders }, false) : Array.Empty<byte>();
+            var bytes = new byte[14 + ppt.Length + ms.Length];
             BinaryPrimitives.WriteUInt16BigEndian(bytes, J2kCodestream.SOT);
             BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(2), 10);
             BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(4), (ushort)tile.Index);
             BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(6), (uint)bytes.Length);
             bytes[10] = 0; bytes[11] = 1;
-            BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(12), J2kCodestream.SOD);
+            ppt.CopyTo(bytes, 12);
+            BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(12 + ppt.Length), J2kCodestream.SOD);
+            ms.GetBuffer().AsSpan(0, (int)ms.Length).CopyTo(bytes.AsSpan(14 + ppt.Length));
             return bytes;
         }
     }

@@ -25,6 +25,8 @@ def decode(path):
             return imagecodecs.jpeg8_decode(f.read())
     if ext == '.webp':
         return decode_webp(path)
+    if ext in ('.jp2', '.j2k', '.j2c', '.jph', '.jhc'):
+        return decode_jp2(path)
     from PIL import Image
     im = Image.open(path)
     if ext == '.png':
@@ -220,6 +222,43 @@ def decode_webp(path):
     if path.lower().endswith('.anim.webp'):
         return np.concatenate(frames, axis=0)
     return frames[0] if output_has_alpha(data) else frames[0][:, :, :3]
+
+
+def decode_jp2(path):
+    """JPEG 2000 / HTJ2K: the components as stored, one channel each (no palette, channel definition or colour space
+    is applied), by OpenJPEG through imagecodecs. HT codestreams OpenJPEG rejects (more than 31 bit) go to OpenJPH.
+    As PixCodec does, unsigned samples of less than 8 bit are scaled to 8 bit. Exits with status 77 when no decoder
+    here can read the file (imagecodecs missing, subsampled components, 32 bit Part 1 streams)."""
+    import struct
+    try:
+        import imagecodecs
+    except ImportError:
+        sys.exit(77)
+    with open(path, 'rb') as f:
+        data = f.read()
+    i = data.find(b'\xff\x4f\xff\x51')
+    nc = struct.unpack('>H', data[i + 40:i + 42])[0]
+    comps = [struct.unpack('>BBB', data[i + 42 + 3 * c:i + 45 + 3 * c]) for c in range(nc)]
+    depth, signed = max((c[0] & 127) + 1 for c in comps), bool(comps[0][0] & 128)
+    a = None
+    for dec in (imagecodecs.jpeg2k_decode, imagecodecs.htj2k_decode):
+        try:
+            a = dec(data)
+            break
+        except Exception as e:   # noqa: BLE001 - whatever the binding raises means "cannot read this one"
+            err = e
+    if a is None:
+        sys.stderr.write(f'no JPEG 2000 decoder here reads this file: {err}\n')
+        sys.exit(77)
+    if a.ndim == 2:
+        a = a[:, :, None]
+    elif a.shape[2] != nc and a.shape[0] == nc:
+        a = np.moveaxis(a, 0, -1)
+    if not signed and depth < 8:
+        m = (1 << depth) - 1
+        return ((a.astype(np.int64) * 255 + m // 2) // m).astype(np.uint8)
+    kind = 'i' if signed else 'u'
+    return a.astype(np.dtype(kind + str(1 if depth <= 8 else 2 if depth <= 16 else 4)))
 
 
 def decode_exr(path):

@@ -23,8 +23,6 @@ namespace PixCodec
         readonly byte[] _cx = new byte[J2kT1.NumCtx];
         // HT scratch lives here too (see J2kHtDecoder)
         public J2kHtScratch? Ht;
-        // per-thread scratch for the wavelet rows
-        public int[]? Line;
 
         const ulong Sig4 = 0x1000100010001000, Visit4 = 0x2000200020002000, Nb4 = 0x00FF00FF00FF00FF;
 
