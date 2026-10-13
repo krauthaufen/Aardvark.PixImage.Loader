@@ -1434,6 +1434,39 @@ public class TiffTests
         }
     }
 
+    /// <summary>
+    /// Strips whose COMPRESSED data exceeds 2 GB (noise does not compress): written row by row, read back through
+    /// the stream entry point, which feeds the decoders piece by piece. About 6 GB of RAM: only with PIXCODEC_BIG_TESTS=1.
+    /// </summary>
+    [Fact]
+    public void CompressedDataBeyond2GB()
+    {
+        if (Environment.GetEnvironmentVariable("PIXCODEC_BIG_TESTS") != "1") return;
+        int w = 33000, h = 33000;
+        var img = RawImage.Create(w, h, ColorModel.Gray, SampleType.UInt16);
+        var a = img.GetData<ushort>();
+        // noise from a small generator state: SparseStream cannot share anything here, so the file is kept on disk
+        ulong x = 88172645463325252;
+        for (int i = 0; i < a.Length; i++) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; a[i] = (ushort)x; }
+        var dir = Path.Combine(TestUtil.FixtureDir, "_tmp");
+        Directory.CreateDirectory(dir);
+        foreach (var comp in new[] { TiffCompression.PackBits, TiffCompression.Lzw, TiffCompression.Deflate })
+        {
+            var path = Path.Combine(dir, $"big_{comp}.tif");
+            try
+            {
+                using (var fs = File.Create(path))
+                    Tiff.Encode(img, fs, new TiffEncodeOptions { Compression = comp, RowsPerStrip = h, Predictor = TiffPredictor.None, CompressionLevel = 1 });
+                using var rs = File.OpenRead(path);
+                var tags = Tiff.ReadTags(rs);
+                Assert.True(tags.Single(t => t.Id == 279).AsIntegers()[0] > int.MaxValue, $"{comp}: the strip is not larger than 2 GB");
+                var back = Tiff.Decode(rs);
+                Assert.True(a.AsSpan().SequenceEqual(back.GetData<ushort>()), comp.ToString());
+            }
+            finally { File.Delete(path); }
+        }
+    }
+
     [Theory]
     [InlineData(TiffCompression.None, 0, 64)]
     [InlineData(TiffCompression.None, 0, 100000)]

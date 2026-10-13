@@ -730,4 +730,108 @@ namespace PixCodec
             return (long)rows * rowBytes;
         }
     }
+
+    /// <summary>
+    /// Decoders for strips / tiles whose COMPRESSED data exceeds 2 GB (only reachable through the stream entry
+    /// points): the input is pulled from the source in pieces and fed to resumable versions of the LZW, PackBits and
+    /// Deflate decoders. Slower than the in-memory decoders, which is why those remain the normal path.
+    /// </summary>
+    internal static unsafe class TiffLargeChunk
+    {
+        const int Piece = 32 << 20;
+
+        public static long Decode(TiffSource src, long offset, long count, int compression, byte* dst, long dstLen)
+        {
+            var buf = System.Buffers.ArrayPool<byte>.Shared.Rent(Piece);
+            try
+            {
+                long op = 0, done = 0;
+                // LZW state
+                ulong[]? tab = compression == 5 ? new ulong[4096] : null;
+                ulong bitBuf = 0; int bits = 0, width = 9, next = 258, prevLen = 0; long prevPos = 0; bool eoi = false;
+                // PackBits state
+                int literal = 0, run = 0;
+                var inflater = compression is 8 or 32946 ? PixCodec.Compression.Zlib.CreateInflater() : null;
+
+                while (done < count && op < dstLen && !eoi)
+                {
+                    int n = (int)Math.Min(Piece, count - done);
+                    src.Read(offset + done, buf.AsSpan(0, n));
+                    if (done == 0 && compression == 5 && n >= 2 && buf[0] == 0 && (buf[1] & 1) != 0)
+                        throw new ImageNotSupportedException("TIFF: old-style LZW strips larger than 2 GB are not supported");
+                    done += n;
+                    int sp = 0;
+                    if (inflater != null)
+                    {
+                        while (sp < n && op < dstLen)
+                        {
+                            var status = inflater.Inflate(buf.AsSpan(sp, n - sp), new Span<byte>(dst + op, (int)Math.Min(dstLen - op, 1 << 30)), out int c, out int w);
+                            sp += c; op += w;
+                            if (status == PixCodec.Compression.InflateStatus.Done) { eoi = true; break; }
+                            if (c == 0 && w == 0) break;
+                        }
+                    }
+                    else if (compression == 32773)
+                    {
+                        while (sp < n && op < dstLen)
+                        {
+                            if (literal > 0)
+                            {
+                                int len = (int)Math.Min(Math.Min(literal, n - sp), dstLen - op);
+                                buf.AsSpan(sp, len).CopyTo(new Span<byte>(dst + op, len));
+                                sp += len; op += len; literal -= len;
+                            }
+                            else if (run > 0)
+                            {
+                                int len = (int)Math.Min(run, dstLen - op);
+                                new Span<byte>(dst + op, len).Fill(buf[sp++]);
+                                op += len; run = 0;
+                            }
+                            else
+                            {
+                                int c = (sbyte)buf[sp++];
+                                if (c >= 0) literal = c + 1;
+                                else if (c != -128) run = 1 - c;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // the LZW decoder of TiffLzw.Decode with the bit reservoir carried across pieces
+                        while (op < dstLen)
+                        {
+                            while (bits <= 56 && sp < n) { bitBuf |= (ulong)buf[sp++] << (56 - bits); bits += 8; }
+                            if (bits < width) break; // needs the next piece
+                            int code = (int)(bitBuf >> (64 - width));
+                            bitBuf <<= width; bits -= width;
+                            int len;
+                            if (code < 256) { dst[op] = (byte)code; len = 1; }
+                            else if (code == 256) { width = 9; next = 258; prevLen = 0; continue; }
+                            else if (code == 257) { eoi = true; break; }
+                            else
+                            {
+                                long so;
+                                if (code < next) { ulong e = tab![code]; so = (long)(e >> 16); len = (int)(e & 0xFFFF); }
+                                else if (code == next && prevLen > 0) { so = prevPos; len = prevLen + 1; }
+                                else throw new ImageFormatException("TIFF: corrupt LZW data");
+                                if (len > dstLen - op) len = (int)(dstLen - op);
+                                byte* d = dst + op, f = dst + so;
+                                for (int i = 0; i < len; i++) d[i] = f[i];
+                            }
+                            if (prevLen > 0 && next < 4096)
+                            {
+                                tab![next] = (ulong)prevPos << 16 | (uint)(prevLen + 1);
+                                next++;
+                                if (next == (1 << width) - 1 && width < 12) width++;
+                            }
+                            prevPos = op; prevLen = len;
+                            op += len;
+                        }
+                    }
+                }
+                return op;
+            }
+            finally { System.Buffers.ArrayPool<byte>.Shared.Return(buf); }
+        }
+    }
 }

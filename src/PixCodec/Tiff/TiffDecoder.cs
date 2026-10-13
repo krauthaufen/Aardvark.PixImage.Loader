@@ -941,7 +941,15 @@ namespace PixCodec
                 ReadRaw(offset, dst, expected);
                 return;
             }
-            if (count > int.MaxValue) throw new ImageNotSupportedException("TIFF: compressed strips or tiles larger than 2 GB are not supported");
+            if (count > int.MaxValue)
+            {
+                // more than 2 GB of compressed data (stream sources only): decoded piece by piece
+                if (!(Compression is 5 or 32773 or 8 or 32946) || FillOrder == 2)
+                    throw new ImageNotSupportedException("TIFF: compressed strips or tiles larger than 2 GB are not supported with this compression");
+                if (TiffLargeChunk.Decode(File.Src, offset, count, Compression, dst, expected) < expected)
+                    throw new ImageFormatException("TIFF: compressed strip/tile data is truncated");
+                return;
+            }
             byte[]? srcRent = null, rev = null;
             try
             {
