@@ -31,18 +31,39 @@ namespace PixCodec
         Background = 1,
     }
 
+    /// <summary>How the lossy encoder derives the half-resolution chroma planes.</summary>
+    public enum WebpChroma
+    {
+        /// <summary>The mean of each 2x2 block (what the decoder's interpolation undoes best on average).</summary>
+        Average = 0,
+        /// <summary>The mean in linear light: saturated edges keep their brightness to the eye, at a cost in PSNR.</summary>
+        LinearLight = 1,
+        /// <summary>The mean, then luma is corrected per pixel for the chroma the decoder will interpolate there:
+        /// sharper colored edges and text. A little slower.</summary>
+        Sharp = 2,
+    }
+
     public sealed class WebpDecodeOptions
     {
         /// <summary>Content of the frames returned by the animation API. <see cref="Webp.Decode"/> ignores it.</summary>
         public WebpFrameMode FrameMode { get; set; } = WebpFrameMode.Composited;
 
         /// <summary>
-        /// Upper bound for the canvas and for a single frame, in pixels; larger files are rejected with
-        /// <see cref="ImageNotSupportedException"/>. The default admits the largest lossless image (16384 x 16384).
+        /// Upper bound for the canvas and for a single frame, in pixels; larger files are rejected with an
+        /// <see cref="ImageNotSupportedException"/> that names this option. The default (2^28) admits the largest
+        /// lossless image (16384 x 16384), which decodes to 1 GB of Rgba.
         /// Note that a lossless WebP of a few bytes can legitimately describe an image of that size (a single color
         /// costs no bits per pixel), so lower this when decoding untrusted data with a memory budget.
         /// </summary>
         public long MaxPixels { get; set; } = 1L << 28;
+
+        /// <summary>
+        /// ICCP, EXIF and XMP chunks normally count only when the VP8X header flags them (that is what lets
+        /// <see cref="Webp.GetInfo"/> answer from the start of the file, and <see cref="Webp.GetInfo"/> always follows
+        /// the flags). With this option the decoding functions and <see cref="Webp.GetAnimationInfo"/> /
+        /// <see cref="Webp.GetXmp"/> take such chunks wherever they find them, as libwebp based readers do.
+        /// </summary>
+        public bool AcceptUnflaggedMetadata { get; set; }
     }
 
     public sealed class WebpEncodeOptions
@@ -68,6 +89,25 @@ namespace PixCodec
         /// compresses best (only alpha 0 is guaranteed to come back).
         /// </summary>
         public bool Exact { get; set; } = true;
+
+        /// <summary>
+        /// Lossy only: quality of the alpha channel, 0..100. 100 stores it lossless; below that it is reduced to fewer
+        /// levels (2 at quality 0; alpha 0 and 255 are always kept) and then stored lossless.
+        /// </summary>
+        public int AlphaQuality { get; set; } = 100;
+
+        /// <summary>
+        /// Lossless only: 100 is lossless; lower values round the color channels of pixels on edges and in texture to
+        /// multiples of 2 (80..99), 4 (60..79), 8, 16 or 32 (0..19) before encoding, so no channel is off by more than
+        /// half of that. Flat areas, alpha and fully transparent pixels stay exact.
+        /// </summary>
+        public int NearLossless { get; set; } = 100;
+
+        /// <summary>Lossy only: how chroma is subsampled. Sharp gives the best PSNR on photographs as well as on drawings.</summary>
+        public WebpChroma Chroma { get; set; } = WebpChroma.Sharp;
+
+        /// <summary>Test hook: unusual but valid choices in the lossy bitstream syntax.</summary>
+        internal Vp8Syntax? Vp8Syntax { get; set; }
 
         /// <summary>Lossy only: number of token partitions, 1, 2, 4 or 8.</summary>
         public int Partitions { get; set; } = 1;
@@ -184,7 +224,8 @@ namespace PixCodec
         /// <summary>
         /// Reads header level information without decoding pixel data. Width/Height are the canvas; Channels/Color are
         /// what <see cref="Decode"/> returns; FrameCount is the number of animation frames (1 for a still image);
-        /// Orientation and HasIccProfile are what Decode puts into the metadata.
+        /// Orientation, DpiX / DpiY (from the EXIF chunk; WebP itself has no density) and HasIccProfile are what
+        /// Decode with default options puts into the metadata.
         /// <para>
         /// The data may be a prefix of the file. A still image is answered from its first chunks, unless the VP8X
         /// header flags an ICC profile or EXIF data whose chunk has not been seen by then (EXIF normally follows the
@@ -196,44 +237,47 @@ namespace PixCodec
         {
             var c = WebpContainer.Parse(data, infoOnly: true);
             bool alpha = WebpDecoder.OutputHasAlpha(c);
+            WebpDecoder.ExifInfo(c, data, out int orientation, out double dpiX, out double dpiY);
             return new ImageInfo(ImageFormat.Webp, c.Width, c.Height, alpha ? 4 : 3, SampleType.UInt8,
                 alpha ? ColorModel.Rgba : ColorModel.Rgb, c.Frames.Count)
             {
                 BitsPerSample = 8,
                 IsAnimated = c.Animated,
                 HasIccProfile = c.IccLength >= 0,
-                Orientation = WebpDecoder.OrientationOf(c, data),
+                Orientation = orientation, DpiX = dpiX, DpiY = dpiY,
             };
         }
 
         /// <summary>Decodes a complete WebP file held in memory (first frame of an animation, composited).</summary>
         public static RawImage Decode(ReadOnlySpan<byte> data, WebpDecodeOptions? options = null)
         {
-            var c = WebpContainer.Parse(data);
-            return WebpDecoder.DecodeFirst(c, data, options ?? new WebpDecodeOptions());
+            options ??= new WebpDecodeOptions();
+            var c = WebpContainer.Parse(data, false, options.AcceptUnflaggedMetadata);
+            return WebpDecoder.DecodeFirst(c, data, options);
         }
 
         /// <summary>Reads the file level properties (and metadata) without decoding pixel data.</summary>
-        public static WebpAnimationInfo GetAnimationInfo(ReadOnlySpan<byte> data)
+        public static WebpAnimationInfo GetAnimationInfo(ReadOnlySpan<byte> data, WebpDecodeOptions? options = null)
         {
-            var c = WebpContainer.Parse(data);
+            var c = WebpContainer.Parse(data, false, options?.AcceptUnflaggedMetadata ?? false);
             var info = new WebpAnimationInfo();
             WebpDecoder.FillInfo(c, data, info);
             return info;
         }
 
         /// <summary>The XMP packet of the file ('XMP ' chunk), or null.</summary>
-        public static byte[]? GetXmp(ReadOnlySpan<byte> data)
+        public static byte[]? GetXmp(ReadOnlySpan<byte> data, WebpDecodeOptions? options = null)
         {
-            var c = WebpContainer.Parse(data);
+            var c = WebpContainer.Parse(data, false, options?.AcceptUnflaggedMetadata ?? false);
             return c.XmpLength < 0 ? null : data.Slice(c.XmpOffset, c.XmpLength).ToArray();
         }
 
         /// <summary>Decodes all frames (a still image yields one). See <see cref="WebpDecodeOptions.FrameMode"/>.</summary>
         public static WebpAnimation DecodeAnimation(ReadOnlySpan<byte> data, WebpDecodeOptions? options = null)
         {
-            var c = WebpContainer.Parse(data);
-            var st = new WebpDecoder(c, options ?? new WebpDecodeOptions());
+            options ??= new WebpDecodeOptions();
+            var c = WebpContainer.Parse(data, false, options.AcceptUnflaggedMetadata);
+            var st = new WebpDecoder(c, options);
             var frames = new List<WebpFrame>(c.Frames.Count);
             while (st.Next(data) is { } f) frames.Add(f);
             var anim = new WebpAnimation { Frames = frames };

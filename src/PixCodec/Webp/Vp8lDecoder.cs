@@ -1,6 +1,9 @@
 using System;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.X86;
 
 namespace PixCodec
 {
@@ -106,7 +109,7 @@ namespace PixCodec
             if (!TryReadHeader(data, out width, out height, out _))
                 throw new ImageFormatException("invalid WebP lossless header");
             if ((long)width * height > maxPixels)
-                throw new ImageNotSupportedException($"WebP image of {width}x{height} exceeds the configured pixel limit");
+                throw new ImageNotSupportedException($"WebP image of {width}x{height} exceeds WebpDecodeOptions.MaxPixels ({maxPixels})");
             fixed (byte* p = data)
             {
                 var dec = new Vp8lDecoder(p + 5, data.Length - 5, maxPixels);
@@ -474,7 +477,7 @@ namespace PixCodec
         uint[] DecodePixels(int xsize, int ysize, int[] groups, uint[] tables, uint[]? meta, int prefixBits, int metaWidth, int cacheBits)
         {
             long total = (long)xsize * ysize;
-            if (total > _maxPixels) throw new ImageNotSupportedException("WebP image exceeds the configured pixel limit");
+            if (total > _maxPixels) throw new ImageNotSupportedException($"WebP image exceeds WebpDecodeOptions.MaxPixels ({_maxPixels})");
             int end = (int)total;
             // The buffer grows with the decoded pixels, so that a header lying about the size cannot allocate much.
             const int Chunk = 1 << 16;
@@ -513,10 +516,11 @@ namespace PixCodec
                                     if ((g[10] & FlagTrivialLiteral) != 0) px = (uint)g[11] | sym << 8;
                                     else
                                     {
+                                        // a refill guarantees 33 bits, enough for two symbols
                                         uint r = ReadSymbol(ref val, ref bits, t, g[2], g[3]);
                                         Vp8lBitReader.Fill(ref val, ref bits, ref cur, bufEnd);
                                         uint b = ReadSymbol(ref val, ref bits, t, g[4], g[5]);
-                                        uint a = ReadSymbol(ref val, ref bits, t, g[6], g[7]);
+                                        uint a = g[7] == 0 ? t[g[6]] >> 8 : ReadSymbol(ref val, ref bits, t, g[6], g[7]);
                                         px = a << 24 | r << 16 | sym << 8 | b;
                                     }
                                 }
@@ -659,12 +663,41 @@ namespace PixCodec
             }
         }
 
+        // ---- byte-wise helpers on vectors (a pixel is four lanes)
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<byte> AddSat(Vector128<byte> a, Vector128<byte> b)
+        {
+            if (Sse2.IsSupported) return Sse2.AddSaturate(a, b);
+            if (AdvSimd.IsSupported) return AdvSimd.AddSaturate(a, b);
+            var sum = a + b;
+            return sum | Vector128.LessThan(sum, a);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<byte> SubSat(Vector128<byte> a, Vector128<byte> b)
+        {
+            if (Sse2.IsSupported) return Sse2.SubtractSaturate(a, b);
+            if (AdvSimd.IsSupported) return AdvSimd.SubtractSaturate(a, b);
+            return Vector128.Max(a, b) - b;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<byte> Half(Vector128<byte> a) => Vector128.ShiftRightLogical((a & Vector128.Create((byte)0xfe)).AsUInt16(), 1).AsByte();
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<byte> Avg(Vector128<byte> a, Vector128<byte> b) => (a & b) + Half(a ^ b);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<byte> Px(uint v) => Vector128.CreateScalarUnsafe(v).AsByte();
+
         static void InversePredictor(uint[] px, int w, int h, int bits, uint[] modes)
         {
             if (px.Length < (long)w * h) throw Bad("size");
             int tw = SubSize(w, bits);
             px[0] = AddPixels(px[0], 0xff000000);
             for (int x = 1; x < w; x++) px[x] = AddPixels(px[x], px[x - 1]);
+            bool simd = Vector128.IsHardwareAccelerated;
             fixed (uint* p0 = px)
             {
                 for (int y = 1; y < h; y++)
@@ -677,6 +710,60 @@ namespace PixCodec
                         int mode = (int)(modes[mrow + (x >> bits)] >> 8) & 15;
                         int xe = Math.Min(w, ((x >> bits) + 1) << bits);
                         // for the last pixel of a row up[x + 1] is the first pixel of the current row, as the format wants it
+                        if (simd)
+                        {
+                            // Predictors that only look at the row above take four pixels at a time. The others
+                            // depend on the pixel just decoded; the costly ones compute their four channels in one vector.
+                            switch (mode)
+                            {
+                                case 2: for (; x + 4 <= xe; x += 4) (Vector128.Load((byte*)(cur + x)) + Vector128.Load((byte*)(up + x))).Store((byte*)(cur + x)); break;
+                                case 3: for (; x + 4 <= xe; x += 4) (Vector128.Load((byte*)(cur + x)) + Vector128.Load((byte*)(up + x + 1))).Store((byte*)(cur + x)); break;
+                                case 4: for (; x + 4 <= xe; x += 4) (Vector128.Load((byte*)(cur + x)) + Vector128.Load((byte*)(up + x - 1))).Store((byte*)(cur + x)); break;
+                                case 8: for (; x + 4 <= xe; x += 4) (Vector128.Load((byte*)(cur + x)) + Avg(Vector128.Load((byte*)(up + x - 1)), Vector128.Load((byte*)(up + x)))).Store((byte*)(cur + x)); break;
+                                case 9: for (; x + 4 <= xe; x += 4) (Vector128.Load((byte*)(cur + x)) + Avg(Vector128.Load((byte*)(up + x)), Vector128.Load((byte*)(up + x + 1)))).Store((byte*)(cur + x)); break;
+                                case 11:
+                                    if (Sse2.IsSupported)
+                                    {
+                                        uint l = cur[x - 1];
+                                        for (; x < xe; x++)
+                                        {
+                                            uint t = up[x];
+                                            var tl = Px(up[x - 1]);
+                                            // the gradient estimate L + T - TL is as far from L as T is from TL
+                                            int toLeft = Sse2.SumAbsoluteDifferences(Px(t), tl).AsInt32().ToScalar();
+                                            int toTop = Sse2.SumAbsoluteDifferences(Px(l), tl).AsInt32().ToScalar();
+                                            cur[x] = l = AddPixels(cur[x], toLeft < toTop ? l : t);
+                                        }
+                                    }
+                                    break;
+                                case 12:
+                                {
+                                    var l = Px(cur[x - 1]);
+                                    for (; x < xe; x++)
+                                    {
+                                        var t = Px(up[x]);
+                                        var tl = Px(up[x - 1]);
+                                        // clamp(L + T - TL): add what T has above TL, take off what it has below
+                                        l = Px(cur[x]) + SubSat(AddSat(l, SubSat(t, tl)), SubSat(tl, t));
+                                        cur[x] = l.AsUInt32().ToScalar();
+                                    }
+                                    break;
+                                }
+                                case 13:
+                                {
+                                    var l = Px(cur[x - 1]);
+                                    for (; x < xe; x++)
+                                    {
+                                        var a = Avg(l, Px(up[x]));
+                                        var tl = Px(up[x - 1]);
+                                        // clamp(a + (a - TL) / 2), the division truncating towards zero
+                                        l = Px(cur[x]) + SubSat(AddSat(a, Half(SubSat(a, tl))), Half(SubSat(tl, a)));
+                                        cur[x] = l.AsUInt32().ToScalar();
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                         switch (mode)
                         {
                             case 0: for (; x < xe; x++) cur[x] = AddPixels(cur[x], 0xff000000); break;
@@ -707,22 +794,40 @@ namespace PixCodec
         {
             if (px.Length < (long)w * h) throw Bad("size");
             int tw = SubSize(w, bits);
-            for (int y = 0; y < h; y++)
+            bool simd = Vector128.IsHardwareAccelerated;
+            fixed (uint* p0 = px)
             {
-                var row = px.AsSpan(y * w, w);
-                int erow = (y >> bits) * tw;
-                for (int x = 0; x < w;)
+                for (int y = 0; y < h; y++)
                 {
-                    uint e = elems[erow + (x >> bits)];
-                    sbyte g2r = (sbyte)e, g2b = (sbyte)(e >> 8), r2b = (sbyte)(e >> 16);
-                    int xe = Math.Min(w, ((x >> bits) + 1) << bits);
-                    for (; x < xe; x++)
+                    uint* row = p0 + (long)y * w;
+                    int erow = (y >> bits) * tw;
+                    for (int x = 0; x < w;)
                     {
-                        uint v = row[x];
-                        sbyte g = (sbyte)(v >> 8);
-                        int r = (int)(v >> 16) + ColorDelta(g2r, g);
-                        int b = (int)v + ColorDelta(g2b, g) + ColorDelta(r2b, (sbyte)r);
-                        row[x] = (v & 0xff00ff00) | (uint)(r & 0xff) << 16 | (uint)(b & 0xff);
+                        uint e = elems[erow + (x >> bits)];
+                        sbyte g2r = (sbyte)e, g2b = (sbyte)(e >> 8), r2b = (sbyte)(e >> 16);
+                        int xe = Math.Min(w, ((x >> bits) + 1) << bits);
+                        if (simd)
+                        {
+                            var keep = Vector128.Create(0xff00ff00u).AsInt32();
+                            var low = Vector128.Create(0xff);
+                            for (; x + 4 <= xe; x += 4)
+                            {
+                                var v = Vector128.Load((int*)(row + x));
+                                var g = Vector128.ShiftRightArithmetic(Vector128.ShiftLeft(v, 16), 24);        // green, sign extended
+                                var r = Vector128.ShiftRightLogical(v, 16) + Vector128.ShiftRightArithmetic(g * g2r, 5);
+                                var rs = Vector128.ShiftRightArithmetic(Vector128.ShiftLeft(r, 24), 24);       // the new red as signed byte
+                                var b = v + Vector128.ShiftRightArithmetic(g * g2b, 5) + Vector128.ShiftRightArithmetic(rs * r2b, 5);
+                                ((v & keep) | Vector128.ShiftLeft(r & low, 16) | (b & low)).Store((int*)(row + x));
+                            }
+                        }
+                        for (; x < xe; x++)
+                        {
+                            uint v = row[x];
+                            sbyte g = (sbyte)(v >> 8);
+                            int r = (int)(v >> 16) + ColorDelta(g2r, g);
+                            int b = (int)v + ColorDelta(g2b, g) + ColorDelta(r2b, (sbyte)r);
+                            row[x] = (v & 0xff00ff00) | (uint)(r & 0xff) << 16 | (uint)(b & 0xff);
+                        }
                     }
                 }
             }
@@ -730,7 +835,19 @@ namespace PixCodec
 
         static void AddGreen(uint[] px)
         {
-            for (int i = 0; i < px.Length; i++)
+            int i = 0;
+            if (Vector128.IsHardwareAccelerated)
+            {
+                fixed (uint* p = px)
+                    for (; i + 4 <= px.Length; i += 4)
+                    {
+                        var v = Vector128.Load(p + i);
+                        var g = Vector128.ShiftRightLogical(v, 8) & Vector128.Create(0xffu);
+                        // green lands in the red and blue bytes; the byte-wise sum wraps as it should
+                        (v.AsByte() + (g | Vector128.ShiftLeft(g, 16)).AsByte()).Store((byte*)(p + i));
+                    }
+            }
+            for (; i < px.Length; i++)
             {
                 uint v = px[i], g = (v >> 8) & 0xff;
                 px[i] = (v & 0xff00ff00) | (((v & 0x00ff00ff) + (g << 16 | g)) & 0x00ff00ff);

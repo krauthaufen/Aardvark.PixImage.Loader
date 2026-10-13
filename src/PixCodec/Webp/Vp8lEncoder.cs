@@ -34,6 +34,13 @@ namespace PixCodec
 
         public long BitCount => (long)_pos * 8 + _n;
 
+        /// <summary>Appends all bits of another writer.</summary>
+        public void Append(Vp8lBitWriter other)
+        {
+            for (int i = 0; i < other._pos; i += 4) Put(BinaryPrimitives.ReadUInt32LittleEndian(other._buf.AsSpan(i)), 32);
+            if (other._n > 0) Put((uint)(other._acc & ((1UL << other._n) - 1)), other._n);
+        }
+
         public byte[] ToArray()
         {
             int bytes = (_n + 7) >> 3;
@@ -86,6 +93,8 @@ namespace PixCodec
         struct Config
         {
             public bool Palette, SubGreen, Predictor, CrossColor;
+            /// <summary>log2 of the block size of the predictor and cross-color transforms, 0 = by image size.</summary>
+            public int Bits;
         }
 
         Vp8lBitWriter EncodeBest(uint[] argb, int w, int h, bool color, Action<Vp8lBitWriter> header)
@@ -127,6 +136,14 @@ namespace PixCodec
                 int tries = _method >= 6 ? 3 : _method >= 5 ? 2 : 1;
                 if (_method == 4 && ranked[1].cost < ranked[0].cost * 1.1) tries = 2;
                 for (int i = 0; i < tries; i++) configs.Add(ranked[i].cfg);
+            }
+            if (_method >= 6 && (palette == null || configs.Contains(spatial)))
+            {
+                // finer and coarser blocks for the predictors
+                int std = (long)w * h > 1 << 22 ? 5 : 4;
+                var v = spatial;
+                v.Bits = std - 1; configs.Add(v);
+                v.Bits = std + 1; configs.Add(v);
             }
             if (_method >= 6 && color && palette == null)
             {
@@ -589,6 +606,8 @@ namespace PixCodec
             long copied = 0;
             for (int i = 0; i < tokens.Count; i++) copied += tokens.Len[i];
             if (copied * 64 < n) return tokens;
+            // at the lowest effort with matching, only drawings get the second look
+            if (_method == 1 && copied * 8 < n) return tokens;
 
             var cost = new float[n + 1];
             var step = new ushort[n + 1];
@@ -876,7 +895,7 @@ namespace PixCodec
         /// while that saves bits, and finally every block moves to the cluster whose statistics suit it best.
         /// Returns the cluster index of every block and the number of clusters.
         /// </summary>
-        int[] ClusterHistograms(int[][] hist, Layout lay, out int numClusters)
+        int[] ClusterHistograms(int[][] hist, Layout lay, int bins, out int numClusters)
         {
             int n = hist.Length;
             var assign = new int[n];
@@ -890,7 +909,7 @@ namespace PixCodec
                 keys[i] = cnt == 0 ? 0 : HistogramCost(hist[i], lay) / cnt;
             }
             Array.Sort(keys, order);
-            int m = Math.Min(n, _method >= 5 ? 96 : _method >= 4 ? 64 : _method >= 2 ? 32 : 16);
+            int m = Math.Min(n, bins);
             for (int i = 0; i < n; i++) assign[order[i]] = (int)((long)i * m / n);
 
             for (int round = 0; ; round++)
@@ -1149,19 +1168,65 @@ namespace PixCodec
         {
             int n = w * h;
             int iters = _method switch { 0 => 2, 1 => 8, 2 => 16, 3 => 32, 4 => 64, 5 => 128, _ => 256 };
-            var t = BackwardReferences(px, n, w, iters, _method >= 1, _method >= 2);
+            var t = BackwardReferences(px, n, w, iters, _method >= 1, _method >= 1);
             int cacheBits = _method >= 1 ? SelectCacheBits(t, px, _method >= 4 ? MaxCacheBits : _method >= 2 ? 8 : 6) : 0;
+            // a longer match search is no promise of a smaller file: above the standard effort the standard parse runs too
+            Tokens? standard = _method >= 5 ? BackwardReferences(px, n, w, 64, true, true) : null;
+            int blockBits = Math.Clamp((palette ? 9 : 7) - _method, 2, 9);
+            while ((long)SubSize(w, blockBits) * SubSize(h, blockBits) > MaxEntropyBlocks) blockBits++;
+            int bins = _method >= 4 ? 64 : _method >= 2 ? 32 : 16;
+            bool entropyImage = _method >= 1 && n >= 256;
+            if (_method < 5)
+            {
+                WriteImage(bw, t, px, w, h, cacheBits, entropyImage ? blockBits : 0, bins);
+                return;
+            }
+            // The estimates behind the choices above are good, not exact: write the image a few ways and keep the smallest.
+            var variants = new List<(int cache, int block, int bins)> { (cacheBits, blockBits, bins) };
+            if (entropyImage)
+            {
+                variants.Add((cacheBits, 0, bins));
+                variants.Add((cacheBits, blockBits + 1, bins));
+                if (blockBits > 2 && (long)SubSize(w, blockBits - 1) * SubSize(h, blockBits - 1) <= 4 * MaxEntropyBlocks) variants.Add((cacheBits, blockBits - 1, bins));
+                variants.Add((cacheBits, blockBits, 24));
+                if (_method >= 6) { variants.Add((cacheBits, blockBits, 128)); variants.Add((cacheBits, blockBits + 2, bins)); }
+            }
+            if (cacheBits > 0) variants.Add((0, entropyImage ? blockBits : 0, bins));
+            else if (_method >= 6) variants.Add((4, entropyImage ? blockBits : 0, bins));
+            Vp8lBitWriter? best = null;
+            foreach (var v in variants)
+            {
+                if (v.block > 9) continue;
+                var trial = new Vp8lBitWriter();
+                WriteImage(trial, t, px, w, h, v.cache, v.block, v.bins);
+                if (best == null || trial.BitCount < best.BitCount) best = trial;
+            }
+            if (standard != null)
+            {
+                int cache = SelectCacheBits(standard, px, MaxCacheBits);
+                foreach (int block in entropyImage ? new[] { blockBits, blockBits == 2 ? 0 : (palette ? 5 : 3) } : new[] { 0 })
+                {
+                    int b = block;
+                    while (b > 0 && (long)SubSize(w, b) * SubSize(h, b) > MaxEntropyBlocks) b++;
+                    var trial = new Vp8lBitWriter();
+                    WriteImage(trial, standard, px, w, h, cache, b, 64);
+                    if (trial.BitCount < best!.BitCount) best = trial;
+                }
+            }
+            bw.Append(best!);
+        }
+
+        /// <summary>Writes color cache info, the entropy image (blockBits 0: none), the prefix codes and the pixels.</summary>
+        void WriteImage(Vp8lBitWriter bw, Tokens t, uint[] px, int w, int h, int cacheBits, int blockBits, int bins)
+        {
             bw.Put(cacheBits > 0 ? 1u : 0u, 1);
             if (cacheBits > 0) bw.Put((uint)cacheBits, 4);
-
             var lay = new Layout(cacheBits);
             int[]? assign = null;
-            int blockBits = 0, blocksWide = 0, numGroups = 1;
+            int blocksWide = 0, numGroups = 1;
             int[][] hist;
-            if (_method >= 1 && n >= 256)
+            if (blockBits > 0)
             {
-                blockBits = Math.Clamp((palette ? 9 : 7) - _method, 2, 9);
-                while ((long)SubSize(w, blockBits) * SubSize(h, blockBits) > MaxEntropyBlocks) blockBits++;
                 blocksWide = SubSize(w, blockBits);
                 int blocksHigh = SubSize(h, blockBits);
                 if (blocksWide * blocksHigh > 1)
@@ -1169,7 +1234,7 @@ namespace PixCodec
                     var blockHist = new int[blocksWide * blocksHigh][];
                     for (int i = 0; i < blockHist.Length; i++) blockHist[i] = new int[lay.Total];
                     BuildHistograms(t, px, w, cacheBits, blockBits, blocksWide, blockHist, lay);
-                    assign = ClusterHistograms(blockHist, lay, out numGroups);
+                    assign = ClusterHistograms(blockHist, lay, bins, out numGroups);
                     if (numGroups == 1) assign = null;
                 }
             }
@@ -1214,12 +1279,21 @@ namespace PixCodec
             if (cfg.Palette)
             {
                 var pal = palette!;
-                if (cfg.Predictor) pal = SortByLuma(pal);
                 bw.Put(1, 1); bw.Put(3, 2);
                 bw.Put((uint)pal.Length - 1, 8);
-                var deltas = new uint[pal.Length];
-                for (int i = 0; i < pal.Length; i++) deltas[i] = i == 0 ? pal[0] : SubPixels(pal[i], pal[i - 1]);
-                EncodeSubImage(bw, deltas, pal.Length, 1);
+                Vp8lBitWriter? table = null;
+                // With prediction the indices should follow brightness. Without, the order only matters for the table
+                // itself, which is stored as differences: try a chain of nearest colors against the numeric order.
+                var orders = cfg.Predictor ? new[] { SortByLuma(pal) } : _method == 0 || pal.Length < 4 ? new[] { pal } : new[] { pal, NearestChain(pal) };
+                foreach (var order in orders)
+                {
+                    var deltas = new uint[order.Length];
+                    for (int i = 0; i < order.Length; i++) deltas[i] = i == 0 ? order[0] : SubPixels(order[i], order[i - 1]);
+                    var trial = new Vp8lBitWriter();
+                    EncodeSubImage(trial, deltas, order.Length, 1);
+                    if (table == null || trial.BitCount < table.BitCount) { table = trial; pal = order; }
+                }
+                bw.Append(table!);
                 px = ApplyPalette(px, w, h, pal, out cw);
             }
             if (cfg.SubGreen)
@@ -1233,7 +1307,7 @@ namespace PixCodec
             }
             if (cfg.Predictor)
             {
-                int bits = cw * h > 1 << 22 ? 5 : 4;
+                int bits = cfg.Bits != 0 ? cfg.Bits : cw * h > 1 << 22 ? 5 : 4;
                 bw.Put(1, 1); bw.Put(0, 2);
                 bw.Put((uint)bits - 2, 3);
                 int tw = SubSize(cw, bits), th = SubSize(h, bits);
@@ -1245,7 +1319,7 @@ namespace PixCodec
             }
             if (cfg.CrossColor)
             {
-                int bits = cw * h > 1 << 22 ? 5 : 4;
+                int bits = cfg.Bits != 0 ? cfg.Bits : cw * h > 1 << 22 ? 5 : 4;
                 int tw = SubSize(cw, bits), th = SubSize(h, bits);
                 var img = ChooseCrossColor(px, cw, h, bits);
                 if (img != null)
@@ -1284,6 +1358,31 @@ namespace PixCodec
             set.CopyTo(pal);
             Array.Sort(pal);
             return pal;
+        }
+
+        /// <summary>Orders the colors so that each one is close to its predecessor (greedy), starting from the smallest.</summary>
+        static uint[] NearestChain(uint[] pal)
+        {
+            var res = new uint[pal.Length];
+            var used = new bool[pal.Length];
+            uint cur = pal[0];
+            used[0] = true;
+            res[0] = cur;
+            for (int k = 1; k < pal.Length; k++)
+            {
+                int best = -1, bestDist = int.MaxValue;
+                for (int i = 0; i < pal.Length; i++)
+                {
+                    if (used[i]) continue;
+                    uint v = pal[i];
+                    int d = Math.Abs((int)(v >> 24) - (int)(cur >> 24)) + Math.Abs((int)((v >> 16) & 0xff) - (int)((cur >> 16) & 0xff))
+                          + Math.Abs((int)((v >> 8) & 0xff) - (int)((cur >> 8) & 0xff)) + Math.Abs((int)(v & 0xff) - (int)(cur & 0xff));
+                    if (d < bestDist) { bestDist = d; best = i; }
+                }
+                used[best] = true;
+                cur = res[k] = pal[best];
+            }
+            return res;
         }
 
         static uint[] SortByLuma(uint[] pal)

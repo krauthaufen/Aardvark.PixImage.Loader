@@ -106,24 +106,15 @@ namespace PixCodec
             uint r = range;
             uint split = (r * (uint)prob) >> 8;
             uint v = (uint)(value >> bits);
-            int bit;
-            if (v > split)
-            {
-                r -= split + 1;
-                value -= (ulong)(split + 1) << bits;
-                bit = 1;
-            }
-            else
-            {
-                r = split;
-                bit = 0;
-            }
-            if (r < 127)
-            {
-                int shift = BitOperations.LeadingZeroCount(r + 1) - 24;
-                r = ((r + 1) << shift) - 1;
-                bits -= shift;
-            }
+            // Without branches: the caller branches on the result anyway, and a second unpredictable branch here
+            // (plus one for the normalization) would cost more than the arithmetic.
+            uint mask = (uint)((int)(split - v) >> 31);         // all ones for a 1
+            int bit = (int)(mask & 1);
+            value -= (ulong)((split + 1) & mask) << bits;
+            r = split + (mask & (r - 2 * split - 1));           // 1: r - split - 1, 0: split
+            int shift = BitOperations.LeadingZeroCount(r + 1) - 24;
+            r = ((r + 1) << shift) - 1;
+            bits -= shift;
             range = r;
             return bit;
         }
@@ -203,7 +194,7 @@ namespace PixCodec
         {
             if (!TryReadHeader(data, out int w, out int h)) throw Bad("frame header");
             if ((long)w * h > maxPixels)
-                throw new ImageNotSupportedException($"WebP image of {w}x{h} exceeds the configured pixel limit");
+                throw new ImageNotSupportedException($"WebP image of {w}x{h} exceeds WebpDecodeOptions.MaxPixels ({maxPixels})");
             fixed (byte* p = data) return new Vp8Decoder().DecodeFrame(p, data.Length, w, h);
         }
 
@@ -354,6 +345,11 @@ namespace PixCodec
             var bprobs = Vp8Tables.BModeProbs;
             int partMask = _numParts - 1;
             bool filter = _filterLevel > 0;
+            // the state of the first partition's reader stays in locals (see GetCoeffs)
+            ulong bv = br._value;
+            uint br1 = br._range;
+            int bb = br._bits;
+            byte* bc = br._cur, be = br._end;
 
             fixed (byte* fy = frame.Y, fu = frame.U, fv = frame.V, probs = _probs)
             fixed (byte* pTopY = topY, pTopU = topU, pTopV = topV, pTopNz = topNz)
@@ -368,13 +364,13 @@ namespace PixCodec
                         // ---- prediction record (first partition)
                         int segment = 0;
                         if (_updateMap)
-                            segment = br.GetBit(_segProbs[0]) == 0 ? br.GetBit(_segProbs[1]) : 2 + br.GetBit(_segProbs[2]);
-                        bool skip = _useSkip && br.GetBit(_skipProb) != 0;
-                        bool i4 = br.GetBit(145) == 0;
+                            segment = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _segProbs[0]) == 0 ? Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _segProbs[1]) : 2 + Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _segProbs[2]);
+                        bool skip = _useSkip && Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, _skipProb) != 0;
+                        bool i4 = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 145) == 0;
                         int ymode = 0;
                         if (!i4)
                         {
-                            ymode = br.GetBit(156) != 0 ? (br.GetBit(128) != 0 ? TmPred : HPred) : (br.GetBit(163) != 0 ? VPred : DcPred);
+                            ymode = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 156) != 0 ? (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 128) != 0 ? TmPred : HPred) : (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 163) != 0 ? VPred : DcPred);
                             for (int i = 0; i < 4; i++) { topModes[4 * mbx + i] = (byte)ymode; leftModes[i] = (byte)ymode; }
                         }
                         else
@@ -386,11 +382,11 @@ namespace PixCodec
                                 {
                                     var p = bprobs.Slice((topModes[4 * mbx + x] * 10 + l) * 9, 9);
                                     int m;
-                                    if (br.GetBit(p[0]) == 0) m = BDc;
-                                    else if (br.GetBit(p[1]) == 0) m = BTm;
-                                    else if (br.GetBit(p[2]) == 0) m = BVe;
-                                    else if (br.GetBit(p[3]) == 0) m = br.GetBit(p[4]) == 0 ? BHe : br.GetBit(p[5]) == 0 ? BRd : BVr;
-                                    else m = br.GetBit(p[6]) == 0 ? BLd : br.GetBit(p[7]) == 0 ? BVl : br.GetBit(p[8]) == 0 ? BHd : BHu;
+                                    if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[0]) == 0) m = BDc;
+                                    else if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[1]) == 0) m = BTm;
+                                    else if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[2]) == 0) m = BVe;
+                                    else if (Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[3]) == 0) m = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[4]) == 0 ? BHe : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[5]) == 0 ? BRd : BVr;
+                                    else m = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[6]) == 0 ? BLd : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[7]) == 0 ? BVl : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, p[8]) == 0 ? BHd : BHu;
                                     topModes[4 * mbx + x] = (byte)m;
                                     modes[y * 4 + x] = (byte)m;
                                     l = m;
@@ -398,7 +394,7 @@ namespace PixCodec
                                 leftModes[y] = (byte)l;
                             }
                         }
-                        int uvmode = br.GetBit(142) == 0 ? DcPred : br.GetBit(114) == 0 ? VPred : br.GetBit(183) != 0 ? TmPred : HPred;
+                        int uvmode = Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 142) == 0 ? DcPred : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 114) == 0 ? VPred : Vp8BoolReader.Bit(ref bv, ref br1, ref bb, ref bc, be, 183) != 0 ? TmPred : HPred;
 
                         // ---- residual tokens
                         uint nzY = 0, nzUv = 0;     // two bits per block: 0 empty, 1 only DC, 2 more
@@ -432,15 +428,15 @@ namespace PixCodec
                         }
                         if (mby > 0)
                         {
-                            Buffer.MemoryCopy(pTopY + 16 * mbx, yb - Bps, 16, 16);
-                            Buffer.MemoryCopy(pTopU + 8 * mbx, ub - Bps, 8, 8);
-                            Buffer.MemoryCopy(pTopV + 8 * mbx, vb - Bps, 8, 8);
+                            Vector128.Load(pTopY + 16 * mbx).Store(yb - Bps);
+                            Unsafe.WriteUnaligned(ub - Bps, Unsafe.ReadUnaligned<ulong>(pTopU + 8 * mbx));
+                            Unsafe.WriteUnaligned(vb - Bps, Unsafe.ReadUnaligned<ulong>(pTopV + 8 * mbx));
                         }
                         else
                         {
-                            new Span<byte>(yb - Bps, 16).Fill(127);
-                            new Span<byte>(ub - Bps, 8).Fill(127);
-                            new Span<byte>(vb - Bps, 8).Fill(127);
+                            Vector128.Create((byte)127).Store(yb - Bps);
+                            Unsafe.WriteUnaligned(ub - Bps, 0x7f7f7f7f7f7f7f7fUL);
+                            Unsafe.WriteUnaligned(vb - Bps, 0x7f7f7f7f7f7f7f7fUL);
                         }
 
                         // ---- luma
@@ -482,7 +478,7 @@ namespace PixCodec
 
                         // ---- store
                         byte* dy = fy + (long)mby * 16 * frame.YStride + mbx * 16;
-                        for (int j = 0; j < 16; j++) Buffer.MemoryCopy(yb + j * Bps, dy + j * frame.YStride, 16, 16);
+                        for (int j = 0; j < 16; j++) Vector128.Load(yb + j * Bps).Store(dy + j * frame.YStride);
                         byte* du = fu + (long)mby * 8 * frame.UVStride + mbx * 8, dv = fv + (long)mby * 8 * frame.UVStride + mbx * 8;
                         for (int j = 0; j < 8; j++)
                         {
@@ -491,9 +487,9 @@ namespace PixCodec
                         }
                         // the unfiltered bottom rows predict the next macroblock row; the top-left pixel of the next
                         // macroblock is still in the work area
-                        Buffer.MemoryCopy(yb + 15 * Bps, pTopY + 16 * mbx, 16, 16);
-                        Buffer.MemoryCopy(ub + 7 * Bps, pTopU + 8 * mbx, 8, 8);
-                        Buffer.MemoryCopy(vb + 7 * Bps, pTopV + 8 * mbx, 8, 8);
+                        Vector128.Load(yb + 15 * Bps).Store(pTopY + 16 * mbx);
+                        Unsafe.WriteUnaligned(pTopU + 8 * mbx, Unsafe.ReadUnaligned<ulong>(ub + 7 * Bps));
+                        Unsafe.WriteUnaligned(pTopV + 8 * mbx, Unsafe.ReadUnaligned<ulong>(vb + 7 * Bps));
                     }
 
                     // Filtering a row only touches it and the rows above, and prediction never reads the frame again.
@@ -751,14 +747,14 @@ namespace PixCodec
                     if (hasTop && hasLeft) dc = (sum + 16) >> 5;
                     else if (hasTop || hasLeft) dc = (sum + 8) >> 4;
                     else dc = 128;
-                    for (int j = 0; j < 16; j++) new Span<byte>(dst + j * Bps, 16).Fill((byte)dc);
+                    for (int j = 0; j < 16; j++) Vector128.Create((byte)dc).Store(dst + j * Bps);
                     break;
                 }
                 case VPred:
-                    for (int j = 0; j < 16; j++) Buffer.MemoryCopy(dst - Bps, dst + j * Bps, 16, 16);
+                    for (int j = 0; j < 16; j++) Vector128.Load(dst - Bps).Store(dst + j * Bps);
                     break;
                 case HPred:
-                    for (int j = 0; j < 16; j++) new Span<byte>(dst + j * Bps, 16).Fill(dst[j * Bps - 1]);
+                    for (int j = 0; j < 16; j++) Vector128.Create(dst[j * Bps - 1]).Store(dst + j * Bps);
                     break;
                 default:
                     TrueMotion(dst, 16);
@@ -778,7 +774,7 @@ namespace PixCodec
                     if (hasTop && hasLeft) dc = (sum + 8) >> 4;
                     else if (hasTop || hasLeft) dc = (sum + 4) >> 3;
                     else dc = 128;
-                    for (int j = 0; j < 8; j++) new Span<byte>(dst + j * Bps, 8).Fill((byte)dc);
+                    for (int j = 0; j < 8; j++) Unsafe.WriteUnaligned(dst + j * Bps, (byte)dc * 0x0101010101010101UL);
                     break;
                 }
                 case VPred:

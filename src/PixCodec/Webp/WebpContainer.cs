@@ -43,7 +43,7 @@ namespace PixCodec
         /// prefix does not have. An animation always needs the whole file (its frames are counted).
         /// </para>
         /// </summary>
-        public static WebpContainer Parse(ReadOnlySpan<byte> data, bool infoOnly = false)
+        public static WebpContainer Parse(ReadOnlySpan<byte> data, bool infoOnly = false, bool unflaggedMetadata = false)
         {
             if (!Webp.IsMatch(data)) throw Bad("no RIFF/WEBP signature");
             long riffEnd = 8L + BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(4));
@@ -51,7 +51,8 @@ namespace PixCodec
             if (prefix && !infoOnly) throw Bad("file is truncated");
             if (riffEnd > int.MaxValue) throw new ImageNotSupportedException("WebP files beyond 2 GB are not supported");
             int end = (int)riffEnd;
-            bool wantIcc = false, wantExif = false, wantXmp = false;
+            // with unflaggedMetadata the chunks count wherever they are found, also in a file without VP8X header
+            bool wantIcc = unflaggedMetadata, wantExif = unflaggedMetadata, wantXmp = unflaggedMetadata;
             var c = new WebpContainer();
             int pos = 12;
             WebpFrameEntry? still = null;
@@ -77,7 +78,7 @@ namespace PixCodec
                         c.HasVp8x = true;
                         c.Animated = (data[payload] & 0x02) != 0;
                         c.AlphaFlag = (data[payload] & 0x10) != 0;
-                        wantIcc = (data[payload] & 0x20) != 0; wantExif = (data[payload] & 0x08) != 0; wantXmp = (data[payload] & 0x04) != 0;
+                        wantIcc |= (data[payload] & 0x20) != 0; wantExif |= (data[payload] & 0x08) != 0; wantXmp |= (data[payload] & 0x04) != 0;
                         if (c.Animated && prefix) throw Bad("more data needed");
                         c.Width = U24(data, payload + 4) + 1;
                         c.Height = U24(data, payload + 7) + 1;

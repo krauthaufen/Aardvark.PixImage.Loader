@@ -161,12 +161,34 @@ namespace PixCodec
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static byte ToUv(int v) => (byte)Math.Clamp((v + (YuvHalf << 2) + (128 << (YuvFix + 2))) >> (YuvFix + 2), 0, 255);
 
+        static readonly double[] ToLinear = BuildToLinear();
+
+        static double[] BuildToLinear()
+        {
+            var t = new double[256];
+            for (int i = 0; i < 256; i++) t[i] = Math.Pow(i / 255.0, 2.2);
+            return t;
+        }
+
+        /// <summary>Four times the average of four samples (0..1020), taken in linear light when they differ much.</summary>
+        static int LinearAverage(uint a, uint b, uint c, uint d)
+        {
+            int ia = (int)(a & 0xff), ib = (int)(b & 0xff), ic = (int)(c & 0xff), id = (int)(d & 0xff);
+            int min = Math.Min(Math.Min(ia, ib), Math.Min(ic, id)), max = Math.Max(Math.Max(ia, ib), Math.Max(ic, id));
+            // similar samples: the plain mean is as good, and exact
+            if (max - min <= 8) return ia + ib + ic + id;
+            double lin = (ToLinear[ia] + ToLinear[ib] + ToLinear[ic] + ToLinear[id]) / 4;
+            return (int)Math.Round(Math.Pow(lin, 1 / 2.2) * 1020);
+        }
+
         /// <summary>
-        /// Converts ARGB pixels to planes padded to whole macroblocks (edge pixels repeated). Chroma is the plain
-        /// average of each 2x2 block: averaging in linear light looks a little better on saturated edges but costs
-        /// about 2 dB of PSNR on drawings, as the decoder's upsampling works on the gamma encoded values too.
+        /// Converts ARGB pixels to planes padded to whole macroblocks (edge pixels repeated).
+        /// <see cref="WebpChroma.Average"/>: chroma is the plain mean of each 2x2 block.
+        /// <see cref="WebpChroma.LinearLight"/>: the mean is taken in linear light.
+        /// <see cref="WebpChroma.Sharp"/>: plain mean, then every luma sample is corrected for the chroma the decoder
+        /// will actually interpolate at its pixel, so that the decoded RGB comes out as close as luma alone can make it.
         /// </summary>
-        public static Vp8Frame FromArgb(uint[] argb, int w, int h)
+        public static Vp8Frame FromArgb(uint[] argb, int w, int h, WebpChroma mode = WebpChroma.Average)
         {
             int mbW = (w + 15) >> 4, mbH = (h + 15) >> 4;
             var f = new Vp8Frame
@@ -201,9 +223,19 @@ namespace PixCodec
                     {
                         int x0 = 2 * x, x1 = 2 * x + 1 < w ? x0 + 1 : x0;
                         uint a = s0[x0], b = s0[x1], c = s1[x0], e = s1[x1];
-                        int r = (int)(((a >> 16) & 0xff) + ((b >> 16) & 0xff) + ((c >> 16) & 0xff) + ((e >> 16) & 0xff));
-                        int g = (int)(((a >> 8) & 0xff) + ((b >> 8) & 0xff) + ((c >> 8) & 0xff) + ((e >> 8) & 0xff));
-                        int bl = (int)((a & 0xff) + (b & 0xff) + (c & 0xff) + (e & 0xff));
+                        int r, g, bl;
+                        if (mode == WebpChroma.LinearLight)
+                        {
+                            r = LinearAverage(a >> 16, b >> 16, c >> 16, e >> 16);
+                            g = LinearAverage(a >> 8, b >> 8, c >> 8, e >> 8);
+                            bl = LinearAverage(a, b, c, e);
+                        }
+                        else
+                        {
+                            r = (int)(((a >> 16) & 0xff) + ((b >> 16) & 0xff) + ((c >> 16) & 0xff) + ((e >> 16) & 0xff));
+                            g = (int)(((a >> 8) & 0xff) + ((b >> 8) & 0xff) + ((c >> 8) & 0xff) + ((e >> 8) & 0xff));
+                            bl = (int)((a & 0xff) + (b & 0xff) + (c & 0xff) + (e & 0xff));
+                        }
                         du[x] = ToUv(-9719 * r - 19081 * g + 28800 * bl);
                         dv[x] = ToUv(28800 * r - 24116 * g - 4684 * bl);
                     }
@@ -214,8 +246,67 @@ namespace PixCodec
                     Buffer.MemoryCopy(pu + (long)(uvH - 1) * f.UVStride, pu + (long)y * f.UVStride, f.UVStride, f.UVStride);
                     Buffer.MemoryCopy(pv + (long)(uvH - 1) * f.UVStride, pv + (long)y * f.UVStride, f.UVStride, f.UVStride);
                 }
+                if (mode == WebpChroma.Sharp) CompensateLuma(src, f, py, pu, pv);
             }
             return f;
+        }
+
+        /// <summary>
+        /// Chroma is shared by four pixels and interpolated by the decoder, so on colored edges a pixel gets chroma
+        /// that is not its own. Luma is per pixel: pick the value for which the decoded RGB is closest to the source.
+        /// </summary>
+        static void CompensateLuma(uint* src, Vp8Frame f, byte* py, byte* pu, byte* pv)
+        {
+            int w = f.Width, h = f.Height, uvH = (h + 1) >> 1;
+            var chroma = new byte[2 * w + 32];
+            var decoded = new byte[3 * w + 16];
+            byte* rgb = stackalloc byte[4];
+            fixed (byte* pc = chroma, pdec = decoded)
+            {
+                byte* u = pc, v = pc + w + 16;
+                for (int y = 0; y < h; y++)
+                {
+                    int near = y >> 1, far = (y & 1) != 0 ? near + 1 : near - 1;
+                    if (far < 0 || far >= uvH) far = near;
+                    UpsampleLine(pu + (long)near * f.UVStride, pu + (long)far * f.UVStride, u, w);
+                    UpsampleLine(pv + (long)near * f.UVStride, pv + (long)far * f.UVStride, v, w);
+                    uint* s = src + (long)y * w;
+                    byte* row = py + (long)y * f.YStride;
+                    // what the decoder would show for the row as it is; most pixels are fine already
+                    ConvertLine(row, u, v, pdec, w, 3);
+                    for (int x = 0; x < w; x++)
+                    {
+                        int r = (int)(s[x] >> 16) & 0xff, g = (int)(s[x] >> 8) & 0xff, b = (int)s[x] & 0xff;
+                        int best = row[x];
+                        int er = r - pdec[3 * x], eg = g - pdec[3 * x + 1], eb = b - pdec[3 * x + 2];
+                        // every channel follows luma with gain 1.164, so the step is the mean error over that (147 / 512);
+                        // below a sum of 2 it rounds to nothing
+                        int sum = er + eg + eb;
+                        if ((uint)(sum + 1) <= 2) continue;
+                        int err = er * er + eg * eg + eb * eb;
+                        for (int iter = 0; iter < 2; iter++)
+                        {
+                            sum = er + eg + eb;
+                            int cand = Math.Clamp(best + ((sum * 147 + 256) >> 9), 0, 255);
+                            if (cand == best) break;
+                            Store(cand, u[x], v[x], rgb);
+                            int cr = r - rgb[0], cg = g - rgb[1], cb = b - rgb[2];
+                            int ce = cr * cr + cg * cg + cb * cb;
+                            if (ce >= err) break;
+                            best = cand; err = ce; er = cr; eg = cg; eb = cb;
+                        }
+                        row[x] = (byte)best;
+                    }
+                }
+            }
+            // the padding repeats the corrected edge pixels
+            for (int y = 0; y < h; y++)
+            {
+                byte* row = py + (long)y * f.YStride;
+                for (int x = w; x < f.YStride; x++) row[x] = row[w - 1];
+            }
+            for (int y = h; y < f.Y.Length / f.YStride; y++)
+                Buffer.MemoryCopy(py + (long)(h - 1) * f.YStride, py + (long)y * f.YStride, f.YStride, f.YStride);
         }
     }
 }

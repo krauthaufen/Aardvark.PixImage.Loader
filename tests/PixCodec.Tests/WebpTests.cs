@@ -38,8 +38,8 @@ public class WebpTests(ITestOutputHelper output)
         {
             BitsPerSample = 8, IsAnimated = frames > 1 || Webp.GetAnimationInfo(data).IsAnimated,
             Orientation = img.Metadata?.Orientation ?? 0, HasIccProfile = img.Metadata?.IccProfile != null,
+            DpiX = img.Metadata?.DpiX ?? 0, DpiY = img.Metadata?.DpiY ?? 0,
         }, info);
-        Assert.Equal((0.0, 0.0), (info.DpiX, info.DpiY));
         // Any prefix either gives the same answer or asks for more; a still image without flagged metadata is
         // answered from its first chunks, an animation needs everything.
         int needed = data.Length;
@@ -236,6 +236,8 @@ public class WebpTests(ITestOutputHelper output)
         Assert.Equal(600, img.Metadata!.IccProfile!.Length);
         Assert.Equal((byte)199, img.Metadata.IccProfile[199]);
         Assert.Equal(6, img.Metadata.Orientation);
+        Assert.Equal((72.0, 0.0), (img.Metadata.DpiX, img.Metadata.DpiY));     // the fixture's EXIF has an XResolution only
+        Assert.Equal((72.0, 0.0), (Webp.GetInfo(data).DpiX, Webp.GetInfo(data).DpiY));
         Assert.True(img.Metadata.Exif!.AsSpan(0, 4).SequenceEqual("II*\0"u8));
         Assert.StartsWith("<?xpacket", System.Text.Encoding.ASCII.GetString(Webp.GetXmp(data)!));
         var info = Webp.GetAnimationInfo(data);
@@ -251,9 +253,30 @@ public class WebpTests(ITestOutputHelper output)
         Assert.Equal("<x/>"u8.ToArray(), Webp.GetXmp(Load("edge_metadata_before_image.webp")));
 
         // metadata chunks count only when the VP8X header flags them (GetInfo must know from the header whether
-        // to look for them); of duplicates the first one
-        Assert.Null(Webp.Decode(Load("edge_metadata_without_flags.webp")).Metadata);
-        Assert.Null(Webp.GetXmp(Load("edge_metadata_without_flags.webp")));
+        // to look for them) - unless asked to take them wherever they are; of duplicates the first one
+        var unflagged = Load("edge_metadata_without_flags.webp");
+        Assert.Null(Webp.Decode(unflagged).Metadata);
+        Assert.Null(Webp.GetXmp(unflagged));
+        Assert.Null(Webp.GetAnimationInfo(unflagged).Exif);
+        Assert.Equal((0, false), (Webp.GetInfo(unflagged).Orientation, Webp.GetInfo(unflagged).HasIccProfile));
+        var accept = new WebpDecodeOptions { AcceptUnflaggedMetadata = true };
+        var noFlags = Webp.Decode(unflagged, accept).Metadata!;
+        Assert.Equal("icc"u8.ToArray(), noFlags.IccProfile);
+        Assert.Equal(8, noFlags.Orientation);
+        Assert.Equal("xmp"u8.ToArray(), Webp.GetXmp(unflagged, accept));
+        Assert.Equal("xmp"u8.ToArray(), Webp.GetAnimationInfo(unflagged, accept).Xmp);
+        Assert.Equal(8, Webp.DecodeAnimation(unflagged, accept).Frames[0].Image.Width > 0 ? Webp.GetAnimationInfo(unflagged, accept).Exif is { } e ? e[18] : -1 : -1);
+        AssertEqual(Webp.Decode(unflagged), Webp.Decode(unflagged, accept));
+        // also in a file without VP8X header, where chunks after the image are otherwise just skipped
+        var simple = Load("lossy_q050.webp");
+        var withExif = new byte[simple.Length + 8 + 26];
+        simple.CopyTo(withExif, 0);
+        "EXIF"u8.CopyTo(withExif.AsSpan(simple.Length));
+        withExif[simple.Length + 4] = 26;
+        new byte[] { (byte)'I', (byte)'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0 }.CopyTo(withExif, simple.Length + 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(withExif.AsSpan(4), (uint)withExif.Length - 8);
+        Assert.Null(Webp.Decode(withExif).Metadata);
+        Assert.Equal(7, Webp.Decode(withExif, accept).Metadata!.Orientation);
         var dup = Webp.Decode(Load("edge_duplicate_metadata.webp")).Metadata!;
         Assert.Equal("first"u8.ToArray(), dup.IccProfile);
         Assert.Equal(2, dup.Orientation);
@@ -399,6 +422,26 @@ public class WebpTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void LosslessNoise()
+    {
+        // every symbol near the longest code length, in all four channels: the bit reader has to keep up
+        foreach (var color in new[] { ColorModel.Rgb, ColorModel.Rgba })
+        {
+            var img = RawImage.Create(300, 200, color, SampleType.UInt8);
+            var rng = new Random(77);
+            var d = img.GetData<byte>();
+            for (int i = 0; i < d.Length; i++) d[i] = (byte)(rng.Next(7) == 0 ? rng.Next(256) : (int)(128 + 100 * Math.Tan(rng.NextDouble() * 3 - 1.5)));
+            foreach (int method in new[] { 0, 4 })
+            {
+                var data = Encode(img, new WebpEncodeOptions { Lossless = true, Method = method });
+                AssertEqual(img, Webp.Decode(data));
+                var oracle = OracleDecode(data, ".webp");
+                if (oracle != null) AssertEqual(img, oracle);
+            }
+        }
+    }
+
+    [Fact]
     public void LosslessEffortPaysOff()
     {
         var photo = Photo(256, 192, ColorModel.Rgb, 3);
@@ -505,6 +548,65 @@ public class WebpTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>
+    /// Parts of the key frame syntax that no encoder at hand writes (libwebp always sends absolute segment values, a
+    /// segment map, skip flags ...): our encoder writes them in a test mode and libwebp has to decode the files to
+    /// the very pixels our decoder gives.
+    /// </summary>
+    [Fact]
+    public void UnusualLossySyntaxDecodesLikeLibwebp()
+    {
+        var img = Photo(120, 104, ColorModel.Rgb, 31);
+        var variants = new (string name, Vp8Syntax sx, WebpEncodeOptions opt)[]
+        {
+            ("segment deltas", new Vp8Syntax { SegmentDeltas = true }, new WebpEncodeOptions { Segments = 4, Quality = 50 }),
+            ("segment deltas, own filter levels", new Vp8Syntax { SegmentDeltas = true, SegmentFilterLevels = new[] { 0, 63, 7, 30 } }, new WebpEncodeOptions { Segments = 4, Quality = 30 }),
+            ("absolute, own filter levels", new Vp8Syntax { SegmentFilterLevels = new[] { 40, 0, 1, 63 } }, new WebpEncodeOptions { Segments = 4, Quality = 30 }),
+            ("three segments as deltas, simple filter", new Vp8Syntax { SegmentDeltas = true }, new WebpEncodeOptions { Segments = 3, Quality = 70, SimpleFilter = true }),
+            ("segmentation without map", new Vp8Syntax { NoSegmentMap = true }, new WebpEncodeOptions { Segments = 4, Quality = 40 }),
+            ("segmentation without map, deltas", new Vp8Syntax { NoSegmentMap = true, SegmentDeltas = true }, new WebpEncodeOptions { Segments = 2, Quality = 40 }),
+            ("segment map without data", new Vp8Syntax { NoSegmentData = true }, new WebpEncodeOptions { Segments = 4, Quality = 40 }),
+            ("default segment probabilities", new Vp8Syntax { DefaultSegmentProbabilities = true }, new WebpEncodeOptions { Segments = 4, Quality = 60 }),
+            ("no skip flags", new Vp8Syntax { NoSkipFlags = true }, new WebpEncodeOptions { Quality = 20 }),
+            ("default token probabilities", new Vp8Syntax { DefaultTokenProbabilities = true }, new WebpEncodeOptions { Quality = 60 }),
+            ("header bits", new Vp8Syntax { ColorSpaceBit = true, ClampingBit = true, RefreshProbabilitiesBit = true }, new WebpEncodeOptions { Quality = 90 }),
+            ("quantizer offsets", new Vp8Syntax { DqY1Dc = 9, DqY2Dc = -15, DqY2Ac = 15, DqUvDc = 7, DqUvAc = -11 }, new WebpEncodeOptions { Quality = 55 }),
+            ("quantizer offsets at the ends", new Vp8Syntax { DqY1Dc = -15, DqY2Dc = 15, DqY2Ac = -15, DqUvDc = 15, DqUvAc = 15 }, new WebpEncodeOptions { Quality = 100 }),
+            ("quantizer offsets, coarse", new Vp8Syntax { DqY1Dc = 15, DqY2Dc = 15, DqY2Ac = 15, DqUvDc = 15, DqUvAc = 15 }, new WebpEncodeOptions { Quality = 0 }),
+            ("filter deltas", new Vp8Syntax { FilterDeltaIntra = -20, FilterDelta4x4 = 30 }, new WebpEncodeOptions { Quality = 35, FilterStrength = 25 }),
+            ("filter deltas clamp", new Vp8Syntax { FilterDeltaIntra = 63, FilterDelta4x4 = -63 }, new WebpEncodeOptions { Quality = 35, FilterStrength = 40, FilterSharpness = 6 }),
+            ("filter deltas to zero", new Vp8Syntax { FilterDeltaIntra = -63 }, new WebpEncodeOptions { Quality = 35 }),
+            ("filter deltas without update", new Vp8Syntax { FilterDeltasWithoutUpdate = true }, new WebpEncodeOptions { Quality = 35 }),
+            ("filter deltas with segments", new Vp8Syntax { FilterDeltaIntra = 5, FilterDelta4x4 = -9, SegmentDeltas = true, SegmentFilterLevels = new[] { 3, 20, 44, 60 } }, new WebpEncodeOptions { Segments = 4, Quality = 45, SimpleFilter = true }),
+            ("everything", new Vp8Syntax { SegmentDeltas = true, DefaultSegmentProbabilities = true, NoSkipFlags = true, DefaultTokenProbabilities = true, ClampingBit = true, DqY1Dc = -3, DqY2Ac = 4, FilterDelta4x4 = 12 },
+                new WebpEncodeOptions { Segments = 4, Quality = 50, Partitions = 4 }),
+        };
+        foreach (var (name, sx, opt) in variants)
+        {
+            opt.Vp8Syntax = sx;
+            foreach (int method in new[] { 0, 4 })
+            {
+                opt.Method = method;
+                var data = Encode(img, opt);
+                var back = Webp.Decode(data);
+                double psnr = Psnr(img, back, 255);
+                Assert.True(psnr > (opt.Quality == 0 ? 18 : 24), $"{name}: {psnr:F2} dB");
+                // The one place where libwebp is not the reference: a key frame with a segment map but no segment data.
+                // RFC 6386 and its reference decoder start a key frame with delta mode and zeros, i.e. the frame's
+                // quantizer and filter level for every segment (libvpx 1.x and ffmpeg's own VP8 decoder both show
+                // this file like we do, checked by hand); libwebp takes absolute zeros and shows garbage.
+                if (sx.NoSegmentData)
+                {
+                    Assert.True(psnr > 30, $"{name}: {psnr:F2} dB");
+                    continue;
+                }
+                var oracle = OracleDecode(data, ".webp");
+                if (oracle == null) return;
+                Assert.True(oracle.GetBytes().SequenceEqual(back.GetBytes()), $"{name} (method {method}): libwebp decodes other pixels, max difference {MaxDiff(oracle, back)}");
+            }
+        }
+    }
+
     [Fact]
     public void LossyQualityScalesSizeAndFidelity()
     {
@@ -540,6 +642,105 @@ public class WebpTests(ITestOutputHelper output)
                 var oracle = OracleDecode(data, ".webp");
                 if (oracle != null) AssertEqual(back, oracle);
             }
+    }
+
+    [Fact]
+    public void LossyAlphaQuality()
+    {
+        var img = Photo(90, 70, ColorModel.Rgba, 4);
+        var src = (byte[])img.Data;
+        int lastSize = 0, lastError = 255;
+        foreach (int q in new[] { 100, 90, 50, 10, 0 })
+        {
+            var data = Encode(img, new WebpEncodeOptions { Quality = 80, AlphaQuality = q });
+            var back = (byte[])Webp.Decode(data).Data;
+            int maxError = 0;
+            var levels = new HashSet<byte>();
+            for (int i = 3; i < src.Length; i += 4)
+            {
+                maxError = Math.Max(maxError, Math.Abs(src[i] - back[i]));
+                levels.Add(back[i]);
+                if (src[i] == 0 || src[i] == 255) Assert.Equal(src[i], back[i]);
+            }
+            output.WriteLine($"alpha quality {q}: {data.Length} bytes, {levels.Count} levels, max error {maxError}");
+            if (q == 100) Assert.Equal(0, maxError);
+            else
+            {
+                // near 100 the few merged levels can cost as much as they save; lower down the file has to shrink
+                Assert.True((q > 50 || data.Length < lastSize) && maxError >= lastError, $"quality {q}");
+                Assert.True(levels.Count <= 2 + q * q * 254 / 10000 && maxError <= 128);
+            }
+            if (q == 0) Assert.Equal(2, levels.Count);
+            lastSize = data.Length; lastError = maxError;
+            var oracle = OracleDecode(data, ".webp");
+            if (oracle != null) AssertEqual(Webp.Decode(data), oracle);
+        }
+    }
+
+    [Fact]
+    public void ChromaModes()
+    {
+        // colored text: the place where subsampled chroma hurts
+        var img = RawImage.Create(128, 96, ColorModel.Rgb, SampleType.UInt8);
+        var d = (byte[])img.Data;
+        for (int y = 0; y < 96; y++)
+            for (int x = 0; x < 128; x++)
+            {
+                bool stroke = y < 48 ? x % 9 < 3 : (x + y) % 11 < 2;
+                var c = stroke ? (y < 48 ? (220, 30, 40) : (20, 60, 230)) : (235, 235, 228);
+                d[(y * 128 + x) * 3] = (byte)c.Item1; d[(y * 128 + x) * 3 + 1] = (byte)c.Item2; d[(y * 128 + x) * 3 + 2] = (byte)c.Item3;
+            }
+        var psnr = new Dictionary<WebpChroma, double>();
+        foreach (var mode in new[] { WebpChroma.Average, WebpChroma.LinearLight, WebpChroma.Sharp })
+        {
+            var data = Encode(img, new WebpEncodeOptions { Quality = 90, Chroma = mode });
+            var back = Webp.Decode(data);
+            psnr[mode] = Psnr(img, back, 255);
+            output.WriteLine($"{mode}: {data.Length} bytes, {psnr[mode]:F2} dB");
+            var oracle = OracleDecode(data, ".webp");
+            if (oracle != null) AssertEqual(back, oracle);
+        }
+        Assert.True(psnr[WebpChroma.Sharp] > psnr[WebpChroma.Average] + 0.3);
+        Assert.True(psnr[WebpChroma.Average] > psnr[WebpChroma.LinearLight]);
+        Assert.Equal(WebpChroma.Sharp, new WebpEncodeOptions().Chroma);
+        // gray input has no chroma to get wrong: all modes give the same file
+        var gray = Photo(64, 48, ColorModel.Gray, 2);
+        Assert.Equal(Encode(gray, new WebpEncodeOptions { Chroma = WebpChroma.Average }), Encode(gray, new WebpEncodeOptions { Chroma = WebpChroma.Sharp }));
+    }
+
+    [Fact]
+    public void NearLossless()
+    {
+        foreach (var color in new[] { ColorModel.Rgb, ColorModel.Rgba })
+        {
+            var img = Photo(160, 120, color, 6);
+            var src = (byte[])img.Data;
+            int ch = img.Channels;
+            // a flat patch, which has to stay exact
+            for (int y = 10; y < 40; y++) for (int x = 10; x < 60; x++) { src[(y * 160 + x) * ch] = 201; src[(y * 160 + x) * ch + 1] = 77; src[(y * 160 + x) * ch + 2] = 3; if (ch == 4) src[(y * 160 + x) * ch + 3] = 255; }
+            int lossless = Encode(img, new WebpEncodeOptions { Lossless = true }).Length, last = lossless;
+            foreach (int q in new[] { 90, 70, 50, 30, 0 })
+            {
+                var data = Encode(img, new WebpEncodeOptions { Lossless = true, NearLossless = q });
+                var back = (byte[])Webp.Decode(data).Data;
+                int limit = 1 << (4 - q / 20), maxError = 0;
+                for (int i = 0; i < src.Length; i++)
+                {
+                    int e = Math.Abs(src[i] - back[i]);
+                    if (ch == 4 && (i % 4 == 3 || src[i | 3] == 0)) Assert.Equal(0, e);       // alpha and hidden colors
+                    maxError = Math.Max(maxError, e);
+                }
+                for (int y = 11; y < 39; y++) for (int x = 11; x < 59; x++) Assert.Equal(201, back[(y * 160 + x) * ch]);
+                output.WriteLine($"{color} near-lossless {q}: {data.Length} bytes (lossless {lossless}), max error {maxError}");
+                Assert.True(maxError <= limit && maxError > 0, $"max error {maxError} at {q}");
+                Assert.True(data.Length < last, $"{data.Length} >= {last} at {q}");
+                last = data.Length;
+                var oracle = OracleDecode(data, ".webp");
+                if (oracle != null) AssertEqual(Webp.Decode(data), oracle);
+            }
+            Assert.True(last < lossless * 0.6);
+            AssertEqual(img, Webp.Decode(Encode(img, new WebpEncodeOptions { Lossless = true, NearLossless = 100 })));
+        }
     }
 
     // ------------------------------------------------------------------ animation encoder
@@ -672,6 +873,74 @@ public class WebpTests(ITestOutputHelper output)
         var anim = Webp.EncodeAnimation(new[] { new WebpInputFrame(img), new WebpInputFrame(Photo(21, 13, ColorModel.Rgb, 2)) }, new WebpEncodeOptions { Xmp = xmp, Lossless = true });
         var info = Webp.GetAnimationInfo(anim);
         Assert.Equal((5, exif.Length, xmp.Length), (info.IccProfile!.Length, info.Exif!.Length, info.Xmp!.Length));
+    }
+
+    static byte[] ExifWithResolution(bool bigEndian, uint xNum, uint xDen, uint yNum, uint yDen, int unit, int orientation)
+    {
+        var ms = new MemoryStream();
+        void U16(int v) { var b = BitConverter.GetBytes((ushort)v); if (bigEndian) Array.Reverse(b); ms.Write(b); }
+        void U32(uint v) { var b = BitConverter.GetBytes(v); if (bigEndian) Array.Reverse(b); ms.Write(b); }
+        ms.Write(bigEndian ? "MM"u8 : "II"u8); U16(42); U32(8);
+        int entries = unit >= 0 ? 4 : 3;
+        U16(entries);
+        int values = 8 + 2 + entries * 12 + 4;
+        U16(0x0112); U16(3); U32(1); U16(orientation); U16(0);
+        U16(0x011a); U16(5); U32(1); U32((uint)values);
+        U16(0x011b); U16(5); U32(1); U32((uint)values + 8);
+        if (unit >= 0) { U16(0x0128); U16(3); U32(1); U16(unit); U16(0); }
+        U32(0);
+        U32(xNum); U32(xDen); U32(yNum); U32(yDen);
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void ResolutionComesFromExif()
+    {
+        var img = Photo(16, 12, ColorModel.Rgb);
+        (double, double) Dpi(byte[] exif, out ImageInfo info)
+        {
+            img.Metadata = new ImageMetadata { Exif = exif };
+            var data = Encode(img, new WebpEncodeOptions { Lossless = true });
+            info = Webp.GetInfo(data);
+            var m = Webp.Decode(data).Metadata!;
+            Assert.Equal((m.DpiX, m.DpiY, m.Orientation), (info.DpiX, info.DpiY, info.Orientation));
+            return (m.DpiX, m.DpiY);
+        }
+        Assert.Equal((300.0, 150.0), Dpi(ExifWithResolution(false, 300, 1, 300, 2, 2, 3), out var i1));
+        Assert.Equal(3, i1.Orientation);
+        Assert.Equal((96.0, 96.0), Dpi(ExifWithResolution(true, 9600, 100, 96, 1, -1, 1), out _));      // no unit tag: inches
+        var cm = Dpi(ExifWithResolution(true, 100, 1, 50, 1, 3, 8), out _);                              // per centimeter
+        Assert.Equal((254.0, 127.0), (Math.Round(cm.Item1, 6), Math.Round(cm.Item2, 6)));
+        Assert.Equal((0.0, 0.0), Dpi(ExifWithResolution(false, 72, 1, 72, 1, 1, 1), out _));             // "no absolute unit"
+        Assert.Equal((0.0, 72.0), Dpi(ExifWithResolution(false, 72, 0, 72, 1, 2, 1), out _));            // zero denominator
+        // damaged blocks give nothing and do not throw
+        var good = ExifWithResolution(false, 300, 1, 300, 1, 2, 6);
+        for (int cut = 0; cut < good.Length; cut++)
+        {
+            img.Metadata = new ImageMetadata { Exif = good.AsSpan(0, cut).ToArray() };
+            if (cut == 0) continue;
+            var m = Webp.Decode(Encode(img, new WebpEncodeOptions { Lossless = true })).Metadata!;
+            Assert.True(m.DpiX is 0 or 300 && m.DpiY is 0 or 300 && m.Orientation is 0 or 6);
+        }
+        var bad = (byte[])good.Clone();
+        bad[4] = 0xff; bad[5] = 0xff; bad[6] = 0xff; bad[7] = 0xff;     // IFD offset far outside
+        Assert.Equal((0.0, 0.0), Dpi(bad, out _));
+    }
+
+    [Fact]
+    public void PixelLimitNamesTheOption()
+    {
+        foreach (bool lossless in new[] { true, false })
+        {
+            var data = Encode(Photo(40, 30, ColorModel.Rgb), new WebpEncodeOptions { Lossless = lossless });
+            var e = Assert.Throws<ImageNotSupportedException>(() => Webp.Decode(data, new WebpDecodeOptions { MaxPixels = 1000 }));
+            Assert.Contains("WebpDecodeOptions.MaxPixels", e.Message);
+            Assert.Contains("1000", e.Message);
+            Assert.Equal(40, Webp.Decode(data, new WebpDecodeOptions { MaxPixels = 1200 }).Width);
+        }
+        var anim = Webp.EncodeAnimation(new[] { new WebpInputFrame(Photo(40, 30, ColorModel.Rgb)), new WebpInputFrame(Photo(40, 30, ColorModel.Rgb, 2)) });
+        Assert.Contains("WebpDecodeOptions.MaxPixels", Assert.Throws<ImageNotSupportedException>(() => Webp.DecodeAnimation(anim, new WebpDecodeOptions { MaxPixels = 1000 })).Message);
+        Assert.Equal(1L << 28, new WebpDecodeOptions().MaxPixels);
     }
 
     [Fact]
