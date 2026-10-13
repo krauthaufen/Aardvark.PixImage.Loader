@@ -66,7 +66,8 @@ namespace PixCodec
         /// <summary>
         /// Use arithmetic coding instead of Huffman coding (sequential or, with <see cref="Progressive"/>, progressive):
         /// 5 to 10 percent smaller files, slower to write and read, and not supported by every decoder (browsers, for
-        /// instance). <see cref="OptimizeHuffman"/> has no meaning then. Not available for <see cref="Lossless"/>.
+        /// instance). <see cref="OptimizeHuffman"/> has no meaning then. Together with <see cref="Lossless"/> it gives
+        /// arithmetic coded lossless JPEG (SOF11), which very few other decoders read.
         /// </summary>
         public bool Arithmetic { get; set; }
 

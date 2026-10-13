@@ -932,6 +932,73 @@ public class JpegTests
         if (oracle != null) TestUtil.AssertEqual(oracle, back, 0);
     }
 
+    /// <summary>The ISO reference software on our output, components as stored; null when the tool is not installed.</summary>
+    static RawImage? OracleDecodeIso(byte[] jpeg)
+    {
+        if (!TestUtil.PythonAvailable) return null;
+        var tmp = Path.Combine(TestUtil.FixtureDir, "_tmp");
+        Directory.CreateDirectory(tmp);
+        var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + ".jpg");
+        try
+        {
+            File.WriteAllBytes(f, jpeg);
+            var (exit, output) = TestUtil.RunPython($"-c \"import sys, gen_jpeg; gen_jpeg.iso_decode(sys.argv[1], sys.argv[2])\" \"{f}\" \"{f}.ref\"");
+            if (exit == 77) return null;
+            Assert.True(exit == 0, "reference software failed: " + output);
+            return TestUtil.LoadRef(f + ".ref");
+        }
+        finally
+        {
+            File.Delete(f); File.Delete(f + ".ref");
+        }
+    }
+
+    public static IEnumerable<object[]> ArithmeticLosslessCases()
+    {
+        foreach (int predictor in new[] { 1, 2, 3, 4, 5, 6, 7 })
+        {
+            yield return new object[] { ColorModel.Gray, 8, 33, 21, predictor, 0 };
+            yield return new object[] { ColorModel.Rgb, 8, 23, 31, predictor, 0 };
+            yield return new object[] { ColorModel.Gray, 16, 33, 21, predictor, 0 };
+            yield return new object[] { ColorModel.Rgb, 16, 23, 31, predictor, 0 };
+        }
+        foreach (int bits in new[] { 2, 5, 10, 12, 15 })
+            yield return new object[] { ColorModel.Rgb, bits, 20, 17, 4, 0 };
+        foreach (var (w, h) in new[] { (1, 1), (1, 9), (9, 1), (130, 97) })
+            yield return new object[] { ColorModel.Rgb, 16, w, h, 7, 0 };
+        foreach (int restart in new[] { 1, 40, 200 })
+        {
+            yield return new object[] { ColorModel.Gray, 16, 40, 23, 4, restart };
+            yield return new object[] { ColorModel.Rgb, 8, 40, 23, 1, restart };
+        }
+    }
+
+    /// <summary>
+    /// Arithmetic coded lossless JPEG (SOF11): exact through our decoder and through the ISO reference software
+    /// (libjpeg-turbo does not implement this process).
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ArithmeticLosslessCases))]
+    public void EncodeArithmeticLosslessRoundTrips(ColorModel color, int bits, int w, int h, int predictor, int restart)
+    {
+        var src = Synthetic16(w, h, color, bits, seed: w + predictor);
+        if (bits == 16)
+        {
+            var d = src.GetData<ushort>();
+            for (int i = 0; i + 4 < d.Length; i += 37) { d[i] = 0; d[i + 1] = 65535; d[i + 2] = 32768; d[i + 3] = 0; }
+        }
+        var opt = new JpegEncodeOptions { Lossless = true, Arithmetic = true, Predictor = predictor, RestartInterval = restart, Precision = bits is 8 or 16 ? 0 : bits };
+        var bytes = Encode(src, opt);
+        Assert.True(bytes.AsSpan().IndexOf(new byte[] { 0xFF, 0xCB }) > 0);
+        Assert.True(bytes.AsSpan().IndexOf(new byte[] { 0xFF, 0xC4 }) < 0);
+        var back = Jpeg.Decode(bytes);
+        TestUtil.AssertEqual(src, back, 0);
+        var huffman = Encode(src, new JpegEncodeOptions { Lossless = true, Predictor = predictor, Precision = bits is 8 or 16 ? 0 : bits });
+        if (w * h > 3000) Assert.True(bytes.Length < huffman.Length, $"arithmetic {bytes.Length} >= Huffman {huffman.Length}");
+        var oracle = OracleDecodeIso(bytes);
+        if (oracle != null) TestUtil.AssertEqual(oracle, back, 0);
+    }
+
     [Fact]
     public void EncodeLosslessChecksArguments()
     {

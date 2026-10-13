@@ -8,6 +8,7 @@ import io
 import os
 import shutil
 import struct
+import sys
 import subprocess
 import tempfile
 import numpy as np
@@ -235,6 +236,23 @@ def round2(cmyk):
 
 
 ISO_TOOL = os.environ.get('PIXCODEC_ISO_JPEG', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.tmp', 'jpeg170'))
+
+
+def iso_decode(src, ref):
+    """Decodes a JPEG file with the reference software, components as stored; exit status 77 without the tool."""
+    if not os.path.exists(ISO_TOOL):
+        sys.exit(77)
+    with tempfile.TemporaryDirectory() as t:
+        out = os.path.join(t, 'o.pnm')
+        r = subprocess.run([ISO_TOOL, '-c', src, out], capture_output=True, text=True)
+        if not os.path.exists(out):
+            sys.exit('reference software failed: ' + r.stdout[-300:] + r.stderr[-300:])
+        with open(out, 'rb') as f:
+            d = f.read()
+        parts = d.split(None, 4)
+        w, h, mx = int(parts[1]), int(parts[2]), int(parts[3])
+        a = np.frombuffer(parts[4], dtype='>u2' if mx > 255 else np.uint8).reshape(h, w, 3 if parts[0] == b'P6' else 1)
+        write_ref(ref, a.astype(np.uint16 if mx > 255 else np.uint8))
 
 
 def round3():

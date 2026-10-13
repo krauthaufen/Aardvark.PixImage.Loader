@@ -1362,7 +1362,8 @@ namespace PixCodec.JpegImpl
 
             var tables = new HuffEnc[nc];
             for (int c = 0; c < nc; c++) tables[c] = new HuffEnc();
-            LosslessPass(s8, s16, w, h, ch, nc, precision, predictor, restart, tables, emit: false);
+            bool arithmetic = _opt.Arithmetic;
+            if (!arithmetic) LosslessPass(s8, s16, w, h, ch, nc, precision, predictor, restart, tables, emit: false);
 
             bool rgb = image.Color is ColorModel.Rgb or ColorModel.Rgba;
             WriteMetadata(image.Metadata, jfif: nc == 1);
@@ -1371,9 +1372,9 @@ namespace PixCodec.JpegImpl
                 // Adobe segment with transform 0: the components are RGB, not YCbCr
                 Marker(0xEE); U16(14); Bytes("Adobe"u8); U16(100); U16(0); U16(0); Byte(0);
             }
-            Marker(0xC3); U16(8 + 3 * nc); Byte(precision); U16(h); U16(w); Byte(nc);
+            Marker(arithmetic ? 0xCB : 0xC3); U16(8 + 3 * nc); Byte(precision); U16(h); U16(w); Byte(nc);
             for (int c = 0; c < nc; c++) { Byte(rgb ? "RGB"[c] : c + 1); Byte(0x11); Byte(0); }
-            for (int c = 0; c < nc; c++)
+            for (int c = 0; c < nc && !arithmetic; c++)
             {
                 tables[c].BuildFromFrequencies();
                 WriteHuffmanTable(tables[c], 0, c);
@@ -1382,11 +1383,55 @@ namespace PixCodec.JpegImpl
             Marker(0xDA); U16(6 + 2 * nc); Byte(nc);
             for (int c = 0; c < nc; c++) { Byte(rgb ? "RGB"[c] : c + 1); Byte(c << 4); }
             Byte(predictor); Byte(0); Byte(0);
-            LosslessPass(s8, s16, w, h, ch, nc, precision, predictor, restart, tables, emit: true);
-            FlushBits();
+            if (arithmetic) LosslessPassArithmetic(s8, s16, w, h, ch, nc, precision, predictor, restart);
+            else
+            {
+                LosslessPass(s8, s16, w, h, ch, nc, precision, predictor, restart, tables, emit: true);
+                FlushBits();
+            }
             Marker(0xD9);
             _out.Write(_buf, 0, _pos);
             _pos = 0;
+        }
+
+        /// <summary>Lossless scan with arithmetic coding (SOF11): every difference is coded in the context of its left and upper neighbours.</summary>
+        void LosslessPassArithmetic(byte[]? s8, ushort[]? s16, int w, int h, int ch, int nc, int precision, int predictor, int restart)
+        {
+            var cur = new int[w * nc];
+            var prev = new int[w * nc];
+            var diff = new int[w * nc];
+            var above = new int[w * nc]; // the differences of the line above
+            int rowsPerInterval = restart == 0 ? int.MaxValue : restart / w;
+            int topRow = 0, rst = 0;
+            var coder = _arith ??= new JpegArithEncoder();
+            coder.Start();
+            for (int y = 0; y < h; y++)
+            {
+                if (y != 0 && y % rowsPerInterval == 0)
+                {
+                    coder.Finish();
+                    Bytes(coder.Buffer.AsSpan(0, coder.Length));
+                    Marker(0xD0 + rst);
+                    rst = (rst + 1) & 7;
+                    topRow = y;
+                    coder.Start();
+                }
+                (cur, prev) = (prev, cur);
+                (diff, above) = (above, diff);
+                for (int x = 0, i = y * w * ch; x < w; x++, i += ch)
+                    for (int c = 0; c < nc; c++) cur[x * nc + c] = s8 != null ? s8[i + c] : s16![i + c];
+                PredictLine(cur, prev, diff, w * nc, nc, y == topRow ? 0 : predictor, 1 << (precision - 1));
+                for (int k = 0; k < w * nc; k++)
+                {
+                    // differences live modulo 65536, like in the decoder that conditions on them
+                    int d = (short)diff[k];
+                    diff[k] = d;
+                    int da = k < nc ? 0 : diff[k - nc], db = y == topRow ? 0 : above[k];
+                    coder.EncodeLosslessDifference(k % nc, da, db, d);
+                }
+            }
+            coder.Finish();
+            Bytes(coder.Buffer.AsSpan(0, coder.Length));
         }
 
         /// <summary>

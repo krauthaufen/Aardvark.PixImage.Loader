@@ -136,7 +136,7 @@ def main():
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
     os.makedirs(OUT)
-    page, small = text_page(200, 150), text_page(61, 47, seed=5)
+    page, small = text_page(120, 90), text_page(61, 47, seed=5)
 
     # single layer: sizes, option bits, stripes
     for (w, h) in [(1, 1), (2, 3), (7, 5), (8, 8), (9, 17), (33, 17), (64, 64), (129, 66), (200, 150)]:
