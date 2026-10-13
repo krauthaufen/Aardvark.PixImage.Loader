@@ -210,12 +210,12 @@ namespace PixCodec
     /// <summary>cICP chunk: color space as ITU-T H.273 code points (e.g. 9, 16, 0, true = BT.2100 PQ, full range).</summary>
     public readonly record struct PngCodingIndependentCodePoints(byte ColorPrimaries, byte TransferFunction, byte MatrixCoefficients, bool FullRange);
 
-    /// <summary>mDCv chunk: chromaticities (CIE 1931 xy) and luminance range (cd/m²) of the mastering display.</summary>
+    /// <summary>mDCV chunk: chromaticities (CIE 1931 xy) and luminance range (cd/m²) of the mastering display.</summary>
     public readonly record struct PngMasteringDisplay(
         double RedX, double RedY, double GreenX, double GreenY, double BlueX, double BlueY, double WhiteX, double WhiteY,
         double MaxLuminance, double MinLuminance);
 
-    /// <summary>cLLi chunk: maximum content light level and maximum frame average light level, in cd/m².</summary>
+    /// <summary>cLLI chunk: maximum content light level and maximum frame average light level, in cd/m².</summary>
     public readonly record struct PngContentLightLevel(double MaxContentLightLevel, double MaxFrameAverageLightLevel);
 
     /// <summary>
@@ -259,9 +259,9 @@ namespace PixCodec
         public PngStereoMode? StereoMode { get; set; }
         /// <summary>cICP chunk.</summary>
         public PngCodingIndependentCodePoints? CodingIndependentCodePoints { get; set; }
-        /// <summary>mDCv chunk.</summary>
+        /// <summary>mDCV chunk.</summary>
         public PngMasteringDisplay? MasteringDisplay { get; set; }
-        /// <summary>cLLi chunk.</summary>
+        /// <summary>cLLI chunk.</summary>
         public PngContentLightLevel? ContentLightLevel { get; set; }
 
         public bool IsEmpty => SrgbIntent == null && Chromaticities == null && SignificantBits == null && Background == null
@@ -364,7 +364,7 @@ namespace PixCodec
 
         /// <summary>
         /// Reads the PNG specific ancillary chunks (sRGB, cHRM, sBIT, bKGD, tIME, text, hIST, sPLT, oFFs, pCAL, sCAL,
-        /// sTER, cICP, mDCv, cLLi) of the whole file without
+        /// sTER, cICP, mDCV, cLLI) of the whole file without
         /// decoding pixel data. Chunks with a wrong CRC or malformed content are skipped.
         /// </summary>
         public static PngMetadata ReadMetadata(ReadOnlySpan<byte> data)

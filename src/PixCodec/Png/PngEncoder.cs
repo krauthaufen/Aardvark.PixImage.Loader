@@ -776,13 +776,13 @@ namespace PixCodec
                 for (int i = 0; i < 8; i++) BinaryPrimitives.WriteUInt16BigEndian(b.Slice(i * 2), (ushort)Scaled(xy[i], 0.00002, ushort.MaxValue, "mastering display chromaticity"));
                 BinaryPrimitives.WriteUInt32BigEndian(b.Slice(16), Scaled(md.MaxLuminance, 0.0001, uint.MaxValue, "mastering display luminance"));
                 BinaryPrimitives.WriteUInt32BigEndian(b.Slice(20), Scaled(md.MinLuminance, 0.0001, uint.MaxValue, "mastering display luminance"));
-                WriteChunk(output, PngChunks.mDCv, b.Slice(0, 24));
+                WriteChunk(output, PngChunks.mDCV, b.Slice(0, 24));
             }
             if (png?.ContentLightLevel is { } cll)
             {
                 BinaryPrimitives.WriteUInt32BigEndian(b, Scaled(cll.MaxContentLightLevel, 0.0001, uint.MaxValue, "content light level"));
                 BinaryPrimitives.WriteUInt32BigEndian(b.Slice(4), Scaled(cll.MaxFrameAverageLightLevel, 0.0001, uint.MaxValue, "content light level"));
-                WriteChunk(output, PngChunks.cLLi, b.Slice(0, 8));
+                WriteChunk(output, PngChunks.cLLI, b.Slice(0, 8));
             }
 
             if (source.Plte != null) WriteChunk(output, PngChunks.PLTE, source.Plte);

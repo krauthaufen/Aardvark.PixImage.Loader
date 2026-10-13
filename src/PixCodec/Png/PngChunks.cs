@@ -59,7 +59,9 @@ namespace PixCodec
                           tEXt = 0x74455874, zTXt = 0x7A545874, iTXt = 0x69545874,
                           acTL = 0x6163544C, fcTL = 0x6663544C, fdAT = 0x66644154,
                           hIST = 0x68495354, sPLT = 0x73504C54, oFFs = 0x6F464673, pCAL = 0x7043414C, sCAL = 0x7343414C,
-                          sTER = 0x73544552, cICP = 0x63494350, mDCv = 0x6D444376, cLLi = 0x634C4C69;
+                          sTER = 0x73544552, cICP = 0x63494350, mDCV = 0x6D444356, cLLI = 0x634C4C49,
+                          // spellings of mDCV / cLLI in drafts of the third edition; still read, never written
+                          mDCvDraft = 0x6D444376, cLLiDraft = 0x634C4C69;
 
         public const int FirstChunkAfterHeader = 8 + 12 + 13;
 
@@ -229,7 +231,7 @@ namespace PixCodec
                 bool animationChunk = wantAnimation && type is acTL or fcTL or fdAT;
                 bool wanted = critical || animationChunk || type is tRNS or gAMA or pHYs or iCCP or eXIf
                               || (wantPngMeta && type is sRGB or cHRM or sBIT or bKGD or tIME or tEXt or zTXt or iTXt
-                                                         or hIST or sPLT or oFFs or pCAL or sCAL or sTER or cICP or mDCv or cLLi);
+                                                         or hIST or sPLT or oFFs or pCAL or sCAL or sTER or cICP or mDCV or cLLI or mDCvDraft or cLLiDraft);
                 if (verify && wanted && !CrcOk(data, chunkPos, body.Length))
                 {
                     if (critical) throw new ImageFormatException($"PNG {TypeName(type)} checksum mismatch");
@@ -529,7 +531,8 @@ namespace PixCodec
                     if (body.Length == 4 && body[3] <= 1)
                         (s.PngMeta ??= new PngMetadata()).CodingIndependentCodePoints = new PngCodingIndependentCodePoints(body[0], body[1], body[2], body[3] == 1);
                     break;
-                case mDCv:
+                case mDCV:
+                case mDCvDraft:
                     if (body.Length == 24)
                     {
                         Span<double> c = stackalloc double[8];
@@ -538,7 +541,8 @@ namespace PixCodec
                             BinaryPrimitives.ReadUInt32BigEndian(body.Slice(16)) * 0.0001, BinaryPrimitives.ReadUInt32BigEndian(body.Slice(20)) * 0.0001);
                     }
                     break;
-                case cLLi:
+                case cLLI:
+                case cLLiDraft:
                     if (body.Length == 8)
                         (s.PngMeta ??= new PngMetadata()).ContentLightLevel = new PngContentLightLevel(
                             BinaryPrimitives.ReadUInt32BigEndian(body) * 0.0001, BinaryPrimitives.ReadUInt32BigEndian(body.Slice(4)) * 0.0001);
