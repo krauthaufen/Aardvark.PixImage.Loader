@@ -5,12 +5,12 @@ namespace PixCodec.Tests;
 
 /// <summary>
 /// HTJ2K compression (OpenEXR 3.4, compression values 10 and 11). The codestream coding belongs to the JPEG 2000
-/// codec; until that provides its entry points the pixel tests are skipped and decoding / encoding throw
-/// ImageNotSupportedException.
+/// codec (Jp2.DecodeCodestreamPlanes / EncodeCodestreamPlanes); while its HT coder is not implemented the pixel
+/// tests are skipped and decoding / encoding throw ImageNotSupportedException.
 /// </summary>
 public class ExrHtj2kTests
 {
-    const string Skip = "needs the JPEG 2000 codec's HT codestream entry points (wire them to ExrHtj2k.DecodeCodestream / EncodeCodestream, then remove this Skip)";
+    const string Skip = "needs HT block decoding and plane encoding in the JPEG 2000 codec (Jp2.DecodeCodestreamPlanes / EncodeCodestreamPlanes, called by ExrHtj2k); remove this Skip when they are implemented";
 
     public static IEnumerable<object[]> Fixtures => TestUtil.Files(Path.Combine("exr", "htj2k"), ".exr");
 
@@ -70,7 +70,7 @@ public class ExrHtj2kTests
     [Fact]
     public void WithoutTheJp2CodecHtj2kIsNotSupported()
     {
-        // TODO when the JPEG 2000 codec is wired in: delete this test together with the Skip above
+        // delete this test together with the Skip above once the JPEG 2000 codec has its HT coder
         var file = Fixtures.Select(f => (string)f[0]).First(f => f.Contains("tall_"));      // (tiny files have raw chunks)
         var data = File.ReadAllBytes(TestUtil.Fixture(file));
         Assert.True(Exr.ReadHeaders(data)[0].Compression is ExrCompression.Htj2k256 or ExrCompression.Htj2k32);

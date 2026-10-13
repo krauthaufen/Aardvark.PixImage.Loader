@@ -3,15 +3,6 @@ using System.Buffers.Binary;
 
 namespace PixCodec
 {
-    /// <summary>One component of a JPEG 2000 codestream as OpenEXR uses it: full 16 or 32 bit integers.</summary>
-    internal sealed class ExrHtPlane
-    {
-        public int Width, Height, BitDepth, XSub = 1, YSub = 1;
-        public bool Signed;
-        /// <summary>Row major samples; for unsigned 32 bit components the int holds the bit pattern.</summary>
-        public int[] Samples = Array.Empty<int>();
-    }
-
     /// <summary>
     /// HTJ2K compression (OpenEXR 3.4). A chunk is "HT", a big-endian 32 bit header length, the header (16 bit channel
     /// count and for each codestream component the 16 bit index of the file channel it holds), and one High Throughput
@@ -21,18 +12,10 @@ namespace PixCodec
     /// </summary>
     internal static class ExrHtj2k
     {
-        /// <summary>Set by the JPEG 2000 codec: raw codestream -> planes (after inverse colour transform).</summary>
-        internal static Func<byte[], ExrHtPlane[]>? DecodeCodestream;
-        /// <summary>Set by the JPEG 2000 codec: planes -> lossless HT codestream; the flag asks for the reversible colour transform on the first three.</summary>
-        internal static Func<int, int, ExrHtPlane[], bool, byte[]>? EncodeCodestream;
-
-        internal const string Missing = "EXR HTJ2K compression needs the JPEG 2000 codec, which is not available in this build";
-
         static ImageFormatException Corrupt(string what) => new("EXR HTJ2K data is corrupt: " + what);
 
         public static void Decode(ReadOnlySpan<byte> src, Span<byte> dst, in ExrChunk c, ExrScratch s)
         {
-            var decode = DecodeCodestream ?? throw new ImageNotSupportedException(Missing);
             int nc = c.Chans.Length;
             if (src.Length < 8 || src[0] != (byte)'H' || src[1] != (byte)'T') throw Corrupt("chunk header");
             uint headerLength = BinaryPrimitives.ReadUInt32BigEndian(src.Slice(2));
@@ -47,15 +30,16 @@ namespace PixCodec
                 if (map[i] >= nc || seen[map[i]]) throw Corrupt("channel map");
                 seen[map[i]] = true;
             }
-            var planes = decode(src.Slice(6 + (int)headerLength).ToArray());
+            // chunks are decoded in parallel by the caller; one chunk is one small codestream
+            var planes = Jp2.DecodeCodestreamPlanes(src.Slice(6 + (int)headerLength), new Jp2DecodeOptions { Parallel = false }).Planes;
             if (planes.Length != nc) throw Corrupt("component count");
-            var byChannel = new ExrHtPlane[nc];
+            var byChannel = new J2kPlane[nc];
             for (int i = 0; i < nc; i++)
             {
                 var p = planes[i];
                 int ch = map[i];
-                if (p.Width != c.Nx[ch] || p.Height != c.Ny[ch] || p.Samples.Length < (long)p.Width * p.Height
-                    || p.BitDepth != c.Chans[ch].Bytes * 8)
+                if (p.Width != c.Nx[ch] || p.Height != c.Ny[ch] || p.Data == null || p.Data.Length < (long)p.Width * p.Height
+                    || p.Precision != c.Chans[ch].Bytes * 8)
                     throw Corrupt("component geometry");
                 byChannel[ch] = p;
             }
@@ -67,7 +51,7 @@ namespace PixCodec
                 {
                     if (!ExrChunk.IsSampled(y, c.Chans[ch].YS)) continue;
                     var p = byChannel[ch];
-                    var line = p.Samples.AsSpan(row[ch]++ * p.Width, p.Width);
+                    var line = p.Data.AsSpan(row[ch]++ * p.Width, p.Width);
                     if (c.Chans[ch].Bytes == 2)
                         for (int x = 0; x < line.Length; x++, o += 2) BinaryPrimitives.WriteUInt16LittleEndian(dst.Slice(o), (ushort)line[x]);
                     else
@@ -77,7 +61,6 @@ namespace PixCodec
 
         public static byte[] Encode(ReadOnlySpan<byte> raw, in ExrChunk c, ExrScratch s)
         {
-            var encode = EncodeCodestream ?? throw new ImageNotSupportedException(Missing);
             int nc = c.Chans.Length;
             if (nc > 16384) throw new ImageNotSupportedException("EXR HTJ2K compression supports at most 16384 channels");
 
@@ -97,12 +80,12 @@ namespace PixCodec
             for (int i = 0; i < nc; i++)
                 if (!rct || (i != r && i != g && i != b)) map[k++] = i;
 
-            var byChannel = new ExrHtPlane[nc];
+            var byChannel = new J2kPlane[nc];
             for (int i = 0; i < nc; i++)
-                byChannel[i] = new ExrHtPlane
+                byChannel[i] = new J2kPlane
                 {
-                    Width = c.Nx[i], Height = c.Ny[i], BitDepth = c.Chans[i].Bytes * 8, Signed = c.Chans[i].Type != 0,
-                    XSub = c.Chans[i].XS, YSub = c.Chans[i].YS, Samples = new int[c.Nx[i] * c.Ny[i]],
+                    Width = c.Nx[i], Height = c.Ny[i], Precision = c.Chans[i].Bytes * 8, Signed = c.Chans[i].Type != 0,
+                    Dx = c.Chans[i].XS, Dy = c.Chans[i].YS, Data = new int[c.Nx[i] * c.Ny[i]],
                 };
             var row = new int[nc];
             int o = 0;
@@ -111,15 +94,20 @@ namespace PixCodec
                 {
                     if (!ExrChunk.IsSampled(y, c.Chans[ch].YS)) continue;
                     var p = byChannel[ch];
-                    var line = p.Samples.AsSpan(row[ch]++ * p.Width, p.Width);
+                    var line = p.Data.AsSpan(row[ch]++ * p.Width, p.Width);
                     if (c.Chans[ch].Bytes == 2)
                         for (int x = 0; x < line.Length; x++, o += 2) line[x] = BinaryPrimitives.ReadInt16LittleEndian(raw.Slice(o));
                     else
                         for (int x = 0; x < line.Length; x++, o += 4) line[x] = BinaryPrimitives.ReadInt32LittleEndian(raw.Slice(o));
                 }
-            var planes = new ExrHtPlane[nc];
+            var planes = new J2kPlane[nc];
             for (int i = 0; i < nc; i++) planes[i] = byChannel[map[i]];
-            var codestream = encode(c.X1 - c.X0 + 1, c.Y1 - c.Y0 + 1, planes, rct);
+            // the parameters of the reference writer: lossless 5/3, HT block coder, 5 levels, 128x32 code blocks, RPCL
+            var codestream = Jp2.EncodeCodestreamPlanes(new J2kPlanes { Width = c.X1 - c.X0 + 1, Height = c.Y1 - c.Y0 + 1, Planes = planes }, new Jp2EncodeOptions
+            {
+                Lossless = true, HighThroughput = true, RawCodestream = true, ColorTransform = rct, Levels = 5,
+                CodeBlockWidth = 128, CodeBlockHeight = 32, Progression = Jp2Progression.Rpcl, Parallel = false,
+            });
 
             int headerLength = 2 + 2 * nc;
             var result = new byte[6 + headerLength + codestream.Length];
