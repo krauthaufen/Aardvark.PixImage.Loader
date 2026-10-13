@@ -33,7 +33,26 @@ public class WebpTests(ITestOutputHelper output)
         Assert.Equal(expected.Channels == 4 ? ColorModel.Rgba : ColorModel.Rgb, img.Color);
 
         int frames = Math.Max(1, FrameRefs(path).Count);
-        Assert.Equal(new ImageInfo(ImageFormat.Webp, img.Width, img.Height, img.Channels, SampleType.UInt8, img.Color, frames), Webp.GetInfo(data));
+        var info = Webp.GetInfo(data);
+        Assert.Equal(new ImageInfo(ImageFormat.Webp, img.Width, img.Height, img.Channels, SampleType.UInt8, img.Color, frames)
+        {
+            BitsPerSample = 8, IsAnimated = frames > 1 || Webp.GetAnimationInfo(data).IsAnimated,
+            Orientation = img.Metadata?.Orientation ?? 0, HasIccProfile = img.Metadata?.IccProfile != null,
+        }, info);
+        Assert.Equal((0.0, 0.0), (info.DpiX, info.DpiY));
+        // Any prefix either gives the same answer or asks for more; a still image without flagged metadata is
+        // answered from its first chunks, an animation needs everything.
+        int needed = data.Length;
+        for (int n = data.Length - 1; n >= 0; n--)
+        {
+            try { Assert.Equal(info, Webp.GetInfo(data.AsSpan(0, n))); needed = n; }
+            catch (ImageFormatException) { break; }
+        }
+        for (int n = 0; n < needed; n += Math.Max(1, needed / 40)) Assert.Throws<ImageFormatException>(() => Webp.GetInfo(data.AsSpan(0, n)));
+        // a RIFF size beyond the data is what a prefix looks like, so it is the trailing bytes that do not count
+        int riff = 8 + BitConverter.ToInt32(data, 4);
+        if (info.IsAnimated) Assert.True(needed >= Math.Min(riff, data.Length) - 1);
+        else if (!data.AsSpan(12, 4).SequenceEqual("VP8X"u8)) Assert.True(needed <= 64, $"needs {needed} of {data.Length} bytes");
         Assert.True(Webp.IsMatch(data));
         Assert.Equal(ImageFormat.Webp, ImageCodec.DetectFormat(data));
         AssertEqual(expected, ImageCodec.Decode(data));
@@ -231,10 +250,10 @@ public class WebpTests(ITestOutputHelper output)
         Assert.Null(before.IccProfile);
         Assert.Equal("<x/>"u8.ToArray(), Webp.GetXmp(Load("edge_metadata_before_image.webp")));
 
-        // chunks count, whatever the VP8X flags say; of duplicates the first one
-        var noFlags = Webp.Decode(Load("edge_metadata_without_flags.webp")).Metadata!;
-        Assert.Equal("icc"u8.ToArray(), noFlags.IccProfile);
-        Assert.Equal(8, noFlags.Orientation);
+        // metadata chunks count only when the VP8X header flags them (GetInfo must know from the header whether
+        // to look for them); of duplicates the first one
+        Assert.Null(Webp.Decode(Load("edge_metadata_without_flags.webp")).Metadata);
+        Assert.Null(Webp.GetXmp(Load("edge_metadata_without_flags.webp")));
         var dup = Webp.Decode(Load("edge_duplicate_metadata.webp")).Metadata!;
         Assert.Equal("first"u8.ToArray(), dup.IccProfile);
         Assert.Equal(2, dup.Orientation);
@@ -337,7 +356,7 @@ public class WebpTests(ITestOutputHelper output)
             var back = Webp.Decode(data);
             Assert.Equal(expected.Color, back.Color);
             AssertEqual(expected, back);
-            Assert.Equal(new ImageInfo(ImageFormat.Webp, img.Width, img.Height, expected.Channels, SampleType.UInt8, expected.Color), Webp.GetInfo(data));
+            Assert.Equal(new ImageInfo(ImageFormat.Webp, img.Width, img.Height, expected.Channels, SampleType.UInt8, expected.Color) { BitsPerSample = 8 }, Webp.GetInfo(data));
             var oracle = OracleDecode(data, ".webp");
             if (oracle == null) return;
             AssertEqual(expected, oracle);
@@ -816,7 +835,8 @@ public class WebpTests(ITestOutputHelper output)
         Assert.Throws<ImageFormatException>(() => Webp.GetInfo(chunkTooLong));
         var riffTooLong = Riff(("VP8L", lossless));
         BinaryPrimitives.WriteUInt32LittleEndian(riffTooLong.AsSpan(4), (uint)riffTooLong.Length);
-        Assert.Throws<ImageFormatException>(() => Webp.GetInfo(riffTooLong));
+        Assert.Throws<ImageFormatException>(() => Webp.Decode(riffTooLong));
+        Assert.Equal(8, Webp.GetInfo(riffTooLong).Width);        // for GetInfo this is a prefix that holds all it needs
         // raw alpha shorter than the image
         Assert.Throws<ImageFormatException>(() => Webp.Decode(Riff(("VP8X", Vp8x(0x10, 8, 8)), ("ALPH", new byte[20]), ("VP8 ", lossy))));
         Assert.Throws<ImageFormatException>(() => Webp.Decode(Riff(("VP8X", Vp8x(0x10, 8, 8)), ("ALPH", new byte[] { 3 }), ("VP8 ", lossy))));

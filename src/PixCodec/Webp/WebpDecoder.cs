@@ -178,6 +178,14 @@ namespace PixCodec
             info.Xmp = c.XmpLength < 0 ? null : data.Slice(c.XmpOffset, c.XmpLength).ToArray();
         }
 
+        public static int OrientationOf(WebpContainer c, ReadOnlySpan<byte> data)
+        {
+            if (c.ExifLength < 0) return 0;
+            var exif = data.Slice(c.ExifOffset, c.ExifLength);
+            if (exif.Length >= 6 && exif.Slice(0, 6).SequenceEqual("Exif\0\0"u8)) exif = exif.Slice(6);
+            return ExifOrientation(exif);
+        }
+
         static ImageMetadata? Metadata(WebpContainer c, ReadOnlySpan<byte> data)
         {
             if (c.IccLength < 0 && c.ExifLength < 0) return null;

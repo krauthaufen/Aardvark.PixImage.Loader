@@ -183,14 +183,27 @@ namespace PixCodec
 
         /// <summary>
         /// Reads header level information without decoding pixel data. Width/Height are the canvas; Channels/Color are
-        /// what <see cref="Decode"/> returns; FrameCount is the number of animation frames (1 for a still image).
+        /// what <see cref="Decode"/> returns; FrameCount is the number of animation frames (1 for a still image);
+        /// Orientation and HasIccProfile are what Decode puts into the metadata.
+        /// <para>
+        /// The data may be a prefix of the file. A still image is answered from its first chunks, unless the VP8X
+        /// header flags an ICC profile or EXIF data whose chunk has not been seen by then (EXIF normally follows the
+        /// pixel data): the walk then continues to that chunk. An animation needs the whole file. A prefix that ends
+        /// before what is needed gives an <see cref="ImageFormatException"/>.
+        /// </para>
         /// </summary>
         public static ImageInfo GetInfo(ReadOnlySpan<byte> data)
         {
-            var c = WebpContainer.Parse(data);
+            var c = WebpContainer.Parse(data, infoOnly: true);
             bool alpha = WebpDecoder.OutputHasAlpha(c);
             return new ImageInfo(ImageFormat.Webp, c.Width, c.Height, alpha ? 4 : 3, SampleType.UInt8,
-                alpha ? ColorModel.Rgba : ColorModel.Rgb, c.Frames.Count);
+                alpha ? ColorModel.Rgba : ColorModel.Rgb, c.Frames.Count)
+            {
+                BitsPerSample = 8,
+                IsAnimated = c.Animated,
+                HasIccProfile = c.IccLength >= 0,
+                Orientation = WebpDecoder.OrientationOf(c, data),
+            };
         }
 
         /// <summary>Decodes a complete WebP file held in memory (first frame of an animation, composited).</summary>

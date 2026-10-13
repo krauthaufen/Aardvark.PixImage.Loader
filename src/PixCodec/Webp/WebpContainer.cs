@@ -34,15 +34,24 @@ namespace PixCodec
         static int U24(ReadOnlySpan<byte> d, int o) => d[o] | d[o + 1] << 8 | d[o + 2] << 16;
 
         /// <summary>
-        /// Walks the chunks. Chunk sizes must stay inside the file; a missing final padding byte, data after the RIFF
-        /// payload and unknown chunks are tolerated. The bitstream headers are checked, the pixel data is not touched.
+        /// Walks the chunks. Chunk sizes must stay inside the RIFF size; a missing final padding byte, data after the
+        /// RIFF payload and unknown chunks are tolerated. The bitstream headers are checked, the pixel data is not
+        /// touched. ICCP, EXIF and XMP chunks count only when the VP8X header flags them.
+        /// <para>
+        /// With <paramref name="infoOnly"/> the data may be a prefix of the file: the walk stops as soon as a still
+        /// image's header and every flagged ICCP / EXIF chunk have been seen, and throws when it needs bytes the
+        /// prefix does not have. An animation always needs the whole file (its frames are counted).
+        /// </para>
         /// </summary>
-        public static WebpContainer Parse(ReadOnlySpan<byte> data)
+        public static WebpContainer Parse(ReadOnlySpan<byte> data, bool infoOnly = false)
         {
             if (!Webp.IsMatch(data)) throw Bad("no RIFF/WEBP signature");
             long riffEnd = 8L + BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(4));
-            if (riffEnd > data.Length) throw Bad("file is truncated");
+            bool prefix = riffEnd > data.Length;
+            if (prefix && !infoOnly) throw Bad("file is truncated");
+            if (riffEnd > int.MaxValue) throw new ImageNotSupportedException("WebP files beyond 2 GB are not supported");
             int end = (int)riffEnd;
+            bool wantIcc = false, wantExif = false, wantXmp = false;
             var c = new WebpContainer();
             int pos = 12;
             WebpFrameEntry? still = null;
@@ -50,11 +59,16 @@ namespace PixCodec
             bool first = true;
             while (pos + 8 <= end)
             {
+                if (infoOnly && still != null && (!wantIcc || c.IccLength >= 0) && (!wantExif || c.ExifLength >= 0)) break;
+                if (pos + 8 > data.Length) throw Bad("more data needed");
                 uint tag = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(pos));
                 uint size = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(pos + 4));
                 int payload = pos + 8;
                 if (size > (uint)(end - payload)) throw Bad("chunk exceeds the file");
                 int len = (int)size;
+                // what the walk reads of a payload: all of VP8X and EXIF, the header of a bitstream
+                int need = tag == Vp8x || tag == Exif ? len : tag == Vp8 ? Math.Min(len, 10) : tag == Vp8l ? Math.Min(len, 5) : 0;
+                if (payload + need > data.Length) throw Bad("more data needed");
                 switch (tag)
                 {
                     case Vp8x:
@@ -63,6 +77,8 @@ namespace PixCodec
                         c.HasVp8x = true;
                         c.Animated = (data[payload] & 0x02) != 0;
                         c.AlphaFlag = (data[payload] & 0x10) != 0;
+                        wantIcc = (data[payload] & 0x20) != 0; wantExif = (data[payload] & 0x08) != 0; wantXmp = (data[payload] & 0x04) != 0;
+                        if (c.Animated && prefix) throw Bad("more data needed");
                         c.Width = U24(data, payload + 4) + 1;
                         c.Height = U24(data, payload + 7) + 1;
                         break;
@@ -88,13 +104,13 @@ namespace PixCodec
                         }
                         break;
                     case Iccp:
-                        if (c.IccLength < 0) { c.IccOffset = payload; c.IccLength = len; }
+                        if (wantIcc && c.IccLength < 0) { c.IccOffset = payload; c.IccLength = len; }
                         break;
                     case Exif:
-                        if (c.ExifLength < 0) { c.ExifOffset = payload; c.ExifLength = len; }
+                        if (wantExif && c.ExifLength < 0) { c.ExifOffset = payload; c.ExifLength = len; }
                         break;
                     case Xmp:
-                        if (c.XmpLength < 0) { c.XmpOffset = payload; c.XmpLength = len; }
+                        if (wantXmp && c.XmpLength < 0) { c.XmpOffset = payload; c.XmpLength = len; }
                         break;
                 }
                 first = false;
@@ -120,7 +136,7 @@ namespace PixCodec
         static void SetBitstream(WebpFrameEntry f, ReadOnlySpan<byte> data, bool lossless, int offset, int length)
         {
             f.DataOffset = offset; f.DataLength = length; f.Lossless = lossless;
-            var d = data.Slice(offset, length);
+            var d = data.Slice(offset, Math.Min(length, data.Length - offset));
             if (lossless)
             {
                 if (!Vp8lDecoder.TryReadHeader(d, out f.Width, out f.Height, out f.HasAlpha)) throw Bad("lossless bitstream header");
