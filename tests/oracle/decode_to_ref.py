@@ -23,7 +23,7 @@ def decode(path):
     if ext == '.png':
         return decode_png(im)
     if ext == '.gif':
-        return np.asarray(im.convert('RGBA'))
+        return decode_gif(path, im)
     if im.mode == 'CMYK':
         im = im.convert('RGB')
     return np.asarray(im)
@@ -48,6 +48,21 @@ def decode_png(im):
     elif im.mode in ('I', 'I;16', 'I;16B'):
         return np.asarray(im).astype(np.uint16)
     return np.asarray(im)
+
+
+def decode_gif(path, im):
+    """First frame as RGBA with transparent pixels zeroed. A file named *.anim.gif yields all composited frames
+    stacked vertically; ImageMagick does that (Pillow restores disposal 2 areas to the background color where
+    browsers and ImageMagick clear to transparent)."""
+    if path.lower().endswith('.anim.gif'):
+        import subprocess
+        w, h = im.size
+        raw = subprocess.run(['magick', path, '-coalesce', '-depth', '8', 'rgba:-'], capture_output=True, check=True).stdout
+        a = np.frombuffer(raw, np.uint8).reshape(-1, w, 4).copy()
+    else:
+        a = np.array(im.convert('RGBA'))
+    a[a[:, :, 3] == 0] = 0
+    return a
 
 
 def decode_exr(path):
