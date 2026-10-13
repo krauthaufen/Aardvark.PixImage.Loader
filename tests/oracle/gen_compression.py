@@ -422,6 +422,57 @@ def gen_zstd(s):
     write("xxlens__multi.zst", b"".join(zstd_cli(t[:n], "-1", "--check") for n in range(0, 101)))
 
 
+def bcj_data():
+    """Bytes that make every BCJ filter convert something: branch instructions of all architectures between noise."""
+    r = rng(42)
+    out = bytearray()
+
+    def le(v):
+        return struct.pack("<I", v & 0xFFFFFFFF)
+
+    def be(v):
+        return struct.pack(">I", v & 0xFFFFFFFF)
+
+    while len(out) < 5000:
+        k = r.randint(13)
+        if k < 3:
+            out += r.bytes(r.randint(1, 40))
+        elif k == 3:  # x86 call/jmp, sometimes back to back or cut short
+            for _ in range(r.randint(1, 4)):
+                out += bytes([0xE8 if r.randint(2) else 0xE9]) + le(int(r.randint(-70000, 70000)))[:(4 if r.randint(5) else r.randint(1, 4))]
+        elif k == 4:
+            out += bytes([0xE8, 0xE8, 0xE9, 0, 0, 0xFF, 0xFF, 0xE8, 0xFF, 0xFF, 0xFF])[:r.randint(3, 12)]
+        elif k == 5:  # ARM bl
+            out += le(0xEB000000 | r.randint(1 << 24))
+        elif k == 6:  # ARM64 bl, adrp
+            out += le(0x94000000 | r.randint(1 << 26)) + le(0x90000000 | (r.randint(4) << 29) | r.randint(1 << 24))
+        elif k == 7:  # PowerPC bl
+            out += be(0x48000001 | (r.randint(1 << 24) << 2))
+        elif k == 8:  # SPARC call
+            out += be((0x40000000 if r.randint(2) else 0x7FC00000) | r.randint(1 << 22))
+        elif k == 9:  # Thumb bl
+            out += bytes([r.randint(256), 0xF0 | r.randint(8), r.randint(256), 0xF8 | r.randint(8)])
+        elif k == 10:  # IA-64 bundle with branch slots
+            b = bytearray(r.bytes(16))
+            b[0] = (b[0] & 0xE0) | [0x10, 0x11, 0x12, 0x13, 0x16, 0x17, 0x18, 0x19, 0x1C, 0x1D][r.randint(10)]
+            v = int.from_bytes(b, "little")
+            for slot in range(3):
+                pos = 5 + 41 * slot
+                if r.randint(3):
+                    v &= ~(0xF << (pos + 37))
+                    v |= 5 << (pos + 37)
+                    v &= ~(7 << (pos + 9))
+            out += v.to_bytes(16, "little")
+        elif k == 11:  # RISC-V jal and auipc pairs
+            out += le(0x6F | ([1, 5, 0, 3][r.randint(4)] << 7) | (r.randint(1 << 20) << 12))
+            rd = r.randint(0, 32)
+            out += le(0x17 | (rd << 7) | (r.randint(1 << 20) << 12))
+            out += le([0x67, 0x13, 0x03, 0x23, 0x01][r.randint(5)] | (r.randint(32) << 7) | (r.randint(8) << 12) | ((rd if r.randint(4) else r.randint(32)) << 15) | (r.randint(1 << 12) << 20))
+        else:  # input that already looks like the RISC-V filter's marker word
+            out += le(0x3117 | (r.randint(1 << 18) << 14)) + r.bytes(4)
+    return bytes(out[:5000])
+
+
 def gen_xz(s):
     for name, data in s.items():
         write("%s__p6.xz" % name, lzma.compress(data, lzma.FORMAT_XZ, lzma.CHECK_CRC64, 6))
@@ -461,9 +512,15 @@ def gen_xz(s):
         + lzma.compress(parts[3], lzma.FORMAT_XZ, lzma.CHECK_CRC64, filters=[{"id": lzma.FILTER_DELTA, "dist": 3}, {"id": lzma.FILTER_LZMA2, "preset": 9}]) \
         + lzma.compress(parts[4], lzma.FORMAT_XZ, lzma.CHECK_CRC32, 0) + bytes(12)
     write("streams__multi.xz", multi)
-    # an x86 BCJ filter in the chain: valid, but not supported by the decoder
+    # BCJ filters: machine code flavoured data for every architecture (see bcj_data), with and without a start offset
     f = [{"id": lzma.FILTER_X86}, {"id": lzma.FILTER_LZMA2, "preset": 1}]
-    write("text__bcj.xz.unsupported", lzma.compress(s["text"][:2000], lzma.FORMAT_XZ, lzma.CHECK_CRC32, filters=f))
+    write("text__x86.xz", lzma.compress(s["text"], lzma.FORMAT_XZ, lzma.CHECK_CRC32, filters=f))
+    code = bcj_data()
+    write("bcj.bin", code)
+    for name, align in (("x86", 1), ("powerpc", 4), ("ia64", 16), ("arm", 4), ("armthumb", 2), ("sparc", 4), ("arm64", 4), ("riscv", 2)):
+        write("bcj__%s.xz" % name, subprocess.run(["xz", "-c", "--" + name, "--lzma2=preset=1"], input=code, stdout=subprocess.PIPE, check=True).stdout)
+        write("bcj__%s_start.xz" % name, subprocess.run(["xz", "-c", "--%s=start=%d" % (name, align * 4099 * 16), "--delta=dist=2", "--lzma2=preset=0"],
+                                                         input=code, stdout=subprocess.PIPE, check=True).stdout)
     # legacy .lzma: liblzma writes "unknown size + end marker"; the patched copies declare the size instead
     for name in ("text", "image", "big", "one", "empty", "random", "zeros"):
         z = lzma.compress(s[name], lzma.FORMAT_ALONE, preset=5)

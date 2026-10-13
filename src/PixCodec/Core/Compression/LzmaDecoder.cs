@@ -57,6 +57,23 @@ namespace PixCodec.Compression
             return 1 - zero;
         }
 
+        // One step down a bit tree with both children's probabilities fetched before the bit is known, so that the
+        // next multiplication does not wait for a load that depends on this decision.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void TreeStep(ushort* probs, ref uint sym, ref uint p, ref uint range, ref uint code, ref byte* inp)
+        {
+            if (range < 1u << 24) { range <<= 8; code = (code << 8) | *inp++; }
+            uint bound = (range >> 11) * p;
+            uint p0 = probs[2 * sym], p1 = probs[2 * sym + 1];
+            uint mask = (uint)(((long)code - bound) >> 63); // all ones for a 0 bit
+            probs[sym] = (ushort)((int)p - (((int)p + (int)(mask & unchecked((uint)(31 - 2048)))) >> 5));
+            uint rest = range - bound;
+            range = rest + (mask & (bound - rest));
+            code -= bound & ~mask;
+            sym = 2 * sym + 1 + mask;
+            p = (p0 & mask) | (p1 & ~mask);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static uint Tree(ushort* probs, int bits, ref uint range, ref uint code, ref byte* p)
         {
@@ -123,7 +140,20 @@ namespace PixCodec.Compression
                                 if (mb != b) break;
                             } while (sym < 0x100);
                         }
-                        while (sym < 0x100) sym = (sym << 1) | Bit(lit + sym, ref range, ref code, ref p);
+                        if (sym == 1)
+                        {
+                            // plain literal: eight tree steps (the last one reads child slots it never uses; they exist)
+                            uint pr0 = lit[1];
+                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
+                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
+                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
+                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
+                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
+                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
+                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
+                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
+                        }
+                        else while (sym < 0x100) sym = (sym << 1) | Bit(lit + sym, ref range, ref code, ref p);
                         dst[o++] = (byte)sym;
                         state = state < 4 ? 0 : state < 10 ? state - 3 : state - 6;
                         continue;

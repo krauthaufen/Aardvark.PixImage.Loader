@@ -259,9 +259,31 @@ public class CompressionDecodeTests
     [Fact]
     public void XzUnsupportedFilter()
     {
-        var z = Load("text__bcj.xz.unsupported");
+        // an x86 filter id rewritten to an id nobody has assigned (with the block header CRC fixed up)
+        var z = Load("text__x86.xz");
+        int header = 12, size = (z[header] + 1) * 4;
+        Assert.Equal(0x04, z[header + 2]);
+        z[header + 2] = 0x3E;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(z.AsSpan(header + size - 4), Zlib.Crc32(z.AsSpan(header, size - 4)));
         Assert.Throws<ImageNotSupportedException>(() => Xz.Decompress(z, new byte[4000]));
         Assert.Throws<ImageNotSupportedException>(() => Xz.Decompress(z));
+    }
+
+    /// <summary>The BCJ fixtures only prove something if every filter really converts instructions in that data.</summary>
+    [Fact]
+    public void BcjFiltersAllChangeTheTestData()
+    {
+        var data = Load("bcj.bin");
+        for (int id = BcjFilters.X86; id <= BcjFilters.RiscV; id++)
+        {
+            var copy = (byte[])data.Clone();
+            BcjFilters.Decode(id, copy, 0);
+            int changed = 0;
+            for (int i = 0; i < data.Length; i++) if (copy[i] != data[i]) changed++;
+            Assert.True(changed > 12, $"filter {id}: only {changed} bytes changed");
+            // buffers shorter than one instruction are left alone
+            for (int n = 0; n < 20; n++) BcjFilters.Decode(id, data.AsSpan(0, n).ToArray(), 0);
+        }
     }
 
     [Fact]
