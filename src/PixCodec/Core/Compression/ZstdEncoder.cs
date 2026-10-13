@@ -668,17 +668,21 @@ namespace PixCodec.Compression
                                 }
                             }
                         }
+                        // a short match that costs more than its bytes as literals is no match (frequent in image data)
+                        if (matchLen != 0 && matchLen <= 8 && LiteralsCheaper(p, matchLen, offset, false)) matchLen = 0;
                         if (matchLen == 0)
                         {
                             // the longer nothing matches, the bigger the steps
-                            p += 1 + ((p - anchor) >> 7);
+                            p += 1 + ((p - anchor) >> 5);
                             continue;
                         }
                         // grow backwards over literals that also match
                         while (p > anchor && p - src > offset && p[-1] == p[-1 - (long)offset]) { p--; matchLen++; }
                     }
                     int litLen = (int)(p - anchor);
-                    Buffer.MemoryCopy(anchor, lit + nlit, litLen, litLen);
+                    // short literal runs: one 16 byte copy (both buffers have the slack) instead of a call
+                    if (litLen <= 16 && end - anchor >= 16) Unsafe.WriteUnaligned(lit + nlit, Unsafe.ReadUnaligned<System.Runtime.Intrinsics.Vector128<byte>>(anchor));
+                    else Buffer.MemoryCopy(anchor, lit + nlit, litLen, litLen);
                     nlit += litLen;
                     sq[nseq].LitLen = litLen;
                     sq[nseq].MatchLen = matchLen;
