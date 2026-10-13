@@ -462,6 +462,51 @@ public class Jp2Tests
         Assert.Equal(sd, planes.Planes[0].Data64);
     }
 
+    /// <summary>Float data in HT codestreams (OpenJPH, OpenEXR): bit patterns as integers behind an NLT type 3 marker segment.</summary>
+    [Fact]
+    public void FloatBitPatternsAndNlt()
+    {
+        var data = File.ReadAllBytes(Fixture("jp2/ht_float_nlt.jhc"));
+        var planes = Jp2.DecodeCodestreamPlanes(data);
+        Assert.Equal(new[] { true }, planes.NltSignMagnitude);
+        Assert.Equal((32, true), (planes.Planes[0].Precision, planes.Planes[0].Signed));
+        // the mapping back to float bits is the caller's: negative values are -(magnitude) - 1
+        static float ToFloat(int v) => BitConverter.Int32BitsToSingle(v >= 0 ? v : (int)(0x80000000u | (uint)(-(v + 1))));
+        var coded = planes.Planes[0].Data!;
+        Assert.Equal(0f, ToFloat(coded[0]));
+        Assert.True(float.IsNegative(ToFloat(coded[1])) && ToFloat(coded[1]) == 0f);
+        Assert.Equal(float.PositiveInfinity, ToFloat(coded[2]));
+        Assert.Equal(float.NegativeInfinity, ToFloat(coded[3]));
+        Assert.Null(Jp2.DecodeCodestreamPlanes(File.ReadAllBytes(Fixture("jp2/ht_gray8_rev.jhc"))).NltSignMagnitude);
+
+        // writing: the same marker, read back as floats by OpenJPH
+        var rng = new Random(2);
+        var floats = new float[30 * 22 * 2];
+        for (int i = 0; i < floats.Length; i++) floats[i] = (float)((rng.NextDouble() - 0.5) * Math.Pow(10, rng.Next(-8, 9)));
+        floats[0] = 0f; floats[1] = -0f; floats[2] = float.MaxValue; floats[3] = float.MinValue; floats[4] = float.Epsilon; floats[5] = -float.Epsilon;
+        var src = new J2kPlanes { Width = 30, Height = 22, Planes = new J2kPlane[2], NltSignMagnitude = new[] { true, true } };
+        for (int c = 0; c < 2; c++)
+        {
+            var d = new int[30 * 22];
+            for (int i = 0; i < d.Length; i++)
+            {
+                int bits = BitConverter.SingleToInt32Bits(floats[2 * i + c]);
+                d[i] = bits >= 0 ? bits : -(bits & 0x7FFFFFFF) - 1;
+            }
+            src.Planes[c] = new J2kPlane { Width = 30, Height = 22, Precision = 32, Signed = true, Data = d };
+        }
+        var cs = Jp2.EncodeCodestreamPlanes(src, new Jp2EncodeOptions { HighThroughput = true, ColorTransform = false });
+        var back = Jp2.DecodeCodestreamPlanes(cs);
+        Assert.Equal(new[] { true, true }, back.NltSignMagnitude);
+        for (int c = 0; c < 2; c++) Assert.Equal(src.Planes[c].Data, back.Planes[c].Data);
+        var oracle = Jp2TestUtil.Oracle(cs, ".jhc");
+        if (oracle != null)
+        {
+            Assert.Equal((SampleType.Float32, 2), (oracle.SampleType, oracle.Channels));
+            Assert.True(System.Runtime.InteropServices.MemoryMarshal.AsBytes<float>(floats).SequenceEqual(oracle.GetBytes()));
+        }
+    }
+
     [Fact]
     public void AbsentTilesOfAClosedCodestreamAreZero()
     {

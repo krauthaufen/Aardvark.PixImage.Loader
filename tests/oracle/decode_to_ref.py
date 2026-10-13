@@ -226,6 +226,8 @@ def decode_jp2(path):
         a = a[:, :, None]
     elif a.shape[2] != nc and a.shape[0] == nc:
         a = np.moveaxis(a, 0, -1)
+    if a.dtype.kind == 'f':
+        return a   # OpenJPH undoes the float mapping of an NLT marker segment
     if not signed and depth < 8:
         m = (1 << depth) - 1
         return ((a.astype(np.int64) * 255 + m // 2) // m).astype(np.uint8)
