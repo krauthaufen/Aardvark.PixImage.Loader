@@ -867,6 +867,64 @@ def gen_ycbcr():
         write_tol(path, 2)   # libtiff converts with fixed point tables, PixCodec with floats
         SUMMARY.append(('ycbcr/' + name, ['cv2 (libtiff RGBA)', f'max error vs. the RGB source {src}']))
 
+    def build_planar(name, w, h, sh, sv, comp, rps, tile=None):
+        # PlanarConfiguration 2: a full resolution Y plane and Cb / Cr planes reduced by the subsampling factors
+        rgb = test_pattern(w, h, 3, np.uint8, 22).astype(np.float64)
+        y = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+        cb = (rgb[:, :, 2] - y) / 1.772 + 128
+        cr = (rgb[:, :, 0] - y) / 1.402 + 128
+        ph, pw = -(-h // sv) * sv, -(-w // sh) * sh
+        pad = lambda a: np.pad(a, ((0, ph - h), (0, pw - w)), mode='edge')
+        q = lambda a: np.clip(np.round(a), 0, 255).astype(np.uint8)
+        planes = [q(y), q(pad(cb).reshape(ph // sv, sv, pw // sh, sh).mean(axis=(1, 3))), q(pad(cr).reshape(ph // sv, sv, pw // sh, sh).mean(axis=(1, 3)))]
+        chunks = []
+        for i, pl in enumerate(planes):
+            fh, fv = (1, 1) if i == 0 else (sh, sv)
+            if tile:
+                tw, th = tile[0] // fh, tile[1] // fv
+                for ty in range(0, -(-h // tile[1])):
+                    for tx in range(0, -(-w // tile[0])):
+                        blk = pl[ty * th:(ty + 1) * th, tx * tw:(tx + 1) * tw]
+                        blk = np.pad(blk, ((0, th - blk.shape[0]), (0, tw - blk.shape[1])))
+                        chunks.append(blk.tobytes())
+            else:
+                for r in range(0, h, rps):
+                    chunks.append(pl[r // fv:-(-min(r + rps, h) // fv)].tobytes())
+        chunks = [lzw_encode(c) if comp == LZW else zlib.compress(c) if comp == DEFLATE else c for c in chunks]
+        verified = sh == 1 and sv == 1
+        d = os.path.join(OUT, 'ycbcr' if verified else 'unverified')
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name + '.tif')
+        page = dict(arr=np.zeros((h, w, 3), np.uint8), photometric=6, planar=2, compression=comp, rps=rps, raw_chunks=chunks, tags=[
+            (530, 3, [sh, sv]), (532, 5, [(0, 1), (255, 1), (128, 1), (255, 1), (128, 1), (255, 1)])])
+        if tile:
+            page['tile'] = tile
+        write_tiff(path, [page])
+        if verified:
+            ref = ref_cv2(path)
+            src = int(np.abs(ref.astype(int) - rgb).max())
+            assert src < 6, (name, src)
+            write_ref(path + '.ref', ref)
+            write_tol(path, 2)
+            SUMMARY.append(('ycbcr/' + name, ['cv2 (libtiff RGBA)', f'max error vs. the RGB source {src}']))
+        else:
+            # libtiff refuses subsampled planar YCbCr and nothing else here converts it: reference = replicate the
+            # chroma samples and apply the same conversion the verified contiguous / 1x1 planar fixtures check
+            assert cv2.imread(path, cv2.IMREAD_UNCHANGED) is None
+            up = lambda pl: np.repeat(np.repeat(pl, sv, axis=0), sh, axis=1)[:h, :w].astype(np.float64)
+            yy, cbb, crr = planes[0].astype(np.float64), up(planes[1]) - 128, up(planes[2]) - 128
+            ref = np.stack([yy + 1.402 * crr, yy - (0.114 * 1.772 * cbb + 0.299 * 1.402 * crr) / 0.587, yy + 1.772 * cbb], axis=-1)
+            write_ref(path + '.ref', np.clip(np.floor(ref + 0.5), 0, 255).astype(np.uint8))
+            write_tol(path, 1)
+            reason = f'planar YCbCr with {sh}x{sv} subsampled chroma planes (libtiff: not supported)'
+            UNVERIFIED.append((name, reason))
+            SUMMARY.append(('unverified/' + name, ['UNVERIFIED: ' + reason]))
+
+    build_planar('ycbcr_planar_1x1_none', 23, 17, 1, 1, NONE, 6)
+    build_planar('ycbcr_planar_1x1_lzw', 23, 17, 1, 1, LZW, 17)
+    build_planar('ycbcr_planar_1x1_deflate_tiled', 40, 33, 1, 1, DEFLATE, 0, tile=(16, 16))
+    build_planar('ycbcr_planar_2x2_none', 23, 17, 2, 2, NONE, 8)
+    build_planar('ycbcr_planar_2x1_lzw_tiled', 40, 33, 2, 1, LZW, 0, tile=(16, 16))
     build('ycbcr_2x2_none', 24, 16, 2, 2, NONE, 16)
     build('ycbcr_2x2_odd_lzw', 23, 17, 2, 2, LZW, 8)
     build('ycbcr_2x1_deflate', 23, 17, 2, 1, DEFLATE, 5)
