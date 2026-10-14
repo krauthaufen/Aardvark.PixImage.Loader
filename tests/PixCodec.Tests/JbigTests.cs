@@ -263,6 +263,8 @@ public class JbigTests
             var back = new byte[packed.Length];
             Jbig.DecodeForTiff(bie, w, h, back);
             Assert.Equal(packed, back);
+            Assert.Equal(packed, Jbig.DecodeBits(bie, out int bw, out int bh));
+            Assert.Equal((w, h), (bw, bh));
             // the same entity through the public decoder: 1 bits are black
             TestUtil.AssertEqual(page, Jbig.Decode(bie), 0);
 
@@ -293,5 +295,9 @@ public class JbigTests
             for (int x = 0; x < img.Width; x++)
                 Assert.Equal(px[y * img.Width + x] == 0, (rows[y * ((img.Width + 7) / 8) + (x >> 3)] & (0x80 >> (x & 7))) != 0);
         Assert.Throws<ImageFormatException>(() => Jbig.DecodeForTiff(Load("jbig/planes2_gray.jbg"), 70, 50, new byte[9 * 50]));
+        Assert.Throws<ImageNotSupportedException>(() => Jbig.DecodeBits(Load("jbig/planes2_gray.jbg"), out _, out _));
+        var nl = Jbig.DecodeBits(data, out int nw, out int nh);
+        Assert.Equal((img.Width, img.Height), (nw, nh));
+        Assert.Equal(rows, nl);
     }
 }

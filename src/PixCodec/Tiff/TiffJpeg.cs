@@ -232,7 +232,21 @@ namespace PixCodec
         /// </summary>
         public static void LercDecode(ReadOnlySpan<byte> blob, SampleType type, int width, int height, Span<byte> destination, int channels,
             Span<byte> masks, out int bands, out int depth, out int maskCount)
-            => throw new ImageNotSupportedException("TIFF: LERC decoding is not available yet");
+        {
+            var info = Lerc.GetInfo(blob);
+            if (info.Width != width || info.Height != height) throw new ImageFormatException("TIFF: LERC strip/tile does not match the image layout");
+            if (info.SampleType != type) throw new ImageFormatException("TIFF: LERC strip/tile holds another data type than the image");
+            bands = info.Bands; depth = info.Depth;
+            if (info.Channels > channels || info.Channels < 1) throw new ImageFormatException("TIFF: LERC strip/tile does not match the image layout");
+            var img = Lerc.Decode(blob, out var valid, new LercDecodeOptions { MaxPixels = (long)width * height });
+            int n = width * height, bps = RawImage.BytesPerSample(type), have = img.Channels;
+            var src = img.GetBytes();
+            if (have == channels) src.CopyTo(destination);
+            else
+                for (int i = 0; i < n; i++) src.Slice(i * have * bps, have * bps).CopyTo(destination.Slice(i * channels * bps));
+            maskCount = valid == null ? 0 : valid.Length / n;
+            valid?.CopyTo(masks);
+        }
 
         /// <summary>
         /// Encodes interleaved native samples (channel = band * depth + index) as one LERC2 blob. <paramref name="masks"/>:
@@ -240,7 +254,16 @@ namespace PixCodec
         /// </summary>
         public static void LercEncode(ReadOnlySpan<byte> samples, SampleType type, int width, int height, int depth, int bands,
             ReadOnlySpan<byte> masks, double maxError, Stream output)
-            => throw new ImageNotSupportedException("TIFF: LERC encoding is not available yet");
+        {
+            int channels = depth * bands;
+            var data = RawImage.CreateArray(type, width * height * channels);
+            var img = new RawImage(width, height, RawImage.DefaultColorModel(channels), data, channels);
+            samples.Slice(0, width * height * channels * RawImage.BytesPerSample(type)).CopyTo(img.GetBytes());
+            output.Write(Lerc.Encode(img, new LercEncodeOptions
+            {
+                MaxZError = maxError, Version = 4, Bands = bands, ValidMask = masks.IsEmpty ? null : masks.ToArray(),
+            }));
+        }
 
         /// <summary>
         /// Encodes width x height pixels of <paramref name="samples"/> interleaved native samples as one strip / tile.

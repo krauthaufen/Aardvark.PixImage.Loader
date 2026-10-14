@@ -612,7 +612,9 @@ namespace PixCodec
         /// LERC (compression 34887): integers of 8, 16 and 32 bits and floats of 32 and 64 bits, lossless or with
         /// <see cref="TiffEncodeOptions.LercMaxError"/>, optionally followed by Deflate or Zstd
         /// (<see cref="TiffEncodeOptions.LercSecondCompression"/>). As in GDAL / libtiff, NaN samples of float images
-        /// and the alpha channel of 8-bit images whose alpha is 0 or 255 everywhere are stored as LERC validity masks.
+        /// and the alpha channel of 8-bit images whose alpha is 0 or 255 everywhere are stored as LERC validity masks
+        /// (so fully transparent pixels come back with colour 0). In big endian files floats and lossy coding of samples
+        /// wider than 8 bits are refused: libtiff hands LERC byte-swapped numbers there.
         /// </summary>
         Lerc,
         /// <summary>JPEG 2000 (compression 34712), lossless: 8 or 16 bit integer samples.</summary>
