@@ -668,17 +668,21 @@ namespace PixCodec.Compression
                                 }
                             }
                         }
+                        // a short match that costs more than its bytes as literals is no match (frequent in image data)
+                        if (matchLen != 0 && matchLen <= 8 && LiteralsCheaper(p, matchLen, offset, false)) matchLen = 0;
                         if (matchLen == 0)
                         {
                             // the longer nothing matches, the bigger the steps
-                            p += 1 + ((p - anchor) >> 7);
+                            p += 1 + ((p - anchor) >> 5);
                             continue;
                         }
                         // grow backwards over literals that also match
                         while (p > anchor && p - src > offset && p[-1] == p[-1 - (long)offset]) { p--; matchLen++; }
                     }
                     int litLen = (int)(p - anchor);
-                    Buffer.MemoryCopy(anchor, lit + nlit, litLen, litLen);
+                    // short literal runs: one 16 byte copy (both buffers have the slack) instead of a call
+                    if (litLen <= 16 && end - anchor >= 16) Unsafe.WriteUnaligned(lit + nlit, Unsafe.ReadUnaligned<System.Runtime.Intrinsics.Vector128<byte>>(anchor));
+                    else Buffer.MemoryCopy(anchor, lit + nlit, litLen, litLen);
                     nlit += litLen;
                     sq[nseq].LitLen = litLen;
                     sq[nseq].MatchLen = matchLen;
@@ -1013,13 +1017,31 @@ namespace PixCodec.Compression
 
         [ThreadStatic] static ZstdEncoder? cached;
 
-        public static byte[] Compress(ReadOnlySpan<byte> source, int level, bool checksum) => (cached ??= new ZstdEncoder()).Run(source, level, checksum);
+        public static byte[] Compress(ReadOnlySpan<byte> source, int level, bool checksum, ReadOnlySpan<byte> dictionary = default)
+            => (cached ??= new ZstdEncoder()).Run(source, level, checksum, dictionary);
 
-        byte[] Run(ReadOnlySpan<byte> source, int level, bool checksum)
+        byte[] Run(ReadOnlySpan<byte> content, int level, bool checksum, ReadOnlySpan<byte> dictionary)
         {
+            // With a dictionary the encoder works on "dictionary content + input" as one buffer: the content is
+            // history that matches may reach, exactly as the decoder will see it.
+            ReadOnlySpan<byte> source = content;
+            int start = 0;
+            uint dictionaryId = 0;
+            bool structured = false;
+            if (!dictionary.IsEmpty)
+            {
+                structured = verifier.ParseDictionary(dictionary, out dictionaryId, out int contentStart);
+                var history = dictionary.Slice(contentStart);
+                if ((long)history.Length + content.Length > Array.MaxLength) throw new ArgumentException("input too large to combine with the dictionary", nameof(content));
+                var all = new byte[history.Length + content.Length];
+                history.CopyTo(all);
+                content.CopyTo(all.AsSpan(history.Length));
+                source = all;
+                start = history.Length;
+            }
             // the output grows as needed: compressible input near 2 GB must not need a 2 GB buffer up front
-            long bound = 18L + source.Length + 3L * (source.Length / BlockSize + 1) + 4;
-            var output = new byte[Math.Min(bound, Math.Max(source.Length / 2 + 4096, 4 * BlockSize))];
+            long bound = 22L + content.Length + 3L * (content.Length / BlockSize + 1) + 4;
+            var output = new byte[Math.Min(bound, Math.Max(content.Length / 2 + 4096, 4 * BlockSize))];
             int o = 0;
             BinaryPrimitives.WriteUInt32LittleEndian(output, 0xFD2FB528);
             o = 4;
@@ -1034,12 +1056,13 @@ namespace PixCodec.Compression
             longShift = 64 - MaxHashLog;
             searchDepth = level <= 4 ? 4 : level == 5 ? 8 : level == 6 ? 16 : level <= 8 ? 32 : level <= 12 ? 64 : level <= 17 ? 128 : 512;
             lazySteps = level <= 6 ? 1 : 2;
-            // window descriptor + 8 byte content size; no dictionary id
             int windowLog = Math.Clamp(source.Length <= 1 ? 10 : BitOperations.Log2((uint)source.Length - 1) + 1, 10, maxWindowLog);
             int window = 1 << windowLog;
-            output[o++] = (byte)(0xC0 | (checksum ? 0x04 : 0));
+            // frame header: 8 byte content size, optional checksum, 4 byte dictionary id for a structured dictionary
+            output[o++] = (byte)(0xC0 | (checksum ? 0x04 : 0) | (dictionaryId != 0 ? 3 : 0));
             output[o++] = (byte)((windowLog - 10) << 3);
-            BinaryPrimitives.WriteUInt64LittleEndian(output.AsSpan(o), (ulong)source.Length);
+            if (dictionaryId != 0) { BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(o), dictionaryId); o += 4; }
+            BinaryPrimitives.WriteUInt64LittleEndian(output.AsSpan(o), (ulong)content.Length);
             o += 8;
 
             if (fast)
@@ -1063,9 +1086,26 @@ namespace PixCodec.Compression
             }
             litCost.AsSpan().Fill(8);
             rep = 1; rep0 = 1; rep1 = 4; rep2 = 8;
+            if (structured)
+            {
+                // the decoder starts with the dictionary's repeat offsets
+                rep0 = verifier.DictionaryRepeatOffset(0); rep1 = verifier.DictionaryRepeatOffset(1); rep2 = verifier.DictionaryRepeatOffset(2);
+                rep = rep0;
+            }
             fixed (byte* src = source, wk = work)
             {
-                int pos = 0;
+                // index the dictionary content
+                if (fast)
+                {
+                    fixed (int* ht = hash, lt = longHash)
+                        for (int i = 0; i + 8 <= start; i++)
+                        {
+                            ht[Hash(src + i, 64 - 8 * hashBytes, hashShift)] = i;
+                            if (useLong) lt[Hash8(src + i, longShift)] = i;
+                        }
+                }
+                else for (int i = 0; i + 8 <= start; i++) ChainInsert(src, i);
+                int pos = start;
                 do
                 {
                     int n = Math.Min(BlockSize, source.Length - pos);
@@ -1112,7 +1152,7 @@ namespace PixCodec.Compression
             if (checksum)
             {
                 if (output.Length - o < 4) Array.Resize(ref output, o + 4);
-                BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(o), (uint)Checksums.XxHash64(source));
+                BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(o), (uint)Checksums.XxHash64(content));
                 o += 4;
             }
             return output.AsSpan(0, o).ToArray();

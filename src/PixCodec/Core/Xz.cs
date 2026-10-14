@@ -58,71 +58,117 @@ namespace PixCodec.Compression
         }
 
         /// <summary>
-        /// Compresses to a single-block .xz stream that xz / liblzma read. Level 0..9 selects dictionary size and
-        /// search effort (not liblzma's presets: there is no optimal parser, so expect somewhat larger output).
-        /// <paramref name="deltaDistance"/> (1..256) puts a Delta filter in front of LZMA2, as TIFF writers do
-        /// for predictor data; 0 = none.
+        /// Compresses to an .xz stream that xz / liblzma read. Level 0..9 selects dictionary size and search effort:
+        /// 1..3 greedy, 4..6 lazy matching, 7..9 price based optimal parsing with large dictionaries (slow, for
+        /// text-like data; on photographic data the lazy levels are already as small).
+        /// <paramref name="deltaDistance"/> (1..256) puts a Delta filter in front of LZMA2, as TIFF writers do for
+        /// predictor data; 0 = none. Large inputs are split into independent blocks of <paramref name="blockSize"/>
+        /// bytes (0 = three times the dictionary size, at least 1 MiB), which <paramref name="threads"/> &gt; 1
+        /// compresses in parallel (0 = one per processor); the output does not depend on the thread count.
         /// </summary>
-        public static byte[] Compress(ReadOnlySpan<byte> source, int level = 6, int deltaDistance = 0, XzCheck check = XzCheck.Crc64)
+        public static unsafe byte[] Compress(ReadOnlySpan<byte> source, int level = 6, int deltaDistance = 0, XzCheck check = XzCheck.Crc64,
+            int threads = 1, int blockSize = 0)
         {
             if (deltaDistance < 0 || deltaDistance > 256) throw new ArgumentOutOfRangeException(nameof(deltaDistance));
             if (check != XzCheck.None && check != XzCheck.Crc32 && check != XzCheck.Crc64 && check != XzCheck.Sha256) throw new ArgumentOutOfRangeException(nameof(check));
-            var enc = new LzmaEncoder(level, source.Length);
-            var output = new byte[Math.Max(256, source.Length / 3 + 128)];
-            int n = 0;
-            // stream header
-            Span<byte> tmp = stackalloc byte[64];
-            HeaderMagic.CopyTo(tmp);
-            tmp[6] = 0; tmp[7] = (byte)check;
-            BinaryPrimitives.WriteUInt32LittleEndian(tmp.Slice(8), Checksums.Crc32(tmp.Slice(6, 2), 0));
-            Put(ref output, ref n, tmp.Slice(0, 12));
-            // block header: filters (delta), LZMA2 with the dictionary size code
-            int dictCode = 0;
-            while (dictCode < 40 && ((2L | (dictCode & 1)) << (dictCode / 2 + 11)) < enc.DictionarySize) dictCode++;
-            int h = 1;
-            tmp[h++] = (byte)(deltaDistance > 0 ? 1 : 0);
-            if (deltaDistance > 0) { tmp[h++] = 0x03; tmp[h++] = 1; tmp[h++] = (byte)(deltaDistance - 1); }
-            tmp[h++] = 0x21; tmp[h++] = 1; tmp[h++] = (byte)dictCode;
-            while ((h & 3) != 0) tmp[h++] = 0;
-            tmp[0] = (byte)((h + 4) / 4 - 1);
-            BinaryPrimitives.WriteUInt32LittleEndian(tmp.Slice(h), Checksums.Crc32(tmp.Slice(0, h), 0));
-            int headerSize = h + 4;
-            Put(ref output, ref n, tmp.Slice(0, headerSize));
-            // data
-            int dataStart = n;
-            if (deltaDistance > 0)
+            if (blockSize < 0) throw new ArgumentOutOfRangeException(nameof(blockSize));
+            if (threads <= 0) threads = Environment.ProcessorCount;
+            int length = source.Length;
+            if (blockSize == 0) blockSize = (int)Math.Min(int.MaxValue, Math.Max(1L << 20, 3L * LzmaEncoder.DictionarySizeFor(level, length)));
+            int blockCount = length == 0 ? 0 : (int)(((long)length + blockSize - 1) / blockSize);
+            var blocks = new byte[blockCount][];
+            var unpadded = new long[blockCount];
+            int checkType = (int)check, checkSize = CheckSizes[checkType];
+
+            fixed (byte* src = source)
             {
-                var filtered = source.ToArray();
-                for (int i = filtered.Length - 1; i >= deltaDistance; i--) filtered[i] -= filtered[i - deltaDistance];
-                enc.EncodeLzma2(filtered, ref output, ref n);
+                nint basePtr = (nint)src;
+                void Encode(int index)
+                {
+                    int start = (int)((long)index * blockSize), n = Math.Min(blockSize, length - start);
+                    var data = new ReadOnlySpan<byte>((byte*)basePtr + start, n);
+                    var enc = new LzmaEncoder(level, n);
+                    var output = new byte[Math.Max(256, n / 3 + 128)];
+                    int o = 0;
+                    Span<byte> tmp = stackalloc byte[64];
+                    // block header: filters (delta), LZMA2 with the dictionary size code
+                    int dictCode = 0;
+                    while (dictCode < 40 && ((2L | (dictCode & 1)) << (dictCode / 2 + 11)) < enc.DictionarySize) dictCode++;
+                    int h = 1;
+                    tmp[h++] = (byte)(deltaDistance > 0 ? 1 : 0);
+                    if (deltaDistance > 0) { tmp[h++] = 0x03; tmp[h++] = 1; tmp[h++] = (byte)(deltaDistance - 1); }
+                    tmp[h++] = 0x21; tmp[h++] = 1; tmp[h++] = (byte)dictCode;
+                    while ((h & 3) != 0) tmp[h++] = 0;
+                    tmp[0] = (byte)((h + 4) / 4 - 1);
+                    BinaryPrimitives.WriteUInt32LittleEndian(tmp.Slice(h), Checksums.Crc32(tmp.Slice(0, h), 0));
+                    int headerSize = h + 4;
+                    Put(ref output, ref o, tmp.Slice(0, headerSize));
+                    if (deltaDistance > 0)
+                    {
+                        // the filter starts afresh in every block
+                        var filtered = data.ToArray();
+                        for (int i = filtered.Length - 1; i >= deltaDistance; i--) filtered[i] -= filtered[i - deltaDistance];
+                        enc.EncodeLzma2(filtered, ref output, ref o);
+                    }
+                    else enc.EncodeLzma2(data, ref output, ref o);
+                    long size = o; // header + compressed data, the "unpadded size" without the check
+                    Span<byte> zeros = stackalloc byte[4];
+                    zeros.Clear();
+                    Put(ref output, ref o, zeros.Slice(0, (4 - o % 4) % 4));
+                    if (check == XzCheck.Crc32) BinaryPrimitives.WriteUInt32LittleEndian(tmp, Checksums.Crc32(data, 0));
+                    else if (check == XzCheck.Crc64) BinaryPrimitives.WriteUInt64LittleEndian(tmp, Checksums.Crc64(data));
+                    else if (check == XzCheck.Sha256) Checksums.Sha256(data, tmp);
+                    Put(ref output, ref o, tmp.Slice(0, checkSize));
+                    Array.Resize(ref output, o);
+                    blocks[index] = output;
+                    unpadded[index] = size + checkSize;
+                }
+                if (threads > 1 && blockCount > 1)
+                {
+                    try { System.Threading.Tasks.Parallel.For(0, blockCount, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = threads }, Encode); }
+                    catch (AggregateException e) when (e.InnerException != null) { throw e.InnerException; }
+                }
+                else for (int i = 0; i < blockCount; i++) Encode(i);
             }
-            else enc.EncodeLzma2(source, ref output, ref n);
-            long packed = n - dataStart;
-            Span<byte> zeros = stackalloc byte[4];
-            zeros.Clear();
-            Put(ref output, ref n, zeros.Slice(0, (4 - (n - 12) % 4) % 4));
-            int checkSize = CheckSizes[(int)check];
-            if (check == XzCheck.Crc32) BinaryPrimitives.WriteUInt32LittleEndian(tmp, Checksums.Crc32(source, 0));
-            else if (check == XzCheck.Crc64) BinaryPrimitives.WriteUInt64LittleEndian(tmp, Checksums.Crc64(source));
-            else if (check == XzCheck.Sha256) Checksums.Sha256(source, tmp);
-            Put(ref output, ref n, tmp.Slice(0, checkSize));
-            // index: one record
-            int ix = 0;
-            tmp[ix++] = 0; tmp[ix++] = 1;
-            WriteVarint(tmp, ref ix, (ulong)(headerSize + packed + checkSize));
-            WriteVarint(tmp, ref ix, (ulong)source.Length);
-            while ((ix & 3) != 0) tmp[ix++] = 0;
-            BinaryPrimitives.WriteUInt32LittleEndian(tmp.Slice(ix), Checksums.Crc32(tmp.Slice(0, ix), 0));
-            int indexSize = ix + 4;
-            Put(ref output, ref n, tmp.Slice(0, indexSize));
+
+            long total = 12 + 12 + 16 + 20L * blockCount;
+            foreach (var b in blocks) total += b.Length;
+            if (total > Array.MaxLength) throw new System.IO.IOException("compressed output too large");
+            var result = new byte[total];
+            int n2 = 0;
+            Span<byte> t = stackalloc byte[32];
+            // stream header
+            HeaderMagic.CopyTo(t);
+            t[6] = 0; t[7] = (byte)check;
+            BinaryPrimitives.WriteUInt32LittleEndian(t.Slice(8), Checksums.Crc32(t.Slice(6, 2), 0));
+            Put(ref result, ref n2, t.Slice(0, 12));
+            foreach (var b in blocks) Put(ref result, ref n2, b);
+            // index: one record per block
+            int indexStart = n2;
+            t[0] = 0;
+            int ix = 1;
+            WriteVarint(t, ref ix, (ulong)blockCount);
+            Put(ref result, ref n2, t.Slice(0, ix));
+            for (int i = 0; i < blockCount; i++)
+            {
+                ix = 0;
+                WriteVarint(t, ref ix, (ulong)unpadded[i]);
+                WriteVarint(t, ref ix, (ulong)Math.Min(blockSize, length - (long)i * blockSize));
+                Put(ref result, ref n2, t.Slice(0, ix));
+            }
+            t.Clear();
+            Put(ref result, ref n2, t.Slice(0, (4 - (n2 - indexStart) % 4) % 4));
+            BinaryPrimitives.WriteUInt32LittleEndian(t, Checksums.Crc32(result.AsSpan(indexStart, n2 - indexStart), 0));
+            Put(ref result, ref n2, t.Slice(0, 4));
+            int indexSize = n2 - indexStart;
             // footer
-            BinaryPrimitives.WriteUInt32LittleEndian(tmp.Slice(4), (uint)(indexSize / 4 - 1));
-            tmp[8] = 0; tmp[9] = (byte)check;
-            BinaryPrimitives.WriteUInt32LittleEndian(tmp, Checksums.Crc32(tmp.Slice(4, 6), 0));
-            tmp[10] = (byte)'Y'; tmp[11] = (byte)'Z';
-            Put(ref output, ref n, tmp.Slice(0, 12));
-            Array.Resize(ref output, n);
-            return output;
+            BinaryPrimitives.WriteUInt32LittleEndian(t.Slice(4), (uint)(indexSize / 4 - 1));
+            t[8] = 0; t[9] = (byte)check;
+            BinaryPrimitives.WriteUInt32LittleEndian(t, Checksums.Crc32(t.Slice(4, 6), 0));
+            t[10] = (byte)'Y'; t[11] = (byte)'Z';
+            Put(ref result, ref n2, t.Slice(0, 12));
+            Array.Resize(ref result, n2);
+            return result;
         }
 
         /// <summary>Compresses to a legacy ".lzma" file (LZMA alone, with the size in the header and no end marker).</summary>

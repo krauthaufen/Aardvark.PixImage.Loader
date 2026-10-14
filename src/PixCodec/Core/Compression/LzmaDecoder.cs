@@ -18,7 +18,7 @@ namespace PixCodec.Compression
         const int InputSlack = 64; // one symbol reads fewer input bytes than this
         const int Wild = 16;
 
-        ushort[] probs = new ushort[Literal + (0x300 << 4)];
+        ushort[] probs = new ushort[Literal + (0x300 << 4) + 0x300];
         int lc, lp, pb;
         uint state, rep0, rep1, rep2, rep3, range, code;
 
@@ -31,7 +31,7 @@ namespace PixCodec.Compression
             lp = props % 5; pb = props / 5;
             if (lzma2 && lc + lp > 4) return false;
             int need = Literal + (0x300 << (lc + lp));
-            if (probs.Length < need) probs = new ushort[need];
+            if (probs.Length < need + 0x300) probs = new ushort[need + 0x300]; // (the tree steps load one level ahead)
             return true;
         }
 
@@ -41,56 +41,60 @@ namespace PixCodec.Compression
             probs.AsSpan(0, Literal + (0x300 << (lc + lp))).Fill(1024);
         }
 
-        // One binary decision. Branch free: on image data the bits are close to unpredictable.
+        // The decoder's speed is set by one dependency chain: range -> bound -> bit -> next range. The select at
+        // its end is done with a mask (the JIT has no conditional move to offer inside this loop, and a branch on
+        // the bit is mispredicted too often on image data). Whatever is not on that chain is kept off it: in
+        // bit trees both children's probabilities are loaded before the bit is known.
+
+        // One binary decision; returns 0 or 1.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static uint Bit(ushort* prob, ref uint range, ref uint code, ref byte* p)
         {
             if (range < 1u << 24) { range <<= 8; code = (code << 8) | *p++; }
-            int v = *prob;
-            uint bound = (range >> 11) * (uint)v;
-            uint zero = code < bound ? 1u : 0u;
-            uint mask = 0 - zero; // all ones for a 0 bit
-            range = (bound & mask) | ((range - bound) & ~mask);
+            uint v = *prob;
+            uint bound = (range >> 11) * v;
+            uint mask = (uint)(((long)code - bound) >> 63); // all ones for a 0 bit
+            uint rest = range - bound;
+            range = (bound & mask) | (rest & ~mask);
             code -= bound & ~mask;
             // 0: v += (2048 - v) >> 5, 1: v -= v >> 5
-            *prob = (ushort)(v - ((v + (int)(mask & unchecked((uint)(31 - 2048)))) >> 5));
-            return 1 - zero;
+            *prob = (ushort)((int)v - (((int)v + (int)(mask & unchecked((uint)(31 - 2048)))) >> 5));
+            return mask + 1;
         }
 
-        // One step down a bit tree with both children's probabilities fetched before the bit is known, so that the
-        // next multiplication does not wait for a load that depends on this decision.
+        // One step down a bit tree: sym is the node (1 = root), p its probability; both are advanced.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void TreeStep(ushort* probs, ref uint sym, ref uint p, ref uint range, ref uint code, ref byte* inp)
         {
             if (range < 1u << 24) { range <<= 8; code = (code << 8) | *inp++; }
             uint bound = (range >> 11) * p;
             uint p0 = probs[2 * sym], p1 = probs[2 * sym + 1];
-            uint mask = (uint)(((long)code - bound) >> 63); // all ones for a 0 bit
+            uint mask = (uint)(((long)code - bound) >> 63);
             probs[sym] = (ushort)((int)p - (((int)p + (int)(mask & unchecked((uint)(31 - 2048)))) >> 5));
             uint rest = range - bound;
-            range = rest + (mask & (bound - rest));
+            range = (bound & mask) | (rest & ~mask);
             code -= bound & ~mask;
             sym = 2 * sym + 1 + mask;
             p = (p0 & mask) | (p1 & ~mask);
         }
 
+        // (the last step of a tree loads "children" that lie past the tree: those slots exist and are never used)
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static uint Tree(ushort* probs, int bits, ref uint range, ref uint code, ref byte* p)
         {
-            uint m = 1;
-            for (int i = 0; i < bits; i++) m = (m << 1) | Bit(probs + m, ref range, ref code, ref p);
+            uint m = 1, pr = probs[1];
+            for (int i = 0; i < bits; i++) TreeStep(probs, ref m, ref pr, ref range, ref code, ref p);
             return m - (1u << bits);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static uint ReverseTree(ushort* probs, int bits, ref uint range, ref uint code, ref byte* p)
         {
-            uint m = 1, sym = 0;
+            uint m = 1, pr = probs[1], sym = 0;
             for (int i = 0; i < bits; i++)
             {
-                uint b = Bit(probs + m, ref range, ref code, ref p);
-                m = (m << 1) | b;
-                sym |= b << i;
+                TreeStep(probs, ref m, ref pr, ref range, ref code, ref p);
+                sym |= (m & 1) << i;
             }
             return sym;
         }
@@ -130,30 +134,38 @@ namespace PixCodec.Compression
                         uint sym = 1;
                         if (state >= 7)
                         {
+                            // Literal after a match: while its bits agree with the byte the last distance points at,
+                            // the probabilities come from the row chosen by that byte's next bit - which is known
+                            // in advance, so both children can still be loaded early.
                             uint matchByte = dst[o - rep0 - 1];
+                            uint mb = (matchByte >> 7) & 1;
+                            uint pm = lit[((1 + mb) << 8) + 1];
                             do
                             {
-                                uint mb = (matchByte >> 7) & 1;
                                 matchByte <<= 1;
-                                uint b = Bit(lit + ((1 + mb) << 8) + sym, ref range, ref code, ref p);
-                                sym = (sym << 1) | b;
+                                uint mbNext = (matchByte >> 7) & 1;
+                                ushort* row = lit + ((1 + mbNext) << 8);
+                                if (range < 1u << 24) { range <<= 8; code = (code << 8) | *p++; }
+                                uint bound = (range >> 11) * pm;
+                                uint p0 = row[2 * sym], p1 = row[2 * sym + 1];
+                                uint mask = (uint)(((long)code - bound) >> 63);
+                                lit[((1 + mb) << 8) + sym] = (ushort)((int)pm - (((int)pm + (int)(mask & unchecked((uint)(31 - 2048)))) >> 5));
+                                uint rest = range - bound;
+                                range = (bound & mask) | (rest & ~mask);
+                                code -= bound & ~mask;
+                                uint b = mask + 1;
+                                sym = 2 * sym + b;
                                 if (mb != b) break;
+                                pm = (p0 & mask) | (p1 & ~mask);
+                                mb = mbNext;
                             } while (sym < 0x100);
                         }
-                        if (sym == 1)
+                        if (sym < 0x100)
                         {
-                            // plain literal: eight tree steps (the last one reads child slots it never uses; they exist)
-                            uint pr0 = lit[1];
-                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
-                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
-                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
-                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
-                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
-                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
-                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
-                            TreeStep(lit, ref sym, ref pr0, ref range, ref code, ref p);
+                            // plain tree steps for all eight bits, or for the rest after the first disagreement
+                            uint pl = lit[sym];
+                            do TreeStep(lit, ref sym, ref pl, ref range, ref code, ref p); while (sym < 0x100);
                         }
-                        else while (sym < 0x100) sym = (sym << 1) | Bit(lit + sym, ref range, ref code, ref p);
                         dst[o++] = (byte)sym;
                         state = state < 4 ? 0 : state < 10 ? state - 3 : state - 6;
                         continue;

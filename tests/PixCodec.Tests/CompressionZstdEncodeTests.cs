@@ -91,6 +91,89 @@ public class CompressionZstdEncodeTests
         Assert.True(data.AsSpan().SequenceEqual(Reference(new[] { z })![0]));
     }
 
+    // decodes with the zstd tool and a dictionary file; null when the tool is not installed
+    static byte[]? ToolDecode(byte[] frame, string dictionaryFile)
+    {
+        var dir = Path.Combine(TestUtil.FixtureDir, "_tmp");
+        Directory.CreateDirectory(dir);
+        var f = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".zst");
+        try
+        {
+            File.WriteAllBytes(f, frame);
+            var psi = new System.Diagnostics.ProcessStartInfo("zstd") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            foreach (var a in new[] { "-d", "-c", "-q", "-D", dictionaryFile, f }) psi.ArgumentList.Add(a);
+            using var p = System.Diagnostics.Process.Start(psi)!;
+            var ms = new MemoryStream();
+            var copy = p.StandardOutput.BaseStream.CopyToAsync(ms);
+            var err = p.StandardError.ReadToEndAsync();
+            copy.Wait(); p.WaitForExit();
+            Assert.True(p.ExitCode == 0, "zstd -D failed: " + err.Result);
+            return ms.ToArray();
+        }
+        catch (System.ComponentModel.Win32Exception) { return null; }
+        finally { File.Delete(f); }
+    }
+
+    /// <summary>Compression with a trained (structured) and a plain-content dictionary, read back by us and by <c>zstd -D</c>.</summary>
+    [Fact]
+    public void DictionaryCompression()
+    {
+        bool toolSeen = false;
+        foreach (var dictName in new[] { "trained.zdict", "rawcontent.zdict" })
+        {
+            var dict = Load(dictName);
+            var other = Load(dictName == "trained.zdict" ? "rawcontent.zdict" : "trained.zdict");
+            foreach (var dataName in new[] { "dictsmall.bin", "dictlarge.bin", "text.bin", "empty.bin", "one.bin" })
+            {
+                var data = Load(dataName);
+                foreach (var (level, checksum) in new[] { (1, false), (2, true), (3, true), (5, false), (9, true), (19, false) })
+                {
+                    string what = $"{dataName} with {dictName}, level {level}";
+                    var z = Zstd.Compress(data, dict, level, checksum);
+                    Assert.True(data.AsSpan().SequenceEqual(Zstd.DecompressWithDictionary(z, dict)), what);
+                    var dst = new byte[data.Length];
+                    Assert.Equal(data.Length, Zstd.Decompress(z, dst, dict));
+                    Assert.True(data.AsSpan().SequenceEqual(dst), what);
+                    var tool = ToolDecode(z, Fixture(dictName));
+                    if (tool != null) { toolSeen = true; Assert.True(data.AsSpan().SequenceEqual(tool), what + ": zstd -D"); }
+                    if (dataName.StartsWith("dict"))
+                    {
+                        // the dictionary is really used: the frame is smaller, and useless without it
+                        Assert.True(z.Length < Zstd.Compress(data, level, checksum).Length, what + ": no gain from the dictionary");
+                        var ex = Record.Exception(() => Zstd.Decompress(z, dst));
+                        Assert.True(ex is ImageFormatException or ImageNotSupportedException, what + ": decoded without its dictionary");
+                        if (checksum) Assert.Throws<ImageFormatException>(() => Zstd.Decompress(z, dst, other)); // (without a checksum a wrong dictionary can go unnoticed)
+                    }
+                }
+            }
+        }
+        log.WriteLine(toolSeen ? "verified with zstd -D" : "zstd tool not available: only self-checked");
+        // records like the dictionary's samples shrink a lot more with it
+        var small = Load("dictsmall.bin");
+        Assert.True(Zstd.Compress(small, Load("trained.zdict")).Length < Zstd.Compress(small).Length * 0.7);
+    }
+
+    [Fact]
+    public void DictionaryFuzz()
+    {
+        var rnd = new Random(808);
+        var dicts = new[] { Load("trained.zdict"), Load("rawcontent.zdict"), Make("text").AsSpan(0, 20_000).ToArray(), new byte[] { 1, 2, 3 }, Make("random").AsSpan(0, 3000).ToArray() };
+        for (int it = 0; it < 250 * FuzzScale; it++)
+        {
+            var dict = dicts[rnd.Next(dicts.Length)];
+            var data = CompressionTestData.Fuzz(rnd);
+            // sometimes splice dictionary content into the data so that there is something to find
+            if (dict.Length > 100 && data.Length > 200 && rnd.Next(2) == 0)
+                dict.AsSpan(dict.Length - 100, 100).CopyTo(data.AsSpan(rnd.Next(data.Length - 100)));
+            int level = new[] { 1, 2, 3, 4, 6, 9, 16 }[rnd.Next(7)];
+            var z = Zstd.Compress(data, dict, level, rnd.Next(2) == 0);
+            byte[] back;
+            try { back = Zstd.DecompressWithDictionary(z, dict); }
+            catch (Exception e) { throw new Xunit.Sdk.XunitException($"iteration {it}, {data.Length} bytes, level {level}: {e.Message}"); }
+            Assert.True(data.AsSpan().SequenceEqual(back), $"iteration {it}, {data.Length} bytes, level {level}");
+        }
+    }
+
     [Fact]
     public void Fuzz()
     {
