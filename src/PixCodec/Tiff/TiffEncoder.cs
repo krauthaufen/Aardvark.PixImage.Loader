@@ -177,6 +177,8 @@ namespace PixCodec
                     // libtiff hands the codec byte-swapped numbers in big endian files, which for floats makes arbitrary
                     // bit patterns (NaN among them) out of ordinary values
                     if (IsFloat && bigEndian) throw new ArgumentException("LERC compressed float output is not available in big endian TIFF files");
+                    // (and the error bound of lossy coding would apply to the swapped numbers)
+                    if (bigEndian && Bps > 1 && o.LercMaxError > 0) throw new ArgumentException("lossy LERC output of samples wider than 8 bits is not available in big endian TIFF files");
                     LercSecond = o.LercSecondCompression switch
                     {
                         TiffCompression.None => 0,

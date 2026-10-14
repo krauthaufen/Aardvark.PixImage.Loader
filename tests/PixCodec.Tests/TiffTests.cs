@@ -1424,8 +1424,7 @@ public class TiffTests
     [MemberData(nameof(LercFixtures))]
     public void DecodesLercFixture(string file) => CheckFixture(file);
 
-    // Un-skip when codec/lerc has an encoder and TiffForeignCodecs.LercEncode calls it.
-    [Theory(Skip = "needs the LERC encoder (codec/lerc)")]
+    [Theory]
     [InlineData(SampleType.Float32, 1, 0, TiffCompression.None, 0.0)]
     [InlineData(SampleType.Float32, 1, 32, TiffCompression.Zstd, 0.01)]
     [InlineData(SampleType.Float64, 1, 0, TiffCompression.Deflate, 0.0)]
@@ -1483,7 +1482,7 @@ public class TiffTests
             for (int x = 3; x < 20; x++) img.GetData<float>()[(50 * w + x) * 3 + 2] = float.NaN;
         }
         foreach (bool planar in channels > 1 ? new[] { false, true } : new[] { false })
-            foreach (bool be in isFloat ? new[] { false } : new[] { false, true })
+            foreach (bool be in isFloat || (maxError > 0 && type != SampleType.UInt8) ? new[] { false } : new[] { false, true })
             {
                 var o = new TiffEncodeOptions { Compression = TiffCompression.Lerc, LercMaxError = maxError, LercSecondCompression = second, TileWidth = tile, TileHeight = tile, RowsPerStrip = 25, Planar = planar, BigEndian = be };
                 var file = Encode(img, o);
@@ -1493,9 +1492,18 @@ public class TiffTests
                 Assert.Equal(new long[] { 4, second == TiffCompression.Deflate ? 1 : second == TiffCompression.Zstd ? 2 : 0 }, tags.Single(t => t.Id == 50674).AsIntegers());
                 var back = Tiff.Decode(file);
                 Assert.Equal((img.Color, img.SampleType, img.Channels), (back.Color, back.SampleType, back.Channels));
-                // the holes come back as holes, everything else within the allowed error (integers: whole steps)
-                TestUtil.AssertEqual(img, back, isFloat ? maxError * 1.0000001 : Math.Floor(maxError));
-                if (maxError == 0) Assert.True(img.GetBytes().SequenceEqual(back.GetBytes()) || isFloat, what);
+                // the holes come back as holes, everything else within the allowed error (integers: whole steps);
+                // a binary alpha channel becomes the LERC mask, so fully transparent pixels lose their colour (as in libtiff)
+                var expected = img;
+                if (type == SampleType.UInt8 && channels == 4 && !planar)
+                {
+                    expected = RawImage.Create(w, h, ColorModel.Rgba, SampleType.UInt8);
+                    var e = expected.GetData<byte>();
+                    img.GetData<byte>().CopyTo(e, 0);
+                    for (int i = 0; i < e.Length; i += 4) if (e[i + 3] == 0) e[i] = e[i + 1] = e[i + 2] = 0;
+                }
+                TestUtil.AssertEqual(expected, back, isFloat ? maxError * 1.0000001 : Math.Floor(maxError));
+                if (maxError == 0) Assert.True(expected.GetBytes().SequenceEqual(back.GetBytes()) || isFloat, what);
                 // GDAL (libtiff + liblerc) reads the very same samples, NaN holes and alpha included
                 var gdal = PythonImage(file, "try:\n    import rasterio\nexcept ImportError:\n    sys.exit(77)\nwrite(np.moveaxis(rasterio.open(PATH).read(), 0, -1))");
                 if (gdal != null) TestUtil.AssertEqual(back, gdal);
@@ -1507,6 +1515,7 @@ public class TiffTests
         Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Gray, SampleType.UInt64, 1), new TiffEncodeOptions { Compression = TiffCompression.Lerc }));
         Assert.Throws<ArgumentException>(() => Encode(img, new TiffEncodeOptions { Compression = TiffCompression.Lerc, LercSecondCompression = TiffCompression.Lzw }));
         if (isFloat) Assert.Throws<ArgumentException>(() => Encode(img, new TiffEncodeOptions { Compression = TiffCompression.Lerc, BigEndian = true }));
+        if (maxError > 0 && !isFloat) Assert.Throws<ArgumentException>(() => Encode(img, new TiffEncodeOptions { Compression = TiffCompression.Lerc, LercMaxError = maxError, BigEndian = true }));
     }
 
     [Theory]

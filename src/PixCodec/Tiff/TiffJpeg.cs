@@ -254,7 +254,16 @@ namespace PixCodec
         /// </summary>
         public static void LercEncode(ReadOnlySpan<byte> samples, SampleType type, int width, int height, int depth, int bands,
             ReadOnlySpan<byte> masks, double maxError, Stream output)
-            => throw new ImageNotSupportedException("TIFF: LERC encoding is not available yet");
+        {
+            int channels = depth * bands;
+            var data = RawImage.CreateArray(type, width * height * channels);
+            var img = new RawImage(width, height, RawImage.DefaultColorModel(channels), data, channels);
+            samples.Slice(0, width * height * channels * RawImage.BytesPerSample(type)).CopyTo(img.GetBytes());
+            output.Write(Lerc.Encode(img, new LercEncodeOptions
+            {
+                MaxZError = maxError, Version = 4, Bands = bands, ValidMask = masks.IsEmpty ? null : masks.ToArray(),
+            }));
+        }
 
         /// <summary>
         /// Encodes width x height pixels of <paramref name="samples"/> interleaved native samples as one strip / tile.
