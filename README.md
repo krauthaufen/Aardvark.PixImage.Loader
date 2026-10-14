@@ -11,11 +11,14 @@ Little-endian hosts only (x64 and arm64 are tested).
 | GIF | 87a/89a, interlace, transparency, animations (compositing verified against Chromium) | single images and animations, quantizer + dithering |
 | OpenEXR | scanline, tiled, multi-part, deep, mip/rip levels, half/float/uint, luminance/chroma, all compressions incl. PIZ, B44, DWA, ZSTD, HTJ2K, region decode from a stream | scanline, tiled, multi-part, deep, luminance/chroma, all of those compressions |
 | WebP | lossy, lossless, alpha, animation | lossy, lossless, alpha, animation |
+| BMP | all header versions (OS/2 1.x/2.x, V1..V5), 1/2/4/8/16/24/32 bit, palettes, bit fields of any width (>8 bit fields give 16 bit samples), alpha masks, RLE4/RLE8/RLE24, embedded JPEG/PNG, ICC; checked against the BMP Suite | 8 bit gray, RGB, RGBA (gray+alpha as RGBA), resolution, ICC |
+| DDS | 1D, 2D, volume and cube map textures, arrays, mip chains, legacy and DX10 headers; BC1..BC7 (BC6H as half float, signed BC4/BC5), legacy bit mask formats, the common uncompressed DXGI formats (8/16/32 bit int and float, 10:10:10:2, 5:6:5, 5:5:5:1, 4:4:4:4, R11G11B10F, RGB9E5) | uncompressed 8/16 bit, half and float, mip chains (given or computed), cube maps |
+| TGA | colour-mapped, true-colour (15/16/24/32 bit), gray (+alpha), RLE, every origin, TGA 2.0 alpha type | gray, gray+alpha, RGB, RGBA, optional RLE |
 | LERC | LERC1 and LERC2 v2..v6 (bands, depth, masks, no-data, lossless float) | decode only |
 | JBIG1 | the whole of T.82 (layers, all stripe orders, bit planes) | single layer, 1..8 bit planes |
 | JPEG 2000 | Part 1 and HTJ2K (.j2k / .jph codestreams, JP2 / JPH container), 1..38 bit, region / reduced resolution / layer limited decode | Part 1 and HTJ2K, lossless and lossy (up to 16 bit), target bitrate, tiles, progression orders |
 
-Not supported: JPEG XL / JPEG XR inside TIFF, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions, ICC colour conversion.
+Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions, ICC colour conversion.
 LERC encoding is not offered because Esri holds patents on LERC compression.
 
 ## Core library
@@ -31,6 +34,8 @@ ImageInfo info = ImageCodec.GetInfo("scan.tif");    // reads only the headers
 // info.Format, Width, Height, Channels, SampleType, Color, FrameCount,
 // BitsPerSample, Orientation (+ StoredWidth/Height), DpiX, DpiY, HasIccProfile, IsAnimated
 if (ImageCodec.TryGetInfo(path, out var i)) { /* ... */ }
+RawImage[] levels = ImageCodec.DecodeMipmaps("tex.dds");   // stored mip levels (DDS, OpenEXR), else just the image
+DdsTexture tex = Dds.DecodeTexture(bytes);              // every surface: tex.GetImage(mip, item, face, slice)
 ```
 
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
@@ -99,6 +104,9 @@ PixImage[] pages   = PixImagePixCodec.LoadAll("stack.tif");                     
 ImageInfo info     = PixImagePixCodec.GetInfo("dem.tif");
 PixImagePixCodec.Save(img, "out.webp");
 PixImage p = rawImage.ToPixImage();   RawImage r = pixImage.ToRawImage();
+PixImageMipMap mm  = PixImagePixCodec.LoadMipmap("tex.dds");                     // also PixImageMipMap.Load (IPixMipmapLoader)
+PixCube cube       = PixImagePixCodec.LoadCube("sky.dds");                        // DDS cube map, every side with its mip chain
+PixImagePixCodec.SaveDds(cube, stream);
 ```
 
 `Init()` also registers `PixCodecProcessor`, so `PixImage.Scaled`, `Resized`, `Rotated`, `Remapped` and `PixImageMipMap.Create`
@@ -106,7 +114,7 @@ use PixCodec for every sample type (ImageInterpolation `Near`, `Linear`, `Cubic`
 bilinear, bicubic, Lanczos3 and box). Extension methods add the other filters and options:
 `pi.Resized(w, h, ResampleFilter.Mitchell)`, `pi.Resized(w, h, new ResizeOptions { LinearLight = true })`,
 `pi.Rotated(angle, true, new WarpOptions { ... })`, `pi.WarpedAffine(...)`, `pi.WarpedPerspective(...)`, `pi.Oriented(orientation)`.
-The alpha channel is taken from the PixImage format (BGRA works as is, premultiplied RGBP/BGRP are not premultiplied again).
+The alpha channel is taken from the PixImage format (BGRA works as is, premultiplied RGBP/BGRP are not premultiplied again). Two channel images without colour meaning (BC5 and RG textures, two band rasters) load as `Col.Format.RG`.
 
 Half float EXR channels load as `PixImage<float>`. BGR(A) images are saved as RGB(A). The existing `PixSaveParams`
 classes (JPEG quality, PNG level, TIFF / EXR compression, WebP quality / lossless, JPEG 2000) are honoured.

@@ -53,6 +53,10 @@ public class LayoutTests
         yield return new object[] { ".tif", Make(ColorModel.Other, SampleType.UInt32, 5) };
         yield return new object[] { ".gif", Make(ColorModel.Rgb, SampleType.UInt8) };
         yield return new object[] { ".exr", Make(ColorModel.Rgba, SampleType.Float32) };
+        yield return new object[] { ".bmp", Make(ColorModel.Rgba, SampleType.UInt8) };
+        yield return new object[] { ".bmp", Make(ColorModel.Gray, SampleType.UInt8) };
+        yield return new object[] { ".tga", Make(ColorModel.Rgb, SampleType.UInt8) };
+        yield return new object[] { ".tga", Make(ColorModel.GrayAlpha, SampleType.UInt8) };
     }
 
     [Theory]
@@ -63,7 +67,7 @@ public class LayoutTests
         try
         {
             ImageCodec.Encode(raw, path);
-            bool oriented = ext is not (".gif" or ".exr");   // formats without an orientation tag
+            bool oriented = ext is not (".gif" or ".exr" or ".bmp" or ".tga");   // formats without an orientation tag
             var size = oriented ? new V2i(4, 6) : new V2i(6, 4);
             var bytes = File.ReadAllBytes(path);
             var images = new List<PixImage>

@@ -31,6 +31,8 @@ namespace PixCodec
         /// <summary>Sets <see cref="LevelX"/> and <see cref="LevelY"/> to the same value (the usual case, mip level n).</summary>
         public int Level { set { LevelX = value; LevelY = value; } }
 
+        internal ExrDecodeOptions Clone() => (ExrDecodeOptions)MemberwiseClone();
+
         /// <summary>
         /// How <see cref="Exr.Decode(ReadOnlySpan{byte}, ExrDecodeOptions)"/> flattens deep parts, see <see cref="ExrDeepImage.Flatten"/>: sort the samples of a
         /// pixel by depth (default true) and split / merge overlapping volume samples (default true). With both false
@@ -368,8 +370,29 @@ namespace PixCodec
             var (dpiX, dpiY) = Density(part);
             return new ImageInfo(ImageFormat.Exr, part.Width, part.Height, channels, type, color, file.Parts.Length)
             {
-                BitsPerSample = bits, DpiX = dpiX, DpiY = dpiY,
+                BitsPerSample = bits, DpiX = dpiX, DpiY = dpiY, MipLevels = MipLevelCount(part),
             };
+        }
+
+        /// <summary>Levels with equal x and y level of a tiled part: all mip levels, the diagonal of a rip map.</summary>
+        static int MipLevelCount(ExrHeader part) => Math.Min(part.LevelCountX, part.LevelCountY);
+
+        /// <summary>
+        /// The mip levels of a part (<see cref="ExrDecodeOptions.PartIndex"/>), largest first: all levels of a mip map, the levels
+        /// with equal x and y resolution of a rip map, or just the image.
+        /// </summary>
+        public static RawImage[] DecodeMipmaps(ReadOnlySpan<byte> data, ExrDecodeOptions? options = null)
+        {
+            options ??= new ExrDecodeOptions();
+            var part = ExrFileStructure.Parse(data).Parts[options.PartIndex];
+            var r = new RawImage[part.IsDeep ? 1 : MipLevelCount(part)];
+            for (int k = 0; k < r.Length; k++)
+            {
+                var o = options.Clone();
+                o.Level = k;
+                r[k] = Decode(data, o);
+            }
+            return r;
         }
 
         /// <summary>Pixels per inch from the "xDensity" attribute (horizontal; vertical is xDensity * pixelAspectRatio), 0 if absent.</summary>

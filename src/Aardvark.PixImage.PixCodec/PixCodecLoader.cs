@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using PixCodec;
 
@@ -8,7 +9,7 @@ namespace Aardvark.Base
     /// PixImage loader backed by the fully managed PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP).
     /// Register with <see cref="PixImagePixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
-    public sealed class PixCodecLoader : IPixLoader
+    public sealed class PixCodecLoader : IPixMipmapLoader
     {
         public string Name => "PixCodec";
         public bool CanEncode => true;
@@ -16,6 +17,13 @@ namespace Aardvark.Base
 
         public PixImage LoadFromFile(string filename) => ToPixImage(ImageCodec.Decode(filename));
         public PixImage LoadFromStream(Stream stream) => ToPixImage(ImageCodec.Decode(stream));
+
+        /// <summary>The stored mip levels (DDS mip chains, OpenEXR mip maps), or just the image for files without them.</summary>
+        public PixImageMipMap LoadMipmapFromFile(string filename) => ToMipMap(ImageCodec.DecodeMipmaps(filename));
+        /// <inheritdoc cref="LoadMipmapFromFile"/>
+        public PixImageMipMap LoadMipmapFromStream(Stream stream) => ToMipMap(ImageCodec.DecodeMipmaps(stream));
+
+        internal static PixImageMipMap ToMipMap(RawImage[] levels) => new PixImageMipMap(Array.ConvertAll(levels, ToPixImage));
 
         public PixImageInfo GetInfoFromFile(string filename)
         {
@@ -64,6 +72,15 @@ namespace Aardvark.Base
                 case PixFileFormat.Jp2:
                 case PixFileFormat.J2k:
                     Jp2.Encode(ToRawImage(image, Target.ByteOrUShort), stream, new Jp2EncodeOptions { RawCodestream = saveParams.Format == PixFileFormat.J2k });
+                    break;
+                case PixFileFormat.Bmp:
+                    Bmp.Encode(ToRawImage(image, Target.Byte), stream);
+                    break;
+                case PixFileFormat.Targa:
+                    Tga.Encode(ToRawImage(image, Target.Byte), stream);
+                    break;
+                case PixFileFormat.Dds:
+                    Dds.Encode(ToRawImage(image, Target.Native), stream);
                     break;
                 case PixFileFormat.Gif:
                     Gif.Encode(ToRawImage(image, Target.Byte), stream);
@@ -125,7 +142,8 @@ namespace Aardvark.Base
             ColorModel.GrayAlpha => Col.Format.GrayAlpha,
             ColorModel.Rgb => Col.Format.RGB,
             ColorModel.Rgba => Col.Format.RGBA,
-            _ => channels switch { 1 => Col.Format.Gray, 2 => Col.Format.GrayAlpha, 3 => Col.Format.RGB, 4 => Col.Format.RGBA, _ => Col.Format.None },
+            // two channels without colour meaning (BC5 / RG textures, two band rasters) are RG
+            _ => channels switch { 1 => Col.Format.Gray, 2 => Col.Format.RG, 3 => Col.Format.RGB, 4 => Col.Format.RGBA, _ => Col.Format.None },
         };
 
         static PixImage<T> Wrap<T>(RawImage img, T[] data)
@@ -181,6 +199,7 @@ namespace Aardvark.Base
                 Col.Format.GrayAlpha => ColorModel.GrayAlpha,
                 Col.Format.RGB => ColorModel.Rgb,
                 Col.Format.RGBA => ColorModel.Rgba,
+                Col.Format.RG => ColorModel.Other,
                 _ => RawImage.DefaultColorModel(c) is var m && c <= 4 ? m : ColorModel.Other,
             };
             return new RawImage(w, h, color, data, c);
@@ -270,6 +289,39 @@ namespace Aardvark.Base
         /// <inheritdoc cref="LoadAll(string)"/>
         public static PixImage[] LoadAll(ReadOnlySpan<byte> data) => ConvertAll(ImageCodec.DecodeAll(data));
 
+        /// <summary>
+        /// The image with its stored mip levels (DDS mip chains, OpenEXR mip maps), largest first; files without levels give a
+        /// single level. <see cref="PixImageMipMap.Create"/> computes levels.
+        /// </summary>
+        public static PixImageMipMap LoadMipmap(string path) => PixCodecLoader.ToMipMap(ImageCodec.DecodeMipmaps(path));
+        /// <inheritdoc cref="LoadMipmap(string)"/>
+        public static PixImageMipMap LoadMipmap(Stream stream) => PixCodecLoader.ToMipMap(ImageCodec.DecodeMipmaps(stream));
+
+        /// <summary>
+        /// A DDS cube map as a PixCube: each side with its mip chain (Aardvark's CubeSide order is the order DDS stores the
+        /// faces in: +X, -X, +Y, -Y, +Z, -Z). Faces a legacy file leaves out are null. <paramref name="item"/> selects the cube
+        /// of a cube map array.
+        /// </summary>
+        public static PixCube LoadCube(string path, int item = 0) => ToCube(Dds.DecodeTexture(File.ReadAllBytes(path)), item);
+        /// <inheritdoc cref="LoadCube(string, int)"/>
+        public static PixCube LoadCube(Stream stream, int item = 0) => ToCube(Dds.DecodeTexture(ImageCodec.ReadAll(stream)), item);
+
+        static PixCube ToCube(DdsTexture t, int item)
+        {
+            if (t.Kind != DdsTextureKind.CubeMap) throw new ImageLoadException($"not a cube map but a {t.Kind}");
+            var sides = new PixImageMipMap[6];
+            for (int i = 0; i < t.Faces.Count; i++) sides[t.Faces[i]] = PixCodecLoader.ToMipMap(t.GetMipChain(item, i));
+            return new PixCube(sides);
+        }
+
+        /// <summary>Saves a mip map as DDS (uncompressed; every level half the size of the previous one).</summary>
+        public static void SaveDds(PixImageMipMap mipmap, Stream stream)
+            => Dds.EncodeMipmaps(Array.ConvertAll(mipmap.ImageArray, PixCodecLoader.ToRawImage), stream);
+
+        /// <summary>Saves a PixCube as a DDS cube map, each side with its mip chain.</summary>
+        public static void SaveDds(PixCube cube, Stream stream)
+            => Dds.EncodeCube(Array.ConvertAll(cube.MipMapArray, m => (IReadOnlyList<RawImage>)Array.ConvertAll(m.ImageArray, PixCodecLoader.ToRawImage)), stream);
+
         /// <summary>Reads only the headers: format, size, channels, sample type, orientation, dpi, ... (see <see cref="ImageInfo"/>).</summary>
         public static ImageInfo GetInfo(string path) => ImageCodec.GetInfo(path);
         /// <inheritdoc cref="GetInfo(string)"/>
@@ -295,6 +347,9 @@ namespace Aardvark.Base
             ImageFormat.Exr => PixFileFormat.Exr,
             ImageFormat.Webp => PixFileFormat.Webp,
             ImageFormat.Jp2 => Path.GetExtension(path).ToLowerInvariant() is ".j2k" or ".j2c" or ".jph" ? PixFileFormat.J2k : PixFileFormat.Jp2,
+            ImageFormat.Bmp => PixFileFormat.Bmp,
+            ImageFormat.Tga => PixFileFormat.Targa,
+            ImageFormat.Dds => PixFileFormat.Dds,
             _ => throw new ArgumentException($"cannot infer the image format from '{path}'"),
         };
 

@@ -16,6 +16,9 @@ namespace PixCodec
             if (Exr.IsMatch(header)) return ImageFormat.Exr;
             if (Webp.IsMatch(header)) return ImageFormat.Webp;
             if (Jp2.IsMatch(header)) return ImageFormat.Jp2;
+            if (Bmp.IsMatch(header)) return ImageFormat.Bmp;
+            if (Dds.IsMatch(header)) return ImageFormat.Dds;
+            if (Tga.IsMatch(header)) return ImageFormat.Tga;   // no signature: last
             return ImageFormat.Unknown;
         }
 
@@ -29,6 +32,9 @@ namespace PixCodec
                 ".exr" => ImageFormat.Exr,
                 ".webp" => ImageFormat.Webp,
                 ".jp2" or ".j2k" or ".j2c" or ".jpc" or ".jpf" or ".jpx" or ".jph" or ".jhc" => ImageFormat.Jp2,
+                ".bmp" or ".dib" => ImageFormat.Bmp,
+                ".dds" => ImageFormat.Dds,
+                ".tga" or ".targa" or ".icb" or ".vda" or ".vst" => ImageFormat.Tga,
                 _ => ImageFormat.Unknown,
             };
 
@@ -41,6 +47,9 @@ namespace PixCodec
             ImageFormat.Exr => Exr.GetInfo(data),
             ImageFormat.Webp => Webp.GetInfo(data),
             ImageFormat.Jp2 => Jp2.GetInfo(data),
+            ImageFormat.Bmp => Bmp.GetInfo(data),
+            ImageFormat.Tga => Tga.GetInfo(data),
+            ImageFormat.Dds => Dds.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -84,14 +93,17 @@ namespace PixCodec
                 stream.Seek(-n, SeekOrigin.Current);
                 return Tiff.GetInfo(stream);
             }
-            // TIFF directories can be anywhere and GIF frames have to be counted: these need all the data.
-            // The others are parsed from a growing prefix; their header parsers throw ImageFormatException when
-            // the prefix ends inside the headers, which is the signal to read more.
-            bool needAll = format is ImageFormat.Tiff or ImageFormat.Gif;
+            // TIFF directories can be anywhere, GIF frames have to be counted, the TGA footer is at the end and BMP run
+            // codes have to be walked: these need all the data. The others are parsed from a growing prefix; their
+            // header parsers throw ImageFormatException when the prefix ends inside the headers, which is the signal
+            // to read more.
+            bool needAll = format is ImageFormat.Tiff or ImageFormat.Gif or ImageFormat.Tga
+                || format == ImageFormat.Bmp && Bmp.InfoNeedsAllData(buf.AsSpan(0, n));
             while (true)
             {
                 if (eof) return GetInfo(buf.AsSpan(0, n));
-                if (!needAll && (format != ImageFormat.Png || PngHeadersComplete(buf.AsSpan(0, n))))
+                if (!needAll && (format != ImageFormat.Png || PngHeadersComplete(buf.AsSpan(0, n)))
+                    && (format != ImageFormat.Bmp || n >= Math.Min(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(10)), 1u << 20)))
                 {
                     try { return GetInfo(buf.AsSpan(0, n)); }
                     catch (ImageFormatException) { }
@@ -142,6 +154,9 @@ namespace PixCodec
             ImageFormat.Exr => Exr.Decode(data),
             ImageFormat.Webp => Webp.Decode(data),
             ImageFormat.Jp2 => Jp2.Decode(data),
+            ImageFormat.Bmp => Bmp.Decode(data),
+            ImageFormat.Tga => Tga.Decode(data),
+            ImageFormat.Dds => Dds.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -150,7 +165,7 @@ namespace PixCodec
 
         /// <summary>
         /// Decodes every image in the file: the pages of a TIFF, the frames of an animated GIF, PNG or WebP (each the whole canvas
-        /// as a viewer shows it), or else the single image.
+        /// as a viewer shows it), the array elements / cube faces of a DDS texture (top mip level), or else the single image.
         /// </summary>
         public static RawImage[] DecodeAll(ReadOnlySpan<byte> data)
         {
@@ -169,6 +184,14 @@ namespace PixCodec
                     return Frames(Png.DecodeAnimation(data).Frames, f => f.Image);
                 case ImageFormat.Webp when GetInfo(data).IsAnimated:
                     return Frames(Webp.DecodeAnimation(data).Frames, f => f.Image);
+                case ImageFormat.Dds:
+                    {
+                        var t = Dds.DecodeTexture(data);
+                        var r = new List<RawImage>();
+                        for (int item = 0; item < t.ArraySize; item++)
+                            for (int face = 0; face < Math.Max(1, t.Faces.Count); face++) r.Add(t.GetImage(0, item, face));
+                        return r.ToArray();
+                    }
                 default:
                     return new[] { Decode(data) };
             }
@@ -176,6 +199,21 @@ namespace PixCodec
 
         public static RawImage[] DecodeAll(Stream stream) => DecodeAll(ReadAll(stream));
         public static RawImage[] DecodeAll(string path) => DecodeAll(File.ReadAllBytes(path));
+
+        /// <summary>
+        /// The image with its stored mip levels, largest first: the mip chain of a DDS texture (first array element / face) or
+        /// the mip levels of an OpenEXR file (first part). Formats without stored levels give just the image; use
+        /// <see cref="ImageOps.Resize(RawImage, int, int, ResizeOptions?)"/> to compute levels.
+        /// </summary>
+        public static RawImage[] DecodeMipmaps(ReadOnlySpan<byte> data) => DetectFormat(data) switch
+        {
+            ImageFormat.Dds => Dds.DecodeMipmaps(data),
+            ImageFormat.Exr => Exr.DecodeMipmaps(data),
+            _ => new[] { Decode(data) },
+        };
+
+        public static RawImage[] DecodeMipmaps(Stream stream) => DecodeMipmaps(ReadAll(stream));
+        public static RawImage[] DecodeMipmaps(string path) => DecodeMipmaps(File.ReadAllBytes(path));
 
         static RawImage[] Frames<TF>(IReadOnlyList<TF> frames, Func<TF, RawImage> image)
         {
@@ -196,6 +234,9 @@ namespace PixCodec
                 case ImageFormat.Exr: Exr.Encode(image, output); break;
                 case ImageFormat.Webp: Webp.Encode(image, output); break;
                 case ImageFormat.Jp2: Jp2.Encode(image, output); break;
+                case ImageFormat.Bmp: Bmp.Encode(image, output); break;
+                case ImageFormat.Tga: Tga.Encode(image, output); break;
+                case ImageFormat.Dds: Dds.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }

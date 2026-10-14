@@ -129,6 +129,24 @@ public class LoaderTests
         for (int i = 0; i < exp.Length; i++) Assert.True(Math.Abs(exp[i] - back.Volume.Data[i]) < 1e-3f); // stored as half
     }
 
+    [Theory]
+    [InlineData(Col.Format.Gray), InlineData(Col.Format.RGB), InlineData(Col.Format.RGBA), InlineData(Col.Format.GrayAlpha)]
+    public void BmpAndTga(Col.Format format)
+    {
+        var img = Make(format, 23, 9, i => (byte)(i * 11 + 1));
+        var bmpBack = RoundTrip<byte>(img, new PixSaveParams(PixFileFormat.Bmp));
+        // BMP has no gray + alpha: it comes back as RGBA
+        AssertSame(format == Col.Format.GrayAlpha ? img.ToFormat(Col.Format.RGBA) : img, bmpBack);
+        AssertSame(img, RoundTrip<byte>(img, new PixSaveParams(PixFileFormat.Targa)));
+        var path = Path.Combine(Path.GetTempPath(), $"pixcodec-{Guid.NewGuid():N}.tga");
+        try
+        {
+            PixImagePixCodec.Save(img, path);
+            AssertSame(img, PixImagePixCodec.Load<byte>(path));
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void Gif()
     {

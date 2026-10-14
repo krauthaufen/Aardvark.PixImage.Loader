@@ -50,3 +50,19 @@ OF THIS SOFTWARE.
 XZ Utils: Copyright The XZ Utils authors and contributors (Lasse Collin, Jia Tan and others); the liblzma parts
 referred to are in the public domain (releases before 5.6) or under the BSD Zero Clause License (0BSD).
 LZMA SDK: by Igor Pavlov, public domain.
+
+## BPTC (BC6H / BC7) partition and anchor tables
+
+`src/PixCodec/Dds/Bptc.cs` contains the BPTC partition tables (64 two-subset and 64 three-subset partitions of a 4x4
+block) and the anchor index tables, converted by script from the text of the Khronos Data Format Specification
+(https://github.com/KhronosGroup/DataFormat, `bptc.txt`), and the BC6H endpoint bit layouts, transcribed from
+Microsoft's "BC6H Format" documentation (https://learn.microsoft.com/windows/win32/direct3d11/bc6h-format, CC BY 4.0,
+https://github.com/MicrosoftDocs/win32). Only these tables were taken; the decoders are written from the prose of the
+two documents. The tables are the format's definition: every BC6H / BC7 decoder carries the same values, e.g.
+Microsoft's DirectXTex (MIT licence, https://github.com/microsoft/DirectXTex), which was not used here.
+
+Khronos Data Format Specification: Copyright (c) 2014-2025 The Khronos Group Inc. Used for implementing the
+functionality it describes, as its copyright notice (https://www.khronos.org/registry/speccopyright.html) permits.
+
+Microsoft documentation: Copyright (c) Microsoft Corporation, licensed under the Creative Commons Attribution 4.0
+International licence (https://creativecommons.org/licenses/by/4.0/).

@@ -41,6 +41,9 @@ namespace PixCodec
         Exr,
         Webp,
         Jp2,
+        Bmp,
+        Tga,
+        Dds,
     }
 
     /// <summary>Optional, format independent metadata. Decoders fill in what they find, encoders write what they can.</summary>
@@ -98,6 +101,12 @@ namespace PixCodec
 
         /// <summary>Whether the file is an animation (GIF, APNG, WebP) rather than a still image or a set of pages.</summary>
         public bool IsAnimated { get; init; }
+
+        /// <summary>
+        /// Number of stored mip levels of the image (DDS mip chains, OpenEXR mip maps), 1 when there is only the image itself.
+        /// See <see cref="ImageCodec.DecodeMipmaps(ReadOnlySpan{byte})"/>.
+        /// </summary>
+        public int MipLevels { get; init; } = 1;
 
         /// <summary>Width / Height of the pixels as stored in the file, before the orientation is applied (swapped for 5..8).</summary>
         public int StoredWidth => OrientationApplied && Orientation >= 5 ? Height : Width;
