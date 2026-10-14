@@ -25,6 +25,37 @@ namespace PixCodec
     public readonly record struct ExrChromaticities(
         float RedX, float RedY, float GreenX, float GreenY, float BlueX, float BlueY, float WhiteX, float WhiteY);
 
+    /// <summary>Environment map layout ("envmap" attribute).</summary>
+    public enum ExrEnvMap { LatLong = 0, Cube = 1 }
+
+    /// <summary>How the samples of a deep image are organised ("deepImageState" attribute).</summary>
+    public enum ExrDeepImageState { Messy = 0, Sorted = 1, NonOverlapping = 2, Tidy = 3 }
+
+    /// <summary>SMPTE 12M time code as stored in a "timecode" attribute: BCD time with flags, and the user data word.</summary>
+    public readonly record struct ExrTimeCode(uint TimeAndFlags, uint UserData)
+    {
+        public ExrTimeCode(int hours, int minutes, int seconds, int frame, bool dropFrame = false, uint userData = 0)
+            : this(Bcd(frame) | (dropFrame ? 0x40u : 0) | Bcd(seconds) << 8 | Bcd(minutes) << 16 | Bcd(hours) << 24, userData)
+        {
+            if (hours is < 0 or > 23 || minutes is < 0 or > 59 || seconds is < 0 or > 59 || frame is < 0 or > 29)
+                throw new ArgumentException("time code value out of range");
+        }
+
+        static uint Bcd(int v) => (uint)(v / 10 << 4 | v % 10);
+        static int FromBcd(uint v, int tensBits) => (int)((v >> 4 & ((1u << tensBits) - 1)) * 10 + (v & 15));
+
+        public int Hours => FromBcd(TimeAndFlags >> 24, 2);
+        public int Minutes => FromBcd(TimeAndFlags >> 16, 3);
+        public int Seconds => FromBcd(TimeAndFlags >> 8, 3);
+        public int Frame => FromBcd(TimeAndFlags, 2);
+        public bool DropFrame => (TimeAndFlags & 0x40) != 0;
+        public bool ColorFrame => (TimeAndFlags & 0x80) != 0;
+        public override string ToString() => $"{Hours:D2}:{Minutes:D2}:{Seconds:D2}{(DropFrame ? ';' : ':')}{Frame:D2}";
+    }
+
+    /// <summary>Motion picture film key code ("keycode" attribute).</summary>
+    public readonly record struct ExrKeyCode(int FilmMfcCode, int FilmType, int Prefix, int Count, int PerfOffset, int PerfsPerFrame, int PerfsPerCount);
+
     /// <summary>One entry of a part's channel list.</summary>
     public sealed class ExrChannel
     {
@@ -126,6 +157,139 @@ namespace PixCodec
                 s = s.Slice(4 + n);
             }
             return list.ToArray();
+        }
+
+        /// <summary>Reads <paramref name="count"/> consecutive doubles (v2d, v3d, m33d, m44d).</summary>
+        public double[] AsDoubles(int count)
+        {
+            var s = Need(checked(count * 8));
+            var r = new double[count];
+            for (int i = 0; i < count; i++) r[i] = BinaryPrimitives.ReadDoubleLittleEndian(s.Slice(i * 8));
+            return r;
+        }
+
+        public (int X, int Y, int Z) AsV3i() { var v = AsInts(3); return (v[0], v[1], v[2]); }
+        public (double X, double Y) AsV2d() { var v = AsDoubles(2); return (v[0], v[1]); }
+        public (double X, double Y, double Z) AsV3d() { var v = AsDoubles(3); return (v[0], v[1], v[2]); }
+        /// <summary>A "box2f" attribute: min x, min y, max x, max y.</summary>
+        public (float MinX, float MinY, float MaxX, float MaxY) AsBox2f() { var v = AsFloats(4); return (v[0], v[1], v[2], v[3]); }
+        /// <summary>The 9 values of an "m33f" attribute, row major.</summary>
+        public float[] AsM33f() => AsFloats(9);
+        /// <summary>The 16 values of an "m44f" attribute, row major.</summary>
+        public float[] AsM44f() => AsFloats(16);
+        /// <summary>The 9 values of an "m33d" attribute, row major.</summary>
+        public double[] AsM33d() => AsDoubles(9);
+        /// <summary>The 16 values of an "m44d" attribute, row major.</summary>
+        public double[] AsM44d() => AsDoubles(16);
+        /// <summary>All values of a "floatvector" attribute.</summary>
+        public float[] AsFloatVector() => AsFloats(Value.Length / 4);
+        public ExrTimeCode AsTimeCode() { var v = AsInts(2); return new ExrTimeCode((uint)v[0], (uint)v[1]); }
+        public ExrKeyCode AsKeyCode() { var v = AsInts(7); return new ExrKeyCode(v[0], v[1], v[2], v[3], v[4], v[5], v[6]); }
+        public ExrEnvMap AsEnvMap() => (ExrEnvMap)AsByte();
+        public ExrDeepImageState AsDeepImageState() => (ExrDeepImageState)AsByte();
+
+        /// <summary>The "preview" attribute as an 8 bit Rgba image (straight alpha; the values are display referred, gamma 2.2).</summary>
+        public RawImage AsPreview()
+        {
+            var s = Need(8);
+            long w = BinaryPrimitives.ReadUInt32LittleEndian(s), h = BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(4));
+            if (w == 0 || h == 0 || w > 65535 || h > 65535 || w * h * 4 != Value.Length - 8)
+                throw new ImageFormatException($"EXR attribute '{Name}': bad preview image");
+            return new RawImage((int)w, (int)h, ColorModel.Rgba, Value.AsSpan(8).ToArray());
+        }
+
+        /// <summary>
+        /// The serialized ID manifest of an "idmanifest" attribute, decompressed (the attribute stores its
+        /// uncompressed size and a zlib stream; <see cref="Value"/> is that stored form). The manifest itself maps the
+        /// numeric ids of id channels to text and is not interpreted here.
+        /// </summary>
+        public byte[] AsIdManifestData()
+        {
+            var s = Need(8);
+            ulong size = BinaryPrimitives.ReadUInt64LittleEndian(s);
+            // a zlib stream cannot expand more than about 1032 times
+            if (size > (ulong)(Value.Length - 8) * 1100 + 64) throw new ImageFormatException($"EXR attribute '{Name}': bad id manifest size");
+            var result = new byte[(int)size];
+            int n;
+            try { n = PixCodec.Compression.Zlib.Decompress(s.Slice(8), result); }
+            catch (Exception e) when (e is not ImageFormatException and not OutOfMemoryException)
+            {
+                throw new ImageFormatException($"EXR attribute '{Name}': corrupt id manifest", e);
+            }
+            if (n != result.Length) throw new ImageFormatException($"EXR attribute '{Name}': corrupt id manifest");
+            return result;
+        }
+
+        public static ExrAttribute V3i(string name, int x, int y, int z) => new(name, "v3i", Ints(x, y, z));
+        public static ExrAttribute V2d(string name, double x, double y) => new(name, "v2d", Doubles(x, y));
+        public static ExrAttribute V3d(string name, double x, double y, double z) => new(name, "v3d", Doubles(x, y, z));
+        public static ExrAttribute Box2f(string name, float minX, float minY, float maxX, float maxY) => new(name, "box2f", Floats(minX, minY, maxX, maxY));
+        public static ExrAttribute Rational(string name, int numerator, uint denominator) => new(name, "rational", Ints(numerator, (int)denominator));
+        /// <summary>A 3x3 float matrix (9 values, row major) as "m33f".</summary>
+        public static ExrAttribute M33f(string name, ReadOnlySpan<float> values)
+        {
+            if (values.Length != 9) throw new ArgumentException("m33f needs 9 values");
+            return new(name, "m33f", Floats(values.ToArray()));
+        }
+        /// <summary>A 3x3 double matrix (9 values, row major) as "m33d".</summary>
+        public static ExrAttribute M33d(string name, ReadOnlySpan<double> values)
+        {
+            if (values.Length != 9) throw new ArgumentException("m33d needs 9 values");
+            return new(name, "m33d", Doubles(values.ToArray()));
+        }
+        /// <summary>A 4x4 double matrix (16 values, row major) as "m44d".</summary>
+        public static ExrAttribute M44d(string name, ReadOnlySpan<double> values)
+        {
+            if (values.Length != 16) throw new ArgumentException("m44d needs 16 values");
+            return new(name, "m44d", Doubles(values.ToArray()));
+        }
+        public static ExrAttribute FloatVector(string name, ReadOnlySpan<float> values) => new(name, "floatvector", Floats(values.ToArray()));
+        public static ExrAttribute StringVector(string name, IReadOnlyList<string> values)
+        {
+            var ms = new System.IO.MemoryStream();
+            Span<byte> len = stackalloc byte[4];
+            foreach (var v in values)
+            {
+                var b = Encoding.UTF8.GetBytes(v);
+                BinaryPrimitives.WriteInt32LittleEndian(len, b.Length);
+                ms.Write(len);
+                ms.Write(b);
+            }
+            return new(name, "stringvector", ms.ToArray());
+        }
+        public static ExrAttribute TimeCode(string name, ExrTimeCode value) => new(name, "timecode", Ints((int)value.TimeAndFlags, (int)value.UserData));
+        public static ExrAttribute KeyCode(string name, ExrKeyCode k)
+            => new(name, "keycode", Ints(k.FilmMfcCode, k.FilmType, k.Prefix, k.Count, k.PerfOffset, k.PerfsPerFrame, k.PerfsPerCount));
+        public static ExrAttribute EnvMap(string name, ExrEnvMap value) => new(name, "envmap", new[] { (byte)value });
+        public static ExrAttribute DeepImageState(string name, ExrDeepImageState value) => new(name, "deepImageState", new[] { (byte)value });
+
+        /// <summary>A "preview" attribute from an 8 bit Rgba image (conventionally named "preview", at most about 100 pixels wide).</summary>
+        public static ExrAttribute Preview(string name, RawImage image)
+        {
+            if (image == null) throw new ArgumentNullException(nameof(image));
+            if (image.SampleType != SampleType.UInt8 || image.Color != ColorModel.Rgba) throw new ArgumentException("a preview image must be 8 bit Rgba");
+            var b = new byte[8 + image.Width * image.Height * 4];
+            BinaryPrimitives.WriteInt32LittleEndian(b, image.Width);
+            BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(4), image.Height);
+            image.GetData<byte>().CopyTo(b, 8);
+            return new(name, "preview", b);
+        }
+
+        /// <summary>An "idmanifest" attribute from serialized (uncompressed) manifest data, see <see cref="AsIdManifestData"/>.</summary>
+        public static ExrAttribute IdManifest(string name, ReadOnlySpan<byte> manifestData)
+        {
+            var z = PixCodec.Compression.Zlib.Compress(manifestData, 6);
+            var b = new byte[8 + z.Length];
+            BinaryPrimitives.WriteUInt64LittleEndian(b, (ulong)manifestData.Length);
+            z.CopyTo(b, 8);
+            return new(name, "idmanifest", b);
+        }
+
+        static byte[] Doubles(params double[] v)
+        {
+            var b = new byte[v.Length * 8];
+            for (int i = 0; i < v.Length; i++) BinaryPrimitives.WriteDoubleLittleEndian(b.AsSpan(i * 8), v[i]);
+            return b;
         }
 
         public static ExrAttribute String(string name, string value) => new(name, "string", Encoding.UTF8.GetBytes(value));

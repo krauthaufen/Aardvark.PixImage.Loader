@@ -170,7 +170,7 @@ public class ExrFeatureTests
 
             // the reference reads the stored (subsampled) channels exactly as we do ...
             var names = Names(Exr.ReadHeaders(data)[0]);
-            var oracle = TestUtil.OracleDecode(data, ".all.exr");
+            var oracle = ExrOracle.Decode(data, ".all.exr");
             if (oracle != null) TestUtil.AssertEqual(oracle, Exr.DecodeChannels(data, names));
             // ... and its RGBA interface converts them to the same RGB (needs the C++ helper)
             var rgba = RunOracle(data, "rgba {in} {out}");
@@ -533,7 +533,7 @@ public class ExrFeatureTests
             else Assert.True(TestUtil.MaxDiff(img, back) < 0.25);
 
             // level 0 through the reference library
-            var oracle = TestUtil.OracleDecode(data, ".exr");
+            var oracle = ExrOracle.Decode(data, ".exr");
             if (oracle != null) TestUtil.AssertEqual(oracle, back);
 
             // generated levels: box filtered, sizes rounded down
@@ -583,7 +583,7 @@ public class ExrFeatureTests
         for (int y = 0; y < 3; y++) for (int x = 0; x < 6; x++) Assert.Equal(ids[2 * y * 13 + 2 * x], l1.GetData<uint>()[y * 6 + x]);
         var l3 = Exr.Decode(data, new ExrDecodeOptions { Level = 3 });
         Assert.Equal((1, 1, ids[0]), (l3.Width, l3.Height, l3.GetData<uint>()[0]));
-        var oracle = TestUtil.OracleDecode(data, ".all.exr");
+        var oracle = ExrOracle.Decode(data, ".all.exr");
         if (oracle != null) TestUtil.AssertEqual(oracle, Exr.Decode(data));
 
         var one = new RawImage(1, 1, ColorModel.Rgb, new Half[] { (Half)1f, (Half)2f, (Half)3f });
@@ -641,7 +641,7 @@ public class ExrFeatureTests
         // every part through the reference library
         for (int p = 0; p < 4; p++)
         {
-            var oracle = TestUtil.OracleDecode(data, $".part{p}.all.exr");
+            var oracle = ExrOracle.Decode(data, $".part{p}.all.exr");
             if (oracle == null) break;
             TestUtil.AssertEqual(oracle, Exr.DecodeChannels(data, Names(h[p]), new ExrDecodeOptions { PartIndex = p }));
         }
@@ -748,7 +748,7 @@ public class ExrFeatureTests
                 for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) Assert.Equal(a[y * (w / 3) + x / 3], back.GetData<float>()[(y * w + x) * 2]);
             var uu = Exr.DecodeChannels(data, new[] { "u" }).GetData<uint>();
             for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) Assert.Equal(u[y / 2 * (w / 2) + x / 2], uu[y * w + x]);
-            var oracle = TestUtil.OracleDecode(data, ".all.exr");
+            var oracle = ExrOracle.Decode(data, ".all.exr");
             if (oracle != null) TestUtil.AssertEqual(oracle, Exr.DecodeChannels(data, Names(hd)));
         }
         var bad = new MemoryStream();
@@ -864,7 +864,7 @@ public class ExrFeatureTests
         Assert.DoesNotContain("lineOrder", names);
         Assert.Contains("displayWindow", names);
         TestUtil.AssertEqual(pixels, Exr.Decode(copy));
-        var oracle = TestUtil.OracleDecode(copy, ".exr");
+        var oracle = ExrOracle.Decode(copy, ".exr");
         if (oracle != null) TestUtil.AssertEqual(oracle, pixels);
 
         // attributes of a reference written file (including ones we do not interpret) go through as well

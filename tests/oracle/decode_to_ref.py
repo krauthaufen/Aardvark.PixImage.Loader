@@ -245,8 +245,9 @@ def decode_exr(path):
 
     Tokens before the extension select what is returned: *.all.exr gives all channels in file (byte-wise
     alphabetical) order, *.partN.exr part N instead of the first (both may be combined: *.part1.all.exr).
-    Subsampled channels are expanded by replication. Uses the official OpenEXR python bindings when installed,
-    otherwise OpenCV (colour channels of the first part only).
+    Subsampled channels are expanded by replication. Needs the official OpenEXR python bindings. *.deep.exr describes a deep part as float64: per pixel
+    the sample count, then for every channel (file order) the sum of sample[k] * (k + 1).
+    Exits with status 77 when the installed tools cannot read the file (no bindings, or bindings too old for it).
     """
     tokens = os.path.basename(path).lower().split('.')[1:-1]
     want_all = 'all' in tokens
@@ -256,18 +257,29 @@ def decode_exr(path):
     except ImportError:
         OpenEXR = None
     if OpenEXR is None:
-        if want_all or part:
-            raise RuntimeError('reading arbitrary EXR channels / parts needs the OpenEXR python module')
-        os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
-        import cv2
-        im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-        if im is None:
-            raise RuntimeError('OpenCV cannot read ' + path)
-        if im.ndim == 3:
-            im = im[..., [2, 1, 0, 3][:im.shape[2]]]
-        return np.ascontiguousarray(im)
-    chans = OpenEXR.File(path, separate_channels=True).parts[part].channels
+        # (OpenCV can read some EXR files, but converts and orders channels its own way: not a usable reference)
+        sys.exit(77)
+    newer = any(t in tokens for t in ('zstd', 'htj2k', 'deep'))       # need OpenEXR 3.4 / 3.5
+    try:
+        chans = OpenEXR.File(path, separate_channels=True).parts[part].channels
+    except Exception:
+        if newer and tuple(int(v) for v in OpenEXR.__version__.split('.')[:2]) < (3, 5):
+            sys.exit(77)
+        raise
     names = sorted(chans.keys(), key=lambda n: n.encode())
+    if 'deep' in tokens:
+        first = chans[names[0]].pixels
+        h, w = first.shape
+        out = np.zeros((h, w, 1 + len(names)), np.float64)
+        for i in range(h):
+            for j in range(w):
+                if first[i, j] is None:         # no samples
+                    continue
+                out[i, j, 0] = len(first[i, j])
+                for k, n in enumerate(names):
+                    v = chans[n].pixels[i, j].astype(np.float64)
+                    out[i, j, 1 + k] = float((v * np.arange(1, len(v) + 1)).sum())
+        return out
     if not want_all:
         for pick in (['R', 'G', 'B'], ['Y']):
             if all(n in chans for n in pick):

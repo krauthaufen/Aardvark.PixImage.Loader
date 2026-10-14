@@ -13,8 +13,8 @@ namespace PixCodec
         public int PartIndex { get; set; }
 
         /// <summary>
-        /// Layer to decode with <see cref="Exr.Decode"/>, e.g. "diffuse" for the channels "diffuse.R", "diffuse.G", ...
-        /// ("" is the root layer). Null picks a default, see <see cref="Exr.Decode"/>.
+        /// Layer to decode with <see cref="Exr.Decode(ReadOnlySpan{byte}, ExrDecodeOptions)"/>, e.g. "diffuse" for the channels "diffuse.R", "diffuse.G", ...
+        /// ("" is the root layer). Null picks a default, see <see cref="Exr.Decode(ReadOnlySpan{byte}, ExrDecodeOptions)"/>.
         /// </summary>
         public string? Layer { get; set; }
 
@@ -32,12 +32,28 @@ namespace PixCodec
         public int Level { set { LevelX = value; LevelY = value; } }
 
         /// <summary>
-        /// How <see cref="Exr.Decode"/> flattens deep parts, see <see cref="ExrDeepImage.Flatten"/>: sort the samples of a
+        /// How <see cref="Exr.Decode(ReadOnlySpan{byte}, ExrDecodeOptions)"/> flattens deep parts, see <see cref="ExrDeepImage.Flatten"/>: sort the samples of a
         /// pixel by depth (default true) and split / merge overlapping volume samples (default true). With both false
         /// the samples are composited in file order, which is what the reference library's compositor does.
         /// </summary>
         public bool DeepSortByDepth { get; set; } = true;
         public bool DeepTidy { get; set; } = true;
+
+        /// <summary>
+        /// Which window the decoded image covers when <see cref="Region"/> is null: the data window (default: exactly
+        /// the stored pixels) or the display window (stored pixels outside it are cut off, the rest of it is 0, i.e.
+        /// black and fully transparent).
+        /// </summary>
+        public ExrWindow Window { get; set; } = ExrWindow.Data;
+
+        /// <summary>
+        /// Decode only this rectangle, given in the pixel coordinates of the file (those of the data window; for mip /
+        /// rip levels the level's own pixel grid, which starts at the data window's corner). The image has exactly
+        /// the size of the rectangle; parts of it outside the data window are 0. Only the scan line blocks or tiles
+        /// that intersect it are read and decompressed. Luminance/chroma images and subsampled channels are decoded
+        /// completely and then cut, because their reconstruction reaches beyond the rectangle.
+        /// </summary>
+        public ExrBox2i? Region { get; set; }
     }
 
     public sealed class ExrEncodeOptions
@@ -106,6 +122,13 @@ namespace PixCodec
         public bool LevelRoundUp { get; set; }
 
         /// <summary>
+        /// Filter for generated levels: Box (default, each pixel is the mean of the 2x2 samples it covers) or Triangle
+        /// (separable 1-3-3-1 weights over 4x4 samples: smoother, less aliasing, about four times the work).
+        /// UINT channels are never filtered.
+        /// </summary>
+        public ExrLevelFilter LevelFilter { get; set; } = ExrLevelFilter.Box;
+
+        /// <summary>
         /// Store an Rgb / Rgba image as luminance Y plus 2x2 subsampled chroma RY, BY (and A), like the reference
         /// library's WRITE_YC / WRITE_YCA modes: half floats, luma weights from the "chromaticities" attribute in
         /// <see cref="Attributes"/> (Rec. 709 if absent), chroma low-pass filtered before subsampling. Lossy for chroma;
@@ -134,6 +157,12 @@ namespace PixCodec
         }
     }
 
+    /// <summary>Filter for generated mip / rip levels.</summary>
+    public enum ExrLevelFilter { Box, Triangle }
+
+    /// <summary>The window a decoded image covers, see <see cref="ExrDecodeOptions.Window"/>.</summary>
+    public enum ExrWindow { Data, Display }
+
     /// <summary>One part for <see cref="Exr.EncodeParts"/>.</summary>
     public sealed class ExrPart
     {
@@ -144,8 +173,10 @@ namespace PixCodec
         public IReadOnlyList<ExrChannelData> Channels { get; }
         public ExrEncodeOptions Options { get; }
 
-        /// <summary>The samples of a deep part (then <see cref="Channels"/> is empty).</summary>
+        /// <summary>The samples of a deep part, level 0 (then <see cref="Channels"/> is empty).</summary>
         public ExrDeepImage? Deep { get; }
+        /// <summary>All levels of a deep part in offset table order (one entry for ordinary deep parts).</summary>
+        public IReadOnlyList<ExrDeepImage>? DeepLevels { get; }
 
         public ExrPart(string? name, int width, int height, IReadOnlyList<ExrChannelData> channels, ExrEncodeOptions? options = null)
         {
@@ -161,9 +192,26 @@ namespace PixCodec
         public ExrPart(string? name, ExrDeepImage deep, ExrEncodeOptions? options = null)
         {
             Deep = deep ?? throw new ArgumentNullException(nameof(deep));
+            DeepLevels = new[] { deep };
             Name = name; Width = deep.Width; Height = deep.Height;
             Channels = Array.Empty<ExrChannelData>();
             Options = options ?? new ExrEncodeOptions();
+        }
+
+        /// <summary>
+        /// A deep tiled part with several resolution levels. There is no defined way to reduce deep samples, so every
+        /// level is supplied by the caller: for <see cref="ExrLevelMode.MipMap"/> levels 0, 1, 2 ... down to 1x1, for
+        /// <see cref="ExrLevelMode.RipMap"/> all (x level, y level) combinations with the x level varying fastest;
+        /// sizes follow <see cref="ExrEncodeOptions.LevelRoundUp"/> (5 -> 2 -> 1 or 5 -> 3 -> 2 -> 1).
+        /// </summary>
+        public ExrPart(string? name, IReadOnlyList<ExrDeepImage> deepLevels, ExrEncodeOptions options)
+        {
+            if (deepLevels == null || deepLevels.Count == 0 || deepLevels[0] == null) throw new ArgumentException("no deep levels given");
+            Deep = deepLevels[0];
+            DeepLevels = deepLevels;
+            Name = name; Width = Deep.Width; Height = Deep.Height;
+            Channels = Array.Empty<ExrChannelData>();
+            Options = options ?? throw new ArgumentNullException(nameof(options));
         }
 
         /// <summary>A part from an interleaved image, with the channel naming and options of <see cref="Exr.Encode"/>.</summary>
@@ -276,14 +324,17 @@ namespace PixCodec
     /// <para>
     /// Decoding: version 2 scan line and tiled files with all mip / rip levels, multi-part files, deep scan line and
     /// deep tiled parts (as samples, or flattened), HALF / FLOAT / UINT channels, subsampled channels and
-    /// luminance/chroma images, and all compressions: None, RLE, ZIPS, ZIP, PIZ, PXR24, B44, B44A, DWAA and DWAB.
-    /// The decoded image always covers the data window (of the selected level). Every scheme decodes bit exactly
-    /// like the reference library; for DWAA / DWAB that means the reference library's AVX code path (its other
-    /// SIMD variants round a few samples per million differently).
+    /// luminance/chroma images. Compressions: None, RLE, ZIPS, ZIP, PIZ, PXR24, B44, B44A, DWAA, DWAB, ZSTD and - with
+    /// the JPEG 2000 codec - HTJ2K256 / HTJ2K32; the lossy LJ2K is recognised but not decoded. Input is a span or a
+    /// seekable stream (only the chunks that are needed are read, so files above 2 GB work); the result covers the
+    /// data window, the display window or any rectangle (<see cref="ExrDecodeOptions.Region"/>). Every scheme
+    /// decodes bit exactly like the reference library; for DWAA / DWAB that means the reference library's AVX code
+    /// path (its other SIMD variants round a few samples per million differently).
     /// </para>
     /// <para>
-    /// Encoding: scan line and tiled parts (optionally with generated mip / rip levels), multi-part files, every
-    /// compression, subsampled channels and luminance/chroma. Deep data cannot be written.
+    /// Encoding: scan line and tiled parts (optionally with generated mip / rip levels), multi-part files, deep parts
+    /// (levels supplied by the caller), every compression that can be decoded, subsampled channels and
+    /// luminance/chroma. A seekable output is written chunk by chunk; any other stream gets the finished file.
     /// </para>
     /// <para>
     /// Like the rest of the library this codec runs on little-endian hosts only: sample data is copied between the
@@ -298,7 +349,7 @@ namespace PixCodec
         /// <summary>
         /// Reads header level information without decoding pixel data; needs only the headers, and throws
         /// <see cref="ImageFormatException"/> if the data ends inside them. Size, channels, sample type and color model
-        /// are those <see cref="Decode"/> returns for the first part with default options. BitsPerSample is 16 if all
+        /// are those <see cref="Decode(ReadOnlySpan{byte}, ExrDecodeOptions)"/> returns for the first part with default options. BitsPerSample is 16 if all
         /// those channels are HALF, else 32 (FLOAT, UINT). DpiX is the "xDensity" attribute and DpiY is
         /// xDensity * pixelAspectRatio (0 without xDensity), the same values Decode puts into the image metadata.
         /// Orientation is always 0 and HasIccProfile false (OpenEXR has neither). FrameCount is the number of parts of
@@ -341,6 +392,35 @@ namespace PixCodec
         /// <summary>Parses the headers of all parts (one for ordinary files). Does not touch pixel data.</summary>
         public static ExrHeader[] ReadHeaders(ReadOnlySpan<byte> data) => ExrFileStructure.Parse(data).Parts;
 
+        /// <summary>Parses the headers from a stream, reading only the start of the file (the position is not restored).</summary>
+        public static ExrHeader[] ReadHeaders(Stream stream) => Open(stream).ParseStructure().Parts;
+
+        /// <summary>
+        /// A random access view of a seekable stream (from its current position to its end); a stream that cannot
+        /// seek is read into memory first. Only the headers, offset tables and the chunks a decode call needs are
+        /// read, so files larger than 2 GB work.
+        /// </summary>
+        static ExrInput Open(Stream stream)
+        {
+            if (stream == null) throw new ArgumentNullException(nameof(stream));
+            return stream.CanSeek ? new ExrStreamInput(stream) : new ExrStreamInput(new MemoryStream(ImageCodec.ReadAll(stream)));
+        }
+
+        /// <summary>
+        /// Decodes from a seekable stream without loading the file: headers, offset tables and only the chunks that
+        /// the selected part, level and region need are read (files above 2 GB work this way). Otherwise like
+        /// <see cref="Decode(ReadOnlySpan{byte}, ExrDecodeOptions)"/>.
+        /// </summary>
+        public static RawImage Decode(Stream stream, ExrDecodeOptions? options = null) => DecodeCore(Open(stream), options ?? new ExrDecodeOptions());
+
+        /// <summary><see cref="DecodeChannels(ReadOnlySpan{byte}, IReadOnlyList{string}, ExrDecodeOptions)"/> from a seekable stream, reading only what is needed.</summary>
+        public static RawImage DecodeChannels(Stream stream, IReadOnlyList<string> channelNames, ExrDecodeOptions? options = null)
+            => DecodeChannelsCore(Open(stream), channelNames, options ?? new ExrDecodeOptions());
+
+        /// <summary><see cref="DecodeDeep(ReadOnlySpan{byte}, IReadOnlyList{string}, ExrDecodeOptions)"/> from a seekable stream, reading only what is needed.</summary>
+        public static ExrDeepImage DecodeDeep(Stream stream, IReadOnlyList<string>? channelNames = null, ExrDecodeOptions? options = null)
+            => DecodeDeepCore(Open(stream), channelNames, options ?? new ExrDecodeOptions());
+
         /// <summary>
         /// Decodes a complete OpenEXR file held in memory.
         /// <para>
@@ -355,11 +435,11 @@ namespace PixCodec
         /// Luminance/chroma images (Y with 2x2 subsampled RY / BY, optional A) are converted to Rgb / Rgba exactly like
         /// the reference library's RGBA interface does: chroma reconstruction filter, luma weights from the
         /// "chromaticities" attribute (Rec. 709 if absent) and its saturation correction; the result is identical to
-        /// the reference bit for bit. The raw Y, RY, BY channels remain available through <see cref="DecodeChannels"/>.
+        /// the reference bit for bit. The raw Y, RY, BY channels remain available through <see cref="DecodeChannels(ReadOnlySpan{byte}, IReadOnlyList{string}, ExrDecodeOptions)"/>.
         /// </para>
         /// <para>
         /// Deep parts are flattened (see <see cref="ExrDeepImage.Flatten"/>) and always give Float32; use
-        /// <see cref="DecodeDeep"/> for the samples themselves.
+        /// <see cref="DecodeDeep(ReadOnlySpan{byte}, IReadOnlyList{string}, ExrDecodeOptions)"/> for the samples themselves.
         /// </para>
         /// <para>
         /// Sample type: all selected channels HALF → Float32 (or Float16 if HalfAsFloat is false); any FLOAT → Float32;
@@ -367,10 +447,14 @@ namespace PixCodec
         /// inexact above 2^24).
         /// </para>
         /// </summary>
-        public static RawImage Decode(ReadOnlySpan<byte> data, ExrDecodeOptions? options = null)
+        public static unsafe RawImage Decode(ReadOnlySpan<byte> data, ExrDecodeOptions? options = null)
         {
-            options ??= new ExrDecodeOptions();
-            var file = ExrFileStructure.Parse(data);
+            fixed (byte* p = data) return DecodeCore(new ExrMemoryInput(p, data.Length), options ?? new ExrDecodeOptions());
+        }
+
+        static RawImage DecodeCore(ExrInput input, ExrDecodeOptions options)
+        {
+            var file = input.ParseStructure();
             var part = GetPart(file, options.PartIndex);
             var (idx, color, yca) = SelectDefault(part, options.Layer);
             if (part.IsDeep)
@@ -385,14 +469,14 @@ namespace PixCodec
                     int i = part.ChannelIndex(extra);
                     if (i >= 0 && !need.Contains(i)) need.Add(i);
                 }
-                var flat = ExrDeepDecoder.Decode(data, file, options.PartIndex, need.ToArray(), options).Flatten(names, options.DeepSortByDepth, options.DeepTidy);
+                var flat = ExrDeepDecoder.Decode(input, file, options.PartIndex, need.ToArray(), options).Flatten(names, options.DeepSortByDepth, options.DeepTidy);
                 return WithMetadata(new RawImage(flat.Width, flat.Height, yca ? ColorModel.Other : color, flat.Data, flat.Channels), part);
             }
-            if (yca) return WithMetadata(DecodeYca(data, file, part, idx, options), part);
-            return WithMetadata(ExrDecoder.Decode(data, file, options.PartIndex, idx, color, options), part);
+            if (yca) return WithMetadata(DecodeYca(input, file, part, idx, options), part);
+            return WithMetadata(ExrDecoder.Decode(input, file, options.PartIndex, idx, color, options), part);
         }
 
-        static RawImage DecodeYca(ReadOnlySpan<byte> data, ExrFileStructure file, ExrHeader part, int[] idx, ExrDecodeOptions options)
+        static RawImage DecodeYca(ExrInput data, ExrFileStructure file, ExrHeader part, int[] idx, ExrDecodeOptions options)
         {
             // idx: Y, RY, BY, A (-1 = absent)
             int w = part.Width, h = part.Height;
@@ -405,7 +489,7 @@ namespace PixCodec
             if (((w | h | part.DataWindow.MinX | part.DataWindow.MinY) & 1) != 0)
                 throw new ImageFormatException("EXR luminance/chroma image has an odd data window");
             if (options.LevelX != 0 || options.LevelY != 0) throw new ArgumentException("EXR scan line part has no levels");
-            if ((long)w * h * 4 > 0x7FFFFFC7) throw new ImageNotSupportedException("EXR image is too large for a single array");
+            if ((long)w * h * 4 > 0x7FFFFFC7) throw ExrDecoder.TooLarge(w, h, 4);
 
             var planes = new ushort[4][];
             var one = new int[1];
@@ -424,25 +508,35 @@ namespace PixCodec
             }
             var bits = ExrYca.ToRgb(planes[0], planes[1], planes[2], planes[3], w, h, ExrYca.LumaWeights(part.Chromaticities), options.Parallel);
             var color = planes[3] != null ? ColorModel.Rgba : ColorModel.Rgb;
+            RawImage result;
             if (!options.HalfAsFloat)
-                return new RawImage(w, h, color, System.Runtime.InteropServices.MemoryMarshal.Cast<ushort, Half>(bits).ToArray());
-            var f = new float[bits.Length];
-            unsafe
+                result = new RawImage(w, h, color, System.Runtime.InteropServices.MemoryMarshal.Cast<ushort, Half>(bits).ToArray());
+            else
             {
-                fixed (ushort* ps = bits)
-                fixed (float* pf = f) ExrHalf.ToFloat(ps, pf, bits.Length);
+                var f = new float[bits.Length];
+                unsafe
+                {
+                    fixed (ushort* ps = bits)
+                    fixed (float* pf = f) ExrHalf.ToFloat(ps, pf, bits.Length);
+                }
+                result = new RawImage(w, h, color, f);
             }
-            return new RawImage(w, h, color, f);
+            // the chroma filters reach 13 pixels beyond a region, so the whole image is converted and then cut
+            return ExrDecoder.Crop(result, part.DataWindow, ExrDecoder.OutputWindow(part, options, part.DataWindow));
         }
 
         /// <summary>
         /// Decodes a deep part (deep scan line or deep tiled; <see cref="ExrDecodeOptions.PartIndex"/>, LevelX / LevelY
         /// apply) with its per pixel sample counts and the samples of the given channels (null = all channels).
         /// </summary>
-        public static ExrDeepImage DecodeDeep(ReadOnlySpan<byte> data, IReadOnlyList<string>? channelNames = null, ExrDecodeOptions? options = null)
+        public static unsafe ExrDeepImage DecodeDeep(ReadOnlySpan<byte> data, IReadOnlyList<string>? channelNames = null, ExrDecodeOptions? options = null)
         {
-            options ??= new ExrDecodeOptions();
-            var file = ExrFileStructure.Parse(data);
+            fixed (byte* p = data) return DecodeDeepCore(new ExrMemoryInput(p, data.Length), channelNames, options ?? new ExrDecodeOptions());
+        }
+
+        static ExrDeepImage DecodeDeepCore(ExrInput input, IReadOnlyList<string>? channelNames, ExrDecodeOptions options)
+        {
+            var file = input.ParseStructure();
             var part = GetPart(file, options.PartIndex);
             int[] idx;
             if (channelNames == null)
@@ -451,7 +545,7 @@ namespace PixCodec
                 for (int i = 0; i < idx.Length; i++) idx[i] = i;
             }
             else idx = ChannelIndices(part, channelNames);
-            return ExrDeepDecoder.Decode(data, file, options.PartIndex, idx, options);
+            return ExrDeepDecoder.Decode(input, file, options.PartIndex, idx, options);
         }
 
         static int[] ChannelIndices(ExrHeader part, IReadOnlyList<string> channelNames)
@@ -472,17 +566,21 @@ namespace PixCodec
         /// Decodes an explicit list of channels (full names such as "Z" or "diffuse.R") of the part selected by
         /// <see cref="ExrDecodeOptions.PartIndex"/> into one interleaved image, in the given order. The color model is
         /// Rgb / Rgba / Gray / GrayAlpha if the names are exactly R,G,B(,A) or Y(,A) of one layer in that order, Gray
-        /// for a single channel, otherwise <see cref="ColorModel.Other"/>. Sample type rules are those of <see cref="Decode"/>.
+        /// for a single channel, otherwise <see cref="ColorModel.Other"/>. Sample type rules are those of <see cref="Decode(ReadOnlySpan{byte}, ExrDecodeOptions)"/>.
         /// Subsampled channels are expanded to full resolution by sample replication.
         /// </summary>
-        public static RawImage DecodeChannels(ReadOnlySpan<byte> data, IReadOnlyList<string> channelNames, ExrDecodeOptions? options = null)
+        public static unsafe RawImage DecodeChannels(ReadOnlySpan<byte> data, IReadOnlyList<string> channelNames, ExrDecodeOptions? options = null)
+        {
+            fixed (byte* p = data) return DecodeChannelsCore(new ExrMemoryInput(p, data.Length), channelNames, options ?? new ExrDecodeOptions());
+        }
+
+        static RawImage DecodeChannelsCore(ExrInput input, IReadOnlyList<string> channelNames, ExrDecodeOptions options)
         {
             if (channelNames == null || channelNames.Count == 0) throw new ArgumentException("no channels given", nameof(channelNames));
-            options ??= new ExrDecodeOptions();
-            var file = ExrFileStructure.Parse(data);
+            var file = input.ParseStructure();
             var part = GetPart(file, options.PartIndex);
             var idx = ChannelIndices(part, channelNames);
-            return WithMetadata(ExrDecoder.Decode(data, file, options.PartIndex, idx, NaturalModel(channelNames), options), part);
+            return WithMetadata(ExrDecoder.Decode(input, file, options.PartIndex, idx, NaturalModel(channelNames), options), part);
         }
 
         /// <summary>
@@ -520,6 +618,13 @@ namespace PixCodec
         /// </summary>
         public static void EncodeDeep(ExrDeepImage image, Stream output, ExrEncodeOptions? options = null)
             => ExrEncoder.Encode(new[] { new ExrPart(null, image, options) }, output, false);
+
+        /// <summary>
+        /// Writes a deep tiled file with several resolution levels, see
+        /// <see cref="ExrPart(string, IReadOnlyList{ExrDeepImage}, ExrEncodeOptions)"/> for the order of the levels.
+        /// </summary>
+        public static void EncodeDeep(IReadOnlyList<ExrDeepImage> levels, Stream output, ExrEncodeOptions options)
+            => ExrEncoder.Encode(new[] { new ExrPart(null, levels, options) }, output, false);
 
         static ExrHeader GetPart(ExrFileStructure file, int index)
         {
@@ -622,5 +727,16 @@ namespace PixCodec
 namespace PixCodec
 {
     /// <summary>OpenEXR compression schemes (values as stored in the file).</summary>
-    public enum ExrCompression { None, Rle, Zips, Zip, Piz, Pxr24, B44, B44A, Dwaa, Dwab }
+    public enum ExrCompression
+    {
+        None, Rle, Zips, Zip, Piz, Pxr24, B44, B44A, Dwaa, Dwab,
+        /// <summary>Lossless High Throughput JPEG 2000, 256 scan lines per chunk (OpenEXR 3.4).</summary>
+        Htj2k256 = 10,
+        /// <summary>Lossless High Throughput JPEG 2000, 32 scan lines per chunk (OpenEXR 3.4).</summary>
+        Htj2k32 = 11,
+        /// <summary>Lossy High Throughput JPEG 2000 (OpenEXR 3.5). Recognised in headers; not decoded or encoded.</summary>
+        Lj2k = 12,
+        /// <summary>Zstandard with per channel delta and byte plane filters (OpenEXR 3.5).</summary>
+        Zstd = 13,
+    }
 }

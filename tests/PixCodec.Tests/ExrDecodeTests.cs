@@ -9,7 +9,7 @@ public class ExrDecodeTests
     public static IEnumerable<object[]> Fixtures => TestUtil.Files("exr", ".exr");
     public static IEnumerable<object[]> Dwa => TestUtil.Files(Path.Combine("exr", "dwa"), ".exr");
     public static IEnumerable<object[]> Others =>
-        new[] { "yc", "levels", "deep", "encref", "selfcheck" }.SelectMany(d => TestUtil.Files(Path.Combine("exr", d), ".exr"));
+        new[] { "yc", "levels", "deep", "encref", "selfcheck", "htj2k", "attributes" }.SelectMany(d => TestUtil.Files(Path.Combine("exr", d), ".exr"));
 
     internal static RawImage HalfToFloat(RawImage img)
     {
@@ -276,7 +276,7 @@ public class ExrDecodeTests
         var img = Exr.Decode(crafted, new ExrDecodeOptions { HalfAsFloat = false });
         Assert.Equal(expected, img.GetData<Half>().Select(BitConverter.HalfToUInt16Bits));
         // (OpenEXR 3.5 itself rejects tables with 58 bit codes, the longest the format allows; 57 bits it reads)
-        var oracle = M < 58 ? TestUtil.OracleDecode(crafted, ".exr") : null;
+        var oracle = M < 58 ? ExrOracle.Decode(crafted, ".exr") : null;
         if (oracle != null) TestUtil.AssertEqual(oracle, Exr.Decode(crafted));
 
         // the same stream cut short or with a wrong bit count must fail cleanly

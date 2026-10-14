@@ -160,6 +160,9 @@ public class ExrSelfCheckTests
         new object[] { "deep_tile_rle.exr", ExrCompression.Rle, 8, 5, 21, 13, true },
         new object[] { "deep_tile_none.exr", ExrCompression.None, 8, 5, 13, 9, false },     // raw tables of clipped edge tiles
         new object[] { "deep_tile_zips.exr", ExrCompression.Zips, 16, 16, 10, 12, false },   // one tile larger than the image
+        // ZSTD (OpenEXR 3.5): beyond the C++ helper's library; verified through the python bindings instead
+        new object[] { "", ExrCompression.Zstd, 0, 0, 23, 9, true },
+        new object[] { "", ExrCompression.Zstd, 8, 5, 21, 13, false },
     };
 
     [Theory]
@@ -170,6 +173,36 @@ public class ExrSelfCheckTests
         var ms = new MemoryStream();
         Exr.EncodeDeep(deep, ms, new ExrEncodeOptions { Compression = comp, TileWidth = tileW, TileHeight = tileH, DataWindowX = -3, DataWindowY = 2, DisplayWindow = new ExrBox2i(0, 0, 30, 20) });
         var fresh = ms.ToArray();
+        if (name.Length == 0)
+        {
+            if (Writing) return;
+            // no committed file: our reader gets everything back, and the reference bindings read the same samples
+            var mine = Exr.DecodeDeep(fresh);
+            Assert.Equal(deep.SampleCounts, mine.SampleCounts);
+            foreach (var n in deep.ChannelNames)
+            {
+                int k = deep.ChannelNames.ToList().IndexOf(n);
+                if (deep.ChannelData[k] is uint[] u) Assert.Equal(u, mine.GetUIntChannel(n));
+                else Assert.Equal((float[])deep.ChannelData[k], mine.GetFloatChannel(n));
+            }
+            var summary = ExrOracle.Decode(fresh, ".deep.exr");
+            if (summary == null) return;
+            var sd = summary.GetData<double>();
+            var names = mine.ChannelNames;        // file order, as in the summary
+            Assert.Equal((w, h, 1 + names.Count), (summary.Width, summary.Height, summary.Channels));
+            for (int p = 0; p < w * h; p++)
+            {
+                Assert.Equal(mine.SampleCounts[p], (int)sd[p * summary.Channels]);
+                for (int k = 0; k < names.Count; k++)
+                {
+                    double sum = 0;
+                    for (int j = 0; j < mine.SampleCounts[p]; j++)
+                        sum += (mine.ChannelData[k] is uint[] u ? u[mine.SampleOffsets[p] + j] : (double)((float[])mine.ChannelData[k])[mine.SampleOffsets[p] + j]) * (j + 1);
+                    Assert.Equal(sum, sd[p * summary.Channels + 1 + k], 6);
+                }
+            }
+            return;
+        }
         var committed = Check(name, fresh, comp);
         if (Writing) return;
 
@@ -195,6 +228,54 @@ public class ExrSelfCheckTests
             }
             TestUtil.AssertEqual(deep.Flatten(new[] { "R", "G", "B", "A" }), Exr.Decode(file));
         }
+    }
+
+    [Theory]
+    [InlineData("deep_mip_rle.exr", ExrCompression.Rle, ExrLevelMode.MipMap, false, 13, 9)]
+    [InlineData("deep_rip_up_none.exr", ExrCompression.None, ExrLevelMode.RipMap, true, 7, 5)]
+    [InlineData("deep_mip_up_zips.exr", ExrCompression.Zips, ExrLevelMode.MipMap, true, 11, 6)]
+    public void DeepLevelsOutput(string name, ExrCompression comp, ExrLevelMode mode, bool roundUp, int w, int h)
+    {
+        // every level has its own, caller supplied samples (deep levels cannot be generated)
+        int Half(int n) => Math.Max(1, roundUp ? (n + 1) / 2 : n / 2);
+        var sizes = new List<(int lx, int ly, int w, int h)>();
+        if (mode == ExrLevelMode.MipMap)
+            for (int l = 0, lw = w, lh = h; ; l++, lw = Half(lw), lh = Half(lh)) { sizes.Add((l, l, lw, lh)); if (lw == 1 && lh == 1) break; }
+        else
+            for (int ly = 0, lh = h; ; ly++, lh = Half(lh))
+            {
+                for (int lx = 0, lw = w; ; lx++, lw = Half(lw)) { sizes.Add((lx, ly, lw, lh)); if (lw == 1) break; }
+                if (lh == 1) break;
+            }
+        var levels = sizes.Select((sz, i) => MakeDeep(sz.w, sz.h, 100 + i * 7 + w, true)).ToList();
+        var ms = new MemoryStream();
+        Exr.EncodeDeep(levels, ms, new ExrEncodeOptions { Compression = comp, TileWidth = 4, TileHeight = 3, LevelMode = mode, LevelRoundUp = roundUp, DataWindowX = 1, DataWindowY = -2 });
+        var fresh = ms.ToArray();
+        var committed = Check(name, fresh, comp);
+        if (Writing) return;
+
+        var hd = Exr.ReadHeaders(committed)[0];
+        Assert.Equal((ExrPartType.DeepTiled, mode, roundUp, sizes.Count >= 4), (hd.Type, hd.LevelMode, hd.LevelRoundUp, true));
+        for (int i = 0; i < sizes.Count; i++)
+        {
+            var (lx, ly, lw, lh) = sizes[i];
+            Assert.Equal((lw, lh), hd.GetLevelSize(lx, ly));
+            // libOpenEXR's reading of this level of the committed file is what went in
+            AssertDeepEquals(levels[i], LoadDump(Path.Combine(Dir, i == 0 ? name + ".part0.deep" : $"{name}.part0.l{lx}_{ly}.deep")));
+            foreach (var file in new[] { committed, fresh })
+            {
+                var back = Exr.DecodeDeep(file, null, new ExrDecodeOptions { LevelX = lx, LevelY = ly });
+                Assert.Equal(levels[i].SampleCounts, back.SampleCounts);
+                Assert.Equal(levels[i].GetFloatChannel("Z"), back.GetFloatChannel("Z"));
+                Assert.Equal(levels[i].GetUIntChannel("id"), back.GetUIntChannel("id"));
+            }
+        }
+        // the level list must match the level structure
+        var bad = new MemoryStream();
+        Assert.Throws<ArgumentException>(() => Exr.EncodeDeep(levels.Take(2).ToList(), bad, new ExrEncodeOptions { TileWidth = 4, TileHeight = 3, LevelMode = mode, LevelRoundUp = roundUp }));
+        Assert.Throws<ArgumentException>(() => Exr.EncodeDeep(levels, bad, new ExrEncodeOptions { TileWidth = 4, TileHeight = 3, LevelMode = mode, LevelRoundUp = !roundUp }));
+        Assert.Throws<ArgumentException>(() => Exr.EncodeDeep(levels, bad, new ExrEncodeOptions { LevelMode = mode, LevelRoundUp = roundUp }));
+        Assert.Equal(0, bad.Length);
     }
 
     [Fact]
@@ -235,7 +316,9 @@ public class ExrSelfCheckTests
         var ms = new MemoryStream();
         var deep = MakeDeep(4, 4, 1, false);
         Assert.Throws<ImageNotSupportedException>(() => Exr.EncodeDeep(deep, ms, new ExrEncodeOptions { Compression = ExrCompression.Piz }));
-        Assert.Throws<ImageNotSupportedException>(() => Exr.EncodeDeep(deep, ms, new ExrEncodeOptions { TileWidth = 4, TileHeight = 4, LevelMode = ExrLevelMode.MipMap }));
+        // deep levels are never generated
+        Assert.Throws<ArgumentException>(() => Exr.EncodeDeep(deep, ms, new ExrEncodeOptions { TileWidth = 4, TileHeight = 4, LevelMode = ExrLevelMode.MipMap }));
+        Assert.Equal(0, ms.Length);
         Assert.Throws<ArgumentException>(() => new ExrDeepImage(2, 2, new[] { 1, 1, 1 }, new[] { "Z" }, new Array[] { new float[3] }));
         Assert.Throws<ArgumentException>(() => new ExrDeepImage(2, 2, new[] { 1, 1, 1, 1 }, new[] { "Z" }, new Array[] { new float[3] }));
         Assert.Throws<ArgumentException>(() => new ExrDeepImage(2, 2, new[] { 1, 1, 1, 1 }, new[] { "Z" }, new Array[] { new double[4] }));

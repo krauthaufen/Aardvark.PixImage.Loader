@@ -23,7 +23,7 @@ namespace PixCodec
         public IReadOnlyList<string> ChannelNames { get; }
         /// <summary>One array of TotalSamples elements per channel: float[] for HALF and FLOAT channels, uint[] for UINT channels.</summary>
         public IReadOnlyList<Array> ChannelData { get; }
-        /// <summary>The type each channel has in the file (decoded images) or will be stored with (<see cref="Exr.EncodeDeep"/>).</summary>
+        /// <summary>The type each channel has in the file (decoded images) or will be stored with (<see cref="Exr.EncodeDeep(ExrDeepImage, System.IO.Stream, ExrEncodeOptions)"/>).</summary>
         public IReadOnlyList<ExrPixelType> ChannelTypes { get; }
 
         internal ExrDeepImage(ExrHeader header, int width, int height, int[] counts, int[] offsets, string[] names, Array[] data, ExrPixelType[] types)
@@ -33,7 +33,7 @@ namespace PixCodec
         }
 
         /// <summary>
-        /// Builds a deep image for <see cref="Exr.EncodeDeep"/> or <see cref="Flatten"/>.
+        /// Builds a deep image for <see cref="Exr.EncodeDeep(ExrDeepImage, System.IO.Stream, ExrEncodeOptions)"/> or <see cref="Flatten"/>.
         /// </summary>
         /// <param name="width">Image width.</param>
         /// <param name="height">Image height.</param>
@@ -282,12 +282,12 @@ namespace PixCodec
     {
         const long MaxRatio = 2048;
 
-        public static ExrDeepImage Decode(ReadOnlySpan<byte> data, ExrFileStructure file, int partIndex, int[] sel, ExrDecodeOptions opt)
+        public static ExrDeepImage Decode(ExrInput input, ExrFileStructure file, int partIndex, int[] sel, ExrDecodeOptions opt)
         {
             var part = file.Parts[partIndex];
             if (!part.IsDeep) throw new ArgumentException("EXR part is not deep; use Exr.Decode");
             var comp = part.Compression;
-            if (comp != ExrCompression.None && comp != ExrCompression.Rle && comp != ExrCompression.Zips)
+            if (comp != ExrCompression.None && comp != ExrCompression.Rle && comp != ExrCompression.Zips && comp != ExrCompression.Zstd)
                 throw new ImageFormatException($"EXR compression {comp} is not valid for deep data");
             var chans = part.Chans;
             foreach (var c in chans)
@@ -295,41 +295,71 @@ namespace PixCodec
             int lx = opt.LevelX, ly = opt.LevelY;
             if (!part.HasLevel(lx, ly)) throw new ArgumentException($"EXR part has no level ({lx}, {ly})");
             var (w, h) = part.GetLevelSize(lx, ly);
-            if ((long)w * h >= 0x7FFFFFC7) throw new ImageNotSupportedException("EXR deep image is too large");
             int minX = part.DataWindow.MinX, minY = part.DataWindow.MinY;
+            var dw = new ExrBox2i(minX, minY, minX + w - 1, minY + h - 1);
+            var region = ExrDecoder.OutputWindow(part, opt, dw);
+            int rw = (int)region.Width, rh = (int)region.Height;
+            if ((long)rw * rh >= 0x7FFFFFC7) throw ExrDecoder.TooLarge(rw, rh, 1);
             bool multi = file.MultiPart, tiled = part.IsTiled;
 
+            // the chunks that intersect the region (in region-relative order they need not be contiguous in the table)
+            int ix0 = Math.Max(region.MinX, dw.MinX) - minX, ix1 = Math.Min(region.MaxX, dw.MaxX) - minX;
+            int iy0 = Math.Max(region.MinY, dw.MinY) - minY, iy1 = Math.Min(region.MaxY, dw.MaxY) - minY;
+            bool empty = ix0 > ix1 || iy0 > iy1;
             int tilesX = tiled ? (w + part.TileWidth - 1) / part.TileWidth : 0;
-            long chunkCount = tiled ? (long)tilesX * ((h + part.TileHeight - 1) / part.TileHeight) : h;
+            var needed = new List<int>();
+            if (!empty)
+            {
+                if (tiled)
+                    for (int ty = iy0 / part.TileHeight; ty <= iy1 / part.TileHeight; ty++)
+                        for (int tx = ix0 / part.TileWidth; tx <= ix1 / part.TileWidth; tx++) needed.Add(checked(ty * tilesX + tx));
+                else
+                    for (int y = iy0; y <= iy1; y++) needed.Add(y);
+            }
             // the offset table alone needs 8 bytes per chunk, which bounds everything allocated from the header
-            if (chunkCount * 8 > data.Length || (long)w * h > data.Length * MaxRatio)
+            if ((long)needed.Count * 8 > input.Length || (long)(empty ? 0 : (ix1 - ix0 + 1)) * (empty ? 0 : (iy1 - iy0 + 1)) > input.Length * MaxRatio)
                 throw new ImageFormatException("EXR data window is too large for the file size");
-            var offsets = ExrChunkTable.Locate(data, file, partIndex, part.FirstChunkOfLevel(lx, ly), (int)chunkCount, lx, ly);
+            int firstIndex = needed.Count > 0 ? needed[0] : 0;
+            var offsets = needed.Count == 0 ? Array.Empty<long>()
+                : ExrChunkTable.Locate(input, file, partIndex, part.FirstChunkOfLevel(lx, ly) + firstIndex, needed[^1] - firstIndex + 1, lx, ly, firstIndex);
 
             int hdrSize = (multi ? 4 : 0) + (tiled ? 16 : 4) + 24;
-            var counts = new int[w * h];
-            var info = new (int pos, long packedData, long unpackedData, int x0, int y0, int cw, int ch)[chunkCount];
+            var counts = new int[rw * rh];
+            var info = new (long pos, long packedTable, long packedData, long unpackedData, int x0, int y0, int cw, int ch, bool rawTable)[needed.Count];
             var s = new ExrScratch();
             int bytesPerSample = 0;
             foreach (var c in chans) bytesPerSample += c.Bytes;
+            int offX = minX - region.MinX, offY = minY - region.MinY;      // data window pixel -> region pixel
+
+            ReadOnlySpan<byte> Table(in (long pos, long packedTable, long packedData, long unpackedData, int x0, int y0, int cw, int ch, bool rawTable) c)
+            {
+                int tableSize = c.cw * c.ch * 4;
+                var table = input.Read(c.pos, (int)c.packedTable, s, 4);
+                if (c.rawTable) return table.Slice(0, tableSize);
+                var buf = s.Bytes(2, tableSize).AsSpan(0, tableSize);
+                if (comp == ExrCompression.Zstd) ExrZstd.DecodeTable(table, buf, s);
+                else ExrCodecs.DecodeBytes(comp, table, buf, s);
+                return buf;
+            }
 
             // pass 1: the sample count tables (cumulative counts along each row of the chunk)
             long total = 0;
-            for (int i = 0; i < chunkCount; i++)
+            for (int i = 0; i < needed.Count; i++)
             {
-                long pos = offsets[i];
+                int index = needed[i];
+                long pos = offsets[index - firstIndex];
                 if (pos <= 0) throw new ImageFormatException("EXR file is incomplete: a chunk is missing");
-                if (pos > data.Length - hdrSize) throw new ImageFormatException("EXR chunk offset is out of range");
-                var hd = data.Slice((int)pos, hdrSize);
+                if (pos > input.Length - hdrSize) throw new ImageFormatException("EXR chunk offset is out of range");
+                var hd = input.Read(pos, hdrSize, s, 5);
                 if (multi)
                 {
                     if (BinaryPrimitives.ReadInt32LittleEndian(hd) != partIndex) throw new ImageFormatException("EXR chunk belongs to another part");
                     hd = hd.Slice(4);
                 }
-                int x0 = 0, y0 = i, cw = w, ch = 1;
+                int x0 = 0, y0 = index, cw = w, ch = 1;
                 if (tiled)
                 {
-                    int tx = i % tilesX, ty = i / tilesX;
+                    int tx = index % tilesX, ty = index / tilesX;
                     if (BinaryPrimitives.ReadInt32LittleEndian(hd) != tx || BinaryPrimitives.ReadInt32LittleEndian(hd.Slice(4)) != ty
                         || BinaryPrimitives.ReadInt32LittleEndian(hd.Slice(8)) != lx || BinaryPrimitives.ReadInt32LittleEndian(hd.Slice(12)) != ly)
                         throw new ImageFormatException("EXR tile coordinates do not match the offset table");
@@ -339,50 +369,45 @@ namespace PixCodec
                 }
                 else
                 {
-                    if (BinaryPrimitives.ReadInt32LittleEndian(hd) != minY + i) throw new ImageFormatException("EXR scan line chunk does not match the offset table");
+                    if (BinaryPrimitives.ReadInt32LittleEndian(hd) != minY + index) throw new ImageFormatException("EXR scan line chunk does not match the offset table");
                     hd = hd.Slice(4);
                 }
                 long packedTable = BinaryPrimitives.ReadInt64LittleEndian(hd), packedData = BinaryPrimitives.ReadInt64LittleEndian(hd.Slice(8));
                 long unpackedData = BinaryPrimitives.ReadInt64LittleEndian(hd.Slice(16));
                 pos += hdrSize;
                 // The table has one entry per pixel of the chunk. It is stored raw when its packed size is that of a full
-                // (not clipped) tile, which is what the reference writer does even for the narrower tiles at the edges.
+                // (not clipped) tile, which is what the reference writer does even for the narrower tiles at the edges;
+                // with ZSTD (a newer writer) a raw table has the size of the clipped tile.
                 long tableSize = (long)cw * ch * 4, nominal = tiled ? (long)part.TileWidth * part.TileHeight * 4 : tableSize;
-                bool rawTable = packedTable == nominal || (comp == ExrCompression.None && packedTable == tableSize);
-                if (packedTable < 0 || packedData < 0 || unpackedData < 0 || packedTable > data.Length - pos || packedData > data.Length - pos - packedTable
+                bool rawTable = packedTable == nominal || ((comp == ExrCompression.None || comp == ExrCompression.Zstd) && packedTable == tableSize);
+                if (packedTable < 0 || packedData < 0 || unpackedData < 0 || packedTable > input.Length - pos || packedData > input.Length - pos - packedTable
                     || packedTable > nominal || packedData > unpackedData || tableSize > int.MaxValue || unpackedData > int.MaxValue
                     || (comp == ExrCompression.None && (!rawTable || packedData != unpackedData))
                     || tableSize > Math.Max(packedTable, 1) * MaxRatio || unpackedData > Math.Max(packedData, 1) * MaxRatio)
                     throw new ImageFormatException("EXR deep chunk has impossible sizes");
+                info[i] = (pos, packedTable, packedData, unpackedData, x0, y0, cw, ch, rawTable);
 
-                ReadOnlySpan<byte> table = data.Slice((int)pos, (int)packedTable);
-                if (!rawTable)
-                {
-                    var buf = s.Bytes(2, (int)tableSize).AsSpan(0, (int)tableSize);
-                    ExrCodecs.Decode(comp, table, buf, default, s);
-                    table = buf;
-                }
+                var table = Table(info[i]);
                 long chunkSamples = 0;
                 for (int y = 0; y < ch; y++)
                 {
-                    int prev = 0;
+                    int prev = 0, ry = y0 + y + offY;
                     for (int x = 0; x < cw; x++)
                     {
                         int cum = BinaryPrimitives.ReadInt32LittleEndian(table.Slice((y * cw + x) * 4));
                         int n = cum - prev;
                         if (n < 0) throw new ImageFormatException("EXR deep sample counts are not increasing");
                         prev = cum;
-                        counts[(y0 + y) * w + x0 + x] = n;
                         chunkSamples += n;
+                        int rx = x0 + x + offX;
+                        if (rx >= 0 && rx < rw && ry >= 0 && ry < rh) { counts[ry * rw + rx] = n; total += n; }
                     }
                 }
                 if (chunkSamples * bytesPerSample != unpackedData) throw new ImageFormatException("EXR deep sample data size does not match the sample counts");
-                total += chunkSamples;
-                info[i] = ((int)(pos + packedTable), packedData, unpackedData, x0, y0, cw, ch);
             }
-            if (total > 0x7FFFFFC7) throw new ImageNotSupportedException("EXR deep image has too many samples for a single array");
+            if (total > 0x7FFFFFC7) throw new ImageNotSupportedException("EXR deep image has too many samples for a single array; decode it in parts with ExrDecodeOptions.Region");
 
-            var sampleOffsets = new int[w * h + 1];
+            var sampleOffsets = new int[rw * rh + 1];
             for (int i = 0; i < counts.Length; i++) sampleOffsets[i + 1] = sampleOffsets[i] + counts[i];
 
             var names = new string[sel.Length];
@@ -398,43 +423,59 @@ namespace PixCodec
 
             // pass 2: sample data; per row of the chunk, per channel, the samples of the row's pixels
             var h2f = ExrHalf.ToFloatBits;
-            for (int i = 0; i < chunkCount; i++)
+            var rowStart = new int[2];
+            for (int i = 0; i < needed.Count; i++)
             {
-                var (pos, packedData, unpackedData, x0, y0, cw, ch) = info[i];
-                if (unpackedData == 0) continue;
-                ReadOnlySpan<byte> raw = data.Slice(pos, (int)packedData);
-                if (packedData != unpackedData)
+                var c = info[i];
+                if (c.unpackedData == 0) continue;
+                // cumulative counts of the pixels of each row that lie in the region
+                var table = Table(c);
+                int xa = Math.Max(c.x0, -offX), xb = Math.Min(c.x0 + c.cw - 1, rw - 1 - offX);       // data window columns wanted
+                if (xa > xb) continue;
+                var skip = new int[c.ch]; var take = new int[c.ch]; var rowTotal = new int[c.ch];
+                for (int y = 0; y < c.ch; y++)
                 {
-                    var buf = s.Bytes(2, (int)unpackedData).AsSpan(0, (int)unpackedData);
-                    ExrCodecs.Decode(comp, raw, buf, default, s);
+                    var row = table.Slice(y * c.cw * 4, c.cw * 4);
+                    skip[y] = xa == c.x0 ? 0 : BinaryPrimitives.ReadInt32LittleEndian(row.Slice((xa - 1 - c.x0) * 4));
+                    take[y] = BinaryPrimitives.ReadInt32LittleEndian(row.Slice((xb - c.x0) * 4)) - skip[y];
+                    rowTotal[y] = BinaryPrimitives.ReadInt32LittleEndian(row.Slice((c.cw - 1) * 4));
+                }
+                ReadOnlySpan<byte> raw = input.Read(c.pos + c.packedTable, (int)c.packedData, s, 4);
+                if (c.packedData != c.unpackedData)
+                {
+                    var buf = s.Bytes(1, (int)c.unpackedData).AsSpan(0, (int)c.unpackedData);
+                    if (comp == ExrCompression.Zstd) ExrZstd.DeepData(raw, buf, chans, rowTotal, c.ch, s, true, out _);
+                    else ExrCodecs.DecodeBytes(comp, raw, buf, s);
                     raw = buf;
                 }
                 int p = 0;
-                for (int y = 0; y < ch; y++)
+                for (int y = 0; y < c.ch; y++)
                 {
-                    int firstPixel = (y0 + y) * w + x0;
-                    int first = sampleOffsets[firstPixel], n = sampleOffsets[firstPixel + cw] - first;
+                    int ry = c.y0 + y + offY;
+                    bool wanted = ry >= 0 && ry < rh && take[y] > 0;
+                    int first = wanted ? sampleOffsets[ry * rw + xa + offX] : 0, n = take[y];
                     for (int ci = 0; ci < chans.Length; ci++)
                     {
-                        int k = slot[ci], type = chans[ci].Type;
-                        if (k >= 0)
+                        int k = slot[ci], type = chans[ci].Type, bytes = chans[ci].Bytes;
+                        if (k >= 0 && wanted)
                         {
-                            if (type == 0) MemoryMarshal.Cast<byte, uint>(raw.Slice(p, n * 4)).CopyTo(((uint[])arrays[k]).AsSpan(first));
-                            else if (type == 2) MemoryMarshal.Cast<byte, float>(raw.Slice(p, n * 4)).CopyTo(((float[])arrays[k]).AsSpan(first));
+                            int q = p + skip[y] * bytes;
+                            if (type == 0) MemoryMarshal.Cast<byte, uint>(raw.Slice(q, n * 4)).CopyTo(((uint[])arrays[k]).AsSpan(first));
+                            else if (type == 2) MemoryMarshal.Cast<byte, float>(raw.Slice(q, n * 4)).CopyTo(((float[])arrays[k]).AsSpan(first));
                             else
                             {
-                                var src = MemoryMarshal.Cast<byte, ushort>(raw.Slice(p, n * 2));
+                                var src = MemoryMarshal.Cast<byte, ushort>(raw.Slice(q, n * 2));
                                 var dst = MemoryMarshal.Cast<float, uint>(((float[])arrays[k]).AsSpan(first, n));
                                 for (int j = 0; j < n; j++) dst[j] = h2f[src[j]];
                             }
                         }
-                        p += n * chans[ci].Bytes;
+                        p += rowTotal[y] * bytes;
                     }
                 }
             }
             var types = new ExrPixelType[sel.Length];
             for (int k = 0; k < sel.Length; k++) types[k] = (ExrPixelType)chans[sel[k]].Type;
-            return new ExrDeepImage(part, w, h, counts, sampleOffsets, names, arrays, types);
+            return new ExrDeepImage(part, rw, rh, counts, sampleOffsets, names, arrays, types);
         }
     }
 }
