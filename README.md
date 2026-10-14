@@ -7,11 +7,10 @@ Little-endian hosts only (x64 and arm64 are tested).
 |---|---|---|
 | PNG | everything in the spec, interlaced, 16 bit, APNG, all standard ancillary chunks | 8/16 bit gray, gray+alpha, RGB, RGBA, palette, 1/2/4 bit, interlaced, APNG |
 | JPEG | baseline, progressive, lossless, hierarchical, arithmetic coding, 8 and 12 bit, CMYK/YCCK, scaled decode | baseline, progressive, lossless (Huffman and arithmetic), arithmetic, 8 and 12 bit |
-| TIFF | classic + BigTIFF, strips + tiles, 1..64 bit int, 16/24/32/64 bit float, LZW, Deflate, PackBits, CCITT, JPEG (incl. old-style, 12 bit, lossless), ZSTD, LZMA, WebP, JPEG 2000 (incl. Aperio), JBIG, LERC, PixarLog, LogLuv, Lab, multi-page, raw tags, regions, files > 4 GB | every sample type, strips or tiles, None / LZW / Deflate / PackBits / ZSTD / LZMA / JPEG / WebP / lossless JPEG 2000 / JBIG / LERC / CCITT G3 and G4, multi-page, overviews, cloud-optimized layout, extra tags |
+| TIFF | classic + BigTIFF, strips + tiles, 1..64 bit int, 16/24/32/64 bit float, LZW, Deflate, PackBits, CCITT, JPEG (incl. old-style, 12 bit, lossless), ZSTD, LZMA, WebP, JPEG 2000 (incl. Aperio), JBIG, PixarLog, LogLuv, Lab, multi-page, raw tags, regions, files > 4 GB | every sample type, strips or tiles, None / LZW / Deflate / PackBits / ZSTD / LZMA / JPEG / WebP / lossless JPEG 2000 / JBIG / CCITT G3 and G4, multi-page, overviews, cloud-optimized layout, extra tags |
 | GIF | 87a/89a, interlace, transparency, animations (compositing verified against Chromium) | single images and animations, quantizer + dithering |
 | OpenEXR | scanline, tiled, multi-part, deep, mip/rip levels, half/float/uint, luminance/chroma, all compressions incl. PIZ, B44, DWA, ZSTD, HTJ2K, region decode from a stream | scanline, tiled, multi-part, deep, luminance/chroma, all of those compressions |
 | WebP | lossy, lossless, alpha, animation | lossy, lossless, alpha, animation |
-| LERC | LERC1 and LERC2 v2..v6 (bands, depth, masks, no-data, lossless float) | LERC2 v2..v6, lossless and max-error lossy |
 | JBIG1 | the whole of T.82 (layers, all stripe orders, bit planes) | single layer, 1..8 bit planes |
 | JPEG 2000 | Part 1 and HTJ2K (.j2k / .jph codestreams, JP2 / JPH container), 1..38 bit, region / reduced resolution / layer limited decode | Part 1 and HTJ2K, lossless and lossy (up to 16 bit), target bitrate, tiles, progression orders |
 
@@ -33,7 +32,7 @@ if (ImageCodec.TryGetInfo(path, out var i)) { /* ... */ }
 ```
 
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
-in R,G,B,A order with straight alpha. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Lerc`, `Jbig`)
+in R,G,B,A order with straight alpha. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Jbig`)
 with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data.
 

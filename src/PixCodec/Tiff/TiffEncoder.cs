@@ -28,7 +28,7 @@ namespace PixCodec
 
         const string TooBig = "TIFF: the output exceeds 4 GB, which needs BigTiff (leave BigTiff unset or set it to true)";
         const int None = 1, CcittRle = 2, Ccitt3 = 3, Ccitt4 = 4, Lzw = 5, JpegComp = 7, Deflate = 8, PackBits = 32773,
-            ZstdComp = 50000, LzmaComp = 34925, WebpComp = 50001, LercComp = 34887, Jp2Comp = 34712, JbigComp = 34661;
+            ZstdComp = 50000, LzmaComp = 34925, WebpComp = 50001, Jp2Comp = 34712, JbigComp = 34661;
 
         /// <summary>Everything derived from one image and its options before a byte is written.</summary>
         sealed class Layout
@@ -40,7 +40,6 @@ namespace PixCodec
             public long RowBytes, ChunkRowBytes, RawTotal;
             public int SubH = 1, SubV = 1;
             public int[] Extra = Array.Empty<int>();
-            public int LercSecond;
             public ushort[]? ColorMap;
             public JpegEncodeOptions? Jpeg;
             public long[] Offsets = Array.Empty<long>(), Counts = Array.Empty<long>();
@@ -71,7 +70,6 @@ namespace PixCodec
                     TiffCompression.Zstd => ZstdComp,
                     TiffCompression.Lzma => LzmaComp,
                     TiffCompression.Webp => WebpComp,
-                    TiffCompression.Lerc => LercComp,
                     TiffCompression.Jpeg2000 => Jp2Comp,
                     TiffCompression.Jbig => JbigComp,
                     _ => throw new ArgumentException("unknown TIFF compression"),
@@ -161,32 +159,15 @@ namespace PixCodec
                 else if (Photometric == 6)
                 {
                     // TIFF 6.0 YCbCr without JPEG: blocks of SubH * SubV luma samples followed by Cb and Cr
-                    if (Planar || Comp is WebpComp or LercComp or Jp2Comp) throw new ArgumentException("TIFF: YCbCr output is contiguous and not available with this compression");
+                    if (Planar || Comp is WebpComp or Jp2Comp) throw new ArgumentException("TIFF: YCbCr output is contiguous and not available with this compression");
                     YccPacked = true;
                     (SubH, SubV) = o.JpegSubsampling switch { JpegSubsampling.Chroma444 => (1, 1), JpegSubsampling.Chroma422 => (2, 1), _ => (2, 2) };
                 }
                 if (Comp == WebpComp && (type != SampleType.UInt8 || !(image.Color is ColorModel.Rgb or ColorModel.Rgba) || Packed || Planar || Photometric != 2))
                     throw new ArgumentException("WebP compressed TIFF output needs an 8-bit Rgb or Rgba image");
-                if (Comp is LercComp or Jp2Comp && (Packed || YccPacked || Bilevel))
+                if (Comp == Jp2Comp && (Packed || YccPacked || Bilevel))
                     throw new ArgumentException("TIFF: this compression needs whole-byte samples");
                 if (Comp == Jp2Comp && (IsFloat || Bps > 2)) throw new ArgumentException("JPEG 2000 compressed TIFF output needs 8 or 16 bit integer samples");
-                if (Comp == LercComp)
-                {
-                    if (type is SampleType.UInt64 or SampleType.Int64 or SampleType.Float16)
-                        throw new ArgumentException("LERC compressed TIFF output needs 8, 16 or 32 bit integers or 32 / 64 bit floats");
-                    // libtiff hands the codec byte-swapped numbers in big endian files, which for floats makes arbitrary
-                    // bit patterns (NaN among them) out of ordinary values
-                    if (IsFloat && bigEndian) throw new ArgumentException("LERC compressed float output is not available in big endian TIFF files");
-                    // (and the error bound of lossy coding would apply to the swapped numbers)
-                    if (bigEndian && Bps > 1 && o.LercMaxError > 0) throw new ArgumentException("lossy LERC output of samples wider than 8 bits is not available in big endian TIFF files");
-                    LercSecond = o.LercSecondCompression switch
-                    {
-                        TiffCompression.None => 0,
-                        TiffCompression.Deflate => 1,
-                        TiffCompression.Zstd => 2,
-                        _ => throw new ArgumentException("the second compression of LERC is None, Deflate or Zstd"),
-                    };
-                }
 
                 if (o.Predictor == TiffPredictor.FloatingPoint && !IsFloat)
                     throw new ArgumentException("the floating point predictor needs float samples");
@@ -591,7 +572,7 @@ namespace PixCodec
 
         // tags the encoder always writes itself; callers may not override them through ExtraTags
         static bool IsStructural(int tag) => tag is 254 or 256 or 257 or 258 or 259 or 262 or 266 or 273 or 277 or 278 or 279 or 284 or 292 or 293 or 317
-            or 320 or 322 or 323 or 324 or 325 or 338 or 339 or 347 or 530 or 34665 or 34853 or 50674;
+            or 320 or 322 or 323 or 324 or 325 or 338 or 339 or 347 or 530 or 34665 or 34853;
 
         static TiffIfdNode BuildDirectory(Layout l, TiffPage page, bool big)
         {
@@ -625,7 +606,6 @@ namespace PixCodec
             if (l.ColorMap != null) n.Set(TiffField.Shorts(320, Array.ConvertAll(l.ColorMap, x => (int)x)));
             if (l.Comp == Ccitt3) n.Set(TiffField.Longs(292, false, o.Ccitt2D ? 1 : 0));
             if (l.Comp == Ccitt4) n.Set(TiffField.Longs(293, false, 0));
-            if (l.Comp == LercComp) n.Set(TiffField.Longs(50674, false, 4, l.LercSecond)); // LercParameters: LERC version 2.4, additional compression
             if (l.Photometric == 6)
             {
                 n.Set(TiffField.Shorts(530, l.SubH, l.SubV));
@@ -676,7 +656,7 @@ namespace PixCodec
                 int x0 = ci % l.Across * l.Cw, y0 = ci / l.Across * l.Ch;
                 int rows = l.Tiled ? l.Ch : Math.Min(l.Ch, l.H - y0);
                 int copyCols = Math.Min(l.Cw, l.W - x0), copyRows = Math.Min(rows, l.H - y0);
-                if (l.Comp is JpegComp or WebpComp or LercComp or Jp2Comp) return CompressImage(plane, x0, y0, rows, copyCols, copyRows);
+                if (l.Comp is JpegComp or WebpComp or Jp2Comp) return CompressImage(plane, x0, y0, rows, copyCols, copyRows);
 
                 int ps = l.Ps, pix = ps * l.Bps;
                 int nativeRow = l.Cw * pix;
@@ -918,90 +898,9 @@ namespace PixCodec
             }
 
             /// <summary>
-            /// Codecs that take an image: JPEG, WebP, LERC, JPEG 2000 - one strip / tile as a complete stream of its
+            /// Codecs that take an image: JPEG, WebP, JPEG 2000 - one strip / tile as a complete stream of its
             /// own. Tiles are padded by repeating the edge pixels.
             /// </summary>
-            /// <summary>
-            /// One LERC blob the way libtiff writes it: NaN samples of float data and a 0 / 255 alpha channel of 8-bit
-            /// data become validity masks (one for all samples where that describes the data, else one per sample).
-            /// </summary>
-            void EncodeLerc(byte[] px, int rows, int ps, int plane, MemoryStream output)
-            {
-                var l = L;
-                var type = l.Image.SampleType;
-                int w = l.Cw, n = w * rows, depth = ps, bands = 1;
-                byte[]? mask = null;
-                ReadOnlySpan<byte> samples = px;
-                if (type is SampleType.Float32 or SampleType.Float64)
-                {
-                    // which samples are NaN
-                    byte[]? nan = null;
-                    if (type == SampleType.Float32)
-                    {
-                        var f = MemoryMarshal.Cast<byte, float>(px.AsSpan());
-                        for (int i = 0; i < f.Length; i++)
-                            if (float.IsNaN(f[i])) { (nan ??= new byte[f.Length])[i] = 1; f[i] = 0; }
-                    }
-                    else
-                    {
-                        var f = MemoryMarshal.Cast<byte, double>(px.AsSpan());
-                        for (int i = 0; i < f.Length; i++)
-                            if (double.IsNaN(f[i])) { (nan ??= new byte[f.Length])[i] = 1; f[i] = 0; }
-                    }
-                    if (nan != null)
-                    {
-                        bool whole = true;   // every pixel is NaN in all of its samples or in none
-                        for (int i = 0; i < n && whole; i++)
-                            for (int c = 1; c < ps; c++)
-                                if (nan[i * ps + c] != nan[i * ps]) { whole = false; break; }
-                        if (whole)
-                        {
-                            mask = new byte[n];
-                            for (int i = 0; i < n; i++) mask[i] = (byte)(1 - nan[i * ps]);
-                        }
-                        else
-                        {
-                            // one band and one mask per sample
-                            depth = 1; bands = ps;
-                            mask = new byte[n * ps];
-                            for (int c = 0; c < ps; c++)
-                                for (int i = 0; i < n; i++) mask[c * n + i] = (byte)(1 - nan[i * ps + c]);
-                        }
-                    }
-                }
-                else if (type == SampleType.UInt8 && plane < 0 && ps >= 2 && l.Extra.Length > 0 && l.Extra[^1] == 2)
-                {
-                    // unassociated alpha of nothing but 0 and 255: stored as the mask, not as a sample
-                    bool binary = true;
-                    for (int i = ps - 1; i < px.Length; i += ps)
-                        if (px[i] != 0 && px[i] != 255) { binary = false; break; }
-                    if (binary)
-                    {
-                        depth = ps - 1;
-                        mask = new byte[n];
-                        var packed = new byte[n * depth];
-                        for (int i = 0; i < n; i++)
-                        {
-                            mask[i] = (byte)(px[i * ps + depth] >> 7);
-                            px.AsSpan(i * ps, depth).CopyTo(packed.AsSpan(i * depth));
-                        }
-                        samples = packed;
-                    }
-                }
-                // (libtiff swaps the samples of a big endian file before its codecs see them: the blob holds swapped numbers)
-                if (BigEndian && l.Bps > 1)
-                    fixed (byte* sp = px) TiffPredict.SwapBytes(sp, px.Length, l.Bps);
-                if (l.LercSecond == 0)
-                {
-                    TiffForeignCodecs.LercEncode(samples, type, w, rows, depth, bands, mask, l.Options.LercMaxError, output);
-                    return;
-                }
-                var blob = new MemoryStream();
-                TiffForeignCodecs.LercEncode(samples, type, w, rows, depth, bands, mask, l.Options.LercMaxError, blob);
-                var raw = blob.GetBuffer().AsSpan(0, (int)blob.Length);
-                output.Write(l.LercSecond == 1 ? Zlib.Compress(raw, l.Options.CompressionLevel) : Zstd.Compress(raw));
-            }
-
             Chunk CompressImage(int plane, int x0, int y0, int rows, int copyCols, int copyRows)
             {
                 var l = L;
@@ -1018,9 +917,6 @@ namespace PixCodec
                     case WebpComp:
                         Webp.Encode(new RawImage(l.Cw, rows, l.Spp == 4 ? ColorModel.Rgba : ColorModel.Rgb, px), ms,
                             new WebpEncodeOptions { Lossless = l.Options.WebpLossless, Quality = l.Options.WebpQuality });
-                        break;
-                    case LercComp:
-                        EncodeLerc(px, rows, ps, plane, ms);
                         break;
                     default:
                         TiffForeignCodecs.Encode(l.Comp, px, l.Cw, rows, ps, l.Image.SampleType, l.Photometric == 2 && plane < 0, l.Options, ms);

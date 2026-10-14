@@ -17,9 +17,10 @@ are JPEG 2000 codestreams with YCbCr 4:2:2 components (compression 33003), for T
 References: tifffile + OpenJPEG (which converts the subsampled YCbCr to RGB), for directory 3 and a region of directory 2.
 
 With --gdal it fetches the GDAL 3.11.0 autotest archive (18 MB, download.osgeo.org) and unpacks the 363 TIFF files of
-gcore/data into downloads/gdal-samples of the test-data repository, for TiffTests.GdalAutotestSamples: files GDAL itself writes (LERC
-with all its variants and masks, ZSTD, LZMA, WebP, JPEG, sparse and cloud optimized layouts, complex and odd sample
-types) and its collection of broken files. References: the installed GDAL (rasterio), stored samples band by band.
+gcore/data into downloads/gdal-samples of the test-data repository, for TiffTests.GdalAutotestSamples: files GDAL
+itself writes (ZSTD, LZMA, WebP, JPEG, sparse and cloud optimized layouts, complex and odd sample types; its LERC files
+only to check that they are refused) and its collection of broken files. References: the installed GDAL (rasterio),
+stored samples band by band.
 Files where GDAL interprets the samples differently from PixCodec's raw decoding get no reference (see GDAL_SKIP).
 """
 import hashlib
@@ -116,8 +117,8 @@ def gdal():
         path = os.path.join(out, name)
         if os.path.exists(path + '.ref'):
             os.remove(path + '.ref')
-        if name in GDAL_SKIP:
-            continue
+        if name in GDAL_SKIP or 'lerc' in name.lower():
+            continue    # (LERC is not supported)
         try:
             with tifffile.TiffFile(path) as t:
                 pg = t.pages[0]

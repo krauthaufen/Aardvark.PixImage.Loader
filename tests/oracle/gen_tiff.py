@@ -2,7 +2,7 @@
 
 usage: python3 gen_tiff.py            (from tests/oracle; deterministic, overwrites the fixture directory)
 
-Needs tifffile + imagecodecs, OpenCV, Pillow, ImageMagick, the system libtiff (with jbigkit and liblerc), rasterio
+Needs tifffile + imagecodecs, OpenCV, Pillow, ImageMagick, the system libtiff (with jbigkit), rasterio
 (GDAL) and FFmpeg. Many files come from the small TIFF writer below because no single tool produces the whole
 matrix (odd bit depths with compression, old-style LZW and JPEG, sparse tiles, hand-packed YCbCr / LogL, JPEG 2000
 codestreams and JBIG entities as strips ...); others are written by tifffile, libtiff (through ctypes, Pillow,
@@ -10,7 +10,7 @@ OpenCV), GDAL and ImageMagick.
 
 Provenance rule: every .ref is what a THIRD-PARTY decoder returned for the file - tifffile + imagecodecs for the
 stored samples (OpenJPEG for JPEG 2000), libtiff (OpenCV / Pillow / ImageMagick) where it interprets the data (YCbCr,
-CCITT, JPEG, LogLuv, JBIG), GDAL for LERC and its masks, FFmpeg for the CCITT uncompressed mode, LittleCMS for Lab -
+CCITT, JPEG, LogLuv, JBIG), GDAL for packed signed integers, FFmpeg for the CCITT uncompressed mode, LittleCMS for Lab -
 and all decoders that can read a file have to agree with the pixels it was built from. On top
 of the decoded samples only the conversions PixCodec documents are applied (MinIsWhite inversion, 1/2/4-bit
 scaling, palette expansion, naive CMYK, un-premultiplied alpha), each cross-checked against Pillow / ImageMagick
@@ -1383,96 +1383,6 @@ def gen_foreign():
     # (ImageMagick cannot write JBIG in TIFF: libtiff's codec has no scanline interface)
 
 
-def gen_lerc():
-    """LERC (34887) as GDAL / libtiff write it, including the second compression (LERC_DEFLATE, LERC_ZSTD) and the
-    validity masks: NaN samples of float data and binary alpha of 8-bit data. Written by GDAL (rasterio) and by
-    tifffile + imagecodecs (liblerc); the reference is GDAL's reading, cross-checked with tifffile where a file has
-    no mask (tifffile ignores LERC masks)."""
-    import rasterio
-    from rasterio.transform import from_origin
-    d = os.path.join(OUT, 'lerc')
-    os.makedirs(d, exist_ok=True)
-    w, h = 70, 45
-    yy, xx = np.mgrid[0:h, 0:w]
-    dem = (np.sin(xx / 9) * np.cos(yy / 7) * 500 + 1000).astype(np.float32)
-    hole = dem.copy()
-    hole[5:12, 20:40] = np.nan
-    hole[30, 3] = np.nan
-
-    def finish(name, tifffile_too):
-        path = os.path.join(d, name + '.tif')
-        with rasterio.open(path) as ds:
-            got = np.moveaxis(ds.read(), 0, -1)
-        with tifffile.TiffFile(path) as t:
-            assert t.pages[0].compression == 34887
-        by = ['GDAL (libtiff + liblerc)']
-        if tifffile_too:
-            assert same(ref_tifffile(path), got), name
-            by.append('tifffile')
-        emit_external('lerc/' + name, path, got, by)
-        return got
-
-    def gdal(name, bands, tifffile_too=True, **kw):
-        bands = np.asarray(bands)
-        if bands.ndim == 2:
-            bands = bands[None]
-        path = os.path.join(d, name + '.tif')
-        with rasterio.open(path, 'w', driver='GTiff', width=bands.shape[2], height=bands.shape[1], count=bands.shape[0],
-                           dtype=bands.dtype, transform=from_origin(0, 0, 1, 1), **kw) as ds:
-            ds.write(bands)
-        aux = path + '.aux.xml'
-        if os.path.exists(aux):
-            os.remove(aux)
-        return finish(name, tifffile_too)
-
-    got = gdal('lerc_f32_dem_nan', hole, False, compress='LERC', nodata=np.nan)
-    assert np.isnan(got).sum() == np.isnan(hole).sum()
-    gdal('lerc_f32_dem', dem, compress='LERC')
-    gdal('lerc_zstd_f32_dem_nan_lossy_tiled', hole, False, compress='LERC_ZSTD', MAX_Z_ERROR=0.01, tiled=True, blockxsize=32, blockysize=32)
-    gdal('lerc_deflate_f64_dem_nan', hole.astype(np.float64), False, compress='LERC_DEFLATE')
-    gdal('lerc_deflate_u16_rgb_tiled', np.moveaxis(pat(3, 'uint16', 70, 45), -1, 0), compress='LERC_DEFLATE', interleave='pixel',
-         photometric='RGB', tiled=True, blockxsize=32, blockysize=16)
-    f3 = np.stack([hole, hole * 2, hole + 1])
-    gdal('lerc_f32_3samples_nan_pixels', f3, False, compress='LERC', interleave='pixel', MAX_Z_ERROR=0.05)
-    f3 = f3.copy()
-    f3[1, 33:36, 5:9] = np.nan
-    f3[2, 0, 0] = np.nan
-    got = gdal('lerc_f32_3samples_nan_mixed', f3, False, compress='LERC', interleave='pixel')
-    assert np.isnan(got).sum() == np.isnan(f3).sum()
-    gdal('lerc_f32_3samples_nan_planar', f3, False, compress='LERC', interleave='band', MAX_Z_ERROR=0.05)
-    alpha = np.where((xx - 35) ** 2 + (yy - 22) ** 2 < 300, 255, 0)
-    rgba = np.stack([(xx * 3) % 256, (yy * 5) % 256, (xx + yy) % 256, alpha]).astype(np.uint8)
-    got = gdal('lerc_u8_rgba_binary_alpha', rgba, False, compress='LERC', photometric='RGB', alpha='YES', interleave='pixel')
-    assert (got[..., 3] == alpha).all()
-    gdal('lerc_u8_rgba_binary_alpha_tiled', rgba, False, compress='LERC', photometric='RGB', alpha='YES', interleave='pixel',
-         tiled=True, blockxsize=32, blockysize=32)
-    gdal('lerc_u8_rgba_opaque', np.concatenate([rgba[:3], np.full((1, h, w), 255, np.uint8)]), False, compress='LERC', photometric='RGB',
-         alpha='YES', interleave='pixel')
-    gdal('lerc_u8_rgba_planar', rgba, compress='LERC', photometric='RGB', alpha='YES', interleave='band')
-    soft = rgba.copy()
-    soft[3] = (xx * 3) % 256
-    gdal('lerc_u8_rgba_soft_alpha', soft, compress='LERC', photometric='RGB', alpha='YES', interleave='pixel')
-    gdal('lerc_u16_2samples_lossy', np.stack([(xx * yy) % 65536, (xx * 700 + yy) % 65536]).astype(np.uint16), compress='LERC',
-         MAX_Z_ERROR=3, interleave='pixel')
-    gdal('lerc_big_u8_gray_tiled', pat(1, 'uint8', 70, 45)[:, :, 0], compress='LERC', BIGTIFF='YES', tiled=True, blockxsize=32, blockysize=32)
-    gdal('lerc_i16_dem_strips', pat(1, 'int16', 70, 45)[:, :, 0], compress='LERC', blockysize=8)
-    # tifffile + imagecodecs
-    for dt in ('int8', 'int32', 'uint32', 'float64'):
-        name = f'lerc_ext_tifffile_{dt}'
-        a = pat(1, dt, 50, 37)[:, :, 0]
-        tifffile.imwrite(os.path.join(d, name + '.tif'), a, compression='lerc', rowsperstrip=16, metadata=None)
-        # (liblerc turns the NaN among the float test values into an invalid pixel by itself; tifffile then reads 0 there)
-        finish(name, not (a.dtype.kind == 'f' and np.isnan(a).any()))
-    # big endian, straight from libtiff (tifffile cannot write LERC into a big endian file)
-    name = 'lerc_ext_libtiff_be_f32_rgb_strips'
-    a = pat(3, 'float32', 50, 37)
-    LibTiff().write(os.path.join(d, name + '.tif'), a, 34887, 2, rps=10, big_endian=True)
-    finish(name, False)
-    name = 'lerc_ext_libtiff_be_i16_gray'
-    LibTiff().write(os.path.join(d, name + '.tif'), pat(1, 'int16', 50, 37), 34887, 1, big_endian=True)
-    finish(name, True)
-
-
 def gen_ccitt_uncompressed():
     """CCITT "uncompressed mode" (T.4 / T.6 extension). No encoder writes it and libtiff does not read it ("uncompressed
     data (not supported)", and with it OpenCV, Pillow, GDAL, libvips; tifffile has no CCITT codec), so these files are
@@ -2349,7 +2259,6 @@ def main():
     gen_depths()
     gen_more_codecs()
     gen_foreign()
-    gen_lerc()
     gen_lab()
     gen_logluv()
     gen_pixarlog()

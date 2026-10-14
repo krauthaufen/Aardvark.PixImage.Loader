@@ -19,7 +19,6 @@ public class TiffTests
     public static IEnumerable<object[]> LzmaFixtures => Dirs("lzma");
     public static IEnumerable<object[]> WebpFixtures => Dirs("webp");
     public static IEnumerable<object[]> JpegFixtures => Dirs("jpeg");
-    public static IEnumerable<object[]> LercFixtures => Dirs("lerc");
 
     static readonly TiffDecodeOptions Serial = new() { Parallel = false };
     static TiffDecodeOptions ForcedParallel(int index = 0) => new() { ParallelThreshold = 0, ImageIndex = index };
@@ -248,8 +247,9 @@ public class TiffTests
                 problems.Add($"{name}: samples differ from GDAL's by up to {TestUtil.MaxDiff(expected, img)}");
             else same++;
         }
-        // (LERC files count as unsupported for as long as the LERC codec is not merged)
+        // LERC is not supported (patent): all of GDAL's LERC files are refused
         int lerc = unsupported.RemoveAll(n => n.Contains("lerc", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(19, lerc);
         Assert.True(problems.Count == 0, string.Join("\n", problems));
         // the one broken file GDAL still reads (with a warning: its strip is said to be longer than the file)
         Assert.Equal(new[] { "minimum_tiff_tags_with_warning.tif" }, rejected);
@@ -262,7 +262,7 @@ public class TiffTests
             "gtiff_unsupported_codec_unknown.tif", "huge-number-strips.tif", "huge4GB.tif", "int12_ycbcr_contig.tif", "leak-ZIPSetupDecode.tif",
             "next_default_case.tif", "next_literalrow.tif", "next_literalspan.tif", "strip_larger_than_2GB_header.tif", "tiff_dos_strip_chop.tif", "unknown_compression.tif",
         }, unsupported);
-        Assert.True(same + lerc >= 290, $"only {same} files compared");
+        Assert.True(same >= 270, $"only {same} files compared");
     }
 
     [Fact]
@@ -1418,102 +1418,25 @@ public class TiffTests
         Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Gray, SampleType.Float32, 1), new TiffEncodeOptions { Compression = TiffCompression.Jpeg2000 }));
     }
 
-    [Theory]
-    [MemberData(nameof(LercFixtures))]
-    public void DecodesLercFixture(string file) => CheckFixture(file);
-
-    [Theory]
-    [InlineData(SampleType.Float32, 1, 0, TiffCompression.None, 0.0)]
-    [InlineData(SampleType.Float32, 1, 32, TiffCompression.Zstd, 0.01)]
-    [InlineData(SampleType.Float64, 1, 0, TiffCompression.Deflate, 0.0)]
-    [InlineData(SampleType.Float32, 3, 0, TiffCompression.None, 0.0)]
-    [InlineData(SampleType.Float32, 3, 64, TiffCompression.None, 0.5)]
-    [InlineData(SampleType.UInt8, 4, 0, TiffCompression.None, 0.0)]
-    [InlineData(SampleType.UInt8, 4, 32, TiffCompression.Deflate, 0.0)]
-    [InlineData(SampleType.UInt8, 1, 0, TiffCompression.None, 0.0)]
-    [InlineData(SampleType.UInt16, 3, 0, TiffCompression.None, 3.0)]
-    [InlineData(SampleType.Int16, 1, 48, TiffCompression.None, 0.0)]
-    [InlineData(SampleType.Int8, 2, 0, TiffCompression.None, 0.0)]
-    [InlineData(SampleType.Int32, 1, 0, TiffCompression.Zstd, 0.0)]
-    [InlineData(SampleType.UInt32, 5, 0, TiffCompression.None, 0.0)]
-    public void EncodesLerc(SampleType type, int channels, int tile, TiffCompression second, double maxError)
+    /// <summary>LERC (34887) is recognised and refused: a hand-built file with arbitrary strip bytes.</summary>
+    [Fact]
+    public void RejectsLerc()
     {
-        const int w = 131, h = 77;
-        bool isFloat = type is SampleType.Float32 or SampleType.Float64;
-        // smooth data (LERC is made for elevation models), with holes: NaN for floats, transparent pixels for RGBA
-        var img = RawImage.Create(w, h, RawImage.DefaultColorModel(channels), type, channels);
-        var rnd = new Random(channels * 31 + (int)type);
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-                for (int c = 0; c < channels; c++)
-                {
-                    double v = 1000 + 800 * Math.Sin(x / (9.0 + c)) * Math.Cos(y / 7.0) + rnd.Next(3);
-                    int i = (y * w + x) * channels + c;
-                    switch (type)
-                    {
-                        case SampleType.UInt8: img.GetData<byte>()[i] = (byte)(v / 8); break;
-                        case SampleType.Int8: img.GetData<sbyte>()[i] = (sbyte)(v / 8 - 128); break;
-                        case SampleType.UInt16: img.GetData<ushort>()[i] = (ushort)(v * 30); break;
-                        case SampleType.Int16: img.GetData<short>()[i] = (short)(v * 10 - 9000); break;
-                        case SampleType.UInt32: img.GetData<uint>()[i] = (uint)(v * 1000000); break;
-                        case SampleType.Int32: img.GetData<int>()[i] = (int)(v * 100000) - 100000000; break;
-                        case SampleType.Float32: img.GetData<float>()[i] = (float)(v + 0.123); break;
-                        default: img.GetData<double>()[i] = v + 0.123456789; break;
-                    }
-                }
-        bool Hole(int x, int y) => (x - 40) * (x - 40) + (y - 30) * (y - 30) < 15 * 15 || (x == 100 && y == 70);
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-            {
-                int i = (y * w + x) * channels;
-                if (type == SampleType.UInt8 && channels == 4) img.GetData<byte>()[i + 3] = (byte)(Hole(x, y) ? 0 : 255);
-                if (!isFloat || !Hole(x, y)) continue;
-                for (int c = 0; c < channels; c++)
-                {
-                    if (type == SampleType.Float32) img.GetData<float>()[i + c] = float.NaN; else img.GetData<double>()[i + c] = double.NaN;
-                }
-            }
-        // with several float samples: NaN in single samples as well (one mask per sample then)
-        if (type == SampleType.Float32 && channels == 3 && maxError == 0)
-        {
-            img.GetData<float>()[1] = float.NaN;
-            for (int x = 3; x < 20; x++) img.GetData<float>()[(50 * w + x) * 3 + 2] = float.NaN;
-        }
-        foreach (bool planar in channels > 1 ? new[] { false, true } : new[] { false })
-            foreach (bool be in isFloat || (maxError > 0 && type != SampleType.UInt8) ? new[] { false } : new[] { false, true })
-            {
-                var o = new TiffEncodeOptions { Compression = TiffCompression.Lerc, LercMaxError = maxError, LercSecondCompression = second, TileWidth = tile, TileHeight = tile, RowsPerStrip = 25, Planar = planar, BigEndian = be };
-                var file = Encode(img, o);
-                string what = $"{type} x{channels} tile {tile} {second} max {maxError} planar {planar} be {be}";
-                var tags = Tiff.ReadTags(file);
-                Assert.Equal(34887, tags.Single(t => t.Id == 259).AsIntegers()[0]);
-                Assert.Equal(new long[] { 4, second == TiffCompression.Deflate ? 1 : second == TiffCompression.Zstd ? 2 : 0 }, tags.Single(t => t.Id == 50674).AsIntegers());
-                var back = Tiff.Decode(file);
-                Assert.Equal((img.Color, img.SampleType, img.Channels), (back.Color, back.SampleType, back.Channels));
-                // the holes come back as holes, everything else within the allowed error (integers: whole steps);
-                // a binary alpha channel becomes the LERC mask, so fully transparent pixels lose their colour (as in libtiff)
-                var expected = img;
-                if (type == SampleType.UInt8 && channels == 4 && !planar)
-                {
-                    expected = RawImage.Create(w, h, ColorModel.Rgba, SampleType.UInt8);
-                    var e = expected.GetData<byte>();
-                    img.GetData<byte>().CopyTo(e, 0);
-                    for (int i = 0; i < e.Length; i += 4) if (e[i + 3] == 0) e[i] = e[i + 1] = e[i + 2] = 0;
-                }
-                TestUtil.AssertEqual(expected, back, isFloat ? maxError * 1.0000001 : Math.Floor(maxError));
-                if (maxError == 0) Assert.True(expected.GetBytes().SequenceEqual(back.GetBytes()) || isFloat, what);
-                // GDAL (libtiff + liblerc) reads the very same samples, NaN holes and alpha included
-                var gdal = PythonImage(file, "try:\n    import rasterio\nexcept ImportError:\n    sys.exit(77)\nwrite(np.moveaxis(rasterio.open(PATH).read(), 0, -1))");
-                if (gdal != null) TestUtil.AssertEqual(back, gdal);
-            }
-        // lossy output is smaller
-        if (maxError > 0)
-            Assert.True(Encode(img, new TiffEncodeOptions { Compression = TiffCompression.Lerc, LercMaxError = maxError }).Length
-                < Encode(img, new TiffEncodeOptions { Compression = TiffCompression.Lerc }).Length);
-        Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Gray, SampleType.UInt64, 1), new TiffEncodeOptions { Compression = TiffCompression.Lerc }));
-        Assert.Throws<ArgumentException>(() => Encode(img, new TiffEncodeOptions { Compression = TiffCompression.Lerc, LercSecondCompression = TiffCompression.Lzw }));
-        if (isFloat) Assert.Throws<ArgumentException>(() => Encode(img, new TiffEncodeOptions { Compression = TiffCompression.Lerc, BigEndian = true }));
-        if (maxError > 0 && !isFloat) Assert.Throws<ArgumentException>(() => Encode(img, new TiffEncodeOptions { Compression = TiffCompression.Lerc, LercMaxError = maxError, BigEndian = true }));
+        var f = new List<byte>();
+        void U16(int v) { f.Add((byte)v); f.Add((byte)(v >> 8)); }
+        void U32(long v) { for (int i = 0; i < 4; i++) f.Add((byte)(v >> (8 * i))); }
+        f.AddRange("II"u8.ToArray()); U16(42); U32(8);
+        var tags = new (int Id, int Type, long Value)[] { (256, 3, 4), (257, 3, 2), (258, 3, 32), (259, 3, 34887), (262, 3, 1), (273, 4, 8 + 2 + 9 * 12 + 4), (277, 3, 1), (279, 4, 16), (339, 3, 3) };
+        U16(tags.Length);
+        foreach (var (id, type, value) in tags) { U16(id); U16(type); U32(1); U32(value); }
+        U32(0);
+        f.AddRange(Enumerable.Range(0, 16).Select(i => (byte)(i * 37)));
+        var file = f.ToArray();
+        var info = Tiff.GetInfo(file);
+        Assert.Equal((4, 2, SampleType.Float32), (info.Width, info.Height, info.SampleType));
+        var e = Assert.Throws<ImageNotSupportedException>(() => Tiff.Decode(file));
+        Assert.Equal("TIFF: LERC compression is not supported", e.Message);
+        Assert.Throws<ImageNotSupportedException>(() => Tiff.Decode(new MemoryStream(file)));
     }
 
     [Theory]
