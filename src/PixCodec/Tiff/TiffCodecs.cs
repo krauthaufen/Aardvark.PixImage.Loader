@@ -422,6 +422,20 @@ namespace PixCodec
             }
         }
 
+        /// <summary>Horizontal differencing on 3-byte samples (24-bit floats), added as 24-bit integers in the file byte order.</summary>
+        public static void UndoHorizontal24(byte* row, int count, int stride, bool bigEndian)
+        {
+            for (int i = stride; i < count; i++)
+            {
+                byte* a = row + (long)(i - stride) * 3, c = row + (long)i * 3;
+                int x = bigEndian ? a[0] << 16 | a[1] << 8 | a[2] : a[2] << 16 | a[1] << 8 | a[0];
+                int y = bigEndian ? c[0] << 16 | c[1] << 8 | c[2] : c[2] << 16 | c[1] << 8 | c[0];
+                int v = x + y;
+                if (bigEndian) { c[0] = (byte)(v >> 16); c[1] = (byte)(v >> 8); c[2] = (byte)v; }
+                else { c[2] = (byte)(v >> 16); c[1] = (byte)(v >> 8); c[0] = (byte)v; }
+            }
+        }
+
         public static void ApplyHorizontal(byte* row, int count, int stride, int bps)
         {
             switch (bps)
@@ -657,6 +671,167 @@ namespace PixCodec
                 case SampleType.UInt16: { var t = To16; var d = (ushort*)dst; for (int i = 0; i < n; i++) d[i] = t[src[i]]; break; }
                 default: { var t = ToFloat; var d = (float*)dst; for (int i = 0; i < n; i++) d[i] = t[src[i]]; break; }
             }
+        }
+    }
+
+    /// <summary>
+    /// ThunderScan (compression 32809): 4-bit gray pixels coded per byte as a run of the last pixel (00, 6-bit count),
+    /// three 2-bit deltas (01), two 3-bit deltas (10) or a literal pixel (11). Delta code "skip" (2 resp. 4) emits nothing.
+    /// Every row starts from pixel value 0 and is packed two pixels per byte.
+    /// </summary>
+    internal static unsafe class TiffThunder
+    {
+        public static long Decode(ReadOnlySpan<byte> src, byte* dst, int width, int rows)
+        {
+            int rowBytes = (width + 1) / 2, sp = 0;
+            new Span<byte>(dst, rowBytes * rows).Clear();
+            ReadOnlySpan<sbyte> two = stackalloc sbyte[] { 0, 1, 0, -1 }, three = stackalloc sbyte[] { 0, 1, 2, 3, 0, -3, -2, -1 };
+            for (int y = 0; y < rows; y++)
+            {
+                byte* row = dst + (long)y * rowBytes;
+                int n = 0, last = 0;
+                void Put(byte* r, int v, ref int count, ref int lastPixel)
+                {
+                    lastPixel = v & 15;
+                    if (count < width) r[count >> 1] |= (byte)((count & 1) == 0 ? lastPixel << 4 : lastPixel);
+                    count++;
+                }
+                while (n < width)
+                {
+                    // Data that ends early leaves the remaining rows at 0: libtiff reads such files (its own sample
+                    // text.tif stops three rows short) and so do we.
+                    if (sp >= src.Length) return (long)rows * rowBytes;
+                    int b = src[sp++], v = b & 0x3F;
+                    switch (b >> 6)
+                    {
+                        case 0:
+                            for (int i = 0; i < v && n < width; i++) Put(row, last, ref n, ref last);
+                            break;
+                        case 1:
+                            for (int shift = 4; shift >= 0; shift -= 2)
+                            {
+                                int d = v >> shift & 3;
+                                if (d != 2) Put(row, last + two[d], ref n, ref last);
+                            }
+                            break;
+                        case 2:
+                            for (int shift = 3; shift >= 0; shift -= 3)
+                            {
+                                int d = v >> shift & 7;
+                                if (d != 4) Put(row, last + three[d], ref n, ref last);
+                            }
+                            break;
+                        default:
+                            Put(row, v, ref n, ref last);
+                            break;
+                    }
+                }
+            }
+            return (long)rows * rowBytes;
+        }
+    }
+
+    /// <summary>
+    /// Decoders for strips / tiles whose COMPRESSED data exceeds 2 GB (only reachable through the stream entry
+    /// points): the input is pulled from the source in pieces and fed to resumable versions of the LZW, PackBits and
+    /// Deflate decoders. Slower than the in-memory decoders, which is why those remain the normal path.
+    /// </summary>
+    internal static unsafe class TiffLargeChunk
+    {
+        const int Piece = 32 << 20;
+
+        public static long Decode(TiffSource src, long offset, long count, int compression, byte* dst, long dstLen)
+        {
+            var buf = System.Buffers.ArrayPool<byte>.Shared.Rent(Piece);
+            try
+            {
+                long op = 0, done = 0;
+                // LZW state
+                ulong[]? tab = compression == 5 ? new ulong[4096] : null;
+                ulong bitBuf = 0; int bits = 0, width = 9, next = 258, prevLen = 0; long prevPos = 0; bool eoi = false;
+                // PackBits state
+                int literal = 0, run = 0;
+                var inflater = compression is 8 or 32946 ? PixCodec.Compression.Zlib.CreateInflater() : null;
+
+                while (done < count && op < dstLen && !eoi)
+                {
+                    int n = (int)Math.Min(Piece, count - done);
+                    src.Read(offset + done, buf.AsSpan(0, n));
+                    if (done == 0 && compression == 5 && n >= 2 && buf[0] == 0 && (buf[1] & 1) != 0)
+                        throw new ImageNotSupportedException("TIFF: old-style LZW strips larger than 2 GB are not supported");
+                    done += n;
+                    int sp = 0;
+                    if (inflater != null)
+                    {
+                        while (sp < n && op < dstLen)
+                        {
+                            var status = inflater.Inflate(buf.AsSpan(sp, n - sp), new Span<byte>(dst + op, (int)Math.Min(dstLen - op, 1 << 30)), out int c, out int w);
+                            sp += c; op += w;
+                            if (status == PixCodec.Compression.InflateStatus.Done) { eoi = true; break; }
+                            if (c == 0 && w == 0) break;
+                        }
+                    }
+                    else if (compression == 32773)
+                    {
+                        while (sp < n && op < dstLen)
+                        {
+                            if (literal > 0)
+                            {
+                                int len = (int)Math.Min(Math.Min(literal, n - sp), dstLen - op);
+                                buf.AsSpan(sp, len).CopyTo(new Span<byte>(dst + op, len));
+                                sp += len; op += len; literal -= len;
+                            }
+                            else if (run > 0)
+                            {
+                                int len = (int)Math.Min(run, dstLen - op);
+                                new Span<byte>(dst + op, len).Fill(buf[sp++]);
+                                op += len; run = 0;
+                            }
+                            else
+                            {
+                                int c = (sbyte)buf[sp++];
+                                if (c >= 0) literal = c + 1;
+                                else if (c != -128) run = 1 - c;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // the LZW decoder of TiffLzw.Decode with the bit reservoir carried across pieces
+                        while (op < dstLen)
+                        {
+                            while (bits <= 56 && sp < n) { bitBuf |= (ulong)buf[sp++] << (56 - bits); bits += 8; }
+                            if (bits < width) break; // needs the next piece
+                            int code = (int)(bitBuf >> (64 - width));
+                            bitBuf <<= width; bits -= width;
+                            int len;
+                            if (code < 256) { dst[op] = (byte)code; len = 1; }
+                            else if (code == 256) { width = 9; next = 258; prevLen = 0; continue; }
+                            else if (code == 257) { eoi = true; break; }
+                            else
+                            {
+                                long so;
+                                if (code < next) { ulong e = tab![code]; so = (long)(e >> 16); len = (int)(e & 0xFFFF); }
+                                else if (code == next && prevLen > 0) { so = prevPos; len = prevLen + 1; }
+                                else throw new ImageFormatException("TIFF: corrupt LZW data");
+                                if (len > dstLen - op) len = (int)(dstLen - op);
+                                byte* d = dst + op, f = dst + so;
+                                for (int i = 0; i < len; i++) d[i] = f[i];
+                            }
+                            if (prevLen > 0 && next < 4096)
+                            {
+                                tab![next] = (ulong)prevPos << 16 | (uint)(prevLen + 1);
+                                next++;
+                                if (next == (1 << width) - 1 && width < 12) width++;
+                            }
+                            prevPos = op; prevLen = len;
+                            op += len;
+                        }
+                    }
+                }
+                return op;
+            }
+            finally { System.Buffers.ArrayPool<byte>.Shared.Return(buf); }
         }
     }
 }

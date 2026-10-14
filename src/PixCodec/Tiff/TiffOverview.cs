@@ -27,6 +27,19 @@ namespace PixCodec
             return new RawImage(w, h, src.Color, data, src.Channels);
         }
 
+        /// <summary>Halves an image by taking every second pixel of every second row (for palette indices, which cannot be averaged).</summary>
+        public static RawImage Decimate(RawImage src)
+        {
+            int w = Math.Max(1, (src.Width + 1) / 2), h = Math.Max(1, (src.Height + 1) / 2);
+            var dst = RawImage.Create(w, h, src.Color, src.SampleType, src.Channels);
+            int pix = src.Channels * RawImage.BytesPerSample(src.SampleType);
+            var s = src.GetBytes(); var d = dst.GetBytes();
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    s.Slice((2 * y * src.Width + 2 * x) * pix, pix).CopyTo(d.Slice((y * w + x) * pix));
+            return dst;
+        }
+
         /// <summary>Mean of the block in double precision; integers are rounded half up.</summary>
         static T[] Halve<T>(T[] s, int sw, int sh, int ch, int w, int h, bool round) where T : unmanaged, INumber<T>
         {

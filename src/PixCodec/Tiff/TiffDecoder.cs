@@ -41,10 +41,14 @@ namespace PixCodec
         YccPacked,
         Jpeg,
         Webp,
+        Jp2,
+        Lerc,
         /// <summary>SGI LogL / LogLuv, converted to floats while decoding.</summary>
         LogLuv,
         /// <summary>Pixar 11-bit log samples (deflate compressed, horizontally differenced), mapped to linear values while decoding.</summary>
         PixarLog,
+        /// <summary>Whole-byte samples whose SampleFormat differs from sample to sample, converted to Float64.</summary>
+        Mixed,
     }
 
     /// <summary>One IFD: parsed layout, and the strip/tile decoder for it.</summary>
@@ -66,7 +70,7 @@ namespace PixCodec
         public readonly SampleType RawType, OutType;
         public readonly int Bps, ColorSamples, RawChannels, OutChannels;
         public readonly ColorModel OutColor;
-        public readonly bool HasAlpha, AssociatedAlpha, IsJpeg, IsCcitt, IsLab, IsLogLuv, ConvertToRgb;
+        public readonly bool HasAlpha, AssociatedAlpha, IsJpeg, IsCcitt, IsJp2, IsLab, IsLogLuv, ConvertToRgb;
         /// <summary>Largest value of an unsigned sample as it ends up in the raw image (after optional scaling).</summary>
         public readonly ulong SampleMax;
         /// <summary>Planar YCbCr: the planes are assembled as full resolution YCbCr and converted at the end.</summary>
@@ -76,7 +80,8 @@ namespace PixCodec
         readonly ulong[] _inMax;
         readonly ulong _outMax;
         readonly int _pixelBits;     // stored bits of one contiguous pixel
-        readonly bool _oldJpeg, _xyzPost;
+        readonly bool _oldJpeg, _xyzPost, _complex;
+        readonly int[]? _formats;
         readonly int _storedStrips;
         readonly long _ifdOffset;
 
@@ -85,8 +90,11 @@ namespace PixCodec
         byte[] _jpegTables = Array.Empty<byte>();
         JpegTiffTables? _jpegPrepared;
         TiffOldJpeg? _ojpeg;
+        bool _ojpegTiffYcc;
         long _t4Options;
         float[]? _yccY, _yccCrR, _yccCbB, _yccCrG, _yccCbG;
+        int _lercSecond;
+        double[]? _ycc16;
 
         // per decode call
         int _rx, _ry, _rw, _rh;
@@ -105,13 +113,29 @@ namespace PixCodec
             Width = (int)w; Height = (int)h;
             long spp = file.Integer(e, 277, 1);
             if (spp < 1 || spp > 65535) throw new ImageFormatException("TIFF: invalid SamplesPerPixel");
+            // SampleFormat: complex data (5: integer pairs, 6: float pairs) is handled as two samples of half the
+            // width - real part, imaginary part - per stored sample; formats that differ between the samples
+            // are kept in _formats and converted to Float64.
+            var formats = file.Integers(e, 339) ?? Array.Empty<long>();
+            long format0 = formats.Length > 0 ? formats[0] : 1;
+            bool sameFormat = true;
+            for (int i = 1; i < Math.Min(formats.Length, (int)spp); i++) sameFormat &= formats[i] == format0;
+            bool complex = sameFormat && (format0 == 5 || format0 == 6);
+            if (complex)
+            {
+                if (spp > 1 && file.Integer(e, 284, 1) == 2) throw new ImageNotSupportedException("TIFF: planar complex samples are not supported");
+                spp *= 2;
+            }
             Spp = (int)spp;
+            _complex = complex;
             Compression = (int)file.Integer(e, 259, 1);
             _oldJpeg = Compression == 6;
             IsJpeg = Compression == 7 || _oldJpeg;
             IsCcitt = Compression is 2 or 3 or 4;
+            IsJp2 = Compression is 34712 or 33003 or 33004 or 33005;
             long pm = file.Integer(e, 262, -1);
             if (pm < 0) pm = IsCcitt ? 0 : Spp >= 3 ? 2 : 1; // required tag, but be lenient
+            if (complex) pm = 1; // no colour interpretation: all parts are returned as ColorModel.Other
             Photometric = (int)pm;
             IsLab = Photometric is 8 or 9 or 10;
             IsLogLuv = Photometric is 32844 or 32845;
@@ -121,21 +145,38 @@ namespace PixCodec
             UniformBits = true;
             for (int i = 0; i < Spp; i++)
             {
-                long b = bits == null || bits.Length == 0 ? 1 : bits[Math.Min(i, bits.Length - 1)];
+                long b = bits == null || bits.Length == 0 ? 1 : bits[Math.Min(complex ? i / 2 : i, bits.Length - 1)];
+                if (complex)
+                {
+                    if (b != 32 && b != 64 && b != 128) throw new ImageNotSupportedException($"TIFF: complex samples of {b} bits are not supported");
+                    b /= 2;
+                }
                 if (b < 1 || b > 64) throw new ImageFormatException("TIFF: invalid BitsPerSample");
                 BitsPer[i] = (int)b;
                 Bits = Math.Max(Bits, (int)b);
                 _pixelBits += (int)b;
                 if (b != BitsPer[0]) UniformBits = false;
             }
-            Format = (int)Uniform(file.Integers(e, 339), 1, "SampleFormat");
+            Format = complex ? (format0 == 5 ? 2 : 3) : (int)format0;
             if (Format == 4) Format = 1; // "undefined" data is treated as unsigned integers
+            if (!sameFormat)
+            {
+                _formats = new int[Spp];
+                for (int i = 0; i < Spp; i++)
+                {
+                    long f = formats[Math.Min(i, formats.Length - 1)];
+                    if (f == 4) f = 1;
+                    if (f < 1 || f > 3) throw new ImageNotSupportedException($"TIFF: sample format {f} mixed with others is not supported");
+                    _formats[i] = (int)f;
+                }
+                Format = 3;
+            }
 
             Planar = Spp == 1 ? 1 : (int)file.Integer(e, 284, 1);
             if (Planar != 1 && Planar != 2) throw new ImageFormatException("TIFF: invalid PlanarConfiguration");
             Predictor = (int)file.Integer(e, 317, 1);
             FillOrder = (int)file.Integer(e, 266, 1);
-            Extra = Array.ConvertAll(file.Integers(e, 338) ?? Array.Empty<long>(), x => (int)x);
+            Extra = complex ? Array.Empty<int>() : Array.ConvertAll(file.Integers(e, 338) ?? Array.Empty<long>(), x => (int)x);
 
             if (TiffFile.Find(e, 322, out _))
             {
@@ -168,6 +209,8 @@ namespace PixCodec
                 0 or 1 or 3 or 4 or 32844 => 1,
                 2 or 6 or 8 or 9 or 10 or 32845 => 3,
                 5 => 4,
+                32803 => 1,                      // colour filter array (raw sensor data): returned as it is stored
+                34892 => Spp >= 3 ? 3 : 1,       // DNG LinearRaw
                 _ => throw new ImageNotSupportedException($"TIFF: photometric interpretation {Photometric} is not supported"),
             };
             if (Spp < ColorSamples) throw new ImageFormatException("TIFF: SamplesPerPixel too small for the photometric interpretation");
@@ -176,9 +219,12 @@ namespace PixCodec
             {
                 // The tags describe the caller side format of the writer; the stored data always is 16-bit log
                 // luminance (LogL) or a 32-bit LogLuv word per pixel.
-                if (Spp != ColorSamples || Planar != 1) throw new ImageNotSupportedException("TIFF: LogLuv with extra samples is not supported");
                 RawType = SampleType.Float32;
-                if (Compression is 34676 or 34677) Kind = TiffChunkKind.LogLuv;
+                if (Compression is 34676 or 34677)
+                {
+                    if (Spp != ColorSamples || Planar != 1) throw new ImageNotSupportedException("TIFF: SGILOG compressed data cannot have extra samples or planes");
+                    Kind = TiffChunkKind.LogLuv;
+                }
                 else
                 {
                     // without the SGILOG codecs the samples are plain floats: luminance, or CIE XYZ
@@ -187,6 +233,15 @@ namespace PixCodec
                     Kind = TiffChunkKind.Samples;
                     _xyzPost = Photometric == 32845;
                 }
+            }
+            else if (_formats != null)
+            {
+                if (!UniformBits || !(Bits is 8 or 16 or 32 or 64)) throw new ImageNotSupportedException("TIFF: differing sample formats need samples of 8, 16, 32 or 64 bits");
+                for (int i = 0; i < Spp; i++)
+                    if (_formats[i] == 3 && Bits == 8) throw new ImageFormatException("TIFF: 8-bit floating point samples");
+                if (Compression is 32909 or 50001 or 34661 or 34887 || IsJpeg || IsCcitt || IsJp2) throw new ImageNotSupportedException("TIFF: differing sample formats are not supported with this compression");
+                RawType = SampleType.Float64;
+                Kind = TiffChunkKind.Mixed;
             }
             else
             {
@@ -226,11 +281,13 @@ namespace PixCodec
                 }
                 else if (IsJpeg) Kind = TiffChunkKind.Jpeg;
                 else if (Compression == 50001) Kind = TiffChunkKind.Webp;
+                else if (IsJp2) Kind = TiffChunkKind.Jp2;
+                else if (Compression == 34887) Kind = TiffChunkKind.Lerc;
                 else if (Format == 3 && Bits == 24) Kind = TiffChunkKind.Float24;
                 else Kind = whole ? TiffChunkKind.Samples : TiffChunkKind.Packed;
             }
             Bps = RawImage.BytesPerSample(RawType);
-            RawChannels = IsLogLuv ? ColorSamples : Spp;
+            RawChannels = Kind == TiffChunkKind.LogLuv ? ColorSamples : Spp;
             OutType = RawType;
             int extra = Spp - ColorSamples;
             int kind = extra >= 1 && Extra.Length >= 1 ? Extra[0] : 0;
@@ -270,20 +327,20 @@ namespace PixCodec
                     OutColor = !ConvertToRgb ? ColorModel.Other : HasAlpha ? ColorModel.Rgba : ColorModel.Rgb;
                     break;
                 case 6:
-                    if (Format != 1 || !UniformBits || Spp != 3 || (Bits != 8 && !(IsJpeg && Planar == 1)))
-                        throw new ImageNotSupportedException("TIFF: YCbCr needs three 8-bit samples (or JPEG compression)");
+                    if (Format != 1 || !UniformBits || Spp != 3 || (Bits != 8 && Bits != 16 && !(IsJpeg && Planar == 1) && !IsJp2))
+                        throw new ImageNotSupportedException("TIFF: YCbCr needs three 8 or 16 bit samples (or JPEG compression)");
                     OutColor = ColorModel.Rgb;
                     break;
                 case 8: case 9: case 10:
                     if (Format != 1 || !UniformBits || (Bits != 8 && Bits != 16)) throw new ImageNotSupportedException("TIFF: Lab needs 8 or 16 bit samples");
+                    // (with extra samples that are not alpha: converted colour followed by the extras, as ColorModel.Other)
                     OutColor = !ConvertToRgb ? ColorModel.Other : HasAlpha ? ColorModel.Rgba : extra == 0 ? ColorModel.Rgb : ColorModel.Other;
-                    if (ConvertToRgb && OutColor == ColorModel.Other) throw new ImageNotSupportedException("TIFF: Lab with unspecified extra samples is not supported");
                     break;
                 case 32844:
-                    OutColor = ColorModel.Gray;
+                    OutColor = extra == 0 ? ColorModel.Gray : HasAlpha ? ColorModel.GrayAlpha : ColorModel.Other;
                     break;
                 case 32845:
-                    OutColor = ConvertToRgb ? ColorModel.Rgb : ColorModel.Other;
+                    OutColor = !ConvertToRgb ? ColorModel.Other : extra == 0 ? ColorModel.Rgb : HasAlpha ? ColorModel.Rgba : ColorModel.Other;
                     break;
                 default:
                     // Extra samples rule: exactly one extra sample tagged as alpha gives GrayAlpha/Rgba, any other
@@ -301,7 +358,13 @@ namespace PixCodec
                 if (sub != null && sub.Length >= 2) { SubH = (int)sub[0]; SubV = (int)sub[1]; }
                 else { SubH = 2; SubV = 2; }
                 if (!(SubH is 1 or 2 or 4) || !(SubV is 1 or 2 or 4)) throw new ImageFormatException("TIFF: invalid YCbCr subsampling");
-                if (Planar == 2) YccPlanar = true;
+                if (IsJp2)
+                {
+                    // the codestream carries its own component geometry; the samples are converted after decoding
+                    if (Planar == 2 || Bits != 8) throw new ImageNotSupportedException("TIFF: JPEG 2000 compressed YCbCr needs 8-bit contiguous samples");
+                    SubH = SubV = 1;
+                }
+                else if (Planar == 2) YccPlanar = true;
                 else if (!IsJpeg)
                 {
                     // Without JPEG, contiguous YCbCr is stored as packed blocks of (SubH*SubV luma, Cb, Cr).
@@ -310,6 +373,17 @@ namespace PixCodec
                 }
             }
             if (IsCcitt && (Bits != 1 || Spp != 1)) throw new ImageFormatException("TIFF: CCITT compression needs bilevel data");
+            if (Compression == 34661 && (Bits != 1 || Spp != 1 || Format != 1)) throw new ImageNotSupportedException("TIFF: JBIG compression needs bilevel data");
+            if (Kind == TiffChunkKind.Lerc)
+            {
+                if (_complex || !UniformBits || !(Bits is 8 or 16 or 32 || (Bits == 64 && Format == 3)) || Photometric == 6)
+                    throw new ImageNotSupportedException("TIFF: LERC compression needs 8, 16 or 32 bit integers or 32 / 64 bit floats");
+                // LercParameters: LERC version, additional compression (0 none, 1 deflate, 2 zstd)
+                var lp = file.Integers(e, 50674);
+                _lercSecond = lp != null && lp.Length >= 2 ? (int)lp[1] : 0;
+                if (_lercSecond < 0 || _lercSecond > 2) throw new ImageNotSupportedException($"TIFF: LERC with additional compression {_lercSecond} is not supported");
+            }
+            if (IsJp2 && (Format == 3 || !UniformBits || _complex)) throw new ImageNotSupportedException("TIFF: JPEG 2000 compression needs integer samples of one depth");
             if (IsJpeg && (Format != 1 || !UniformBits || Bits > 16)) throw new ImageNotSupportedException("TIFF: JPEG compression needs unsigned samples of up to 16 bits");
             if (Kind == TiffChunkKind.Webp && (Format != 1 || !UniformBits || Bits != 8 || Planar != 1 || Spp < 3 || Spp > 4))
                 throw new ImageNotSupportedException("TIFF: WebP compression needs 8-bit RGB or RGBA");
@@ -333,7 +407,7 @@ namespace PixCodec
             var m = ReadMetadata(false);
             return new ImageInfo(ImageFormat.Tiff, Width, Height, OutChannels, OutType, OutColor, frameCount)
             {
-                BitsPerSample = Photometric == 3 ? 8 : Bits,
+                BitsPerSample = Photometric == 3 ? 8 : _complex ? Bits * 2 : Bits,   // (a complex sample counts as one)
                 Orientation = m.Orientation,
                 DpiX = m.DpiX,
                 DpiY = m.DpiY,
@@ -348,10 +422,11 @@ namespace PixCodec
         {
             TiffChunkKind.Samples => (long)cw * PlaneSamples * Bps,
             TiffChunkKind.Float24 => (long)cw * PlaneSamples * 3,
+            TiffChunkKind.Mixed => (long)cw * PlaneSamples * (Bits / 8),
             _ => ((long)cw * (Planar == 2 ? BitsPer[plane] : _pixelBits) + 7) / 8,
         };
 
-        long YccBlockRowBytes => (long)((ChunkW + SubH - 1) / SubH) * (SubH * SubV + 2);
+        long YccBlockRowBytes => (long)((ChunkW + SubH - 1) / SubH) * (SubH * SubV + 2) * Bps;
 
         /// <summary>Upper bound for the decompressed size of one chunk.</summary>
         long MaxChunkBytes() => Kind switch
@@ -359,7 +434,7 @@ namespace PixCodec
             TiffChunkKind.YccPacked => YccBlockRowBytes * ((ChunkH + SubV - 1) / SubV),
             TiffChunkKind.LogLuv => (long)ChunkW * ChunkH * 4,
             TiffChunkKind.PixarLog => (long)ChunkW * ChunkH * Spp * Math.Max(2, Bps),
-            TiffChunkKind.Jpeg or TiffChunkKind.Webp => (long)ChunkW * ChunkH * Spp * Bps,
+            TiffChunkKind.Jpeg or TiffChunkKind.Webp or TiffChunkKind.Jp2 or TiffChunkKind.Lerc => (long)ChunkW * ChunkH * Spp * Bps,
             _ => RowBytes(ChunkW, 0) * ChunkH,
         };
 
@@ -369,6 +444,10 @@ namespace PixCodec
             {
                 case 1: case 5: case 8: case 32946: case 32773: case 2: case 3: case 4: case 6: case 7:
                 case 50000: case 34925: case 50001: case 32909:
+                case 34661: case 34712: case 33003: case 33004: case 33005: case 34887:
+                    break;
+                case 32809:
+                    if (Bits != 4 || Spp != 1) throw new ImageFormatException("TIFF: ThunderScan compression needs 4-bit single sample data");
                     break;
                 case 34676:
                     if (!IsLogLuv) throw new ImageFormatException("TIFF: SGILOG compression needs a LogL / LogLuv photometric interpretation");
@@ -378,7 +457,7 @@ namespace PixCodec
                     break;
                 default: throw new ImageNotSupportedException($"TIFF: compression {Compression} is not supported");
             }
-            bool plain = Kind is TiffChunkKind.Samples or TiffChunkKind.Float24 && !IsCcitt;
+            bool plain = Kind is TiffChunkKind.Samples or TiffChunkKind.Float24 && !IsCcitt && Kind != TiffChunkKind.YccPacked;
             if (Predictor == 1) { }
             else if (!plain || YccPlanar)
             {
@@ -386,10 +465,7 @@ namespace PixCodec
                 if (!(Kind == TiffChunkKind.Packed && !IsCcitt && Predictor == 2))
                     throw new ImageNotSupportedException("TIFF: predictor not supported with this compression");
             }
-            else if (Predictor == 2)
-            {
-                if (Kind == TiffChunkKind.Float24) throw new ImageNotSupportedException("TIFF: horizontal predictor on 24-bit floats is not supported");
-            }
+            else if (Predictor == 2) { }
             else if (Predictor == 3)
             {
                 if (Format != 3) throw new ImageFormatException("TIFF: floating point predictor on integer data");
@@ -399,7 +475,7 @@ namespace PixCodec
             if (YccPlanar && Kind != TiffChunkKind.Samples && Kind != TiffChunkKind.Jpeg)
                 throw new ImageNotSupportedException("TIFF: planar YCbCr with this compression is not supported");
             // Kinds that go through intermediate buffers or codecs with 32-bit sizes
-            if (!(Kind is TiffChunkKind.Samples or TiffChunkKind.Packed or TiffChunkKind.Float24) && MaxChunkBytes() > int.MaxValue - 64)
+            if (!(Kind is TiffChunkKind.Samples or TiffChunkKind.Packed or TiffChunkKind.Float24 or TiffChunkKind.Mixed) && MaxChunkBytes() > int.MaxValue - 64)
                 throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression");
         }
 
@@ -421,6 +497,9 @@ namespace PixCodec
             {
                 long c = cnts![i], o = offs[i];
                 if (o == 0 && !noCounts) { cnts[i] = 0; empty++; continue; } // sparse file (GDAL): the chunk is not stored
+                // a tile without bytes is a tile that is not there, wherever its offset points (GDAL reads its own
+                // files that way); only strips get the recovery below, as in libtiff
+                if (c == 0 && Tiled && !noCounts) { empty++; continue; }
                 if (o <= 0 || o > len || c < 0) throw new ImageFormatException("TIFF: strip/tile data outside of the file");
                 if (c == 0)
                 {
@@ -474,7 +553,19 @@ namespace PixCodec
             }
             if (_oldJpeg) _ojpeg = new TiffOldJpeg(this, offs, cnts!, _storedStrips);
             if (IsCcitt) _t4Options = File.Integer(e, Compression == 3 ? 292 : 293, 0);
-            if (Photometric == 6 && (Kind == TiffChunkKind.YccPacked || YccPlanar)) BuildYccTables();
+            if (_oldJpeg && Photometric == 6 && !YccPlanar)
+            {
+                // Old-style JPEG data is YCbCr as the TIFF tags describe it. With the default (full range) reference
+                // values that is what the JPEG decoder converts; anything else - studio range data from old scanners
+                // and NeXT software - goes through the TIFF conversion.
+                var rb = File.Doubles(e, 532);
+                var co = File.Doubles(e, 529);
+                bool fullRange = rb == null || rb.Length < 6 || (rb[0] == 0 && rb[1] == 255 && rb[2] == 128 && rb[3] == 255 && rb[4] == 128 && rb[5] == 255);
+                bool rec601 = co == null || co.Length < 3 || (Math.Abs(co[0] - 0.299) < 1e-3 && Math.Abs(co[1] - 0.587) < 1e-3 && Math.Abs(co[2] - 0.114) < 1e-3);
+                _ojpegTiffYcc = !fullRange || !rec601;
+            }
+            if (Photometric == 6 && (Kind == TiffChunkKind.YccPacked || YccPlanar || _ojpegTiffYcc)) BuildYccTables();
+            if (IsJp2 && (Photometric == 6 || Compression == 33003) && Bps == 1 && Spp >= 3) BuildYccTables();
         }
 
         void BuildYccTables()
@@ -484,7 +575,17 @@ namespace PixCodec
             if (co != null && co.Length >= 3 && co[1] > 0) { lr = co[0]; lg = co[1]; lb = co[2]; }
             var rb = File.Doubles(Entries, 532);
             if (rb == null || rb.Length < 6 || rb[1] == rb[0] || rb[3] == rb[2] || rb[5] == rb[4])
-                rb = new double[] { 0, 255, 128, 255, 128, 255 };
+                rb = Bps == 2 ? new double[] { 0, 65535, 32768, 65535, 32768, 65535 } : new double[] { 0, 255, 128, 255, 128, 255 };
+            if (Bps == 2)
+            {
+                // 16 bit: no tables, the same formulas per pixel (scale and offset per component, then the matrix)
+                _ycc16 = new[]
+                {
+                    rb[0], 65535.0 / (rb[1] - rb[0]), rb[2], 32767.0 / (rb[3] - rb[2]), rb[4], 32767.0 / (rb[5] - rb[4]),
+                    2 - 2 * lr, 2 - 2 * lb, (2 - 2 * lr) * lr / lg, (2 - 2 * lb) * lb / lg,
+                };
+                return;
+            }
             _yccY = new float[256]; _yccCrR = new float[256]; _yccCbB = new float[256]; _yccCrG = new float[256]; _yccCbG = new float[256];
             for (int i = 0; i < 256; i++)
             {
@@ -496,6 +597,39 @@ namespace PixCodec
                 _yccCbB[i] = (float)(cb * (2 - 2 * lb));
                 _yccCrG[i] = (float)(-cr * (2 - 2 * lr) * lr / lg);
                 _yccCbG[i] = (float)(-cb * (2 - 2 * lb) * lb / lg);
+            }
+        }
+
+        /// <summary>
+        /// Chunks that are not stored (sparse files, a GDAL convention) read as GDAL's no-data value where the file
+        /// names one (tag 42113), as zero otherwise.
+        /// </summary>
+        void FillSparse(Array raw, int[] list, int n)
+        {
+            if (Kind != TiffChunkKind.Samples || _oldJpeg) return;
+            bool sparse = false;
+            for (int i = 0; i < n && !sparse; i++) sparse = _counts[list[i]] == 0;
+            if (!sparse) return;
+            string? text = null;
+            foreach (var en in Entries)
+                if (en.Tag == 42113 && en.Type == 2 && en.Count <= 64) text = File.ReadValue(en) as string;
+            if (text == null || !double.TryParse(text.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v))
+            {
+                if (text == null || !text.Trim().Equals("nan", StringComparison.OrdinalIgnoreCase)) return;
+                v = double.NaN;
+            }
+            if (v == 0) return;
+            bool whole = v == Math.Floor(v);
+            switch (RawType)
+            {
+                case SampleType.UInt8: if (whole && v >= 0 && v <= byte.MaxValue) Array.Fill((byte[])raw, (byte)v); break;
+                case SampleType.Int8: if (whole && v >= sbyte.MinValue && v <= sbyte.MaxValue) Array.Fill((sbyte[])raw, (sbyte)v); break;
+                case SampleType.UInt16: if (whole && v >= 0 && v <= ushort.MaxValue) Array.Fill((ushort[])raw, (ushort)v); break;
+                case SampleType.Int16: if (whole && v >= short.MinValue && v <= short.MaxValue) Array.Fill((short[])raw, (short)v); break;
+                case SampleType.UInt32: if (whole && v >= 0 && v <= uint.MaxValue) Array.Fill((uint[])raw, (uint)v); break;
+                case SampleType.Int32: if (whole && v >= int.MinValue && v <= int.MaxValue) Array.Fill((int[])raw, (int)v); break;
+                case SampleType.Float32: Array.Fill((float[])raw, (float)v); break;
+                case SampleType.Float64: Array.Fill((double[])raw, v); break;
             }
         }
 
@@ -526,6 +660,7 @@ namespace PixCodec
             try
             {
                 _dst = (byte*)pin.AddrOfPinnedObject();
+                FillSparse(raw, list, n);
                 if (opts.Parallel && n > 1 && _dstRowBytes * rh >= opts.ParallelThreshold)
                 {
                     try
@@ -543,11 +678,15 @@ namespace PixCodec
                 }
                 else
                     for (int i = 0; i < n; i++) DecodeChunk(list[i]);
-                if (YccPlanar) YccInPlace(_dst, (long)rw * rh);
+                if (YccPlanar)
+                {
+                    if (Bps == 2) YccInPlace16((ushort*)_dst, (long)rw * rh);
+                    else YccInPlace(_dst, (long)rw * rh);
+                }
                 if (_xyzPost && ConvertToRgb)
                 {
                     float* f = (float*)_dst;
-                    for (long i = 0, np = (long)rw * rh; i < np; i++, f += 3) TiffColor.XyzToLinearRgb(ref f[0], ref f[1], ref f[2]);
+                    for (long i = 0, np = (long)rw * rh; i < np; i++, f += RawChannels) TiffColor.XyzToLinearRgb(ref f[0], ref f[1], ref f[2]);
                 }
             }
             finally
@@ -617,6 +756,7 @@ namespace PixCodec
                 case TiffChunkKind.Samples:
                 case TiffChunkKind.Packed:
                 case TiffChunkKind.Float24:
+                case TiffChunkKind.Mixed:
                 {
                     long rowBytes = RowBytes(cw, plane);
                     bool fullRows = Kind == TiffChunkKind.Samples && sh == 1 && !Tiled && Planar == 1 && _rx == 0 && _rw == Width;
@@ -669,14 +809,19 @@ namespace PixCodec
                     int decoded = Math.Min(rows, blockRows * SubV);
                     long need = YccBlockRowBytes * blockRows;
                     if (Compression != 1) CheckPlausible(need, count, decoded);
-                    byte* b = (byte*)NativeMemory.Alloc((nuint)(need + (long)ChunkW * decoded * 3));
+                    byte* b = (byte*)NativeMemory.Alloc((nuint)(need + (long)ChunkW * decoded * 3 * Bps));
                     try
                     {
                         byte* rgb = b + need;
                         Decompress(offset, count, b, need, YccBlockRowBytes);
-                        YccToRgb(b, rgb, decoded);
+                        if (Bps == 2)
+                        {
+                            if (File.BigEndian) TiffPredict.SwapBytes(b, need, 2);
+                            YccToRgb16((ushort*)b, (ushort*)rgb, decoded);
+                        }
+                        else YccToRgb(b, rgb, decoded);
                         g.Ps = 3;
-                        Transfer(rgb, (long)ChunkW * 3, g, TiffChunkKind.Samples);
+                        Transfer(rgb, (long)ChunkW * 3 * Bps, g, TiffChunkKind.Samples);
                     }
                     finally { NativeMemory.Free(b); }
                     return;
@@ -692,9 +837,10 @@ namespace PixCodec
                         ReadOnlySpan<byte> src = _oldJpeg ? _ojpeg!.BuildStream(plane, Tiled ? index : -1, cw, crows)
                             : count > int.MaxValue ? throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression")
                             : File.Src.Get(offset, (int)count, ref srcRent);
-                        bool ycc = Photometric == 6 && !YccPlanar;
+                        bool ycc = Photometric == 6 && !YccPlanar && !_ojpegTiffYcc;
                         if (Bps == 1) TiffJpegBridge.Decode8(_jpegPrepared, _jpegTables, src, cw, crows, ps, ycc, new Span<byte>(b, (int)size));
                         else TiffJpegBridge.Decode16(_jpegPrepared, src, cw, crows, ps, ycc, new Span<ushort>(b, (int)(size / 2)));
+                        if (_ojpegTiffYcc && Bps == 1) YccInPlace(b, (long)cw * crows);
                         Transfer(b, (long)cw * ps * Bps, g, TiffChunkKind.Samples);
                     }
                     finally
@@ -735,6 +881,55 @@ namespace PixCodec
                     }
                     finally
                     {
+                        if (srcRent != null) ArrayPool<byte>.Shared.Return(srcRent);
+                    }
+                    return;
+                }
+                case TiffChunkKind.Jp2:
+                {
+                    if (count > int.MaxValue) throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression");
+                    byte[]? srcRent = null;
+                    long rowBytes = (long)cw * ps * Bps, size = rowBytes * rows;
+                    byte* b = (byte*)NativeMemory.Alloc((nuint)Math.Max(size, 1));
+                    try
+                    {
+                        // (decoding runs in parallel over the strips / tiles already)
+                        var planes = Jp2.DecodeCodestreamPlanes(File.Src.Get(offset, (int)count, ref srcRent), new Jp2DecodeOptions { Parallel = false, MaxPixels = Math.Max((long)cw * ChunkH, 1L << 20) * 4 });
+                        Jp2ToSamples(planes, b, cw, rows, ps);
+                        Transfer(b, rowBytes, g, TiffChunkKind.Samples);
+                    }
+                    finally
+                    {
+                        NativeMemory.Free(b);
+                        if (srcRent != null) ArrayPool<byte>.Shared.Return(srcRent);
+                    }
+                    return;
+                }
+                case TiffChunkKind.Lerc:
+                {
+                    if (count > int.MaxValue) throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression");
+                    byte[]? srcRent = null;
+                    long rowBytes = (long)cw * ps * Bps, size = rowBytes * rows;
+                    byte* b = (byte*)NativeMemory.AllocZeroed((nuint)Math.Max(size, 1));
+                    try
+                    {
+                        var blob = File.Src.Get(offset, (int)count, ref srcRent);
+                        try
+                        {
+                            // GDAL's LERC_DEFLATE / LERC_ZSTD: the blob compressed once more
+                            if (_lercSecond == 1) blob = Zlib.Decompress(blob, (int)Math.Min(size, 1 << 28));
+                            else if (_lercSecond == 2) blob = Zstd.Decompress(blob);
+                        }
+                        catch (Exception ex) when (ex is InvalidDataException || ex is IOException)
+                        {
+                            throw new ImageFormatException("TIFF: corrupt deflate data", ex);
+                        }
+                        LercToSamples(blob, b, cw, rows, ps);
+                        Transfer(b, rowBytes, g, TiffChunkKind.Samples);
+                    }
+                    finally
+                    {
+                        NativeMemory.Free(b);
                         if (srcRent != null) ArrayPool<byte>.Shared.Return(srcRent);
                     }
                     return;
@@ -847,6 +1042,129 @@ namespace PixCodec
         }
 
         /// <summary>
+        /// Decodes one LERC blob into cw x rows pixels of ps native samples and applies its validity masks the way
+        /// libtiff / GDAL do: invalid float samples become NaN; a blob holding one value less per pixel than the image
+        /// has samples, in an 8-bit image whose last extra sample is unassociated alpha, gives that alpha (255 = valid).
+        /// Invalid integer samples stay 0.
+        /// </summary>
+        void LercToSamples(ReadOnlySpan<byte> blob, byte* dst, int cw, int rows, int ps)
+        {
+            int n = cw * rows, bps = Bps;
+            var masks = new byte[(long)n * ps];
+            TiffForeignCodecs.LercDecode(blob, RawType, cw, rows, new Span<byte>(dst, n * ps * bps), ps, masks, out int bands, out int depth, out int maskCount);
+            int channels = bands * depth;
+            if (channels == ps)
+            {
+                if (maskCount == 0 || Format != 3) goto swap;
+                if (maskCount != 1 && maskCount != bands) throw new ImageFormatException("TIFF: LERC blob with an unexpected number of masks");
+                for (int c = 0; c < ps; c++)
+                {
+                    // one mask for all samples, or one per band (band b = samples b * depth ..)
+                    var m = masks.AsSpan(maskCount == 1 ? 0 : c / depth * n, n);
+                    if (bps == 4)
+                    {
+                        float* d = (float*)dst + c;
+                        for (int i = 0; i < n; i++, d += ps) if (m[i] == 0) *(uint*)d = 0x7FC00000u;   // (the quiet NaN of C, as libtiff stores it)
+                    }
+                    else
+                    {
+                        double* d = (double*)dst + c;
+                        for (int i = 0; i < n; i++, d += ps) if (m[i] == 0) *(ulong*)d = 0x7FF8000000000000ul;
+                    }
+                }
+            }
+            else if (channels == ps - 1 && bands == 1 && Planar == 1 && RawType == SampleType.UInt8 && Extra.Length > 0 && Extra[^1] == 2)
+            {
+                byte* d = dst + ps - 1;
+                if (maskCount == 0) for (int i = 0; i < n; i++, d += ps) *d = 255;
+                else for (int i = 0; i < n; i++, d += ps) *d = (byte)(masks[i] != 0 ? 255 : 0);
+            }
+            else throw new ImageFormatException("TIFF: LERC strip/tile does not match the image layout");
+        swap:
+            // libtiff swaps the samples of a big endian file before its codecs see them and after they return them,
+            // so there a blob holds byte-swapped numbers (and what it fills in for invalid floats is swapped as well:
+            // such samples come back as the swapped NaN pattern, as they do from libtiff)
+            if (File.BigEndian && bps > 1) TiffPredict.SwapBytes(dst, (long)n * ps * bps, bps);
+        }
+
+        /// <summary>
+        /// libtiff stores the bytes of a JBIG entity bit-reversed when FillOrder is 1 (the default) and as they are
+        /// when it is 2 - the opposite of what the tag suggests, but its files are what exists. The entity's header
+        /// tells whether a strip follows that convention: a single plane as wide as the image.
+        /// </summary>
+        bool JbigIsReversed(ReadOnlySpan<byte> bie)
+        {
+            if (bie.Length < 20) return FillOrder != 2;
+            Span<byte> h = stackalloc byte[8], r = stackalloc byte[8];
+            bie.Slice(0, 8).CopyTo(h);
+            TiffPredict.ReverseBits(h, r);
+            int w = ChunkW;
+            static bool Fits(Span<byte> h, int w) => h[2] == 1 && h[3] == 0 && h[0] <= h[1] && (h[4] << 24 | h[5] << 16 | h[6] << 8 | h[7]) == w;
+            bool byConvention = FillOrder != 2;
+            return Fits(byConvention ? r : h, w) || !Fits(byConvention ? h : r, w) ? byConvention : !byConvention;
+        }
+
+        /// <summary>
+        /// Interleaves the components of a JPEG 2000 codestream into native samples of the image's type: cw x rows
+        /// pixels of ps samples. Subsampled components are replicated. Component values are taken as they are; only
+        /// YCbCr data (Aperio's 33003, or the YCbCr photometric) that the codestream did not already convert itself
+        /// becomes RGB here.
+        /// </summary>
+        void Jp2ToSamples(J2kPlanes planes, byte* dst, int cw, int rows, int ps)
+        {
+            var pl = planes.Planes;
+            if (pl.Length < ps || planes.Width < cw || planes.Height < rows)
+                throw new ImageFormatException("TIFF: JPEG 2000 strip/tile does not match the image layout");
+            int bps = Bps;
+            for (int c = 0; c < ps; c++)
+            {
+                var p = pl[c];
+                if (p.Dx < 1 || p.Dy < 1 || (p.Data == null && p.Data64 == null)) throw new ImageFormatException("TIFF: JPEG 2000 strip/tile lacks a component");
+                if (p.Precision > bps * 8) throw new ImageFormatException("TIFF: JPEG 2000 strip/tile is deeper than the image");
+                if ((long)(p.Width - 1) * p.Dx + 1 < cw - p.Dx + 1 || (long)(p.Height - 1) * p.Dy + 1 < rows - p.Dy + 1)
+                    throw new ImageFormatException("TIFF: JPEG 2000 strip/tile does not match the image layout");
+                for (int y = 0; y < rows; y++)
+                {
+                    long row = (long)Math.Min(y / p.Dy, p.Height - 1) * p.Width;
+                    byte* d = dst + ((long)y * cw * ps + c) * bps;
+                    int step = ps * bps, dx = p.Dx, last = p.Width - 1;
+                    if (p.Data64 != null)
+                    {
+                        fixed (long* sp = p.Data64)
+                            for (int x = 0; x < cw; x++, d += step) *(long*)d = sp[row + Math.Min(x / dx, last)];
+                        continue;
+                    }
+                    fixed (int* sp = p.Data)
+                    {
+                        int* sr = sp + row;
+                        if (dx == 1)
+                            switch (bps)
+                            {
+                                case 1: for (int x = 0; x < cw; x++, d += step) *d = (byte)sr[x]; break;
+                                case 2: for (int x = 0; x < cw; x++, d += step) *(ushort*)d = (ushort)sr[x]; break;
+                                case 4: for (int x = 0; x < cw; x++, d += step) *(int*)d = sr[x]; break;
+                                default: for (int x = 0; x < cw; x++, d += step) *(long*)d = p.Signed ? sr[x] : (uint)sr[x]; break;
+                            }
+                        else
+                            for (int x = 0; x < cw; x++, d += step)
+                            {
+                                int v = sr[Math.Min(x / dx, last)];
+                                switch (bps)
+                                {
+                                    case 1: *d = (byte)v; break;
+                                    case 2: *(ushort*)d = (ushort)v; break;
+                                    case 4: *(int*)d = v; break;
+                                    default: *(long*)d = p.Signed ? v : (uint)v; break;
+                                }
+                            }
+                    }
+                }
+            }
+            if (_yccY != null && !planes.UsedColorTransform && ps >= 3)
+                YccInPlace(dst, (long)cw * rows, ps);
+        }
+
+        /// <summary>
         /// Decompresses the first <paramref name="expected"/> bytes of a chunk (whole rows of <paramref name="rowBytes"/>).
         /// </summary>
         void Decompress(long offset, long count, byte* dst, long expected, long rowBytes)
@@ -857,13 +1175,21 @@ namespace PixCodec
                 ReadRaw(offset, dst, expected);
                 return;
             }
-            if (count > int.MaxValue) throw new ImageNotSupportedException("TIFF: compressed strips or tiles larger than 2 GB are not supported");
+            if (count > int.MaxValue)
+            {
+                // more than 2 GB of compressed data (stream sources only): decoded piece by piece
+                if (!(Compression is 5 or 32773 or 8 or 32946) || FillOrder == 2)
+                    throw new ImageNotSupportedException("TIFF: compressed strips or tiles larger than 2 GB are not supported with this compression");
+                if (TiffLargeChunk.Decode(File.Src, offset, count, Compression, dst, expected) < expected)
+                    throw new ImageFormatException("TIFF: compressed strip/tile data is truncated");
+                return;
+            }
             byte[]? srcRent = null, rev = null;
             try
             {
                 var src = File.Src.Get(offset, (int)count, ref srcRent);
                 // FillOrder 2 only makes sense for bit oriented data; byte oriented deflate-like streams are left alone.
-                if (FillOrder == 2 && (Compression is 5 or 32773 || IsCcitt))
+                if ((FillOrder == 2 && (Compression is 5 or 32773 || IsCcitt)) || (Compression == 34661 && JbigIsReversed(src)))
                 {
                     rev = ArrayPool<byte>.Shared.Rent((int)count);
                     TiffPredict.ReverseBits(src, rev);
@@ -873,6 +1199,7 @@ namespace PixCodec
                 switch (Compression)
                 {
                     case 5: got = TiffLzw.Decode(src, dst, expected); break;
+                    case 32809: got = TiffThunder.Decode(src, dst, ChunkW, (int)(expected / Math.Max(1, rowBytes))); break;
                     case 32773: got = TiffPackBits.Decode(src, dst, expected); break;
                     case 8 or 32946 when expected > int.MaxValue:
                     {
@@ -924,6 +1251,13 @@ namespace PixCodec
                         TiffCcitt.Decode(src, dst, ChunkW, (int)(expected / Math.Max(1, rowBytes)), Compression, _t4Options);
                         got = expected;
                         break;
+                    case 34661:
+                        // one single-plane bi-level image entity per strip; its bits are the stored bits
+                        if (expected > int.MaxValue)
+                            throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression");
+                        Jbig.DecodeForTiff(src, ChunkW, (int)(expected / Math.Max(1, rowBytes)), new Span<byte>(dst, (int)expected));
+                        got = expected;
+                        break;
                     default: throw new ImageNotSupportedException($"TIFF: compression {Compression} is not supported");
                 }
                 if (got < expected) throw new ImageFormatException("TIFF: compressed strip/tile data is truncated");
@@ -951,7 +1285,14 @@ namespace PixCodec
                 finally { NativeMemory.Free(t); }
                 return;
             }
-            if (Kind == TiffChunkKind.Float24) return; // converted from the file byte order in Transfer
+            if (Kind == TiffChunkKind.Mixed) return;   // read sample by sample in Transfer
+            if (Kind == TiffChunkKind.Float24)
+            {
+                // stays in file byte order (converted in Transfer); the horizontal predictor adds 24-bit integers
+                if (Predictor == 2)
+                    for (int y = 0; y < rows; y++) TiffPredict.UndoHorizontal24(b + y * rowBytes, samples, ps, File.BigEndian);
+                return;
+            }
             if (File.BigEndian && Bps > 1) TiffPredict.SwapBytes(b, rowBytes * rows, Bps);
             if (Predictor == 2)
                 for (int y = 0; y < rows; y++) TiffPredict.UndoHorizontal(b + y * rowBytes, samples, ps, Bps);
@@ -979,9 +1320,17 @@ namespace PixCodec
                     case TiffChunkKind.Samples:
                         if (g.Sh > 1 || g.Sv > 1)
                         {
-                            // subsampled chroma plane (8 bit): replicate
-                            d += plane;
-                            for (int i = 0; i < n; i++) d[(long)i * rc] = s[(sx + i) / g.Sh];
+                            // subsampled chroma plane: replicate
+                            if (bps == 2)
+                            {
+                                ushort* d2 = (ushort*)d + plane, s2 = (ushort*)s;
+                                for (int i = 0; i < n; i++) d2[(long)i * rc] = s2[(sx + i) / g.Sh];
+                            }
+                            else
+                            {
+                                d += plane;
+                                for (int i = 0; i < n; i++) d[(long)i * rc] = s[(sx + i) / g.Sh];
+                            }
                         }
                         else if (ps == rc)
                         {
@@ -1011,6 +1360,29 @@ namespace PixCodec
                         if (ps != rc) f += plane;
                         for (long i = 0; i < total; i++, s += 3)
                             f[i * step] = Float24ToSingle(be ? (uint)(s[0] << 16 | s[1] << 8 | s[2]) : (uint)(s[2] << 16 | s[1] << 8 | s[0]));
+                        break;
+                    }
+                    case TiffChunkKind.Mixed:
+                    {
+                        int sb = Bits / 8;
+                        s += (long)sx * ps * sb;
+                        double* o = (double*)d;
+                        bool contig = ps == rc;
+                        for (int x = 0; x < n; x++)
+                            for (int c = 0; c < ps; c++, s += sb)
+                            {
+                                int ch = contig ? c : plane;
+                                ulong v = 0;
+                                if (File.BigEndian) for (int k = 0; k < sb; k++) v = v << 8 | s[k];
+                                else for (int k = sb - 1; k >= 0; k--) v = v << 8 | s[k];
+                                o[(long)x * rc + ch] = _formats![ch] switch
+                                {
+                                    // (correctly rounded for values above 2^63, where the direct conversion may round twice)
+                                    1 => v <= long.MaxValue ? (double)(long)v : (double)(long)(v >> 1 | (v & 1)) * 2.0,
+                                    2 => sb == 8 ? (long)v : (double)((long)(v << (64 - sb * 8)) >> (64 - sb * 8)),
+                                    _ => sb == 2 ? (double)BitConverter.UInt16BitsToHalf((ushort)v) : sb == 4 ? BitConverter.UInt32BitsToSingle((uint)v) : BitConverter.UInt64BitsToDouble(v),
+                                };
+                            }
                         break;
                     }
                     default:
@@ -1143,11 +1515,36 @@ namespace PixCodec
                 }
         }
 
+        void Ycc16(double y, double cb, double cr, ushort* o)
+        {
+            var k = _ycc16!;
+            y = (y - k[0]) * k[1]; cb = (cb - k[2]) * k[3]; cr = (cr - k[4]) * k[5];
+            double r = y + cr * k[6], bl = y + cb * k[7], gr = y - cr * k[8] - cb * k[9];
+            o[0] = (ushort)Math.Clamp(r + 0.5, 0, 65535); o[1] = (ushort)Math.Clamp(gr + 0.5, 0, 65535); o[2] = (ushort)Math.Clamp(bl + 0.5, 0, 65535);
+        }
+
+        void YccToRgb16(ushort* src, ushort* rgb, int rows)
+        {
+            int w = ChunkW, sh = SubH, sv = SubV;
+            int across = (w + sh - 1) / sh, down = (rows + sv - 1) / sv;
+            ushort* p = src;
+            for (int by = 0; by < down; by++)
+                for (int bx = 0; bx < across; bx++, p += sh * sv + 2)
+                    for (int j = 0; j < sv && by * sv + j < rows; j++)
+                        for (int i = 0; i < sh && bx * sh + i < w; i++)
+                            Ycc16(p[j * sh + i], p[sh * sv], p[sh * sv + 1], rgb + ((long)(by * sv + j) * w + bx * sh + i) * 3);
+        }
+
+        void YccInPlace16(ushort* p, long pixels)
+        {
+            for (long i = 0; i < pixels; i++, p += 3) Ycc16(p[0], p[1], p[2], p);
+        }
+
         /// <summary>Converts interleaved full resolution YCbCr pixels to RGB in place.</summary>
-        void YccInPlace(byte* p, long pixels)
+        void YccInPlace(byte* p, long pixels, int step = 3)
         {
             float[] ty = _yccY!, crR = _yccCrR!, cbB = _yccCbB!, crG = _yccCrG!, cbG = _yccCbG!;
-            for (long i = 0; i < pixels; i++, p += 3)
+            for (long i = 0; i < pixels; i++, p += step)
             {
                 float l = ty[p[0]];
                 int cb = p[1], cr = p[2];

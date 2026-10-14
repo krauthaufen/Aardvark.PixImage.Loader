@@ -10,6 +10,12 @@ namespace PixCodec
         /// <summary>Which image (IFD) of a multi-page / pyramid file to decode, 0 = first.</summary>
         public int ImageIndex { get; set; }
 
+        /// <summary>
+        /// Decode a sub-image instead of the image itself: indices into the SubIFDs of the image at
+        /// <see cref="ImageIndex"/>, one per nesting level (see <see cref="Tiff.GetSubImageInfos(ReadOnlySpan{byte}, int, int[])"/>).
+        /// </summary>
+        public int[]? SubImagePath { get; set; }
+
         /// <summary>Decode strips/tiles on several threads when the image is large enough to benefit.</summary>
         public bool Parallel { get; set; } = true;
 
@@ -145,6 +151,64 @@ namespace PixCodec
         /// </summary>
         public bool CloudOptimized { get; set; }
 
+        /// <summary>
+        /// PhotometricInterpretation to write. Auto: MinIsBlack for Gray / GrayAlpha / Other, RGB for Rgb / Rgba, YCbCr
+        /// for JPEG compressed Rgb, MinIsWhite for CCITT, Palette when <see cref="Palette"/> is set.
+        /// The explicit values say how the samples of the image are to be understood - see <see cref="TiffPhotometric"/>.
+        /// </summary>
+        public TiffPhotometric Photometric { get; set; } = TiffPhotometric.Auto;
+
+        /// <summary>
+        /// Colormap for a palette image: the image (Gray, UInt8 or UInt16) holds indices, this holds R, G, B triples
+        /// of 16-bit values (0..65535), one per index up to 2^BitsPerSample. See <see cref="PaletteFromRgb8"/>.
+        /// </summary>
+        public ushort[]? Palette { get; set; }
+
+        /// <summary>
+        /// Bits per sample to store, 0 = the full width of the sample type. 1..32 packs integer samples MSB first into
+        /// that many bits (the values have to fit; with <see cref="Bilevel"/> an 8-bit image is thresholded instead).
+        /// No predictor is used on packed samples.
+        /// </summary>
+        public int BitsPerSample { get; set; }
+
+        /// <summary>Write PlanarConfiguration 2: every sample in strips / tiles of its own.</summary>
+        public bool Planar { get; set; }
+
+        /// <summary>
+        /// Meaning of the samples beyond the colour ones. Default: unassociated alpha for GrayAlpha / Rgba, "unspecified"
+        /// for the surplus samples of other images.
+        /// </summary>
+        public TiffExtraSample[]? ExtraSamples { get; set; }
+
+        /// <summary>Two-dimensional coding for <see cref="TiffCompression.CcittGroup3"/> (T4Options bit 0).</summary>
+        public bool Ccitt2D { get; set; }
+
+        /// <summary>For <see cref="TiffCompression.Jpeg"/>: store Rgb images as RGB components instead of YCbCr (larger, but no colour transform).</summary>
+        public bool JpegRgb { get; set; }
+
+        /// <summary>For <see cref="TiffCompression.Webp"/>: lossless (default) or lossy with <see cref="WebpQuality"/>.</summary>
+        public bool WebpLossless { get; set; } = true;
+
+        /// <summary>Quality 0..100 of lossy WebP.</summary>
+        public int WebpQuality { get; set; } = 75;
+
+        /// <summary>For <see cref="TiffCompression.Lerc"/>: largest error allowed per sample, 0 = lossless.</summary>
+        public double LercMaxError { get; set; }
+
+        /// <summary>
+        /// For <see cref="TiffCompression.Lerc"/>: a second compression applied to every LERC blob, as GDAL's
+        /// LERC_DEFLATE and LERC_ZSTD do. None (default), Deflate or Zstd; <see cref="CompressionLevel"/> applies to it.
+        /// </summary>
+        public TiffCompression LercSecondCompression { get; set; } = TiffCompression.None;
+
+        /// <summary>Colormap entries from 8-bit R, G, B triples.</summary>
+        public static ushort[] PaletteFromRgb8(ReadOnlySpan<byte> rgb)
+        {
+            var p = new ushort[rgb.Length];
+            for (int i = 0; i < p.Length; i++) p[i] = (ushort)(rgb[i] * 257);
+            return p;
+        }
+
         /// <summary>Test seam: zero bytes inserted after the header, pushing every offset (also past 4 GB).</summary>
         internal long TestPadding;
 
@@ -167,30 +231,87 @@ namespace PixCodec
 
         /// <summary>Marks the image as a reduced resolution version of another one (NewSubfileType bit 0): an overview / pyramid level.</summary>
         public bool ReducedResolution { get; set; }
+
+        /// <summary>
+        /// Validity mask of the image: a Gray UInt8 image of the same size, non-zero = valid pixel. Written as a
+        /// 1-bit transparency mask directory (NewSubfileType 4) right after the image - the "internal mask" of GDAL.
+        /// </summary>
+        public RawImage? Mask { get; set; }
+
+        /// <summary>NewSubfileType override for the directories the encoder generates itself (masks).</summary>
+        internal int SubfileType = -1;
+    }
+
+    /// <summary>How the samples of an image to encode are to be understood.</summary>
+    public enum TiffPhotometric
+    {
+        Auto,
+        /// <summary>Gray, 0 = black.</summary>
+        MinIsBlack,
+        /// <summary>
+        /// Gray stored inverted (0 = white). Unsigned samples are inverted on writing, so that decoding gives the
+        /// image back; other sample types are written as they are.
+        /// </summary>
+        MinIsWhite,
+        /// <summary>The first three samples are R, G, B (for ColorModel.Other images with further samples).</summary>
+        Rgb,
+        /// <summary>Indices into <see cref="TiffEncodeOptions.Palette"/>.</summary>
+        Palette,
+        /// <summary>The first four samples are C, M, Y, K ink values (8 or 16 bit unsigned), written as they are.</summary>
+        Cmyk,
+        /// <summary>
+        /// An 8-bit Rgb image converted to YCbCr (full range, ITU-R BT.601) with the chroma resolution of
+        /// <see cref="TiffEncodeOptions.JpegSubsampling"/>; without JPEG compression as the packed layout of TIFF 6.0.
+        /// </summary>
+        YCbCr,
+        /// <summary>The first three samples are CIE L*a*b* in the TIFF encoding (8 or 16 bit), written as they are.</summary>
+        CieLab,
+        /// <summary>L*a*b* in the ICC encoding, written as they are.</summary>
+        IccLab,
+        /// <summary>L*a*b* in the ITU-T T.42 encoding, written as they are.</summary>
+        ItuLab,
+        /// <summary>A 1-bit mask (transparency mask photometric).</summary>
+        TransparencyMask,
+    }
+
+    public enum TiffExtraSample
+    {
+        Unspecified = 0,
+        /// <summary>Alpha the colour samples are already multiplied with. The samples are written as they are.</summary>
+        AssociatedAlpha = 1,
+        UnassociatedAlpha = 2,
     }
 
     /// <summary>
-    /// TIFF codec: classic TIFF and BigTIFF, strips and tiles, both byte orders, multi-page files.
+    /// TIFF codec: classic TIFF and BigTIFF, strips and tiles, both byte orders, multi-page files, SubIFDs.
     /// <para>Decoding:</para>
     /// <list type="bullet">
     /// <item>Compression: none, LZW, Deflate, PackBits, CCITT RLE / Group 3 / Group 4 (incl. uncompressed mode), JPEG
-    /// (8 and 12 bit DCT, lossless, old-style in strips, tiles and planes), ZSTD, LZMA, WebP, SGI LogLuv (32 and
-    /// 24 bit) and LogL, PixarLog. Predictors 2 and 3.</item>
-    /// <item>Samples: unsigned and signed integers of 1..64 bits, floats of 16, 24, 32 and 64 bits. Samples of an
-    /// odd bit depth arrive with their stored values in the next larger type (12 bit: UInt16 0..4095; 24-bit floats:
-    /// Float32); only 1, 2 and 4 bit unsigned samples are stretched to 0..255 by default, see
-    /// <see cref="TiffBitScaling"/>.</item>
+    /// (8 and 12 bit DCT, lossless, old-style in strips, tiles and planes), ZSTD, LZMA, WebP, JPEG 2000 (34712 and
+    /// Aperio's 33003 / 33005), LERC (with its Deflate / ZSTD variants and validity masks), JBIG, SGI LogLuv (32 and
+    /// 24 bit) and LogL, PixarLog, ThunderScan. Predictors 2 and 3.</item>
+    /// <item>Samples: unsigned and signed integers of 1..64 bits, floats of 16, 24, 32 and 64 bits, complex numbers
+    /// (two channels each). Samples of an odd bit depth arrive with their stored values in the next larger type
+    /// (12 bit: UInt16 0..4095; 24-bit floats: Float32); only 1, 2 and 4 bit unsigned samples are stretched to 0..255
+    /// by default, see <see cref="TiffBitScaling"/>. Samples of differing formats come back as Float64.</item>
     /// <item>MinIsWhite is inverted for unsigned integer data (signed and float data is returned as stored).</item>
     /// <item>Palette images are expanded to UInt8 Rgb; YCbCr, CMYK (naively), CIELab / ICCLab / ITULab (to sRGB) and
-    /// LogLuv (to linear Float32 RGB) are converted to Rgb unless <see cref="TiffDecodeOptions.ConvertToRgb"/> is off.</item>
+    /// LogLuv (to linear Float32 RGB) are converted to Rgb unless <see cref="TiffDecodeOptions.ConvertToRgb"/> is off.
+    /// Colour filter array and LinearRaw data is returned as stored.</item>
     /// <item>Exactly one extra sample marked as alpha gives GrayAlpha/Rgba (associated alpha is un-premultiplied).
     /// Any other surplus samples (unspecified extras, more than one extra) keep ALL samples as stored and report
     /// <see cref="ColorModel.Other"/>.</item>
+    /// <item>LERC validity masks, as in GDAL: invalid float samples are NaN, a mask standing in for the alpha
+    /// channel of an 8-bit image gives alpha 0 / 255; invalid integer samples are 0.</item>
     /// <item>Orientation is reported in the metadata, never applied. Resolution, ICC profile and EXIF are returned.</item>
     /// </list>
-    /// <para>Encoding: all sample types and colour models; none, LZW, Deflate, Zstd, PackBits, JPEG (8 / 12 bit) and
-    /// CCITT Group 4; strips or tiles; multi-page files, generated overviews and a cloud optimized layout; either byte
-    /// order; arbitrary extra tags.</para>
+    /// <para>Encoding: all sample types and colour models, packed depths of 1..32 bits, palettes, CMYK / Lab / YCbCr /
+    /// MinIsWhite photometrics, contiguous or planar; none, LZW, Deflate, Zstd, LZMA, PackBits, JPEG (8 / 12 bit, YCbCr
+    /// or RGB), WebP, JPEG 2000 (lossless), LERC, CCITT RLE / Group 3 / Group 4 and JBIG; strips or tiles; multi-page
+    /// files, mask directories, generated overviews and the cloud optimized layout of GDAL; either byte order;
+    /// arbitrary extra tags.</para>
+    /// <para>Limits: a strip or tile must decode to less than 2 GB unless it is uncompressed, LZW, PackBits or
+    /// Deflate; compressed data of more than 2 GB per strip or tile is read from streams for those three only.</para>
     /// </summary>
     public static unsafe class Tiff
     {
@@ -307,6 +428,51 @@ namespace PixCodec
             return Guard(() => TagsCore(src, imageIndex), seekableStream, src.Origin);
         }
 
+        /// <summary>Tags of a sub-image (see <see cref="GetSubImageInfos(ReadOnlySpan{byte}, int, int[])"/>).</summary>
+        public static TiffTag[] ReadTags(ReadOnlySpan<byte> data, int imageIndex, int[] subImagePath)
+        {
+            fixed (byte* p = data)
+            {
+                var src = new TiffMemorySource(p, data.Length);
+                return Guard(() => TagsCore(src, imageIndex, subImagePath));
+            }
+        }
+
+        public static TiffTag[] ReadTags(Stream seekableStream, int imageIndex, int[] subImagePath)
+        {
+            var src = new TiffStreamSource(seekableStream);
+            return Guard(() => TagsCore(src, imageIndex, subImagePath), seekableStream, src.Origin);
+        }
+
+        /// <summary>
+        /// Sub-images of an image: the directories its SubIFDs tag (330) points to - reduced resolution versions in
+        /// pyramid files, the raw sensor data or previews in DNG. <paramref name="subImagePath"/> addresses a
+        /// sub-image whose own sub-images are wanted (empty: those of the image itself). The result is in file order;
+        /// decode one with <see cref="TiffDecodeOptions.SubImagePath"/> = path + its index. An entry with Channels = 0
+        /// is a directory this codec cannot decode (it is listed so that the indices stay valid).
+        /// </summary>
+        public static ImageInfo[] GetSubImageInfos(ReadOnlySpan<byte> data, int imageIndex = 0, params int[] subImagePath)
+        {
+            fixed (byte* p = data)
+            {
+                var src = new TiffMemorySource(p, data.Length);
+                return Guard(() => SubInfosCore(src, imageIndex, subImagePath));
+            }
+        }
+
+        public static ImageInfo[] GetSubImageInfos(Stream seekableStream, int imageIndex = 0, params int[] subImagePath)
+        {
+            var src = new TiffStreamSource(seekableStream);
+            return Guard(() => SubInfosCore(src, imageIndex, subImagePath), seekableStream, src.Origin);
+        }
+
+        /// <summary>Number of sub-images of an image (or of the sub-image at <paramref name="subImagePath"/>).</summary>
+        public static int GetSubImageCount(ReadOnlySpan<byte> data, int imageIndex = 0, params int[] subImagePath)
+            => GetSubImageInfos(data, imageIndex, subImagePath).Length;
+
+        public static int GetSubImageCount(Stream seekableStream, int imageIndex = 0, params int[] subImagePath)
+            => GetSubImageInfos(seekableStream, imageIndex, subImagePath).Length;
+
         /// <summary>Encodes an image as TIFF to the stream (which only needs to be writable, not seekable).</summary>
         public static void Encode(RawImage image, Stream output, TiffEncodeOptions? options = null)
             => TiffEncoder.Encode(new[] { new TiffPage(image ?? throw new ArgumentNullException(nameof(image))) }, output, options ?? new TiffEncodeOptions());
@@ -340,25 +506,59 @@ namespace PixCodec
             return r;
         }
 
-        static long Locate(TiffFile file, int index)
+        static long Locate(TiffFile file, int index, int[]? path = null)
         {
             if (index < 0) throw new TiffArgumentException("imageIndex", "TIFF: image index must not be negative");
             var offs = file.IfdOffsets(index + 1);
             if (index >= offs.Count) throw new TiffArgumentException("imageIndex", $"TIFF: the file has only {offs.Count} image(s)");
-            return offs[index];
+            long offset = offs[index];
+            if (path != null)
+                foreach (int k in path)
+                {
+                    var sub = SubOffsets(file, offset);
+                    if (k < 0 || k >= sub.Length) throw new TiffArgumentException("subImagePath", $"TIFF: the directory has only {sub.Length} sub-image(s)");
+                    offset = sub[k];
+                }
+            return offset;
         }
 
-        static TiffTag[] TagsCore(TiffSource src, int index)
+        /// <summary>Offsets of the SubIFDs (tag 330) of a directory; entries pointing outside of the file are dropped.</summary>
+        static long[] SubOffsets(TiffFile file, long ifdOffset)
+        {
+            var sub = file.Integers(file.ReadIfd(ifdOffset), 330) ?? Array.Empty<long>();
+            return Array.FindAll(sub, o => o >= 8 && o < file.Src.Length);
+        }
+
+        static TiffTag[] TagsCore(TiffSource src, int index, int[]? path = null)
         {
             var file = new TiffFile(src);
-            return file.ReadTags(file.ReadIfd(Locate(file, index)));
+            return file.ReadTags(file.ReadIfd(Locate(file, index, path)));
+        }
+
+        static ImageInfo[] SubInfosCore(TiffSource src, int index, int[] path)
+        {
+            var file = new TiffFile(src);
+            var offs = SubOffsets(file, Locate(file, index, path));
+            var r = new ImageInfo[offs.Length];
+            for (int i = 0; i < r.Length; i++)
+            {
+                try { r[i] = new TiffImage(file, offs[i]).Info(1); }
+                catch (Exception e) when (e is ImageNotSupportedException || e is ImageFormatException)
+                {
+                    // listed all the same, so that the indices stay usable: Channels 0 marks "cannot be decoded"
+                    var dir = file.ReadIfd(offs[i]);
+                    r[i] = new ImageInfo(ImageFormat.Tiff, (int)Math.Clamp(file.Integer(dir, 256, 0), 0, int.MaxValue),
+                        (int)Math.Clamp(file.Integer(dir, 257, 0), 0, int.MaxValue), 0, SampleType.UInt8, ColorModel.Other);
+                }
+            }
+            return r;
         }
 
         static RawImage DecodeCore(TiffSource src, TiffDecodeOptions? options, (int x, int y, int w, int h)? region)
         {
             options ??= new TiffDecodeOptions();
             var file = new TiffFile(src);
-            var img = new TiffImage(file, Locate(file, options.ImageIndex), options);
+            var img = new TiffImage(file, Locate(file, options.ImageIndex, options.SubImagePath), options);
             return region is var (x, y, w, h)
                 ? img.Decode(x, y, w, h, options)
                 : img.Decode(0, 0, img.Width, img.Height, options);
@@ -400,5 +600,27 @@ namespace PixCodec
         CcittGroup4,
         /// <summary>Zstandard (compression 50000), with the same predictors as Deflate. Read by libtiff 4.0.10+ / GDAL.</summary>
         Zstd,
+        /// <summary>LZMA2 in an xz container (compression 34925), with the same predictors as Deflate.</summary>
+        Lzma,
+        /// <summary>WebP (compression 50001): 8-bit Rgb or Rgba, lossless or lossy.</summary>
+        Webp,
+        /// <summary>CCITT Group 3 fax (compression 3), one- or two-dimensional: 1-bit bilevel output from an 8-bit Gray image.</summary>
+        CcittGroup3,
+        /// <summary>CCITT modified Huffman run length coding (compression 2): 1-bit bilevel output from an 8-bit Gray image.</summary>
+        CcittRle,
+        /// <summary>
+        /// LERC (compression 34887): integers of 8, 16 and 32 bits and floats of 32 and 64 bits, lossless or with
+        /// <see cref="TiffEncodeOptions.LercMaxError"/>, optionally followed by Deflate or Zstd
+        /// (<see cref="TiffEncodeOptions.LercSecondCompression"/>). As in GDAL / libtiff, NaN samples of float images
+        /// and the alpha channel of 8-bit images whose alpha is 0 or 255 everywhere are stored as LERC validity masks.
+        /// </summary>
+        Lerc,
+        /// <summary>JPEG 2000 (compression 34712), lossless: 8 or 16 bit integer samples.</summary>
+        Jpeg2000,
+        /// <summary>
+        /// JBIG (compression 34661): 1-bit bilevel output from an 8-bit Gray image, one bi-level image entity per strip,
+        /// stored the way libtiff does. One strip unless RowsPerStrip is set (libtiff reads single strip files only).
+        /// </summary>
+        Jbig,
     }
 }

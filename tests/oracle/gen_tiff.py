@@ -2,14 +2,16 @@
 
 usage: python3 gen_tiff.py            (from tests/oracle; deterministic, overwrites the fixture directory)
 
-Needs tifffile + imagecodecs, OpenCV, Pillow and ImageMagick. Many files come from the small TIFF writer below
-because no single tool produces the whole matrix (odd bit depths with compression, old-style LZW and JPEG, sparse
-tiles, hand-packed YCbCr / LogL ...); others are written by tifffile, libtiff (through Pillow / OpenCV) and
-ImageMagick.
+Needs tifffile + imagecodecs, OpenCV, Pillow, ImageMagick, the system libtiff (with jbigkit and liblerc), rasterio
+(GDAL) and FFmpeg. Many files come from the small TIFF writer below because no single tool produces the whole
+matrix (odd bit depths with compression, old-style LZW and JPEG, sparse tiles, hand-packed YCbCr / LogL, JPEG 2000
+codestreams and JBIG entities as strips ...); others are written by tifffile, libtiff (through ctypes, Pillow,
+OpenCV), GDAL and ImageMagick.
 
 Provenance rule: every .ref is what a THIRD-PARTY decoder returned for the file - tifffile + imagecodecs for the
-stored samples, libtiff (OpenCV / Pillow / ImageMagick) where it interprets the data (YCbCr, CCITT, JPEG, LogLuv),
-LittleCMS for Lab - and all decoders that can read a file have to agree with the pixels it was built from. On top
+stored samples (OpenJPEG for JPEG 2000), libtiff (OpenCV / Pillow / ImageMagick) where it interprets the data (YCbCr,
+CCITT, JPEG, LogLuv, JBIG), GDAL for LERC and its masks, FFmpeg for the CCITT uncompressed mode, LittleCMS for Lab -
+and all decoders that can read a file have to agree with the pixels it was built from. On top
 of the decoded samples only the conversions PixCodec documents are applied (MinIsWhite inversion, 1/2/4-bit
 scaling, palette expansion, naive CMYK, un-premultiplied alpha), each cross-checked against Pillow / ImageMagick
 where those implement the same thing. A `.tol` sidecar gives the allowed difference where bit exactness is not
@@ -234,8 +236,15 @@ def encode_chunk(a, p, e, plane=None):
         if pred == 3:
             b = np.ascontiguousarray(b.transpose(0, 2, 1)).reshape(rows, -1).copy()
             b[:, s:] -= b[:, :-s].copy()
-        elif e == '<':
-            b = b[:, :, ::-1]
+        else:
+            if pred == 2:
+                # horizontal differencing of the samples taken as 24-bit integers
+                v = (b[:, :, 0].astype(np.int64) << 16 | b[:, :, 1].astype(np.int64) << 8 | b[:, :, 2]).reshape(rows, cols, s)
+                v[:, 1:, :] = (v[:, 1:, :] - v[:, :-1, :]) & 0xFFFFFF
+                v = v.reshape(rows, cols * s)
+                b = np.stack([v >> 16, v >> 8 & 255, v & 255], axis=-1).astype(np.uint8)
+            if e == '<':
+                b = b[:, :, ::-1]
         raw = np.ascontiguousarray(b).tobytes()
     elif any(w not in (8, 16, 32, 64) for w in widths) or len(set(widths)) > 1:
         assert pred in (1, 2)
@@ -431,7 +440,7 @@ def cmyk_to_rgb(a):
     return np.concatenate([rgb, a[:, :, 4:5]], axis=2) if a.shape[2] > 4 else rgb
 
 
-BASE_SAMPLES = {0: 1, 1: 1, 3: 1, 4: 1, 2: 3, 5: 4, 6: 3, 8: 3, 9: 3, 10: 3}
+BASE_SAMPLES = {0: 1, 1: 1, 3: 1, 4: 1, 2: 3, 5: 4, 6: 3, 8: 3, 9: 3, 10: 3, 32803: 1, 34892: 3, 32844: 1, 32845: 3}
 
 
 def expected(p, raw, scaling='default', convert=True):
@@ -546,7 +555,7 @@ def third_party(name, path, p, page=0):
                 who = 'tifffile (masked to the sample depth)'
             note(who, t)
     # libtiff ignores the Predictor tag for PackBits (tifffile honours it, as does PixCodec), so skip that combination.
-    libtiff_ok = not (p.get('compression') == PACKBITS and p.get('predictor', 1) != 1) and p.get('compression', 1) < 34000
+    libtiff_ok = not (p.get('compression') == PACKBITS and p.get('predictor', 1) != 1) and p.get('compression', 1) < 33003
     simple = page == 0 and whole and pm in (1, 2) and src.shape[2] in (1, 3) and 'extrasamples' not in p
     if libtiff_ok and simple and src.dtype in (np.uint8, np.uint16):
         r = subprocess.run(['magick', path, '-depth', str(widths[0]), '-endian', 'LSB', ('gray' if src.shape[2] == 1 else 'rgb') + ':-'],
@@ -1239,10 +1248,236 @@ def gen_more_codecs():
             write_tol(path, 4)
 
 
+def gen_foreign():
+    """Compressions whose codecs live outside the TIFF folder: JPEG 2000 (34712, Aperio 33003 / 33005) and JBIG (34661).
+    JPEG 2000 strips / tiles are raw codestreams from OpenJPEG (imagecodecs) and are read back by tifffile + OpenJPEG;
+    JBIG entities are written and read back by libtiff (jbigkit)."""
+    import imagecodecs
+    kw = dict(subdir='jp2')
+
+    def j2k(a, **args):
+        args.setdefault('codecformat', 'j2k')
+        return imagecodecs.jpeg2k_encode(np.ascontiguousarray(a), **args)
+
+    def chunks_of(a, tile=None, rps=None, planar=False, **args):
+        h, w, c = a.shape
+        cw, ch = tile if tile else (w, rps or h)
+        out = []
+        for plane in (range(c) if planar else [None]):
+            src = a if plane is None else a[:, :, plane:plane + 1]
+            for y in range(0, h, ch):
+                for x in range(0, w, cw):
+                    blk = src[y:y + ch, x:x + cw]
+                    if tile:   # tiles are stored whole: pad by repeating the edge
+                        blk = np.pad(blk, ((0, ch - blk.shape[0]), (0, cw - blk.shape[1]), (0, 0)), mode='edge')
+                    out.append(j2k(blk[:, :, 0] if blk.shape[2] == 1 else blk, **args))
+        return out
+
+    def jp2(name, a, comp=34712, tile=None, rps=None, planar=False, byteorder='<', bigtiff=False, extra=None, **args):
+        page = dict(arr=a, compression=comp, raw_chunks=chunks_of(a, tile, rps, planar, **args))
+        if tile:
+            page['tile'] = tile
+        if rps:
+            page['rps'] = rps
+        if planar:
+            page['planar'] = 2
+        page.update(extra or {})
+        emit(name, page, byteorder=byteorder, bigtiff=bigtiff, **kw)
+
+    jp2('jp2_u8_rgb_strip', pat(3, 'uint8'))
+    jp2('jp2_u8_rgb_strips', pat(3, 'uint8'), rps=8)
+    jp2('jp2_u8_rgb_nomct', pat(3, 'uint8'), mct=False)
+    jp2('jp2_u8_rgb_jp2boxes', pat(3, 'uint8'), codecformat='jp2')
+    jp2('jp2_u8_gray_tiled', pat(1, 'uint8', 50, 37), tile=(32, 16))
+    jp2('jp2_u8_rgba_tiled', pat(4, 'uint8', 50, 37), tile=(32, 32), extra=dict(extrasamples=[2]))
+    jp2('jp2_u16_gray', pat(1, 'uint16'))
+    jp2('jp2_u16_rgb_planar_tiled', pat(3, 'uint16', 50, 37), tile=(32, 32), planar=True)
+    jp2('jp2_be_big_i16_dem_tiled', pat(1, 'int16', 70, 45), tile=(32, 32), byteorder='>', bigtiff=True)
+    jp2('jp2_i8_gray', pat(1, 'int8'))
+    jp2('jp2_gray12bit', pat(1, 'uint16') >> 4, extra=dict(bits=12), bitspersample=12)
+    jp2('jp2_u8_5samples', pat(5, 'uint8'), extra=dict(photometric=1, extrasamples=[0, 0, 0, 0]), mct=False)
+    jp2('jp2_aperio33005_rgb_tiled', pat(3, 'uint8', 50, 37), comp=33005, tile=(32, 32))
+    jp2('jp2_aperio33003_mct_tiled', pat(3, 'uint8', 50, 37), comp=33003, tile=(32, 32))
+    # lossy (9/7 wavelet): decoders differ in rounding
+    for name, a, args in [('jp2_u8_rgb_lossy', pat(3, 'uint8', 70, 50), dict(level=45)),
+                          ('jp2_u16_gray_lossy_tiled', pat(1, 'uint16', 70, 50), dict(level=60, tile=(32, 32)))]:
+        tile = args.pop('tile', None)
+        path = os.path.join(OUT, 'jp2', name + '.tif')
+        page = dict(arr=a, compression=34712, raw_chunks=chunks_of(a, tile, **args))
+        if tile:
+            page['tile'] = tile
+        write_tiff(path, [page])
+        emit_external('jp2/' + name, path, ref_tifffile(path), ['tifffile (OpenJPEG)'])
+        write_tol(path, 2 if a.dtype == np.uint8 else 2 * 257)
+    # YCbCr components in the codestream (no component transform): Aperio's 33003, and the YCbCr photometric.
+    # OpenJPEG returns the components; the reference applies the JFIF conversion to them.
+    rgb = pat(3, 'uint8', 50, 37).astype(np.float64)
+    ycc = np.stack([0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2],
+                    128 - 0.168736 * rgb[..., 0] - 0.331264 * rgb[..., 1] + 0.5 * rgb[..., 2],
+                    128 + 0.5 * rgb[..., 0] - 0.418688 * rgb[..., 1] - 0.081312 * rgb[..., 2]], -1).round().clip(0, 255).astype(np.uint8)
+
+    def to_rgb(c):
+        c = c.astype(np.float64)
+        y, cb, cr = c[..., 0], c[..., 1] - 128, c[..., 2] - 128
+        return np.stack([y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr, y + 1.772 * cb], -1).round().clip(0, 255).astype(np.uint8)
+
+    for name, comp, pm in [('jp2_aperio33003_ycbcr_tiled', 33003, 2), ('jp2_photometric_ycbcr_tiled', 34712, 6)]:
+        path = os.path.join(OUT, 'jp2', name + '.tif')
+        write_tiff(path, [dict(arr=ycc, compression=comp, photometric=pm, tile=(32, 32), raw_chunks=chunks_of(ycc, (32, 32), mct=False),
+                               tags=[(530, 3, [1, 1])] if pm == 6 else [])])
+        with tifffile.TiffFile(path) as t:
+            got = np.zeros((64, 64, 3), np.uint8)
+            pg = t.pages[0]
+            fh = t.filehandle
+            for i, (o, n) in enumerate(zip(pg.dataoffsets, pg.databytecounts)):
+                fh.seek(o)
+                got[i // 2 * 32:i // 2 * 32 + 32, i % 2 * 32:i % 2 * 32 + 32] = imagecodecs.jpeg2k_decode(fh.read(n))
+        assert same(got[:37, :50], ycc)
+        emit_external('jp2/' + name, path, to_rgb(got[:37, :50]), ['OpenJPEG components, YCbCr to RGB by the JFIF formula in gen_tiff.py'])
+        write_tol(path, 1)
+
+    # ---- JBIG
+    os.makedirs(os.path.join(OUT, 'jbig'), exist_ok=True)
+    lib = LibTiff()
+    rng = np.random.default_rng(77)
+
+    def bilevel(w, h):
+        yy, xx = np.mgrid[0:h, 0:w]
+        a = (((xx // 5 + yy // 3) % 2 == 0) ^ (rng.random((h, w)) < 0.08)).astype(np.uint8)
+        a[h // 2] = 1
+        return a
+
+    def bie(bits, fill):
+        """One strip through libtiff's JBIG codec: (the bi-level image entity, libtiff's decoding of it)."""
+        packed = np.packbits(bits, axis=1)
+        tmp = os.path.join(OUT, 'jbig', '_strip.tif')
+        lib.write(tmp, packed[:, :, None], 34661, 0, tags=((256, bits.shape[1]), (258, 1), (266, fill)))
+        back = np.unpackbits(lib.read(tmp, np.uint8, packed.shape), axis=1)[:, :bits.shape[1]]
+        with tifffile.TiffFile(tmp) as t:
+            pg = t.pages[0]
+            t.filehandle.seek(pg.dataoffsets[0])
+            data = t.filehandle.read(pg.databytecounts[0])
+        os.remove(tmp)
+        return data, back
+
+    # libtiff reads and writes single strip JBIG files only; files with several strips are put together from
+    # entities it wrote one by one, and the reference from its reading of each
+    for name, w, h, pm, rps, e, fill in [('jbig_minisblack', 61, 40, 1, None, '<', 1), ('jbig_miniswhite_strips', 131, 53, 0, 8, '<', 1),
+                                         ('jbig_be_strips', 64, 33, 1, 16, '>', 1), ('jbig_1x1', 1, 1, 0, None, '<', 1),
+                                         ('jbig_fillorder2', 77, 30, 0, None, '<', 2), ('jbig_fillorder2_strips', 77, 30, 1, 7, '<', 2),
+                                         ('jbig_wide', 900, 70, 0, None, '<', 1)]:
+        bits = bilevel(w, h)
+        parts = [bie(bits[y:y + (rps or h)], fill) for y in range(0, h, rps or h)]
+        back = np.concatenate([b for _, b in parts])
+        assert (back == bits).all(), name
+        path = os.path.join(OUT, 'jbig', name + '.tif')
+        write_tiff(path, [dict(arr=bits[:, :, None], bits=1, photometric=pm, compression=34661, rps=rps or h, raw_chunks=[d for d, _ in parts],
+                               tags=[(266, 3, [fill])] if fill == 2 else [])], byteorder=e)
+        who = 'libtiff (jbigkit)'
+        if rps is None:
+            whole = np.unpackbits(lib.read(path, np.uint8, (h, (w + 7) // 8)), axis=1)[:, :w]
+            assert (whole == bits).all(), name
+        else:
+            who += ', strip by strip'
+        emit_external('jbig/' + name, path, ((back if pm == 1 else 1 - back) * 255).astype(np.uint8)[:, :, None], [who])
+    # (ImageMagick cannot write JBIG in TIFF: libtiff's codec has no scanline interface)
+
+
+def gen_lerc():
+    """LERC (34887) as GDAL / libtiff write it, including the second compression (LERC_DEFLATE, LERC_ZSTD) and the
+    validity masks: NaN samples of float data and binary alpha of 8-bit data. Written by GDAL (rasterio) and by
+    tifffile + imagecodecs (liblerc); the reference is GDAL's reading, cross-checked with tifffile where a file has
+    no mask (tifffile ignores LERC masks)."""
+    import rasterio
+    from rasterio.transform import from_origin
+    d = os.path.join(OUT, 'lerc')
+    os.makedirs(d, exist_ok=True)
+    w, h = 70, 45
+    yy, xx = np.mgrid[0:h, 0:w]
+    dem = (np.sin(xx / 9) * np.cos(yy / 7) * 500 + 1000).astype(np.float32)
+    hole = dem.copy()
+    hole[5:12, 20:40] = np.nan
+    hole[30, 3] = np.nan
+
+    def finish(name, tifffile_too):
+        path = os.path.join(d, name + '.tif')
+        with rasterio.open(path) as ds:
+            got = np.moveaxis(ds.read(), 0, -1)
+        with tifffile.TiffFile(path) as t:
+            assert t.pages[0].compression == 34887
+        by = ['GDAL (libtiff + liblerc)']
+        if tifffile_too:
+            assert same(ref_tifffile(path), got), name
+            by.append('tifffile')
+        emit_external('lerc/' + name, path, got, by)
+        return got
+
+    def gdal(name, bands, tifffile_too=True, **kw):
+        bands = np.asarray(bands)
+        if bands.ndim == 2:
+            bands = bands[None]
+        path = os.path.join(d, name + '.tif')
+        with rasterio.open(path, 'w', driver='GTiff', width=bands.shape[2], height=bands.shape[1], count=bands.shape[0],
+                           dtype=bands.dtype, transform=from_origin(0, 0, 1, 1), **kw) as ds:
+            ds.write(bands)
+        aux = path + '.aux.xml'
+        if os.path.exists(aux):
+            os.remove(aux)
+        return finish(name, tifffile_too)
+
+    got = gdal('lerc_f32_dem_nan', hole, False, compress='LERC', nodata=np.nan)
+    assert np.isnan(got).sum() == np.isnan(hole).sum()
+    gdal('lerc_f32_dem', dem, compress='LERC')
+    gdal('lerc_zstd_f32_dem_nan_lossy_tiled', hole, False, compress='LERC_ZSTD', MAX_Z_ERROR=0.01, tiled=True, blockxsize=32, blockysize=32)
+    gdal('lerc_deflate_f64_dem_nan', hole.astype(np.float64), False, compress='LERC_DEFLATE')
+    gdal('lerc_deflate_u16_rgb_tiled', np.moveaxis(pat(3, 'uint16', 70, 45), -1, 0), compress='LERC_DEFLATE', interleave='pixel',
+         photometric='RGB', tiled=True, blockxsize=32, blockysize=16)
+    f3 = np.stack([hole, hole * 2, hole + 1])
+    gdal('lerc_f32_3samples_nan_pixels', f3, False, compress='LERC', interleave='pixel', MAX_Z_ERROR=0.05)
+    f3 = f3.copy()
+    f3[1, 33:36, 5:9] = np.nan
+    f3[2, 0, 0] = np.nan
+    got = gdal('lerc_f32_3samples_nan_mixed', f3, False, compress='LERC', interleave='pixel')
+    assert np.isnan(got).sum() == np.isnan(f3).sum()
+    gdal('lerc_f32_3samples_nan_planar', f3, False, compress='LERC', interleave='band', MAX_Z_ERROR=0.05)
+    alpha = np.where((xx - 35) ** 2 + (yy - 22) ** 2 < 300, 255, 0)
+    rgba = np.stack([(xx * 3) % 256, (yy * 5) % 256, (xx + yy) % 256, alpha]).astype(np.uint8)
+    got = gdal('lerc_u8_rgba_binary_alpha', rgba, False, compress='LERC', photometric='RGB', alpha='YES', interleave='pixel')
+    assert (got[..., 3] == alpha).all()
+    gdal('lerc_u8_rgba_binary_alpha_tiled', rgba, False, compress='LERC', photometric='RGB', alpha='YES', interleave='pixel',
+         tiled=True, blockxsize=32, blockysize=32)
+    gdal('lerc_u8_rgba_opaque', np.concatenate([rgba[:3], np.full((1, h, w), 255, np.uint8)]), False, compress='LERC', photometric='RGB',
+         alpha='YES', interleave='pixel')
+    gdal('lerc_u8_rgba_planar', rgba, compress='LERC', photometric='RGB', alpha='YES', interleave='band')
+    soft = rgba.copy()
+    soft[3] = (xx * 3) % 256
+    gdal('lerc_u8_rgba_soft_alpha', soft, compress='LERC', photometric='RGB', alpha='YES', interleave='pixel')
+    gdal('lerc_u16_2samples_lossy', np.stack([(xx * yy) % 65536, (xx * 700 + yy) % 65536]).astype(np.uint16), compress='LERC',
+         MAX_Z_ERROR=3, interleave='pixel')
+    gdal('lerc_big_u8_gray_tiled', pat(1, 'uint8', 70, 45)[:, :, 0], compress='LERC', BIGTIFF='YES', tiled=True, blockxsize=32, blockysize=32)
+    gdal('lerc_i16_dem_strips', pat(1, 'int16', 70, 45)[:, :, 0], compress='LERC', blockysize=8)
+    # tifffile + imagecodecs
+    for dt in ('int8', 'int32', 'uint32', 'float64'):
+        name = f'lerc_ext_tifffile_{dt}'
+        a = pat(1, dt, 50, 37)[:, :, 0]
+        tifffile.imwrite(os.path.join(d, name + '.tif'), a, compression='lerc', rowsperstrip=16, metadata=None)
+        # (liblerc turns the NaN among the float test values into an invalid pixel by itself; tifffile then reads 0 there)
+        finish(name, not (a.dtype.kind == 'f' and np.isnan(a).any()))
+    # big endian, straight from libtiff (tifffile cannot write LERC into a big endian file)
+    name = 'lerc_ext_libtiff_be_f32_rgb_strips'
+    a = pat(3, 'float32', 50, 37)
+    LibTiff().write(os.path.join(d, name + '.tif'), a, 34887, 2, rps=10, big_endian=True)
+    finish(name, False)
+    name = 'lerc_ext_libtiff_be_i16_gray'
+    LibTiff().write(os.path.join(d, name + '.tif'), pat(1, 'int16', 50, 37), 34887, 1, big_endian=True)
+    finish(name, True)
+
+
 def gen_ccitt_uncompressed():
-    """CCITT "uncompressed mode" (T.4 / T.6 extension). No encoder writes it and no decoder at hand reads it (libtiff:
-    "uncompressed data (not supported)", and with it OpenCV, Pillow, GDAL, libvips; tifffile has no CCITT codec),
-    so these files are packed by hand from the recommendation and listed as unverified."""
+    """CCITT "uncompressed mode" (T.4 / T.6 extension). No encoder writes it and libtiff does not read it ("uncompressed
+    data (not supported)", and with it OpenCV, Pillow, GDAL, libvips; tifffile has no CCITT codec), so these files are
+    packed by hand from the recommendation. FFmpeg's independent decoder reads them and provides the reference; without
+    FFmpeg they are listed as unverified."""
     rng = np.random.default_rng(81)
     w, h = 61, 24
     a = (rng.random((h, w)) < 0.35).astype(np.uint8)       # 1 = black
@@ -1270,21 +1505,36 @@ def gen_ccitt_uncompressed():
         return [x for x in range(len(row)) if row[x] != (row[x - 1] if x else 0)]
 
     def finish(name, img, data, comp, tag, rps=None):
-        d = os.path.join(OUT, 'unverified')
-        os.makedirs(d, exist_ok=True)
-        path = os.path.join(d, name + '.tif')
         page = dict(arr=img[:, :, None], bits=1, photometric=0, compression=comp, raw_chunks=data, rps=rps or img.shape[0], tags=[(tag, 4, [2])])
-        write_tiff(path, [page])
-        for reader in (lambda: ref_cv2(path), lambda: np.asarray(Image.open(path).convert('L'))):
+        tmp = os.path.join(OUT, name + '.tif')
+        write_tiff(tmp, [page])
+        for reader in (lambda: ref_cv2(tmp), lambda: np.asarray(Image.open(tmp).convert('L'))):
             try:
                 got = reader()
-                assert not np.array_equal(got.reshape(img.shape) > 0, img == 0), f'{name}: a reference decoder reads this now - use it'
+                assert not np.array_equal(got.reshape(img.shape) > 0, img == 0), f'{name}: a libtiff based decoder reads this now - use it'
             except AssertionError:
                 raise
             except Exception:
                 pass
+        # FFmpeg's own TIFF / fax decoder (libavcodec, not libtiff) implements the uncompressed mode
+        got = None
+        try:
+            r = subprocess.run(['ffmpeg', '-v', 'error', '-i', tmp, '-pix_fmt', 'gray', '-f', 'rawvideo', '-'], capture_output=True)
+            if r.returncode == 0 and len(r.stdout) == img.size:
+                got = np.frombuffer(r.stdout, np.uint8).reshape(img.shape)
+        except FileNotFoundError:
+            pass
+        if got is not None:
+            assert np.array_equal(got, ((1 - img) * 255).astype(np.uint8)), f'{name}: FFmpeg decodes another picture'
+            write_ref(tmp + '.ref', got[:, :, None])
+            SUMMARY.append((name, ['ffmpeg (libavcodec)']))
+            return
+        d = os.path.join(OUT, 'unverified')
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name + '.tif')
+        os.replace(tmp, path)
         write_ref(path + '.ref', ((1 - img) * 255).astype(np.uint8))
-        reason = 'CCITT uncompressed mode: libtiff (and so OpenCV, Pillow, GDAL, libvips) rejects it, nothing writes it'
+        reason = 'CCITT uncompressed mode: libtiff (and so OpenCV, Pillow, GDAL, libvips) rejects it, nothing writes it; FFmpeg is not installed'
         UNVERIFIED.append((name, reason))
         SUMMARY.append(('unverified/' + name, ['UNVERIFIED: ' + reason]))
 
@@ -1306,6 +1556,131 @@ def gen_ccitt_uncompressed():
     strips = [to_bytes(''.join('000000000001' + '000000001111' + urow(r) for r in a[y:y + 12])) for y in range(0, h, 12)]
     finish('ccitt_g3_uncompressed', a, strips, 3, 292, rps=12)
     finish('ccitt_rle_uncompressed', a, [b''.join(to_bytes('000000001111' + urow(r)) for r in a)], 2, 292)
+
+
+def gen_structures():
+    """SubIFDs, complex samples, raw sensor photometrics, per-sample formats and other rarely seen layouts."""
+    rng = np.random.default_rng(91)
+    # SubIFDs, written by tifffile: two reduced levels below the first page and a second page with one sub-image
+    # (tifffile cannot write SubIFDs inside SubIFDs). References: tifffile's reading of the sub pages.
+    path = os.path.join(OUT, 'subifds_pyramid.tif')
+    base = pat(3, 'uint8', 64, 48)
+    lv1, lv2 = np.ascontiguousarray(base[::2, ::2]), pat(3, 'uint8', 16, 12, seed=4)
+    page2, sub2 = pat(1, 'float32', 20, 10), pat(1, 'float32', 10, 5, seed=6)
+    with tifffile.TiffWriter(path) as tw:
+        tw.write(base, photometric='rgb', subifds=2, metadata=None)
+        tw.write(lv1, photometric='rgb', subfiletype=1, compression='lzw', metadata=None)
+        tw.write(lv2, photometric='rgb', subfiletype=1, tile=(16, 16), metadata=None)
+        tw.write(page2[:, :, 0], subifds=1, compression='zlib', metadata=None)
+        tw.write(sub2[:, :, 0], subfiletype=1, metadata=None)
+    with tifffile.TiffFile(path) as t:
+        p0, p1 = t.pages[0], t.pages[1]
+        got = {'': p0.asarray(), '.sub0': p0.pages[0].asarray(), '.sub1': p0.pages[1].asarray(), '.1': p1.asarray(), '.1.sub0': p1.pages[0].asarray()}
+    want = {'': base, '.sub0': lv1, '.sub1': lv2, '.1': page2[:, :, 0], '.1.sub0': sub2[:, :, 0]}
+    for k, v in got.items():
+        assert np.array_equal(v, want[k], equal_nan=v.dtype.kind == 'f'), k
+        write_ref(path + k + '.ref', v)
+    SUMMARY.append(('subifds_pyramid', ['tifffile (written and read)']))
+
+    # complex samples: two parts (real, imaginary) per sample
+    for name, a, kw in [('complex64_gray', (pat(1, 'float32')[:, :, 0] + 1j * pat(1, 'float32', seed=3)[:, :, 0]).astype(np.complex64), dict()),
+                        ('complex128_lzw', (pat(1, 'float64')[:, :, 0] - 2j * pat(1, 'float64', seed=3)[:, :, 0]).astype(np.complex128), dict(compression='lzw')),
+                        ('be_complex64_rgb_deflate_tiled', (pat(3, 'float32', 40, 33) + 1j * pat(3, 'float32', 40, 33, seed=3)).astype(np.complex64),
+                         dict(compression='zlib', tile=(16, 16), byteorder='>', photometric='rgb'))]:
+        path = os.path.join(OUT, name + '.tif')
+        tifffile.imwrite(path, a, metadata=None, **kw)
+        got = tifffile.imread(path)
+        assert got.dtype == a.dtype and np.array_equal(got, a, equal_nan=True)
+        part = np.dtype(f'f{a.dtype.itemsize // 2}')
+        ref = np.ascontiguousarray(got).view(part).reshape(got.shape[0], got.shape[1], -1)
+        emit_external(name, path, ref, ['tifffile'])
+    try:
+        import rasterio
+        path = os.path.join(OUT, 'complex_int16_gdal.tif')
+        ci = (rng.integers(-3000, 3000, (17, 23)) + 1j * rng.integers(-3000, 3000, (17, 23))).astype(np.complex64)
+        with rasterio.open(path, 'w', driver='GTiff', width=23, height=17, count=1, dtype='complex_int16', compress='deflate') as ds:
+            ds.write(ci, 1)
+        with rasterio.open(path) as ds:
+            got = ds.read(1)
+        assert np.array_equal(got, ci)
+        emit_external('complex_int16_gdal', path, np.stack([got.real, got.imag], axis=-1).astype(np.int16), ['GDAL (rasterio), written by GDAL'])
+    except ImportError:
+        pass
+
+    # raw sensor photometrics (DNG): returned as stored
+    emit('cfa_u16', dict(arr=pat(1, 'uint16'), photometric=32803, compression=LZW, predictor=2))
+    emit('linearraw_u16_rgb', dict(arr=pat(3, 'uint16'), photometric=34892, tile=(16, 16)))
+    # Lab with an extra sample that is not alpha: colour converted, the extra carried along (see gen_lab for the colour)
+
+    # plain float "LogLuv": XYZ with an alpha sample, contiguous and planar. Samples: tifffile; colour: cv2 XYZ2RGB.
+    xyz = cv2.cvtColor(np.abs(test_pattern(31, 23, 3, np.float32, 51)).astype(np.float32) * 0.6 + 0.01, cv2.COLOR_RGB2XYZ)
+    al = np.clip(np.abs(test_pattern(31, 23, 1, np.float32, 53)), 0, 1).astype(np.float32)
+    for name, kw in [('logluv_float_alpha', dict(extrasamples=[2])), ('logluv_float_alpha_planar_lzw', dict(extrasamples=[2], planar=2, compression=LZW)),
+                     ('logluv_float_extra', dict(extrasamples=[0]))]:
+        def from_raw(raw):
+            return np.concatenate([cv2.cvtColor(np.ascontiguousarray(raw[:, :, :3]), cv2.COLOR_XYZ2RGB), raw[:, :, 3:]], axis=2)
+        pth = emit(name, dict(arr=np.concatenate([xyz, al], axis=2), photometric=32845, ref_from_raw=from_raw, **kw), subdir='logluv', variants=('raw',))
+        write_tol(pth, 1e-4)
+
+    # Per-sample formats (converted to Float64), the horizontal predictor on 24-bit floats and 16-bit YCbCr without
+    # JPEG: no decoder reads these the way the tags describe them (tifffile applies the first sample's format to all,
+    # libtiff's RGBA interface is 8-bit only), so they are listed as unverified.
+    def hand(name, page, ref, reason, byteorder='<'):
+        d = os.path.join(OUT, 'unverified')
+        os.makedirs(d, exist_ok=True)
+        pth = os.path.join(d, name + '.tif')
+        write_tiff(pth, [page], byteorder)
+        write_ref(pth + '.ref', ref)
+        UNVERIFIED.append((name, reason))
+        SUMMARY.append(('unverified/' + name, ['UNVERIFIED: ' + reason]))
+        return pth
+
+    why = 'differing SampleFormat per sample: tifffile applies the first format to all samples, libtiff readers refuse'
+    for bits, byteorder in ((32, '<'), (16, '>'), (64, '<')):
+        e = byteorder
+        dt = np.dtype([('u', f'{e}u{bits // 8}'), ('i', f'{e}i{bits // 8}'), ('f', f'{e}f{bits // 8}')])
+        rec = np.zeros((H, W), dt)
+        rec['u'] = pat(1, f'uint{bits}')[:, :, 0]
+        rec['i'] = pat(1, f'int{bits}', seed=2)[:, :, 0]
+        rec['f'] = np.nan_to_num(pat(1, f'float{bits}', seed=3)[:, :, 0])
+        ref = np.stack([rec['u'].astype(np.float64), rec['i'].astype(np.float64), rec['f'].astype(np.float64)], axis=-1)
+        chunks = [rec[y:y + 6].tobytes() for y in range(0, H, 6)]
+        hand(f'mixed_formats_{bits}bit', dict(arr=np.zeros((H, W, 3), f'uint{bits}'), photometric=1, extrasamples=[0, 0], rps=6, raw_chunks=chunks,
+                                             sampleformat=1, tags=[(339, 3, [1, 2, 3])]), ref, why, byteorder)
+
+    f24 = pat(3, 'float16').astype(np.float32)
+    hand('f24_rgb_lzw_pred2', dict(arr=f24, float24=True, sampleformat=3, compression=LZW, predictor=2), f24,
+         'horizontal predictor on 24-bit floats: tifffile and GDAL refuse it')
+    hand('be_f24_gray_deflate_pred2', dict(arr=f24[:, :, :1], float24=True, sampleformat=3, compression=DEFLATE, predictor=2, rps=5), f24[:, :, :1],
+         'horizontal predictor on 24-bit floats: tifffile and GDAL refuse it', '>')
+
+    # 16-bit YCbCr, packed 2x2 blocks and planar 2x1
+    rgb16 = test_pattern(24, 16, 3, np.uint16, 23).astype(np.float64)
+    y = 0.299 * rgb16[:, :, 0] + 0.587 * rgb16[:, :, 1] + 0.114 * rgb16[:, :, 2]
+    cb = (rgb16[:, :, 2] - y) / 1.772 + 32768
+    cr = (rgb16[:, :, 0] - y) / 1.402 + 32768
+    q = lambda a: np.clip(np.round(a), 0, 65535).astype(np.uint16)
+
+    def back(yy, cbb, crr):
+        yy, cbb, crr = yy.astype(np.float64) * 65535 / 65535, (cbb.astype(np.float64) - 32768) * 32767 / 32767, (crr.astype(np.float64) - 32768) * 32767 / 32767
+        r, b = yy + crr * 1.402, yy + cbb * 1.772
+        gg = yy - crr * 1.402 * 0.299 / 0.587 - cbb * 1.772 * 0.114 / 0.587
+        return np.clip(np.floor(np.stack([r, gg, b], axis=-1) + 0.5), 0, 65535).astype(np.uint16)
+
+    why = '16-bit YCbCr without JPEG: libtiff converts YCbCr only at 8 bits, tifffile returns the stored samples'
+    tags16 = [(532, 5, [(0, 1), (65535, 1), (32768, 1), (65535, 1), (32768, 1), (65535, 1)])]
+    cbs, crs = q(cb.reshape(8, 2, 12, 2).mean(axis=(1, 3))), q(cr.reshape(8, 2, 12, 2).mean(axis=(1, 3)))
+    blocks = np.concatenate([q(y).reshape(8, 2, 12, 2).transpose(0, 2, 1, 3).reshape(8, 12, 4), cbs[:, :, None], crs[:, :, None]], axis=2)
+    up = lambda pl, fh, fv: np.repeat(np.repeat(pl, fv, axis=0), fh, axis=1)
+    pth = hand('ycbcr16_2x2', dict(arr=np.zeros((16, 24, 3), np.uint16), photometric=6, rps=8, tags=tags16 + [(530, 3, [2, 2])],
+                                   raw_chunks=[blocks[:4].astype('<u2').tobytes(), blocks[4:].astype('<u2').tobytes()]),
+               back(q(y), up(cbs, 2, 2), up(crs, 2, 2)), why)
+    write_tol(pth, 1)
+    cbs, crs = q(cb.reshape(16, 1, 12, 2).mean(axis=(1, 3))), q(cr.reshape(16, 1, 12, 2).mean(axis=(1, 3)))
+    pth = hand('be_ycbcr16_planar_2x1', dict(arr=np.zeros((16, 24, 3), np.uint16), photometric=6, planar=2, rps=16, tags=tags16 + [(530, 3, [2, 1])],
+                                             raw_chunks=[q(y).astype('>u2').tobytes(), cbs.astype('>u2').tobytes(), crs.astype('>u2').tobytes()]),
+               back(q(y), up(cbs, 2, 1), up(crs, 2, 1)), why, '>')
+    write_tol(pth, 1)
 
 
 def gen_lab():
@@ -1385,6 +1760,7 @@ def gen_lab():
     make('cielab8_lzw_planar', u8(L, A & 255, B & 255), 8, 2, compression=LZW, planar=2)
     make('cielab8_alpha', np.concatenate([u8(L, A & 255, B & 255), alpha8], axis=2), 8, 2, extrasamples=[2])
     make('icclab8', u8(L, A + 128, B + 128), 9, 2, compression=DEFLATE, predictor=2)
+    make('cielab8_extra_unspecified', np.concatenate([u8(L, A & 255, B & 255), alpha8], axis=2), 8, 2, extrasamples=[0])
     make('itulab8', u8(L, np.round(A * 255 / 170 + 128).clip(0, 255), np.round(B * 255 / 200 + 96).clip(0, 255)), 10, 12, tile=(16, 16))
     make('cielab16', u16(L * 257, (A * 256) & 0xFFFF, (B * 256) & 0xFFFF), 8, 400)
     make('be_cielab16_deflate', u16(L * 257 + 100, (A * 256 + 77) & 0xFFFF, (B * 256 - 90) & 0xFFFF).clip(0, 65535).astype(np.uint16),
@@ -1972,9 +2348,12 @@ def main():
     gen_external()
     gen_depths()
     gen_more_codecs()
+    gen_foreign()
+    gen_lerc()
     gen_lab()
     gen_logluv()
     gen_pixarlog()
+    gen_structures()
     gen_ccitt()
     gen_ccitt_uncompressed()
     gen_ycbcr()

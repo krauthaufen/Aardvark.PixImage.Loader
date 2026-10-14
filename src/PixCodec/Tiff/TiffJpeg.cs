@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -214,6 +215,58 @@ namespace PixCodec
             ms.Write(new byte[] { 0xFF, 0xC4, (byte)((19 + n) >> 8), (byte)(19 + n), (byte)id });
             ms.Write(counts);
             ms.Write(Read(offset + 16, n));
+        }
+    }
+}
+
+namespace PixCodec
+{
+    /// <summary>The calls into the LERC and JPEG 2000 codecs that the TIFF encoder needs, in one place.</summary>
+    internal static class TiffForeignCodecs
+    {
+        /// <summary>
+        /// Decodes one LERC blob of width x height pixels into interleaved native samples (channels per pixel in
+        /// <paramref name="destination"/>; the blob may hold fewer). Blob channel = band * depth + index.
+        /// <paramref name="masks"/> (channels * width * height bytes) receives 1 = valid, band after band, for as many
+        /// bands as the blob has masks: one (shared by all bands) or one per band.
+        /// </summary>
+        public static void LercDecode(ReadOnlySpan<byte> blob, SampleType type, int width, int height, Span<byte> destination, int channels,
+            Span<byte> masks, out int bands, out int depth, out int maskCount)
+            => throw new ImageNotSupportedException("TIFF: LERC decoding is not available yet");
+
+        /// <summary>
+        /// Encodes interleaved native samples (channel = band * depth + index) as one LERC2 blob. <paramref name="masks"/>:
+        /// empty (all valid), width * height bytes (one mask for all bands) or bands * width * height, 1 = valid.
+        /// </summary>
+        public static void LercEncode(ReadOnlySpan<byte> samples, SampleType type, int width, int height, int depth, int bands,
+            ReadOnlySpan<byte> masks, double maxError, Stream output)
+            => throw new ImageNotSupportedException("TIFF: LERC encoding is not available yet");
+
+        /// <summary>
+        /// Encodes width x height pixels of <paramref name="samples"/> interleaved native samples as one strip / tile.
+        /// <paramref name="rgb"/>: the first three samples are RGB (JPEG 2000 then uses its reversible colour transform).
+        /// </summary>
+        public static void Encode(int compression, byte[] pixels, int width, int height, int samples, SampleType type, bool rgb, TiffEncodeOptions options, Stream output)
+        {
+            if (compression != 34712) throw new ArgumentException("unknown compression");
+            int bps = RawImage.BytesPerSample(type);
+            bool signed = type is SampleType.Int8 or SampleType.Int16;
+            var planes = new J2kPlanes { Width = width, Height = height, Planes = new J2kPlane[samples] };
+            int n = width * height;
+            for (int c = 0; c < samples; c++)
+            {
+                var d = new int[n];
+                if (bps == 1)
+                    for (int i = 0, k = c; i < n; i++, k += samples) d[i] = signed ? (sbyte)pixels[k] : pixels[k];
+                else
+                {
+                    var px = MemoryMarshal.Cast<byte, ushort>(pixels);
+                    for (int i = 0, k = c; i < n; i++, k += samples) d[i] = signed ? (short)px[k] : px[k];
+                }
+                planes.Planes[c] = new J2kPlane { Width = width, Height = height, Precision = bps * 8, Signed = signed, Data = d };
+            }
+            // (strips / tiles are encoded in parallel already)
+            output.Write(Jp2.EncodeCodestreamPlanes(planes, new Jp2EncodeOptions { Lossless = true, RawCodestream = true, ColorTransform = rgb && samples >= 3, Parallel = false }));
         }
     }
 }
