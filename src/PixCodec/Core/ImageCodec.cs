@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace PixCodec
@@ -146,6 +147,42 @@ namespace PixCodec
 
         public static RawImage Decode(Stream stream) => Decode(ReadAll(stream));
         public static RawImage Decode(string path) => Decode(File.ReadAllBytes(path));
+
+        /// <summary>
+        /// Decodes every image in the file: the pages of a TIFF, the frames of an animated GIF, PNG or WebP (each the whole canvas
+        /// as a viewer shows it), or else the single image.
+        /// </summary>
+        public static RawImage[] DecodeAll(ReadOnlySpan<byte> data)
+        {
+            switch (DetectFormat(data))
+            {
+                case ImageFormat.Tiff:
+                    {
+                        int n = Tiff.GetImageCount(data);
+                        var r = new RawImage[n];
+                        for (int i = 0; i < n; i++) r[i] = Tiff.Decode(data, new TiffDecodeOptions { ImageIndex = i });
+                        return r;
+                    }
+                case ImageFormat.Gif:
+                    return Frames(Gif.DecodeAnimation(data).Frames, f => f.Image!); // composited mode always sets it
+                case ImageFormat.Png when GetInfo(data).IsAnimated:
+                    return Frames(Png.DecodeAnimation(data).Frames, f => f.Image);
+                case ImageFormat.Webp when GetInfo(data).IsAnimated:
+                    return Frames(Webp.DecodeAnimation(data).Frames, f => f.Image);
+                default:
+                    return new[] { Decode(data) };
+            }
+        }
+
+        public static RawImage[] DecodeAll(Stream stream) => DecodeAll(ReadAll(stream));
+        public static RawImage[] DecodeAll(string path) => DecodeAll(File.ReadAllBytes(path));
+
+        static RawImage[] Frames<TF>(IReadOnlyList<TF> frames, Func<TF, RawImage> image)
+        {
+            var r = new RawImage[frames.Count];
+            for (int i = 0; i < r.Length; i++) r[i] = image(frames[i]);
+            return r;
+        }
 
         /// <summary>Encodes with default options for the format.</summary>
         public static void Encode(RawImage image, Stream output, ImageFormat format)

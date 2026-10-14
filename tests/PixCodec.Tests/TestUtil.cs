@@ -133,7 +133,7 @@ public static class TestUtil
     }
 
     // switch on SampleType: sbyte[] also matches a `byte[]` pattern (CLR array covariance)
-    static double[] ToDoubles(RawImage img) => img.SampleType switch
+    public static double[] ToDoubles(RawImage img) => img.SampleType switch
     {
         SampleType.UInt8 => Array.ConvertAll((byte[])img.Data, x => (double)x),
         SampleType.Int8 => Array.ConvertAll((sbyte[])img.Data, x => (double)x),

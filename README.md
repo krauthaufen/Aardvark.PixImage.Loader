@@ -50,6 +50,31 @@ files flagged as carrying EXIF/ICC need the whole file; TIFF directories are loc
 The managed deflate is the default; `Zlib.Backend = ZlibBackend.Bcl` (or `PIXCODEC_ZLIB=bcl`) switches to
 `System.IO.Compression`.
 
+## Image operations
+
+`ImageOps` works on any `RawImage` (every sample type, any channel count) and returns new images:
+
+```csharp
+var thumb = ImageOps.Resize(img, 320, 240);                          // Lanczos3
+var small = ImageOps.Resize(img, 800, 600, ResampleFilter.Mitchell);
+var fit   = ImageOps.ResizeToFit(img, 1024, 1024, new ResizeOptions { LinearLight = true });
+var up    = ImageOps.ApplyOrientation(img);                          // EXIF orientation from the metadata
+var rot   = ImageOps.Rotate(img, 12.5, expand: true, new WarpOptions { Filter = ResampleFilter.Bicubic });
+var w     = ImageOps.WarpPerspective(img, 800, 600, homography, new WarpOptions { Border = BorderMode.Mirror });
+```
+
+- Filters: `Nearest`, `Box`, `Bilinear`, `Hermite`, `Bicubic` (Catmull-Rom), `Mitchell`, `BSpline`, `Hamming`, `Lanczos2`,
+  `Lanczos3`, `Gaussian`, plus `ResampleFilter.Cubic(b, c)`, `Lanczos(n)` and custom kernels.
+- Resizing is separable and widens the filter when downscaling (no aliasing), with pixel areas aligned
+  (the same conventions as Pillow, whose float results it reproduces). Alpha is premultiplied while filtering;
+  `LinearLight` filters 8 and 16 bit sRGB in linear light. Integer results are rounded and clamped, float results are not.
+- Lossless: `Crop`, `FlipHorizontal`, `FlipVertical`, `Rotate90`, `Rotate180`, `Rotate270`, `Transpose`, `Transverse`, `ApplyOrientation`.
+- Warps (`Rotate`, `WarpAffine`, `WarpPerspective`, `Remap`) interpolate with any filter and border mode
+  (`Constant`, `Clamp`, `Wrap`, `Mirror`, `MirrorRepeat`).
+- Multi-threaded and vectorised: 4000x3000 RGB to 1000x750 with Lanczos3 takes about 30 ms on 8 cores (Pillow: 125 ms, one thread).
+
+`ImageCodec.DecodeAll` returns every page of a TIFF or every frame of an animated GIF, PNG or WebP.
+
 ## Aardvark
 
 `Aardvark.PixImage.PixCodec` provides an `IPixLoader`. It registers itself on `Aardvark.Init()`,
@@ -60,6 +85,24 @@ PixImagePixCodec.Init();
 var pi = PixImage.Load("dem.tif");                  // PixImage<float>, wraps the decoded array without copying
 pi.Save("dem.exr");
 ```
+
+Without registering anything, `PixImagePixCodec` loads straight into PixImages:
+
+```csharp
+PixImage img       = PixImagePixCodec.Load("photo.jpg", applyOrientation: true); // PixImage<byte>, upright
+PixImage<float> f  = PixImagePixCodec.Load<float>("scan.tif");                    // converted if the file is not float
+PixImage[] pages   = PixImagePixCodec.LoadAll("stack.tif");                       // pages or animation frames
+ImageInfo info     = PixImagePixCodec.GetInfo("dem.tif");
+PixImagePixCodec.Save(img, "out.webp");
+PixImage p = rawImage.ToPixImage();   RawImage r = pixImage.ToRawImage();
+```
+
+`Init()` also registers `PixCodecProcessor`, so `PixImage.Scaled`, `Resized`, `Rotated`, `Remapped` and `PixImageMipMap.Create`
+use PixCodec for every sample type (ImageInterpolation `Near`, `Linear`, `Cubic`, `Lanczos`, `SuperSample` map to nearest,
+bilinear, bicubic, Lanczos3 and box). Extension methods add the other filters and options:
+`pi.Resized(w, h, ResampleFilter.Mitchell)`, `pi.Resized(w, h, new ResizeOptions { LinearLight = true })`,
+`pi.Rotated(angle, true, new WarpOptions { ... })`, `pi.WarpedAffine(...)`, `pi.WarpedPerspective(...)`, `pi.Oriented(orientation)`.
+The alpha channel is taken from the PixImage format (BGRA works as is, premultiplied RGBP/BGRP are not premultiplied again).
 
 Half float EXR channels load as `PixImage<float>`. BGR(A) images are saved as RGB(A). The existing `PixSaveParams`
 classes (JPEG quality, PNG level, TIFF / EXR compression, WebP quality / lossless, JPEG 2000) are honoured.
