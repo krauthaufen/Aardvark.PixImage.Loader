@@ -817,6 +817,8 @@ namespace PixCodec
             if (png != null)
                 foreach (var entry in png.Text) WriteText(output, entry, level);
             if (ExifTags.ForWriting(meta) is { } exif) WriteChunk(output, PngChunks.eXIf, exif);
+            if (ExifTags.XmpForWriting(meta) is { } xmp && !(png?.Text.Exists(t => t.Keyword == "XML:com.adobe.xmp") ?? false))
+                WriteText(output, new PngTextEntry("XML:com.adobe.xmp", Encoding.UTF8.GetString(xmp).Replace("\0", "")) { International = true }, level);
         }
 
         /// <summary>value / unit as an unsigned integer, rejecting what the field cannot hold.</summary>

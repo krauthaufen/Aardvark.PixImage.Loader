@@ -67,6 +67,27 @@ namespace PixCodec
             return r;
         }
 
+        static readonly System.Text.RegularExpressions.Regex XmpOrientation = new(
+            @"(tiff:Orientation\s*=\s*[""'])\s*\d\s*([""'])|(<tiff:Orientation>)\s*\d\s*(</tiff:Orientation>)",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        /// <summary>The XMP packet with its tiff:Orientation (if any) set to <paramref name="orientation"/>.</summary>
+        public static byte[] XmpWithOrientation(byte[] xmp, int orientation)
+        {
+            var text = System.Text.Encoding.UTF8.GetString(xmp);
+            var r = XmpOrientation.Replace(text, m => m.Groups[1].Success
+                ? m.Groups[1].Value + orientation + m.Groups[2].Value
+                : m.Groups[3].Value + orientation + m.Groups[4].Value);
+            return ReferenceEquals(r, text) || r == text ? xmp : System.Text.Encoding.UTF8.GetBytes(r);
+        }
+
+        /// <summary>The XMP packet to write: <see cref="ImageMetadata.Xmp"/> with tiff:Orientation set to the metadata's orientation.</summary>
+        public static byte[]? XmpForWriting(ImageMetadata? meta)
+        {
+            if (meta?.Xmp is not { Length: > 0 } xmp) return null;
+            return meta.Orientation is >= 1 and <= 8 ? XmpWithOrientation(xmp, meta.Orientation) : xmp;
+        }
+
         /// <summary>
         /// Describes the decoded result when the decoder turns the image upright: size and resolution as returned, OrientationApplied set.
         /// </summary>

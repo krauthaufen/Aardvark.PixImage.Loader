@@ -593,6 +593,13 @@ namespace PixCodec.JpegImpl
 
         void ReadApp1(int p, int n)
         {
+            var xmpId = "http://ns.adobe.com/xap/1.0/\0"u8;
+            if (n > xmpId.Length && Metadata.Xmp == null && new ReadOnlySpan<byte>(_d + p, xmpId.Length).SequenceEqual(xmpId))
+            {
+                Metadata.Xmp = new ReadOnlySpan<byte>(_d + p + xmpId.Length, n - xmpId.Length).ToArray();
+                _hasMetadata = true;
+                return;
+            }
             if (n < 6 || Metadata.Exif != null || !new ReadOnlySpan<byte>(_d + p, 6).SequenceEqual("Exif\0\0"u8)) return;
             var exif = new ReadOnlySpan<byte>(_d + p + 6, n - 6).ToArray();
             Metadata.Exif = exif;

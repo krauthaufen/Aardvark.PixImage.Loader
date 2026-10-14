@@ -727,6 +727,8 @@ namespace PixCodec
                 }
                 var icc = File.Bytes(e, 34675);
                 if (icc != null && icc.Length > 0) m.IccProfile = icc;
+                var xmp = File.Bytes(e, 700);
+                if (xmp != null && xmp.Length > 0) m.Xmp = xmp;
                 // EXIF / GPS directories, repackaged as the standalone EXIF blob other formats carry
                 if (TiffFile.Find(e, 34665, out _) || TiffFile.Find(e, 34853, out _)) m.Exif = TiffExif.Extract(File, _ifdOffset);
             }

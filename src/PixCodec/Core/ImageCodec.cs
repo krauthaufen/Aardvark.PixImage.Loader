@@ -38,7 +38,13 @@ namespace PixCodec
                 _ => ImageFormat.Unknown,
             };
 
-        public static ImageInfo GetInfo(ReadOnlySpan<byte> data) => DetectFormat(data) switch
+        /// <summary>
+        /// Reads format, dimensions, channels, sample type, frame count and the descriptive metadata
+        /// (<see cref="ImageInfo.Metadata"/>) of an encoded image without decoding its pixels.
+        /// </summary>
+        public static ImageInfo GetInfo(ReadOnlySpan<byte> data) => HeaderInfo(data) with { Metadata = TryReadMetadata(data) };
+
+        static ImageInfo HeaderInfo(ReadOnlySpan<byte> data) => DetectFormat(data) switch
         {
             ImageFormat.Png => Png.GetInfo(data),
             ImageFormat.Jpeg => Jpeg.GetInfo(data),
@@ -53,22 +59,73 @@ namespace PixCodec
             _ => throw new ImageFormatException("unknown image format"),
         };
 
-        /// <summary>
-        /// Reads format, dimensions, channels, sample type and frame count of an image file without decoding it and
-        /// without reading the whole file: only the leading part holding the headers is read (TIFF directories are
-        /// located by seeking). GIF is the exception, counting its frames needs the whole file.
-        /// </summary>
-        public static ImageInfo GetInfo(string path)
+        /// <summary>Metadata problems never make the header information unreadable.</summary>
+        static PhotoMetadata? TryReadMetadata(ReadOnlySpan<byte> data)
         {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.None);
-            return GetInfo(fs);
+            try { return MetadataReader.Read(data); }
+            catch (Exception e) when (e is ImageFormatException or ImageNotSupportedException or ArgumentException or IndexOutOfRangeException
+                                       or InvalidOperationException or OverflowException or System.Xml.XmlException) { return null; }
         }
 
         /// <summary>
-        /// Like <see cref="GetInfo(string)"/> for a stream positioned at the start of the image. Reads only as far as
-        /// the headers need (the stream position afterwards is unspecified). Works on non-seekable streams.
+        /// Reads format, dimensions, channels, sample type, frame count and the descriptive metadata of an image file without
+        /// decoding it. The file is memory mapped, so only the parts holding headers and metadata are read from disk (GIF frame
+        /// counting and run length coded TGA / BMP walk all data).
         /// </summary>
-        public static ImageInfo GetInfo(Stream stream) => GetInfo(stream, 8192);
+        public static unsafe ImageInfo GetInfo(string path)
+        {
+            long length = new FileInfo(path).Length;
+            if (length == 0) throw new ImageFormatException("empty file");
+            if (length > int.MaxValue)
+            {
+                // beyond what a span can address: headers through the stream, metadata from the first 2 GB
+                ImageInfo info;
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.None))
+                    info = GetInfo(fs, 8192, false);
+                return info with { Metadata = Mapped(path, int.MaxValue, d => TryReadMetadata(d)) };
+            }
+            return Mapped(path, length, d => GetInfo(d));
+        }
+
+        delegate T SpanFunc<T>(ReadOnlySpan<byte> data);
+
+        static unsafe T Mapped<T>(string path, long length, SpanFunc<T> f)
+        {
+            using var mmf = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
+            using var view = mmf.CreateViewAccessor(0, length, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
+            byte* p = null;
+            view.SafeMemoryMappedViewHandle.AcquirePointer(ref p);
+            try { return f(new ReadOnlySpan<byte>(p + view.PointerOffset, (int)length)); }
+            finally { view.SafeMemoryMappedViewHandle.ReleasePointer(); }
+        }
+
+        /// <summary>
+        /// Like <see cref="GetInfo(string)"/> for a stream positioned at the start of the image (the position afterwards is
+        /// unspecified). Works on non-seekable streams. Pixel data is not read: file streams are memory mapped, other
+        /// seekable streams are walked by seeking past the image data (PNG, WebP, JPEG 2000 chunks, TIFF directories). From
+        /// non-seekable streams the metadata comes from the part read for the headers (for JPEG, up to the scan); metadata
+        /// stored after the pixels (possible in PNG, WebP) is then missed.
+        /// </summary>
+        public static ImageInfo GetInfo(Stream stream) => GetInfo(stream, 8192, true);
+
+        /// <summary>
+        /// Reads the descriptive metadata (EXIF, XMP, IPTC, ICC, comments and text chunks, OpenEXR attributes) and the
+        /// common values taken from them: camera, capture settings, dates, GPS, drone attitude, description. Pixels are not
+        /// decoded. Damaged blocks are skipped.
+        /// </summary>
+        public static PhotoMetadata ReadMetadata(ReadOnlySpan<byte> data) => MetadataReader.Read(data);
+
+        /// <inheritdoc cref="ReadMetadata(ReadOnlySpan{byte})"/>
+        /// <remarks>The file is memory mapped: only the parts holding metadata are read from disk.</remarks>
+        public static PhotoMetadata ReadMetadata(string path)
+        {
+            long length = new FileInfo(path).Length;
+            if (length == 0) throw new ImageFormatException("empty file");
+            return Mapped(path, Math.Min(length, int.MaxValue), d => MetadataReader.Read(d));   // (metadata sits in the first 2 GB)
+        }
+
+        /// <inheritdoc cref="ReadMetadata(ReadOnlySpan{byte})"/>
+        public static PhotoMetadata ReadMetadata(Stream stream) => ReadMetadata(ReadAll(stream));
 
         /// <summary>Returns false instead of throwing when the file is missing, unreadable or not a supported image.</summary>
         public static bool TryGetInfo(string path, out ImageInfo info)
@@ -81,8 +138,41 @@ namespace PixCodec
             }
         }
 
-        internal static ImageInfo GetInfo(Stream stream, int initialSize)
+        internal static ImageInfo GetInfo(Stream stream, int initialSize) => GetInfo(stream, initialSize, true);
+
+        static ImageInfo GetInfo(Stream stream, int initialSize, bool metadata)
         {
+            long start = stream.CanSeek ? stream.Position : -1;
+            var info = HeaderInfo(stream, initialSize, out var prefix);
+            if (!metadata) return info;
+            try
+            {
+                if (stream is FileStream fs && start >= 0 && fs.Length - start > 0)
+                {
+                    // memory mapped: only the pages holding metadata are read
+                    long len = Math.Min(fs.Length - start, int.MaxValue);
+                    using var mmf = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateFromFile(fs, null, 0,
+                        System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read, HandleInheritability.None, leaveOpen: true);
+                    using var view = mmf.CreateViewAccessor(start, len, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
+                    unsafe
+                    {
+                        byte* p = null;
+                        view.SafeMemoryMappedViewHandle.AcquirePointer(ref p);
+                        try { return info with { Metadata = TryReadMetadata(new ReadOnlySpan<byte>(p + view.PointerOffset, (int)len)) }; }
+                        finally { view.SafeMemoryMappedViewHandle.ReleasePointer(); }
+                    }
+                }
+                if (stream is MemoryStream ms && start >= 0 && ms.TryGetBuffer(out var seg))
+                    return info with { Metadata = TryReadMetadata(seg.AsSpan((int)start)) };
+                return info with { Metadata = TryReadMetadata(StreamMetadata.Collect(stream, start, info.Format, prefix)) };
+            }
+            catch (IOException) { return info with { Metadata = TryReadMetadata(prefix) }; }
+            catch (NotSupportedException) { return info with { Metadata = TryReadMetadata(prefix) }; }
+        }
+
+        static ImageInfo HeaderInfo(Stream stream, int initialSize, out byte[] prefix)
+        {
+            prefix = Array.Empty<byte>();
             var buf = new byte[Math.Max(initialSize, 64)];
             int n = Fill(stream, buf, 0);
             bool eof = n < buf.Length;
@@ -90,6 +180,7 @@ namespace PixCodec
             if (format == ImageFormat.Unknown) throw new ImageFormatException("unknown image format");
             if (format == ImageFormat.Tiff && stream.CanSeek)
             {
+                prefix = buf.AsSpan(0, n).ToArray();
                 stream.Seek(-n, SeekOrigin.Current);
                 return Tiff.GetInfo(stream);
             }
@@ -101,11 +192,11 @@ namespace PixCodec
                 || format == ImageFormat.Bmp && Bmp.InfoNeedsAllData(buf.AsSpan(0, n));
             while (true)
             {
-                if (eof) return GetInfo(buf.AsSpan(0, n));
+                if (eof) { prefix = buf.AsSpan(0, n).ToArray(); return HeaderInfo(buf.AsSpan(0, n)); }
                 if (!needAll && (format != ImageFormat.Png || PngHeadersComplete(buf.AsSpan(0, n)))
                     && (format != ImageFormat.Bmp || n >= Math.Min(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(10)), 1u << 20)))
                 {
-                    try { return GetInfo(buf.AsSpan(0, n)); }
+                    try { var r = HeaderInfo(buf.AsSpan(0, n)); prefix = buf.AsSpan(0, n).ToArray(); return r; }
                     catch (ImageFormatException) { }
                 }
                 Array.Resize(ref buf, (int)Math.Min((long)buf.Length * 4, Array.MaxLength));

@@ -232,7 +232,7 @@ namespace PixCodec
                 long worst = Tiled ? (long)Cw * Ch * Spp * Bps * PerPlane : (long)W * H * Spp * Bps;
                 if (Comp != None) worst += worst / 2 + 4096L * N;
                 var m = Image.Metadata;
-                worst += 8192 + 24L * N + (m?.IccProfile?.Length ?? 0) + (m?.Exif?.Length ?? 0) + (ColorMap?.Length ?? 0) * 2;
+                worst += 8192 + 24L * N + (m?.IccProfile?.Length ?? 0) + (m?.Exif?.Length ?? 0) + (m?.Xmp?.Length ?? 0) + (ColorMap?.Length ?? 0) * 2;
                 foreach (var t in Options.ExtraTags) worst += 64 + (long)t.Count * 16;
                 return worst;
             }
@@ -632,6 +632,7 @@ namespace PixCodec
                 if (exif.Find(296) is { } eu) n.Set(eu);
             }
             if (meta?.IccProfile is { Length: > 0 } icc) n.Set(new TiffField { Tag = 34675, Type = 7, Count = icc.Length, Data = icc });
+            if (ExifTags.XmpForWriting(meta) is { Length: > 0 } xmp) n.Set(new TiffField { Tag = 700, Type = 1, Count = xmp.Length, Data = xmp });
 
             foreach (var t in o.ExtraTags)
             {

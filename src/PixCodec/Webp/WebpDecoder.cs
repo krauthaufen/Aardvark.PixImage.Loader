@@ -223,8 +223,9 @@ namespace PixCodec
 
         static ImageMetadata? Metadata(WebpContainer c, ReadOnlySpan<byte> data)
         {
-            if (c.IccLength < 0 && c.ExifLength < 0) return null;
+            if (c.IccLength < 0 && c.ExifLength < 0 && c.XmpLength < 0) return null;
             var m = new ImageMetadata();
+            if (c.XmpLength >= 0) m.Xmp = data.Slice(c.XmpOffset, c.XmpLength).ToArray();
             if (c.IccLength >= 0) m.IccProfile = data.Slice(c.IccOffset, c.IccLength).ToArray();
             if (c.ExifLength >= 0)
             {

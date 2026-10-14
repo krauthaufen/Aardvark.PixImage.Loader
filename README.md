@@ -30,9 +30,15 @@ RawImage img = ImageCodec.Decode("photo.jpg");      // format is sniffed from th
 ImageCodec.Encode(img, "out.png");                  // format from the extension
 Jpeg.Encode(img, stream, new JpegEncodeOptions { Quality = 85, Progressive = true });
 
-ImageInfo info = ImageCodec.GetInfo("scan.tif");    // reads only the headers
+ImageInfo info = ImageCodec.GetInfo("scan.tif");    // headers and metadata, no pixels
 // info.Format, Width, Height, Channels, SampleType, Color, FrameCount,
-// BitsPerSample, Orientation (+ StoredWidth/Height), DpiX, DpiY, HasIccProfile, IsAnimated
+// BitsPerSample, Orientation (+ StoredWidth/Height), DpiX, DpiY, HasIccProfile, IsAnimated, MipLevels, Metadata
+PhotoMetadata m = info.Metadata!;                   // or ImageCodec.ReadMetadata(path)
+// m.Make, Model, LensModel, SerialNumber, DateTaken (+ DateTakenOffset), ExposureTime, FNumber, Iso, FocalLength, ...
+// m.Gps: Latitude, Longitude, Altitude, TimeUtc, Speed, ImageDirection, HorizontalError, ...
+// m.Pose: camera / gimbal and vehicle yaw, pitch, roll, relative / absolute altitude, RTK (DJI, Parrot, Pix4D camera XMP)
+// m.Title, Description, Artist, Copyright, Keywords, Rating, City, ...; m.Panorama (GPano)
+// raw: m.Exif (every tag), m.Xmp (every property), m.Iptc, m.Comments, m.Text (PNG), m.ExrAttributes, m.Thumbnail
 if (ImageCodec.TryGetInfo(path, out var i)) { /* ... */ }
 RawImage[] levels = ImageCodec.DecodeMipmaps("tex.dds");   // stored mip levels (DDS, OpenEXR), else just the image
 DdsTexture tex = Dds.DecodeTexture(bytes);              // every surface: tex.GetImage(mip, item, face, slice)
@@ -49,8 +55,12 @@ EXR headers, named channels, levels and deep data.
 
 Malformed files throw `ImageFormatException`, valid files using an unimplemented feature throw `ImageNotSupportedException`.
 
-`GetInfo` reads the leading part of the file only. Exceptions: GIF and animated WebP (frames are counted) and WebP
-files flagged as carrying EXIF/ICC need the whole file; TIFF directories are located by seeking.
+`GetInfo` never reads pixel data: files are memory mapped (only the pages holding headers and metadata are read),
+streams are walked by seeking past image chunks (PNG, WebP, JPEG 2000) or by reading just the TIFF directories. GIF
+frame counting and run length coded TGA / BMP walk all data. Metadata comes from EXIF, XMP (also JPEG extended XMP),
+IPTC (JPEG APP13, TIFF), ICC descriptions, JPEG / GIF / JPEG 2000 comments, PNG text chunks (incl. ImageMagick raw
+profiles) and OpenEXR attributes; where several hold a value, EXIF wins over XMP over IPTC. XMP is kept when decoding
+and written back by the JPEG, PNG, TIFF and WebP encoders (its tiff:Orientation follows the applied orientation).
 
 ## Compression
 

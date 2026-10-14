@@ -112,6 +112,7 @@ namespace PixCodec
             {
                 m.Orientation = 1;
                 if (m.Exif != null) m.Exif = ExifTags.WithOrientation(m.Exif, 1);
+                if (m.Xmp != null) m.Xmp = ExifTags.XmpWithOrientation(m.Xmp, 1);
             }
             return r;
         }
@@ -308,7 +309,7 @@ namespace PixCodec
 
         static ImageMetadata? CopyMetadata(ImageMetadata? m) => m == null ? null : new ImageMetadata
         {
-            IccProfile = m.IccProfile, Exif = m.Exif, DpiX = m.DpiX, DpiY = m.DpiY, Gamma = m.Gamma, Orientation = m.Orientation,
+            IccProfile = m.IccProfile, Exif = m.Exif, Xmp = m.Xmp, DpiX = m.DpiX, DpiY = m.DpiY, Gamma = m.Gamma, Orientation = m.Orientation,
         };
 
         static ImageMetadata? ScaledMetadata(ImageMetadata? m, double sx, double sy)

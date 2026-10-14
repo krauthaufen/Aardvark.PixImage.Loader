@@ -385,6 +385,14 @@ namespace Aardvark.Base
             return r;
         }
 
+        /// <summary>
+        /// Reads the descriptive metadata without decoding pixels: EXIF, XMP, IPTC, comments, and the values commonly needed
+        /// from them (camera, exposure, dates, GPS, drone gimbal / flight attitude, description). See <see cref="PhotoMetadata"/>.
+        /// </summary>
+        public static PhotoMetadata ReadMetadata(string path) => ImageCodec.ReadMetadata(path);
+        /// <inheritdoc cref="ReadMetadata(string)"/>
+        public static PhotoMetadata ReadMetadata(Stream stream) => ImageCodec.ReadMetadata(stream);
+
         /// <summary>Reads only the headers: format, size, channels, sample type, orientation, dpi, ... (see <see cref="ImageInfo"/>).</summary>
         public static ImageInfo GetInfo(string path) => ImageCodec.GetInfo(path);
         /// <inheritdoc cref="GetInfo(string)"/>

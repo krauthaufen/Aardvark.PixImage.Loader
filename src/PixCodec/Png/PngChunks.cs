@@ -229,7 +229,7 @@ namespace PixCodec
 
                 bool critical = IsCritical(type);
                 bool animationChunk = wantAnimation && type is acTL or fcTL or fdAT;
-                bool wanted = critical || animationChunk || type is tRNS or gAMA or pHYs or iCCP or eXIf
+                bool wanted = critical || animationChunk || type is tRNS or gAMA or pHYs or iCCP or eXIf or iTXt
                               || (wantPngMeta && type is sRGB or cHRM or sBIT or bKGD or tIME or tEXt or zTXt or iTXt
                                                          or hIST or sPLT or oFFs or pCAL or sCAL or sTER or cICP or mDCV or cLLI or mDCvDraft or cLLiDraft);
                 if (verify && wanted && !CrcOk(data, chunkPos, body.Length))
@@ -312,7 +312,7 @@ namespace PixCodec
                         break;
                     default:
                         if (critical) throw new ImageNotSupportedException($"unknown critical PNG chunk '{TypeName(type)}'");
-                        if (wantPngMeta) ReadPngMetadata(type, body, data, s);
+                        if (wantPngMeta || type == iTXt) ReadPngMetadata(type, body, data, s, wantPngMeta);
                         break;
                 }
             }
@@ -437,7 +437,7 @@ namespace PixCodec
         /// <summary>Number of sBIT entries for a color type.</summary>
         public static int SignificantBitsCount(int colorType) => colorType switch { 0 => 1, 4 => 2, 6 => 4, _ => 3 };
 
-        static void ReadPngMetadata(uint type, ReadOnlySpan<byte> body, ReadOnlySpan<byte> data, PngStructure s)
+        static void ReadPngMetadata(uint type, ReadOnlySpan<byte> body, ReadOnlySpan<byte> data, PngStructure s, bool wantPngMeta)
         {
             ref readonly PngHeader h = ref s.Header;
             switch (type)
@@ -494,7 +494,12 @@ namespace PixCodec
                 case tEXt:
                 case zTXt:
                 case iTXt:
-                    if (ReadText(type, body) is { } entry) (s.PngMeta ??= new PngMetadata()).Text.Add(entry);
+                    if (ReadText(type, body) is { } entry)
+                    {
+                        // XMP goes to ImageMetadata.Xmp, the other text to the PNG metadata
+                        if (entry.Keyword == "XML:com.adobe.xmp") (s.Meta ??= new ImageMetadata()).Xmp ??= Encoding.UTF8.GetBytes(entry.Text);
+                        else if (wantPngMeta) (s.PngMeta ??= new PngMetadata()).Text.Add(entry);
+                    }
                     break;
                 case hIST:
                     if (h.IsPalette && s.PlteLength > 0 && body.Length == s.PlteLength / 3 * 2)

@@ -21,7 +21,7 @@ public class InfoTests
             .Select(c => new object[] { Path.GetRelativePath(fixtures, c[0]), c });
     }
 
-    sealed class CountingStream(Stream inner, bool seekable) : Stream
+    internal sealed class CountingStream(Stream inner, bool seekable) : Stream
     {
         public long BytesRead;
         public override bool CanRead => true;

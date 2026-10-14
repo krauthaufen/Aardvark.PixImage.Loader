@@ -53,6 +53,11 @@ namespace PixCodec
         public byte[]? IccProfile;
         /// <summary>Raw EXIF blob (starting at the TIFF header), if embedded.</summary>
         public byte[]? Exif;
+        /// <summary>
+        /// Raw XMP packet (UTF-8), if embedded (JPEG, PNG, TIFF, WebP, JPEG 2000); written back by the JPEG, PNG, TIFF and WebP
+        /// encoders. Parse it with <see cref="XmpData.Parse"/>, or read all metadata of a file with ImageCodec.ReadMetadata.
+        /// </summary>
+        public byte[]? Xmp;
         /// <summary>Horizontal / vertical resolution in pixels per inch, 0 if unknown.</summary>
         public double DpiX, DpiY;
         /// <summary>File gamma (PNG gAMA), 0 if unknown.</summary>
@@ -107,6 +112,23 @@ namespace PixCodec
         /// See <see cref="ImageCodec.DecodeMipmaps(ReadOnlySpan{byte})"/>.
         /// </summary>
         public int MipLevels { get; init; } = 1;
+
+        /// <summary>
+        /// The file's descriptive metadata (EXIF, XMP, IPTC; camera, exposure, dates, GPS, drone attitude, description), filled
+        /// by <see cref="ImageCodec.GetInfo(string)"/> and its overloads without decoding pixels; null from the format specific
+        /// GetInfo methods. Not part of equality.
+        /// </summary>
+        public PhotoMetadata? Metadata { get; init; }
+
+        public bool Equals(ImageInfo o)
+            => Format == o.Format && Width == o.Width && Height == o.Height && Channels == o.Channels && SampleType == o.SampleType
+               && Color == o.Color && FrameCount == o.FrameCount && BitsPerSample == o.BitsPerSample && Orientation == o.Orientation
+               && OrientationApplied == o.OrientationApplied && DpiX.Equals(o.DpiX) && DpiY.Equals(o.DpiY) && HasIccProfile == o.HasIccProfile
+               && IsAnimated == o.IsAnimated && MipLevels == o.MipLevels;
+
+        public override int GetHashCode()
+            => HashCode.Combine(HashCode.Combine(Format, Width, Height, Channels, SampleType, Color, FrameCount),
+                HashCode.Combine(BitsPerSample, Orientation, OrientationApplied, DpiX, DpiY, HasIccProfile, IsAnimated, MipLevels));
 
         /// <summary>Width / Height of the pixels as stored in the file, before the orientation is applied (swapped for 5..8).</summary>
         public int StoredWidth => OrientationApplied && Orientation >= 5 ? Height : Width;

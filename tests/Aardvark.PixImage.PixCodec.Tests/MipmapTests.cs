@@ -145,4 +145,13 @@ public class MipmapTests
         PixImagePixCodec.SaveDds(vol, bs, new DdsEncodeOptions { Compression = DdsCompression.BC1 });
         Assert.Equal((DdsTextureKind.Texture3D, 3, "BC1_UNORM"), (Dds.GetTextureInfo(bs.ToArray()).Kind, Dds.GetTextureInfo(bs.ToArray()).Depth, Dds.GetTextureInfo(bs.ToArray()).Format));
     }
+
+    [Fact]
+    public void MetadataWithTheInfo()
+    {
+        var info = PixImagePixCodec.GetInfo(Fixture("metadata/meta.jpg"));
+        Assert.Equal(("DJI", -90.0), (info.Metadata!.Make, info.Metadata.Pose!.CameraPitch));
+        Assert.Equal(47.0707123, info.Metadata.Gps!.Latitude!.Value, 9);
+        Assert.Equal("FC6310R", PixImagePixCodec.ReadMetadata(Fixture("metadata/meta.png")).Model);
+    }
 }
