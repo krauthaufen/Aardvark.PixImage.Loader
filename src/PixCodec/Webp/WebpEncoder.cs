@@ -143,7 +143,7 @@ namespace PixCodec
             icc = exif = xmp = null;
             if (!opt.WriteMetadata) return;
             icc = image.Metadata?.IccProfile;
-            exif = image.Metadata?.Exif;
+            exif = ExifTags.ForWriting(image.Metadata);
             xmp = opt.Xmp;
             if (icc != null && icc.Length == 0) icc = null;
             if (exif != null && exif.Length == 0) exif = null;

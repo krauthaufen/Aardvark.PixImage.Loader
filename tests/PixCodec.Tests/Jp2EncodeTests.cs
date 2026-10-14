@@ -297,22 +297,27 @@ public class Jp2EncodeTests
         foreach (bool ht in new[] { false, true })
         {
             var bytes = Jp2.Encode(img, new Jp2EncodeOptions { HighThroughput = ht });
-            var back = Jp2.Decode(bytes);
+            var back = Jp2.Decode(bytes, new Jp2DecodeOptions { ApplyOrientation = false });
             AssertEqual(img, back);
             var m = back.Metadata!;
             Assert.Equal(icc, m.IccProfile);
             Assert.Equal(exif, m.Exif);
             Assert.Equal(5, m.Orientation);
             Assert.Equal(300, m.DpiX, 6); Assert.Equal(72.5, m.DpiY, 6);
+            // by default upright, with the resolution and the EXIF tag following
+            var up = Jp2.Decode(bytes);
+            AssertEqual(ImageOps.Transpose(img), up);
+            Assert.Equal((1, 72.5, 300.0), (up.Metadata!.Orientation, Math.Round(up.Metadata.DpiX, 6), Math.Round(up.Metadata.DpiY, 6)));
+            Assert.Equal(1, up.Metadata.Exif![18]);
             var info = Jp2.GetInfo(bytes);
-            Assert.Equal((true, 5, 300.0, 72.5), (info.HasIccProfile, info.Orientation, Math.Round(info.DpiX, 6), Math.Round(info.DpiY, 6)));
-            Assert.Equal((30, 40), (info.OrientedWidth, info.OrientedHeight));
+            Assert.Equal((true, 5, 72.5, 300.0), (info.HasIccProfile, info.Orientation, Math.Round(info.DpiX, 6), Math.Round(info.DpiY, 6)));
+            Assert.Equal((30, 40, 40, 30, true), (info.Width, info.Height, info.StoredWidth, info.StoredHeight, info.OrientationApplied));
             var oracle = Oracle(bytes, ht ? ".jph" : ".jp2");
             if (oracle != null) AssertEqual(img, oracle);
         }
         // orientation without an EXIF block is written as a minimal one
         img.Metadata = new ImageMetadata { Orientation = 8 };
-        var o2 = Jp2.Decode(Jp2.Encode(img));
+        var o2 = Jp2.Decode(Jp2.Encode(img), new Jp2DecodeOptions { ApplyOrientation = false });
         Assert.Equal(8, o2.Metadata!.Orientation);
         Assert.Null(o2.Metadata.IccProfile);
         // not written on request, and never into a raw codestream

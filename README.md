@@ -29,12 +29,14 @@ Jpeg.Encode(img, stream, new JpegEncodeOptions { Quality = 85, Progressive = tru
 
 ImageInfo info = ImageCodec.GetInfo("scan.tif");    // reads only the headers
 // info.Format, Width, Height, Channels, SampleType, Color, FrameCount,
-// BitsPerSample, Orientation (+ OrientedWidth/Height), DpiX, DpiY, HasIccProfile, IsAnimated
+// BitsPerSample, Orientation (+ StoredWidth/Height), DpiX, DpiY, HasIccProfile, IsAnimated
 if (ImageCodec.TryGetInfo(path, out var i)) { /* ... */ }
 ```
 
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
-in R,G,B,A order with straight alpha. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Lerc`, `Jbig`)
+in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF orientation (JPEG, PNG, WebP, TIFF, JPEG 2000)
+is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
+turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Lerc`, `Jbig`)
 with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data.
 
@@ -58,7 +60,7 @@ The managed deflate is the default; `Zlib.Backend = ZlibBackend.Bcl` (or `PIXCOD
 var thumb = ImageOps.Resize(img, 320, 240);                          // Lanczos3
 var small = ImageOps.Resize(img, 800, 600, ResampleFilter.Mitchell);
 var fit   = ImageOps.ResizeToFit(img, 1024, 1024, new ResizeOptions { LinearLight = true });
-var up    = ImageOps.ApplyOrientation(img);                          // EXIF orientation from the metadata
+var turn  = ImageOps.Rotate90(img);                                  // lossless, also Flip*, Transpose, ApplyOrientation
 var rot   = ImageOps.Rotate(img, 12.5, expand: true, new WarpOptions { Filter = ResampleFilter.Bicubic });
 var w     = ImageOps.WarpPerspective(img, 800, 600, homography, new WarpOptions { Border = BorderMode.Mirror });
 ```
@@ -86,10 +88,12 @@ var pi = PixImage.Load("dem.tif");                  // PixImage<float>, wraps th
 pi.Save("dem.exr");
 ```
 
-Without registering anything, `PixImagePixCodec` loads straight into PixImages:
+Without registering anything, `PixImagePixCodec` loads straight into PixImages. Like the registered loader it always returns
+upright images (orientation applied) whose volume has the dense image layout: channels innermost, then x, then y, top row first,
+starting at index 0 (no y-flip; the same convention as the other Aardvark loaders).
 
 ```csharp
-PixImage img       = PixImagePixCodec.Load("photo.jpg", applyOrientation: true); // PixImage<byte>, upright
+PixImage img       = PixImagePixCodec.Load("photo.jpg");                         // PixImage<byte>, upright
 PixImage<float> f  = PixImagePixCodec.Load<float>("scan.tif");                    // converted if the file is not float
 PixImage[] pages   = PixImagePixCodec.LoadAll("stack.tif");                       // pages or animation frames
 ImageInfo info     = PixImagePixCodec.GetInfo("dem.tif");

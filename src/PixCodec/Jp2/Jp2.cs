@@ -61,12 +61,17 @@ namespace PixCodec
     {
         /// <summary>Number of highest resolution levels to discard: the result is 2^Reduce times smaller in each direction.</summary>
         public int Reduce { get; set; }
+        /// <summary>
+        /// Rotate / mirror the pixels according to the EXIF orientation (default), so that the image comes back upright; its
+        /// metadata then says orientation 1. False returns the pixels as stored with the file's orientation in the metadata.
+        /// </summary>
+        public bool ApplyOrientation { get; set; } = true;
         /// <summary>Decode only the first quality layers (0 = all).</summary>
         public int MaxLayers { get; set; }
         /// <summary>
-        /// Decode only this window, given in full resolution pixels relative to the image origin (it is clipped to the
-        /// image; with <see cref="Reduce"/> the result is the correspondingly smaller window). Only the tiles and
-        /// code-blocks that contribute to the window are decoded.
+        /// Decode only this window, given in full resolution pixels of the image as returned, i.e. upright unless
+        /// <see cref="ApplyOrientation"/> is off (it is clipped to the image; with <see cref="Reduce"/> the result is the
+        /// correspondingly smaller window). Only the tiles and code-blocks that contribute to the window are decoded.
         /// </summary>
         public (int X, int Y, int Width, int Height)? Region { get; set; }
         /// <summary>
@@ -90,6 +95,13 @@ namespace PixCodec
         /// a silently incomplete image is the worse failure for most uses. Missing tiles come out as 0.
         /// </summary>
         public bool AllowTruncated { get; set; }
+
+        internal Jp2DecodeOptions With((int, int, int, int) region)
+        {
+            var o = (Jp2DecodeOptions)MemberwiseClone();
+            o.Region = region;
+            return o;
+        }
     }
 
     public sealed class Jp2EncodeOptions
@@ -215,13 +227,13 @@ namespace PixCodec
             }
             if (siz.Width > int.MaxValue || siz.Height > int.MaxValue) throw new ImageNotSupportedException("JPEG 2000 image larger than 2^31 pixels across");
             var layout = Jp2Layout.Create(hdr, siz, false, null);
-            return new ImageInfo(ImageFormat.Jp2, (int)siz.Width, (int)siz.Height, layout.OutChannels, layout.Type, layout.Color)
+            return ExifTags.Upright(new ImageInfo(ImageFormat.Jp2, (int)siz.Width, (int)siz.Height, layout.OutChannels, layout.Type, layout.Color)
             {
                 BitsPerSample = layout.BitsPerSample,
                 Orientation = hdr.Orientation,
                 DpiX = hdr.DpiX, DpiY = hdr.DpiY,
                 HasIccProfile = hdr.Icc != null,
-            };
+            });
         }
 
         /// <summary>Decodes a complete JP2 / JPH file or raw codestream held in memory.</summary>
@@ -229,10 +241,29 @@ namespace PixCodec
         {
             options ??= new Jp2DecodeOptions();
             var hdr = Jp2Header.Parse(data, false);
-            var img = DecodeImage(data.Slice(hdr.CodestreamStart, hdr.CodestreamLength), options, hdr, options.RawComponents || options.Components != null);
+            var codestream = data.Slice(hdr.CodestreamStart, hdr.CodestreamLength);
+            bool orient = options.ApplyOrientation && hdr.Orientation > 1;
+            if (orient && options.Region is { } region)
+            {
+                J2kSiz siz;
+                fixed (byte* p = codestream)
+                {
+                    var cs = new J2kCodestream(p, codestream.Length);
+                    cs.ParseSiz();
+                    siz = cs.Siz;
+                }
+                int sw = (int)Math.Min(siz.Width, int.MaxValue), sh = (int)Math.Min(siz.Height, int.MaxValue);
+                int uw = hdr.Orientation >= 5 ? sh : sw, uh = hdr.Orientation >= 5 ? sw : sh;
+                if (region.X < 0 || region.Y < 0 || region.Width <= 0 || region.Height <= 0) throw new ArgumentException("bad region");
+                // clipped to the upright image here, as the decoder clips unturned regions
+                int x1 = (int)Math.Min((long)region.X + region.Width, uw), y1 = (int)Math.Min((long)region.Y + region.Height, uh);
+                if (region.X >= x1 || region.Y >= y1) throw new ArgumentException("the region lies outside the image");
+                options = options.With(ExifTags.StoredRegion(hdr.Orientation, sw, sh, (region.X, region.Y, x1 - region.X, y1 - region.Y)));
+            }
+            var img = DecodeImage(codestream, options, hdr, options.RawComponents || options.Components != null);
             if (hdr.Icc != null || hdr.Exif != null || hdr.DpiX > 0 || hdr.Orientation != 0)
                 img.Metadata = new ImageMetadata { IccProfile = hdr.Icc, Exif = hdr.Exif, DpiX = hdr.DpiX, DpiY = hdr.DpiY, Orientation = hdr.Orientation };
-            return img;
+            return orient ? ImageOps.ApplyOrientation(img) : img;
         }
 
         /// <summary>The XMP packet of a JP2 file (uuid box or xml box holding one), null if there is none.</summary>

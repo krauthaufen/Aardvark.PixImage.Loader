@@ -98,8 +98,9 @@ public class JpegTests
     [MemberData(nameof(MiscWithRef))]
     public void DecodeMatchesReference(string file)
     {
-        var expected = TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref");
         var data = Load(file);
+        // the references hold the stored pixels, Decode turns them upright
+        var expected = ImageOps.ApplyOrientation(TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref"), Jpeg.GetInfo(data).Orientation);
         var actual = Jpeg.Decode(data);
         TestUtil.AssertEqual(expected, actual, 0);
 
@@ -109,7 +110,7 @@ public class JpegTests
             (info.Format, info.Width, info.Height, info.Channels, info.SampleType, info.Color));
         // the file-level properties are what Decode reports as metadata
         var meta = actual.Metadata ?? new ImageMetadata();
-        Assert.Equal((meta.Orientation, meta.DpiX, meta.DpiY, meta.IccProfile != null), (info.Orientation, info.DpiX, info.DpiY, info.HasIccProfile));
+        Assert.Equal((meta.Orientation, meta.DpiX, meta.DpiY, meta.IccProfile != null), (Math.Min(info.Orientation, 1), info.DpiX, info.DpiY, info.HasIccProfile));
         Assert.InRange(info.BitsPerSample, actual.SampleType == SampleType.UInt8 ? 2 : 9, actual.SampleType == SampleType.UInt8 ? 8 : 16);
         Assert.False(info.IsAnimated);
     }
@@ -120,7 +121,7 @@ public class JpegTests
     public void DecodePathsAgree(string file)
     {
         var data = Load(file);
-        var expected = TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref");
+        var expected = ImageOps.ApplyOrientation(TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref"), Jpeg.GetInfo(data).Orientation);
         lock (PathLock)
         {
             try
@@ -167,11 +168,14 @@ public class JpegTests
     [Fact]
     public void Metadata()
     {
-        var img = Jpeg.Decode(Load("jpeg/meta_exif_icc.jpg"));
+        var img = Jpeg.Decode(Load("jpeg/meta_exif_icc.jpg"), Stored);
         var m = img.Metadata!;
         Assert.Equal(300, m.DpiX);
         Assert.Equal(150, m.DpiY);
         Assert.Equal(6, m.Orientation);
+        // by default turned upright: resolution swapped, orientation 1 also in the EXIF blob
+        var up = Jpeg.Decode(Load("jpeg/meta_exif_icc.jpg")).Metadata!;
+        Assert.Equal((150.0, 300.0, 1, 1), (up.DpiX, up.DpiY, up.Orientation, ExifOrientationOf(up.Exif!)));
         Assert.NotNull(m.Exif);
         Assert.True(m.Exif!.AsSpan(0, 2).SequenceEqual("II"u8) || m.Exif.AsSpan(0, 2).SequenceEqual("MM"u8));
         Assert.Equal(File.ReadAllBytes(TestUtil.Fixture("jpeg/meta_exif_icc.icc")), m.IccProfile);
@@ -350,19 +354,36 @@ public class JpegTests
     {
         var data = Load(file);
         int orientation = file[file.IndexOf("orient") + 6] - '0';
-        var plain = Jpeg.Decode(data);
+        var plain = Jpeg.Decode(data, new JpegDecodeOptions { ApplyOrientation = false });
         Assert.Equal(orientation, plain.Metadata!.Orientation);
         Assert.Equal((300.0, 100.0), (plain.Metadata.DpiX, plain.Metadata.DpiY));
 
-        var o = new JpegDecodeOptions { ApplyOrientation = true };
-        var upright = Jpeg.Decode(data, o);
+        var o = new JpegDecodeOptions();
+        var upright = Jpeg.Decode(data);
         TestUtil.AssertEqual(TestUtil.LoadRef(TestUtil.Fixture(file) + ".ref"), upright, 0);
+        TestUtil.AssertEqual(ImageOps.ApplyOrientation(plain), upright, 0);
         Assert.Equal(1, upright.Metadata!.Orientation);
+        Assert.Equal(1, ExifOrientationOf(upright.Metadata.Exif!));
         bool swap = orientation >= 5;
         Assert.Equal(swap ? (plain.Height, plain.Width) : (plain.Width, plain.Height), (upright.Width, upright.Height));
         Assert.Equal(swap ? (100.0, 300.0) : (300.0, 100.0), (upright.Metadata.DpiX, upright.Metadata.DpiY));
         var info = Jpeg.GetInfo(data, o);
         Assert.Equal((upright.Width, upright.Height), (info.Width, info.Height));
+        Assert.Equal((orientation, orientation > 1), (info.Orientation, info.OrientationApplied));
+        Assert.Equal((upright.Metadata.DpiX, upright.Metadata.DpiY), (info.DpiX, info.DpiY));
+
+        // re-encoding the upright image must not rotate it a second time when read back
+        var again = Jpeg.Decode(ImageCodec.Encode(upright, ImageFormat.Jpeg));
+        Assert.Equal((upright.Width, upright.Height, 1), (again.Width, again.Height, again.Metadata!.Orientation));
+    }
+
+    static readonly JpegDecodeOptions Stored = new() { ApplyOrientation = false };
+
+    /// <summary>The orientation tag of an EXIF blob, read back through a JPEG carrying it.</summary>
+    static int ExifOrientationOf(byte[] exif)
+    {
+        var probe = new RawImage(1, 1, ColorModel.Gray, new byte[1], 1, new ImageMetadata { Exif = exif });
+        return Jpeg.Decode(Encode(probe), Stored).Metadata!.Orientation;
     }
 
     [Fact]
@@ -1051,7 +1072,7 @@ public class JpegTests
         // metadata survives; gray keeps its density (JFIF), RGB cannot carry one
         var rgb = Synthetic16(9, 7, ColorModel.Rgb, 16);
         rgb.Metadata = new ImageMetadata { DpiX = 300, DpiY = 300, Orientation = 3, IccProfile = new byte[] { 1, 2, 3 } };
-        var m = Jpeg.Decode(Encode(rgb, new JpegEncodeOptions { Lossless = true })).Metadata!;
+        var m = Jpeg.Decode(Encode(rgb, new JpegEncodeOptions { Lossless = true }), Stored).Metadata!;
         Assert.Equal((3, 0.0), (m.Orientation, m.DpiX));
         Assert.Equal(new byte[] { 1, 2, 3 }, m.IccProfile);
     }
@@ -1192,12 +1213,12 @@ public class JpegTests
         var src = Synthetic(20, 12, ColorModel.Rgb);
         var icc = new byte[150_000];
         new Random(5).NextBytes(icc);
-        var exif = Jpeg.Decode(Load("jpeg/meta_exif_icc.jpg")).Metadata!.Exif!;
+        var exif = Jpeg.Decode(Load("jpeg/meta_exif_icc.jpg"), Stored).Metadata!.Exif!;
         src.Metadata = new ImageMetadata { DpiX = 300, DpiY = 72, IccProfile = icc, Exif = exif };
         foreach (bool progressive in new[] { false, true })
         {
             var bytes = Encode(src, new JpegEncodeOptions { Progressive = progressive });
-            var m = Jpeg.Decode(bytes).Metadata!;
+            var m = Jpeg.Decode(bytes, Stored).Metadata!;
             Assert.Equal((300.0, 72.0), (m.DpiX, m.DpiY));
             Assert.Equal(icc, m.IccProfile);
             Assert.Equal(exif, m.Exif);
@@ -1206,8 +1227,11 @@ public class JpegTests
 
         // orientation without an EXIF blob is still carried
         src.Metadata = new ImageMetadata { Orientation = 8 };
-        var m2 = Jpeg.Decode(Encode(src)).Metadata!;
+        var m2 = Jpeg.Decode(Encode(src), Stored).Metadata!;
         Assert.Equal(8, m2.Orientation);
+        // the metadata's orientation wins over the one in the EXIF blob
+        src.Metadata = new ImageMetadata { Orientation = 3, Exif = exif };
+        Assert.Equal(3, Jpeg.Decode(Encode(src), Stored).Metadata!.Orientation);
         Assert.Equal(0, m2.DpiX);
 
         src.Metadata = null;

@@ -12,6 +12,8 @@ public class WebpTests(ITestOutputHelper output)
 {
     public static IEnumerable<object[]> Fixtures => Files("webp", ".webp");
 
+    static readonly WebpDecodeOptions Stored = new() { ApplyOrientation = false };
+
     static List<RawImage> FrameRefs(string path)
     {
         var refs = new List<RawImage>();
@@ -51,19 +53,22 @@ public class WebpTests(ITestOutputHelper output)
         var path = Fixture(file);
         var data = File.ReadAllBytes(path);
         var expected = LoadRef(path + ".ref");
+        // the references hold the stored pixels, Decode turns them upright
+        var stored = Webp.Decode(data, Stored);
+        AssertEqual(expected, stored);
         var img = Webp.Decode(data);
-        AssertEqual(expected, img);
+        AssertEqual(ImageOps.ApplyOrientation(stored), img);
         Assert.Equal(SampleType.UInt8, img.SampleType);
         Assert.Equal(expected.Channels == 4 ? ColorModel.Rgba : ColorModel.Rgb, img.Color);
 
         int frames = Math.Max(1, FrameRefs(path).Count);
         var info = Webp.GetInfo(data);
-        Assert.Equal(new ImageInfo(ImageFormat.Webp, img.Width, img.Height, img.Channels, SampleType.UInt8, img.Color, frames)
+        Assert.Equal(ExifTags.Upright(new ImageInfo(ImageFormat.Webp, stored.Width, stored.Height, img.Channels, SampleType.UInt8, img.Color, frames)
         {
             BitsPerSample = 8, IsAnimated = frames > 1 || Webp.GetAnimationInfo(data).IsAnimated,
-            Orientation = img.Metadata?.Orientation ?? 0, HasIccProfile = img.Metadata?.IccProfile != null,
-            DpiX = img.Metadata?.DpiX ?? 0, DpiY = img.Metadata?.DpiY ?? 0,
-        }, info);
+            Orientation = stored.Metadata?.Orientation ?? 0, HasIccProfile = stored.Metadata?.IccProfile != null,
+            DpiX = stored.Metadata?.DpiX ?? 0, DpiY = stored.Metadata?.DpiY ?? 0,
+        }), info);
         // Any prefix either gives the same answer or asks for more; a still image without flagged metadata is
         // answered from its first chunks, an animation needs everything.
         int needed = data.Length;
@@ -79,7 +84,7 @@ public class WebpTests(ITestOutputHelper output)
         else if (!data.AsSpan(12, 4).SequenceEqual("VP8X"u8)) Assert.True(needed <= 64, $"needs {needed} of {data.Length} bytes");
         Assert.True(Webp.IsMatch(data));
         Assert.Equal(ImageFormat.Webp, ImageCodec.DetectFormat(data));
-        AssertEqual(expected, ImageCodec.Decode(data));
+        AssertEqual(img, ImageCodec.Decode(data));
     }
 
     /// <summary>
@@ -113,6 +118,7 @@ public class WebpTests(ITestOutputHelper output)
         var refs = FrameRefs(path);
         var anim = Webp.DecodeAnimation(data);
         var info = Webp.GetAnimationInfo(data);
+        int orientation = Webp.GetInfo(data).Orientation;   // the references are stored frames, composited ones are turned upright
         Assert.Equal(anim.Frames.Count, info.FrameCount);
         Assert.Equal((anim.Width, anim.Height, anim.LoopCount, anim.BackgroundColor, anim.IsAnimated), (info.Width, info.Height, info.LoopCount, info.BackgroundColor, info.IsAnimated));
         if (refs.Count == 0)
@@ -137,13 +143,13 @@ public class WebpTests(ITestOutputHelper output)
         {
             Assert.Equal(i, anim.Frames[i].Index);
             Assert.Equal(ColorModel.Rgba, anim.Frames[i].Image.Color);
-            AssertEqual(refs[i], anim.Frames[i].Image);
+            AssertEqual(ImageOps.ApplyOrientation(refs[i], orientation), anim.Frames[i].Image);
         }
         // The lazy variant yields the same frames, each with pixels of its own.
         int n = 0;
         foreach (var f in Webp.EnumerateFrames(data))
         {
-            AssertEqual(refs[n], f.Image);
+            AssertEqual(ImageOps.ApplyOrientation(refs[n], orientation), f.Image);
             Assert.NotSame(anim.Frames[n].Image.Data, f.Image.Data);
             n++;
         }
@@ -256,12 +262,12 @@ public class WebpTests(ITestOutputHelper output)
         byte[] Load(string name) => File.ReadAllBytes(Fixture("webp/" + name));
 
         var data = Load("edge_metadata.webp");
-        var img = Webp.Decode(data);
+        var img = Webp.Decode(data, Stored);
         Assert.Equal(600, img.Metadata!.IccProfile!.Length);
         Assert.Equal((byte)199, img.Metadata.IccProfile[199]);
         Assert.Equal(6, img.Metadata.Orientation);
         Assert.Equal((72.0, 0.0), (img.Metadata.DpiX, img.Metadata.DpiY));     // the fixture's EXIF has an XResolution only
-        Assert.Equal((72.0, 0.0), (Webp.GetInfo(data).DpiX, Webp.GetInfo(data).DpiY));
+        Assert.Equal((0.0, 72.0), (Webp.GetInfo(data).DpiX, Webp.GetInfo(data).DpiY));   // of the upright image
         Assert.True(img.Metadata.Exif!.AsSpan(0, 4).SequenceEqual("II*\0"u8));
         Assert.StartsWith("<?xpacket", System.Text.Encoding.ASCII.GetString(Webp.GetXmp(data)!));
         var info = Webp.GetAnimationInfo(data);
@@ -270,7 +276,7 @@ public class WebpTests(ITestOutputHelper output)
         Assert.Equal(Webp.GetXmp(data), info.Xmp);
 
         // the JPEG style "Exif\0\0" prefix is dropped; big endian EXIF
-        var before = Webp.Decode(Load("edge_metadata_before_image.webp")).Metadata!;
+        var before = Webp.Decode(Load("edge_metadata_before_image.webp"), Stored).Metadata!;
         Assert.True(before.Exif!.AsSpan(0, 4).SequenceEqual("MM\0*"u8));
         Assert.Equal(3, before.Orientation);
         Assert.Null(before.IccProfile);
@@ -283,7 +289,7 @@ public class WebpTests(ITestOutputHelper output)
         Assert.Null(Webp.GetXmp(unflagged));
         Assert.Null(Webp.GetAnimationInfo(unflagged).Exif);
         Assert.Equal((0, false), (Webp.GetInfo(unflagged).Orientation, Webp.GetInfo(unflagged).HasIccProfile));
-        var accept = new WebpDecodeOptions { AcceptUnflaggedMetadata = true };
+        var accept = new WebpDecodeOptions { AcceptUnflaggedMetadata = true, ApplyOrientation = false };
         var noFlags = Webp.Decode(unflagged, accept).Metadata!;
         Assert.Equal("icc"u8.ToArray(), noFlags.IccProfile);
         Assert.Equal(8, noFlags.Orientation);
@@ -301,7 +307,7 @@ public class WebpTests(ITestOutputHelper output)
         BinaryPrimitives.WriteUInt32LittleEndian(withExif.AsSpan(4), (uint)withExif.Length - 8);
         Assert.Null(Webp.Decode(withExif).Metadata);
         Assert.Equal(7, Webp.Decode(withExif, accept).Metadata!.Orientation);
-        var dup = Webp.Decode(Load("edge_duplicate_metadata.webp")).Metadata!;
+        var dup = Webp.Decode(Load("edge_duplicate_metadata.webp"), Stored).Metadata!;
         Assert.Equal("first"u8.ToArray(), dup.IccProfile);
         Assert.Equal(2, dup.Orientation);
 
@@ -310,7 +316,7 @@ public class WebpTests(ITestOutputHelper output)
         var anim = Webp.GetAnimationInfo(Load("hand_anim_unknown_chunks.webp"));
         Assert.Equal("fake icc profile"u8.ToArray(), anim.IccProfile);
         Assert.Equal("<x:xmpmeta/>"u8.ToArray(), anim.Xmp);
-        Assert.Equal(6, Webp.Decode(Load("hand_anim_unknown_chunks.webp")).Metadata!.Orientation);
+        Assert.Equal(6, Webp.Decode(Load("hand_anim_unknown_chunks.webp"), Stored).Metadata!.Orientation);
     }
 
     // ------------------------------------------------------------------ test images
@@ -964,7 +970,7 @@ public class WebpTests(ITestOutputHelper output)
         foreach (bool lossless in new[] { true, false })
         {
             var data = Encode(img, new WebpEncodeOptions { Lossless = lossless, Xmp = xmp });
-            var back = Webp.Decode(data);
+            var back = Webp.Decode(data, Stored);
             Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, back.Metadata!.IccProfile);
             Assert.Equal(exif, back.Metadata.Exif);
             Assert.Equal(5, back.Metadata.Orientation);
@@ -1011,8 +1017,8 @@ public class WebpTests(ITestOutputHelper output)
             img.Metadata = new ImageMetadata { Exif = exif };
             var data = Encode(img, new WebpEncodeOptions { Lossless = true });
             info = Webp.GetInfo(data);
-            var m = Webp.Decode(data).Metadata!;
-            Assert.Equal((m.DpiX, m.DpiY, m.Orientation), (info.DpiX, info.DpiY, info.Orientation));
+            var m = Webp.Decode(data, Stored).Metadata!;
+            Assert.Equal((m.DpiX, m.DpiY, m.Orientation), info.Orientation >= 5 ? (info.DpiY, info.DpiX, info.Orientation) : (info.DpiX, info.DpiY, info.Orientation));
             return (m.DpiX, m.DpiY);
         }
         Assert.Equal((300.0, 150.0), Dpi(ExifWithResolution(false, 300, 1, 300, 2, 2, 3), out var i1));
@@ -1028,7 +1034,7 @@ public class WebpTests(ITestOutputHelper output)
         {
             img.Metadata = new ImageMetadata { Exif = good.AsSpan(0, cut).ToArray() };
             if (cut == 0) continue;
-            var m = Webp.Decode(Encode(img, new WebpEncodeOptions { Lossless = true })).Metadata!;
+            var m = Webp.Decode(Encode(img, new WebpEncodeOptions { Lossless = true }), Stored).Metadata!;
             Assert.True(m.DpiX is 0 or 300 && m.DpiY is 0 or 300 && m.Orientation is 0 or 6);
         }
         var bad = (byte[])good.Clone();

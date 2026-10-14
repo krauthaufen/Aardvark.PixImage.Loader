@@ -34,7 +34,7 @@ namespace PixCodec
             var h = PngChunks.ReadHeader(data, verifyCrc: false);
             var head = PngChunks.ScanHead(data, h);
             OutputFormat(h, !head.Trns.IsEmpty, false, out var color, out var type);
-            return new ImageInfo(ImageFormat.Png, h.Width, h.Height, RawImage.ChannelCount(color), type, color, head.Frames)
+            return ExifTags.Upright(new ImageInfo(ImageFormat.Png, h.Width, h.Height, RawImage.ChannelCount(color), type, color, head.Frames)
             {
                 BitsPerSample = h.IsPalette ? 8 : h.BitDepth,
                 Orientation = head.Orientation,
@@ -42,7 +42,7 @@ namespace PixCodec
                 DpiY = head.DpiY,
                 HasIccProfile = head.HasIccProfile,
                 IsAnimated = head.Animated,
-            };
+            });
         }
 
         public static byte[]? ReadPalette(ReadOnlySpan<byte> data)
@@ -77,7 +77,7 @@ namespace PixCodec
             var s = PngChunks.Parse(data, options, PngChunks.ParseFlags.None);
             var image = DecodeImage(data, s, null, options);
             image.Metadata = s.Meta;
-            return image;
+            return options.ApplyOrientation ? ImageOps.ApplyOrientation(image) : image;
         }
 
         /// <summary>

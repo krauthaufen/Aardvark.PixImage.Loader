@@ -54,13 +54,17 @@ namespace PixCodec
         public double DpiX, DpiY;
         /// <summary>File gamma (PNG gAMA), 0 if unknown.</summary>
         public double Gamma;
-        /// <summary>EXIF orientation 1..8, 0 if unknown. Decoders do NOT apply it.</summary>
+        /// <summary>
+        /// EXIF/TIFF orientation 1..8, 0 if unknown. Decoders turn the image upright by default and then report 1 (and set the
+        /// tag in <see cref="Exif"/> to 1 too); encoders write this value, also into a copied <see cref="Exif"/> blob.
+        /// </summary>
         public int Orientation;
     }
 
     /// <summary>
-    /// Cheap header level information about an encoded image. Width, Height, Channels, SampleType and Color describe
-    /// what Decode returns with default options; the remaining properties describe the file.
+    /// Cheap header level information about an encoded image. Width, Height, Channels, SampleType, Color and DpiX / DpiY
+    /// describe what Decode returns with default options, i.e. after the orientation has been applied; the remaining
+    /// properties describe the file.
     /// </summary>
     public readonly record struct ImageInfo(
         ImageFormat Format, int Width, int Height, int Channels, SampleType SampleType, ColorModel Color, int FrameCount = 1)
@@ -72,10 +76,17 @@ namespace PixCodec
         public int BitsPerSample { get; init; }
 
         /// <summary>
-        /// EXIF/TIFF orientation 1..8 (1 = top-left, i.e. no transformation needed), 0 if the file does not say.
-        /// Decoders do not apply it unless asked to through their options.
+        /// EXIF/TIFF orientation 1..8 as stored in the file (1 = top-left, i.e. no transformation needed), 0 if the file does
+        /// not say. Decoders apply it by default (see <see cref="OrientationApplied"/>).
         /// </summary>
         public int Orientation { get; init; }
+
+        /// <summary>
+        /// True when Decode rotates / mirrors the stored pixels according to an <see cref="Orientation"/> of 2..8 (the default of
+        /// every decoder), so that Width / Height / DpiX / DpiY are those of the upright image. False when there is nothing to
+        /// do (orientation 0 or 1) or the orientation was explicitly left alone through decode options.
+        /// </summary>
+        public bool OrientationApplied { get; init; }
 
         /// <summary>Horizontal / vertical resolution in pixels per inch, 0 if the file does not say.</summary>
         public double DpiX { get; init; }
@@ -88,10 +99,10 @@ namespace PixCodec
         /// <summary>Whether the file is an animation (GIF, APNG, WebP) rather than a still image or a set of pages.</summary>
         public bool IsAnimated { get; init; }
 
-        /// <summary>Width / Height as displayed after applying <see cref="Orientation"/> (swapped for 5..8).</summary>
-        public int OrientedWidth => Orientation >= 5 && Orientation <= 8 ? Height : Width;
-        /// <inheritdoc cref="OrientedWidth"/>
-        public int OrientedHeight => Orientation >= 5 && Orientation <= 8 ? Width : Height;
+        /// <summary>Width / Height of the pixels as stored in the file, before the orientation is applied (swapped for 5..8).</summary>
+        public int StoredWidth => OrientationApplied && Orientation >= 5 ? Height : Width;
+        /// <inheritdoc cref="StoredWidth"/>
+        public int StoredHeight => OrientationApplied && Orientation >= 5 ? Width : Height;
     }
 
     /// <summary>

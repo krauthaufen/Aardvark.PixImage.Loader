@@ -32,8 +32,11 @@ namespace PixCodec
         /// </summary>
         public bool KeepYCbCr { get; set; }
 
-        /// <summary>Rotate / mirror the pixels according to the EXIF orientation; the reported orientation then is 1.</summary>
-        public bool ApplyOrientation { get; set; }
+        /// <summary>
+        /// Rotate / mirror the pixels according to the EXIF orientation (default), so that the image comes back upright; its
+        /// metadata then says orientation 1. False returns the pixels as stored with the file's orientation in the metadata.
+        /// </summary>
+        public bool ApplyOrientation { get; set; } = true;
 
         /// <summary>
         /// By default <see cref="Jpeg.Decode"/> and <see cref="Jpeg.GetInfo(ReadOnlySpan{byte})"/> skip junk in front of the
@@ -180,16 +183,16 @@ namespace PixCodec
                 var d = Open(p, data, options, headerOnly: true);
                 var (_, model, channels) = Plan(d, options);
                 var m = d.Metadata;
-                bool swap = options.ApplyOrientation && m.Orientation >= 5;
-                return new ImageInfo(ImageFormat.Jpeg, swap ? d.OutHeight : d.OutWidth, swap ? d.OutWidth : d.OutHeight, channels,
+                var info = new ImageInfo(ImageFormat.Jpeg, d.OutWidth, d.OutHeight, channels,
                     d.Precision > 8 ? SampleType.UInt16 : SampleType.UInt8, model)
                 {
                     BitsPerSample = d.Precision,
-                    Orientation = options.ApplyOrientation && m.Orientation > 1 ? 1 : m.Orientation,
-                    DpiX = swap ? m.DpiY : m.DpiX,
-                    DpiY = swap ? m.DpiX : m.DpiY,
+                    Orientation = m.Orientation,
+                    DpiX = m.DpiX,
+                    DpiY = m.DpiY,
                     HasIccProfile = d.HasCompleteIcc,
                 };
+                return options.ApplyOrientation ? ExifTags.Upright(info) : info;
             }
         }
 
@@ -197,7 +200,7 @@ namespace PixCodec
         /// Decodes a complete JPEG file held in memory. 8 bit frames give UInt8 samples, deeper ones (12 bit DCT, lossless
         /// up to 16 bit) UInt16 holding the values as coded, e.g. 0..4095 for 12 bit - they are not scaled to the full
         /// 16 bit range. Files that end early decode as far as the data goes (the remainder is gray). The EXIF orientation
-        /// is reported in the metadata and only applied on request.
+        /// is applied unless <see cref="JpegDecodeOptions.ApplyOrientation"/> is off.
         /// </summary>
         public static RawImage Decode(ReadOnlySpan<byte> data, JpegDecodeOptions? options = null)
         {
@@ -229,15 +232,8 @@ namespace PixCodec
                     }
                 }
                 var meta = d.HasMetadata ? d.Metadata : null;
-                if (options.ApplyOrientation && meta != null && meta.Orientation > 1)
-                {
-                    pixels = pixels is byte[] b8
-                        ? JpegMeta.Reorient(b8, ref w, ref h, channels, meta.Orientation)
-                        : JpegMeta.Reorient((ushort[])pixels, ref w, ref h, channels, meta.Orientation);
-                    if (meta.Orientation >= 5) (meta.DpiX, meta.DpiY) = (meta.DpiY, meta.DpiX);
-                    meta.Orientation = 1;
-                }
-                return new RawImage(w, h, model, pixels, channels, meta);
+                var img = new RawImage(w, h, model, pixels, channels, meta);
+                return options.ApplyOrientation ? ImageOps.ApplyOrientation(img) : img;
             }
         }
 

@@ -207,7 +207,7 @@ public class ProcessorTests
 
     [Theory]
     [InlineData(".jpg"), InlineData(".png"), InlineData(".tif")]
-    public void LoadAppliesOrientationOnRequest(string ext)
+    public void LoadAppliesOrientation(string ext)
     {
         var raw = RawImage.Create(16, 8, ColorModel.Rgb, SampleType.UInt8);
         ((byte[])raw.Data)[0] = 255; // top-left red
@@ -216,11 +216,14 @@ public class ProcessorTests
         try
         {
             ImageCodec.Encode(raw, path);
-            Assert.Equal(6, PixImagePixCodec.GetInfo(path).Orientation);
-            Assert.Equal(new V2i(16, 8), PixImagePixCodec.Load(path).Size);
-            var up = PixImagePixCodec.Load<byte>(path, applyOrientation: true);
-            Assert.Equal(new V2i(8, 16), up.Size);
-            Assert.True(up.Volume[7, 0, 0] > 128); // top-left went to top-right (rotated clockwise)
+            var info = PixImagePixCodec.GetInfo(path);
+            Assert.Equal((6, 8, 16), (info.Orientation, info.Width, info.Height));
+            Assert.Equal(new V2i(8, 16), PixImage.GetInfoFromFile(path, PixImagePixCodec.Loader).Size);
+            foreach (var up in new[] { PixImagePixCodec.Load<byte>(path), PixImagePixCodec.LoadAll(path)[0].ToPixImage<byte>(), PixImage.Load(path, PixImagePixCodec.Loader).ToPixImage<byte>() })
+            {
+                Assert.Equal(new V2i(8, 16), up.Size);
+                Assert.True(up.Volume[7, 0, 0] > 128); // top-left went to top-right (rotated clockwise)
+            }
         }
         finally { File.Delete(path); }
     }

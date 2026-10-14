@@ -11,6 +11,7 @@ namespace PixCodec
         readonly WebpDecodeOptions _opt;
         byte[]? _canvas;
         int _index;
+        int _orientation = -1;   // of the EXIF chunk, read on the first frame
         WebpFrameEntry? _prev;
         bool _prevKey;
 
@@ -35,7 +36,7 @@ namespace PixCodec
             if (!c.Animated) px = DecodeFrame(data, c.Frames[0], alpha ? 4 : 3, opt);
             else
             {
-                var st = new WebpDecoder(c, new WebpDecodeOptions { MaxPixels = opt.MaxPixels, Multithreaded = opt.Multithreaded });
+                var st = new WebpDecoder(c, new WebpDecodeOptions { MaxPixels = opt.MaxPixels, Multithreaded = opt.Multithreaded, ApplyOrientation = false });
                 px = (byte[])st.Next(data)!.Image.Data;
                 if (!alpha)
                 {
@@ -44,7 +45,8 @@ namespace PixCodec
                     px = rgb;
                 }
             }
-            return new RawImage(c.Width, c.Height, alpha ? ColorModel.Rgba : ColorModel.Rgb, px, 0, Metadata(c, data));
+            var img = new RawImage(c.Width, c.Height, alpha ? ColorModel.Rgba : ColorModel.Rgb, px, 0, Metadata(c, data));
+            return opt.ApplyOrientation ? ImageOps.ApplyOrientation(img) : img;
         }
 
         /// <summary>The frame's own pixels as RGB or RGBA; alpha is 255 where the frame has none.</summary>
@@ -120,6 +122,11 @@ namespace PixCodec
                 frame.Image = new RawImage(f.Width, f.Height, ColorModel.Rgba, DecodeFrame(data, f, 4, _opt));
             else
                 frame.Image = new RawImage(_c.Width, _c.Height, ColorModel.Rgba, Composite(data, f));
+            if (_opt.FrameMode != WebpFrameMode.Raw && _opt.ApplyOrientation)
+            {
+                if (_orientation < 0) ExifInfo(_c, data, out _orientation, out _, out _);
+                frame.Image = ImageOps.ApplyOrientation(frame.Image, _orientation);
+            }
             _index++;
             return frame;
         }
@@ -184,9 +191,12 @@ namespace PixCodec
 
         // ------------------------------------------------------------------ metadata
 
-        public static void FillInfo(WebpContainer c, ReadOnlySpan<byte> data, WebpAnimationInfo info)
+        /// <summary>The file level properties; Width / Height are those of the frames <paramref name="opt"/> makes.</summary>
+        public static void FillInfo(WebpContainer c, ReadOnlySpan<byte> data, WebpAnimationInfo info, WebpDecodeOptions opt)
         {
-            info.Width = c.Width; info.Height = c.Height;
+            ExifInfo(c, data, out int orientation, out _, out _);
+            bool swap = opt.ApplyOrientation && opt.FrameMode != WebpFrameMode.Raw && orientation >= 5;
+            info.Width = swap ? c.Height : c.Width; info.Height = swap ? c.Width : c.Height;
             info.FrameCount = c.Frames.Count;
             info.IsAnimated = c.Animated;
             info.LoopCount = c.Animated ? c.LoopCount : 1;

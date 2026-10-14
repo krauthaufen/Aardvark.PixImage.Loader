@@ -1462,38 +1462,6 @@ namespace PixCodec.JpegImpl
             return 0;
         }
 
-        /// <summary>
-        /// Brings pixels stored with the given EXIF orientation (2..8) upright. Orientations 5..8 swap width and height.
-        /// </summary>
-        public static T[] Reorient<T>(T[] src, ref int w, ref int h, int ch, int orientation) where T : unmanaged
-        {
-            if (orientation < 2 || orientation > 8) return src;
-            int sw = w, sh = h;
-            bool swap = orientation >= 5;
-            int dw = swap ? sh : sw, dh = swap ? sw : sh;
-            var dst = GC.AllocateUninitializedArray<T>(src.Length);
-            for (int y = 0; y < dh; y++)
-                for (int x = 0; x < dw; x++)
-                {
-                    // source position of destination pixel (x, y)
-                    int sx, sy;
-                    switch (orientation)
-                    {
-                        case 2: sx = sw - 1 - x; sy = y; break;          // mirrored left-right
-                        case 3: sx = sw - 1 - x; sy = sh - 1 - y; break; // rotated 180
-                        case 4: sx = x; sy = sh - 1 - y; break;          // mirrored top-bottom
-                        case 5: sx = y; sy = x; break;                   // transposed
-                        case 6: sx = y; sy = sh - 1 - x; break;          // needs 90 clockwise
-                        case 7: sx = sw - 1 - y; sy = sh - 1 - x; break; // transversed
-                        default: sx = sw - 1 - y; sy = x; break;         // needs 90 counterclockwise
-                    }
-                    int s = (sy * sw + sx) * ch, d = (y * dw + x) * ch;
-                    for (int c = 0; c < ch; c++) dst[d + c] = src[s + c];
-                }
-            w = dw; h = dh;
-            return dst;
-        }
-
         static int R16(ReadOnlySpan<byte> e, int o, bool le) => le ? e[o] | e[o + 1] << 8 : e[o] << 8 | e[o + 1];
         static uint R32(ReadOnlySpan<byte> e, int o, bool le)
             => le ? (uint)(e[o] | e[o + 1] << 8 | e[o + 2] << 16 | e[o + 3] << 24) : (uint)(e[o] << 24 | e[o + 1] << 16 | e[o + 2] << 8 | e[o + 3]);

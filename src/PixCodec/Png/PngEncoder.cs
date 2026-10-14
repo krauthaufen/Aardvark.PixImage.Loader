@@ -816,25 +816,7 @@ namespace PixCodec
             }
             if (png != null)
                 foreach (var entry in png.Text) WriteText(output, entry, level);
-            if (meta != null)
-            {
-                if (meta.Exif is { Length: > 0 } exif)
-                {
-                    WriteChunk(output, PngChunks.eXIf, exif);
-                }
-                else if (meta.Orientation is >= 1 and <= 8)
-                {
-                    // Minimal EXIF: big endian TIFF header and one IFD holding just the orientation tag.
-                    ReadOnlySpan<byte> tiff = stackalloc byte[]
-                    {
-                        (byte)'M', (byte)'M', 0, 42, 0, 0, 0, 8,
-                        0, 1,
-                        0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, (byte)meta.Orientation, 0, 0,
-                        0, 0, 0, 0,
-                    };
-                    WriteChunk(output, PngChunks.eXIf, tiff);
-                }
-            }
+            if (ExifTags.ForWriting(meta) is { } exif) WriteChunk(output, PngChunks.eXIf, exif);
         }
 
         /// <summary>value / unit as an unsigned integer, rejecting what the field cannot hold.</summary>

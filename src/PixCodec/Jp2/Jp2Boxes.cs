@@ -355,17 +355,8 @@ namespace PixCodec
             }
             Box(s, Jp2h, jp2h.ToArray());
 
-            if (meta?.Exif != null && meta.Exif.Length >= 8)
+            if (ExifTags.ForWriting(meta) is { Length: >= 8 } exif)
             {
-                var u = new byte[16 + meta.Exif.Length];
-                ExifUuid.CopyTo(u, 0);
-                meta.Exif.CopyTo(u, 16);
-                Box(s, Uuid, u);
-            }
-            else if (meta != null && meta.Orientation >= 1 && meta.Orientation <= 8)
-            {
-                // minimal little endian TIFF structure holding just the Orientation tag
-                byte[] exif = { (byte)'I', (byte)'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, (byte)meta.Orientation, 0, 0, 0, 0, 0, 0, 0 };
                 var u = new byte[16 + exif.Length];
                 ExifUuid.CopyTo(u, 0);
                 exif.CopyTo(u, 16);

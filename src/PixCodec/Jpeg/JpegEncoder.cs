@@ -809,12 +809,7 @@ namespace PixCodec.JpegImpl
                 Byte(0); Byte(0);
             }
 
-            byte[]? exif = meta?.Exif;
-            if (exif == null && meta != null && meta.Orientation >= 1 && meta.Orientation <= 8)
-            {
-                // minimal little endian TIFF structure holding just the Orientation tag
-                exif = [(byte)'I', (byte)'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, (byte)meta.Orientation, 0, 0, 0, 0, 0, 0, 0];
-            }
+            byte[]? exif = ExifTags.ForWriting(meta);
             if (exif != null && exif.Length <= 65533 - 6)
             {
                 Marker(0xE1); U16(exif.Length + 8);

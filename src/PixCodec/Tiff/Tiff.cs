@@ -36,6 +36,14 @@ namespace PixCodec
         /// <summary>Linear output format for PixarLog compressed files (their tags do not reliably say).</summary>
         public TiffPixarLogOutput PixarLogOutput { get; set; } = TiffPixarLogOutput.Default;
 
+        /// <summary>
+        /// Rotate / mirror the pixels according to the EXIF orientation (default), so that the image comes back upright; its
+        /// metadata then says orientation 1. False returns the pixels as stored with the file's orientation in the metadata.
+        /// The rectangle of <see cref="Tiff.DecodeRegion(ReadOnlySpan{byte}, int, int, int, int, TiffDecodeOptions?)"/> is in
+        /// coordinates of the image as returned, i.e. upright unless this is off.
+        /// </summary>
+        public bool ApplyOrientation { get; set; } = true;
+
         /// <summary>Decoded size in bytes from which <see cref="Parallel"/> kicks in.</summary>
         internal long ParallelThreshold = 512 * 1024;
 
@@ -550,9 +558,18 @@ namespace PixCodec
             options ??= new TiffDecodeOptions();
             var file = new TiffFile(src);
             var img = new TiffImage(file, Locate(file, options.ImageIndex, options.SubImagePath), options);
-            return region is var (x, y, w, h)
-                ? img.Decode(x, y, w, h, options)
-                : img.Decode(0, 0, img.Width, img.Height, options);
+            int o = options.ApplyOrientation ? img.Orientation : 0;
+            var (x, y, w, h) = (0, 0, img.Width, img.Height);
+            if (region is { } r)
+            {
+                // checked against the upright size, as the caller sees the image
+                int uw = o >= 5 ? img.Height : img.Width, uh = o >= 5 ? img.Width : img.Height;
+                if (r.x < 0 || r.y < 0 || r.w <= 0 || r.h <= 0 || r.x > uw - r.w || r.y > uh - r.h)
+                    throw new TiffArgumentException("region", "TIFF: region lies outside of the image");
+                (x, y, w, h) = ExifTags.StoredRegion(o, img.Width, img.Height, r);
+            }
+            var raw = img.Decode(x, y, w, h, options);
+            return o > 1 ? ImageOps.ApplyOrientation(raw) : raw;
         }
 
         /// <summary>Safety net: whatever a corrupt file manages to trip inside the decoder surfaces as ImageFormatException.</summary>

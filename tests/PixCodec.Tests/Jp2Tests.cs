@@ -159,19 +159,23 @@ public class Jp2Tests
         var data = File.ReadAllBytes(Fixture(file));
         var expected = LoadRef(Fixture(file) + ".ref");
         var info = Jp2.GetInfo(data);
+        // the references hold the stored pixels, Decode turns them upright
+        var stored = Jp2.Decode(data, new Jp2DecodeOptions { ApplyOrientation = false });
+        AssertEqual(expected, stored, Jp2TestUtil.Tolerance(file, data, info.BitsPerSample));
         var img = Jp2.Decode(data);
-        AssertEqual(expected, img, Jp2TestUtil.Tolerance(file, data, info.BitsPerSample));
+        AssertEqual(ImageOps.ApplyOrientation(stored), img);
 
         // header information describes what Decode returns
         Assert.Equal(ImageFormat.Jp2, info.Format);
-        Assert.Equal((img.Width, img.Height, img.Channels, img.SampleType, img.Color), (info.Width, info.Height, info.Channels, info.SampleType, info.Color));
+        // (except for an EXIF box behind the codestream, which is beyond what GetInfo reads)
+        var turned = file.Contains("exif_after") ? stored : img;
+        Assert.Equal((turned.Width, turned.Height, img.Channels, img.SampleType, img.Color), (info.Width, info.Height, info.Channels, info.SampleType, info.Color));
         Assert.Equal(1, info.FrameCount);
         Assert.InRange(info.BitsPerSample, 1, RawImage.BytesPerSample(img.SampleType) * 8);
-        var m = img.Metadata ?? new ImageMetadata();
+        var m = turned.Metadata ?? new ImageMetadata();
         Assert.Equal(m.IccProfile != null, info.HasIccProfile);
         Assert.Equal((m.DpiX, m.DpiY), (info.DpiX, info.DpiY));
-        // an EXIF box behind the codestream is beyond what GetInfo reads
-        Assert.Equal(file.Contains("exif_after") ? 0 : m.Orientation, info.Orientation);
+        Assert.Equal(file.Contains("exif_after") ? 0 : stored.Metadata?.Orientation ?? 0, info.Orientation);
         Assert.Equal(info, ImageCodec.GetInfo(data));
         Assert.True(Jp2.IsMatch(data));
 
@@ -313,16 +317,20 @@ public class Jp2Tests
         m = Jp2.Decode(Load("res_display_only.jp2")).Metadata!;
         Assert.Equal(100.0, m.DpiX, 1); Assert.Equal(100.0, m.DpiY, 1);
 
-        m = Jp2.Decode(Load("exif_before.jp2")).Metadata!;
+        var stored = new Jp2DecodeOptions { ApplyOrientation = false };
+        m = Jp2.Decode(Load("exif_before.jp2"), stored).Metadata!;
         Assert.Equal(6, m.Orientation);
         Assert.Equal((byte)'I', m.Exif![0]);
-        Assert.Equal(6, Jp2.GetInfo(Load("exif_before.jp2")).Orientation);
-        Assert.Equal((37, 45), (Jp2.GetInfo(Load("exif_before.jp2")).OrientedWidth, Jp2.GetInfo(Load("exif_before.jp2")).OrientedHeight));
-        m = Jp2.Decode(Load("exif_after.jp2")).Metadata!;
+        var info = Jp2.GetInfo(Load("exif_before.jp2"));
+        Assert.Equal(6, info.Orientation);
+        Assert.Equal((37, 45), (info.Width, info.Height));
+        Assert.Equal((37, 45), (Jp2.Decode(Load("exif_before.jp2")).Width, Jp2.Decode(Load("exif_before.jp2")).Height));
+        m = Jp2.Decode(Load("exif_after.jp2"), stored).Metadata!;
         Assert.Equal(8, m.Orientation);
         Assert.Equal((byte)'M', m.Exif![0]);
         Assert.Equal(0, Jp2.GetInfo(Load("exif_after.jp2")).Orientation);
-        m = Jp2.Decode(Load("exif_prefixed.jp2")).Metadata!;
+        Assert.Equal(1, Jp2.Decode(Load("exif_after.jp2")).Metadata!.Orientation);
+        m = Jp2.Decode(Load("exif_prefixed.jp2"), stored).Metadata!;
         Assert.Equal(3, m.Orientation);
         Assert.Equal((byte)'I', m.Exif![0]);   // the "Exif\0\0" prefix some writers add is dropped
 

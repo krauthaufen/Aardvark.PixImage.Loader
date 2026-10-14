@@ -399,21 +399,25 @@ namespace PixCodec
         }
 
         /// <summary>
-        /// Header level description. Orientation, resolution and the ICC flag are exactly what Decode reports in the
-        /// metadata; BitsPerSample is the stored depth (the largest one if the samples differ), 8 for palette images.
+        /// Header level description of the default decode (turned upright). Orientation is the stored tag, resolution and
+        /// the ICC flag are what Decode reports in the metadata; BitsPerSample is the stored depth (the largest one if
+        /// the samples differ), 8 for palette images.
         /// </summary>
         public ImageInfo Info(int frameCount)
         {
             var m = ReadMetadata(false);
-            return new ImageInfo(ImageFormat.Tiff, Width, Height, OutChannels, OutType, OutColor, frameCount)
+            return ExifTags.Upright(new ImageInfo(ImageFormat.Tiff, Width, Height, OutChannels, OutType, OutColor, frameCount)
             {
                 BitsPerSample = Photometric == 3 ? 8 : _complex ? Bits * 2 : Bits,   // (a complex sample counts as one)
                 Orientation = m.Orientation,
                 DpiX = m.DpiX,
                 DpiY = m.DpiY,
                 HasIccProfile = m.IccProfile != null,
-            };
+            });
         }
+
+        /// <summary>The Orientation tag, 0 if absent or invalid.</summary>
+        public int Orientation => ReadMetadata(false).Orientation;
 
         int PlaneSamples => Planar == 2 ? 1 : Spp;
 

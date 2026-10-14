@@ -36,8 +36,9 @@ namespace PixCodec
 
         public void FillInfo(PngAnimationInfo info)
         {
-            info.Width = _s.Header.Width;
-            info.Height = _s.Header.Height;
+            bool swap = Orientation >= 5;
+            info.Width = swap ? _s.Header.Height : _s.Header.Width;
+            info.Height = swap ? _s.Header.Width : _s.Header.Height;
             info.FrameCount = _s.Frames!.Count;
             info.IsAnimated = _s.Animated;
             info.LoopCount = _s.Plays;
@@ -95,7 +96,7 @@ namespace PixCodec
             var image = RawImage.Create(width, height, ColorModel.Rgba, _wide ? SampleType.UInt16 : SampleType.UInt8);
             _canvas.CopyTo(image.GetBytes());
             if (_next == 0) image.Metadata = _s.Meta;
-            frame.Image = image;
+            frame.Image = Orientation > 1 ? ImageOps.ApplyOrientation(image, Orientation) : image;
 
             if (disposal == PngDisposal.Background)
                 for (int y = 0; y < e.Height; y++) Region(e, y).Clear();
@@ -105,6 +106,9 @@ namespace PixCodec
             _next++;
             return frame;
         }
+
+        /// <summary>The orientation composited frames are turned upright with, 0 when they are not.</summary>
+        int Orientation => _options.ApplyOrientation && _options.FrameMode == PngFrameMode.Composited ? _s.Meta?.Orientation ?? 0 : 0;
 
         /// <summary>One row of the frame's region on the canvas.</summary>
         Span<byte> Region(PngFrameEntry e, int row)

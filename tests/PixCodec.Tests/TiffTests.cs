@@ -21,8 +21,10 @@ public class TiffTests
     public static IEnumerable<object[]> JpegFixtures => Dirs("jpeg");
     public static IEnumerable<object[]> LercFixtures => Dirs("lerc");
 
-    static readonly TiffDecodeOptions Serial = new() { Parallel = false };
-    static TiffDecodeOptions ForcedParallel(int index = 0) => new() { ParallelThreshold = 0, ImageIndex = index };
+    // the references hold the stored pixels: these leave the orientation alone
+    static readonly TiffDecodeOptions Stored = new() { ApplyOrientation = false };
+    static readonly TiffDecodeOptions Serial = new() { Parallel = false, ApplyOrientation = false };
+    static TiffDecodeOptions ForcedParallel(int index = 0) => new() { ParallelThreshold = 0, ImageIndex = index, ApplyOrientation = false };
 
     static double Tolerance(string file)
     {
@@ -42,14 +44,17 @@ public class TiffTests
 
         var img = Tiff.Decode(bytes, Serial);
         TestUtil.AssertEqual(expected, img, tol);
+        // by default turned upright
+        var up = Tiff.Decode(bytes);
+        TestUtil.AssertEqual(ImageOps.ApplyOrientation(img), up);
 
         var info = Tiff.GetInfo(bytes);
-        Assert.Equal((img.Width, img.Height, img.Channels, img.SampleType, img.Color),
+        Assert.Equal((up.Width, up.Height, up.Channels, up.SampleType, up.Color),
             (info.Width, info.Height, info.Channels, info.SampleType, info.Color));
         Assert.Equal(ImageFormat.Tiff, info.Format);
         // the header level metadata is exactly what decoding reports
-        var md = img.Metadata!;
-        Assert.Equal((md.Orientation, md.DpiX, md.DpiY, md.IccProfile != null), (info.Orientation, info.DpiX, info.DpiY, info.HasIccProfile));
+        var md = up.Metadata!;
+        Assert.Equal((img.Metadata!.Orientation, md.DpiX, md.DpiY, md.IccProfile != null), (info.Orientation, info.DpiX, info.DpiY, info.HasIccProfile));
         Assert.False(info.IsAnimated);
         var stored = Tiff.ReadTags(bytes).FirstOrDefault(t => t.Id == 258)?.AsIntegers() ?? new long[] { 1 };
         bool palette = Tiff.ReadTags(bytes).Any(t => t.Id == 262 && t.AsIntegers()[0] == 3);
@@ -62,11 +67,11 @@ public class TiffTests
         // references for other decode options, where the generator wrote them
         foreach (var (suffix, options) in new[]
         {
-            (".none.ref", new TiffDecodeOptions { BitScaling = TiffBitScaling.None }),
-            (".full.ref", new TiffDecodeOptions { BitScaling = TiffBitScaling.FullRange }),
-            (".raw.ref", new TiffDecodeOptions { ConvertToRgb = false }),
-            (".u16.ref", new TiffDecodeOptions { PixarLogOutput = TiffPixarLogOutput.UInt16 }),
-            (".f32.ref", new TiffDecodeOptions { PixarLogOutput = TiffPixarLogOutput.Float32 }),
+            (".none.ref", new TiffDecodeOptions { BitScaling = TiffBitScaling.None, ApplyOrientation = false }),
+            (".full.ref", new TiffDecodeOptions { BitScaling = TiffBitScaling.FullRange, ApplyOrientation = false }),
+            (".raw.ref", new TiffDecodeOptions { ConvertToRgb = false, ApplyOrientation = false }),
+            (".u16.ref", new TiffDecodeOptions { PixarLogOutput = TiffPixarLogOutput.UInt16, ApplyOrientation = false }),
+            (".f32.ref", new TiffDecodeOptions { PixarLogOutput = TiffPixarLogOutput.Float32, ApplyOrientation = false }),
         })
             if (File.Exists(path + suffix))
             {
@@ -88,7 +93,7 @@ public class TiffTests
         ms.Write(new byte[13]);
         ms.Write(bytes);
         ms.Position = 13;
-        TestUtil.AssertEqual(img, Tiff.Decode(ms));
+        TestUtil.AssertEqual(img, Tiff.Decode(ms, Stored));
 
         // regions: exactly the corresponding part of the full decode
         int w = img.Width, h = img.Height;
@@ -107,9 +112,20 @@ public class TiffTests
             TestUtil.AssertEqual(crop, Tiff.DecodeRegion(bytes, r.x, r.y, r.w, r.h, Serial));
             TestUtil.AssertEqual(crop, Tiff.DecodeRegion(rs, r.x, r.y, r.w, r.h, ForcedParallel()));
         }
-        Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, 0, 0, w + 1, h));
-        Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, -1, 0, 1, 1));
-        Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, 0, h, 1, 1));
+        Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, 0, 0, w + 1, h, Serial));
+        Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, -1, 0, 1, 1, Serial));
+        Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, 0, h, 1, 1, Serial));
+
+        // by default the region is given in coordinates of the upright image
+        if (img.Metadata?.Orientation > 1)
+        {
+            int uw = up.Width, uh = up.Height;
+            foreach (var r in new (int x, int y, int w, int h)[] { (0, 0, uw, uh), (uw - 1, 0, 1, 1), (0, uh - 1, 1, 1), (1, 2, uw - 3, uh / 2), (uw / 2, uh / 3, uw - uw / 2, 1) })
+                TestUtil.AssertEqual(Crop(up, r.x, r.y, r.w, r.h), Tiff.DecodeRegion(bytes, r.x, r.y, r.w, r.h));
+            Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, 0, 0, uw + 1, uh));
+            Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, 0, uh, 1, 1));
+            Assert.ThrowsAny<ArgumentException>(() => Tiff.DecodeRegion(bytes, uw, 0, 1, 1));
+        }
     }
 
     [Theory]
@@ -414,7 +430,7 @@ public class TiffTests
     public void ReadsMetadata()
     {
         var path = TestUtil.Fixture(Path.Combine("tiff", "meta_res_icc_orient.tif"));
-        var img = Tiff.Decode(File.ReadAllBytes(path));
+        var img = Tiff.Decode(File.ReadAllBytes(path), Stored);
         var m = img.Metadata!;
         Assert.Equal(6, m.Orientation);
         Assert.Equal(300, m.DpiX, 6);
@@ -596,7 +612,7 @@ public class TiffTests
     static void AssertRoundTrip(RawImage img, byte[] file, string what)
     {
         RawImage back;
-        try { back = Tiff.Decode(file); }
+        try { back = Tiff.Decode(file, Stored); }
         catch (Exception e) { throw new Xunit.Sdk.XunitException($"{what}: {e}"); }
         Assert.True(back.SampleType == img.SampleType && (back.Width, back.Height, back.Channels) == (img.Width, img.Height, img.Channels), what);
         Assert.True(ExpectedColor(img) == back.Color, $"{what}: color {back.Color}");
@@ -686,7 +702,7 @@ public class TiffTests
         img.Metadata = new ImageMetadata { DpiX = 300, DpiY = 72.5, IccProfile = icc, Orientation = 3 };
         foreach (var big in new[] { false, true })
         {
-            var back = Tiff.Decode(Encode(img, new TiffEncodeOptions { BigTiff = big }));
+            var back = Tiff.Decode(Encode(img, new TiffEncodeOptions { BigTiff = big }), Stored);
             Assert.Equal(300, back.Metadata!.DpiX, 6);
             Assert.Equal(72.5, back.Metadata.DpiY, 6);
             Assert.Equal(icc, back.Metadata.IccProfile);
@@ -1611,7 +1627,7 @@ public class TiffTests
         }
 
         // and it comes back as an EXIF blob: orientation in the metadata, the directories intact
-        var back = Tiff.Decode(file);
+        var back = Tiff.Decode(file, Stored);
         Assert.Equal(6, back.Metadata!.Orientation);
         var blob = back.Metadata.Exif!;
         Assert.NotNull(blob);

@@ -49,6 +49,13 @@ namespace PixCodec
         public WebpFrameMode FrameMode { get; set; } = WebpFrameMode.Composited;
 
         /// <summary>
+        /// Rotate / mirror the pixels according to the EXIF orientation (default), so that the image comes back upright; its
+        /// metadata then says orientation 1. False returns the pixels as stored with the file's orientation in the metadata.
+        /// Composited animation frames are turned upright too, raw frames (sub-rectangles of the canvas) are always as stored.
+        /// </summary>
+        public bool ApplyOrientation { get; set; } = true;
+
+        /// <summary>
         /// Upper bound for the canvas and for a single frame, in pixels; larger files are rejected with an
         /// <see cref="ImageNotSupportedException"/> that names this option. The default (2^28) admits the largest
         /// lossless image (16384 x 16384), which decodes to 1 GB of Rgba.
@@ -166,7 +173,7 @@ namespace PixCodec
     /// <summary>File level information about a WebP file.</summary>
     public class WebpAnimationInfo
     {
-        /// <summary>Canvas size.</summary>
+        /// <summary>Canvas size as the composited frames have it (turned upright like them).</summary>
         public int Width { get; internal set; }
         public int Height { get; internal set; }
         public int FrameCount { get; internal set; }
@@ -250,14 +257,14 @@ namespace PixCodec
             var c = WebpContainer.Parse(data, infoOnly: true);
             bool alpha = WebpDecoder.OutputHasAlpha(c);
             WebpDecoder.ExifInfo(c, data, out int orientation, out double dpiX, out double dpiY);
-            return new ImageInfo(ImageFormat.Webp, c.Width, c.Height, alpha ? 4 : 3, SampleType.UInt8,
+            return ExifTags.Upright(new ImageInfo(ImageFormat.Webp, c.Width, c.Height, alpha ? 4 : 3, SampleType.UInt8,
                 alpha ? ColorModel.Rgba : ColorModel.Rgb, c.Frames.Count)
             {
                 BitsPerSample = 8,
                 IsAnimated = c.Animated,
                 HasIccProfile = c.IccLength >= 0,
                 Orientation = orientation, DpiX = dpiX, DpiY = dpiY,
-            };
+            });
         }
 
         /// <summary>Decodes a complete WebP file held in memory (first frame of an animation, composited).</summary>
@@ -273,7 +280,7 @@ namespace PixCodec
         {
             var c = WebpContainer.Parse(data, false, options?.AcceptUnflaggedMetadata ?? false);
             var info = new WebpAnimationInfo();
-            WebpDecoder.FillInfo(c, data, info);
+            WebpDecoder.FillInfo(c, data, info, options ?? new WebpDecodeOptions());
             return info;
         }
 
@@ -293,7 +300,7 @@ namespace PixCodec
             var frames = new List<WebpFrame>(c.Frames.Count);
             while (st.Next(data) is { } f) frames.Add(f);
             var anim = new WebpAnimation { Frames = frames };
-            WebpDecoder.FillInfo(c, data, anim);
+            WebpDecoder.FillInfo(c, data, anim, options);
             return anim;
         }
 

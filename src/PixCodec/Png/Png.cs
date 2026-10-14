@@ -63,6 +63,13 @@ namespace PixCodec
 
         /// <summary>Content of the frames returned by the animation API. <see cref="Png.Decode"/> ignores it.</summary>
         public PngFrameMode FrameMode { get; set; } = PngFrameMode.Composited;
+
+        /// <summary>
+        /// Rotate / mirror the pixels according to the EXIF orientation (default), so that the image comes back upright; its
+        /// metadata then says orientation 1. False returns the pixels as stored with the file's orientation in the metadata.
+        /// Composited animation frames are turned upright too, raw frames (sub-rectangles of the canvas) are always as stored.
+        /// </summary>
+        public bool ApplyOrientation { get; set; } = true;
     }
 
     /// <summary>Row filter used by the PNG encoder.</summary>
@@ -281,7 +288,7 @@ namespace PixCodec
     /// <summary>File level information about a PNG seen as an animation.</summary>
     public class PngAnimationInfo
     {
-        /// <summary>Canvas size (the size of the PNG image).</summary>
+        /// <summary>Canvas size (the size of the PNG image) as the composited frames have it (turned upright like them).</summary>
         public int Width { get; internal set; }
         public int Height { get; internal set; }
         /// <summary>Number of animation frames; 1 for a PNG that is not animated.</summary>

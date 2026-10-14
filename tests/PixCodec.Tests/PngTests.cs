@@ -10,6 +10,8 @@ public class PngTests
 {
     // ------------------------------------------------------------------ helpers
 
+    static readonly PngDecodeOptions Stored = new() { ApplyOrientation = false };
+
     static bool IsCorruptSuiteFile(string rel) => Path.GetFileName(rel).StartsWith('x');
 
     public static IEnumerable<object[]> Fixtures() => TestUtil.Files("png", ".png").Concat(TestUtil.Files("png/apng", ".png"));
@@ -112,16 +114,18 @@ public class PngTests
     static void Decodes(string rel)
     {
         var bytes = Load(rel);
-        var expected = TestUtil.LoadRef(TestUtil.Fixture(rel) + ".ref");
         Assert.True(Png.IsMatch(bytes));
+        // the references hold the stored pixels, Decode turns them upright
+        var stored = Png.Decode(bytes, Stored);
+        TestUtil.AssertEqual(TestUtil.LoadRef(TestUtil.Fixture(rel) + ".ref"), stored);
         var img = Png.Decode(bytes);
-        TestUtil.AssertEqual(expected, img);
-        Assert.Equal(RawImage.DefaultColorModel(expected.Channels), img.Color);
+        TestUtil.AssertEqual(ImageOps.ApplyOrientation(stored), img);
+        Assert.Equal(RawImage.DefaultColorModel(img.Channels), img.Color);
 
         var info = Png.GetInfo(bytes);
         // header level fields: bit depth as stored (8 for palette entries), and exactly what Decode reports as metadata
-        var meta = img.Metadata;
-        Assert.Equal(new ImageInfo(ImageFormat.Png, img.Width, img.Height, img.Channels, img.SampleType, img.Color, info.FrameCount)
+        var meta = stored.Metadata;
+        Assert.Equal(ExifTags.Upright(new ImageInfo(ImageFormat.Png, stored.Width, stored.Height, img.Channels, img.SampleType, img.Color, info.FrameCount)
         {
             BitsPerSample = bytes[25] == 3 ? 8 : bytes[24],
             Orientation = meta?.Orientation ?? 0,
@@ -129,12 +133,13 @@ public class PngTests
             DpiY = meta?.DpiY ?? 0,
             HasIccProfile = meta?.IccProfile != null,
             IsAnimated = rel.Contains("apng"),
-        }, info);
+        }), info);
+        Assert.Equal((img.Width, img.Height), (info.Width, info.Height));
         Assert.Equal(rel.Contains("apng") && !rel.Contains("single_frame"), info.FrameCount > 1);
 
         // same result through the generic entry point and without CRC checks
-        TestUtil.AssertEqual(expected, ImageCodec.Decode(bytes));
-        TestUtil.AssertEqual(expected, Png.Decode(bytes, new PngDecodeOptions { VerifyChecksums = false }));
+        TestUtil.AssertEqual(img, ImageCodec.Decode(bytes));
+        TestUtil.AssertEqual(img, Png.Decode(bytes, new PngDecodeOptions { VerifyChecksums = false }));
     }
 
     [TestDataTheory]
@@ -148,7 +153,7 @@ public class PngTests
     [Fact]
     public void ReadsMetadata()
     {
-        var img = Png.Decode(Load("png/meta_all.png"));
+        var img = Png.Decode(Load("png/meta_all.png"), Stored);
         var m = img.Metadata;
         Assert.NotNull(m);
         Assert.Equal(0.45455, m!.Gamma, 9);
@@ -314,8 +319,10 @@ public class PngTests
     {
         var all = Load("png/meta_all.png");
         var info = Png.GetInfo(all);
-        Assert.Equal((8, 6, 300.0, 150.0, true, false), (info.BitsPerSample, info.Orientation, info.DpiX, info.DpiY, info.HasIccProfile, info.IsAnimated));
-        Assert.Equal((info.Height, info.Width), (info.OrientedWidth, info.OrientedHeight));
+        Assert.Equal((8, 6, 150.0, 300.0, true, false), (info.BitsPerSample, info.Orientation, info.DpiX, info.DpiY, info.HasIccProfile, info.IsAnimated));
+        Assert.Equal((info.Height, info.Width, true), (info.StoredWidth, info.StoredHeight, info.OrientationApplied));
+        var up = Png.Decode(all);
+        Assert.Equal((info.Width, info.Height, 1), (up.Width, up.Height, up.Metadata!.Orientation));
 
         foreach (var (name, bits) in new[] { ("m_c0_d01_n_13x9", 1), ("m_c0_d02_i_13x9", 2), ("m_c0_d04_n_13x9", 4), ("m_c0_d16_n_13x9", 16),
                                              ("m_c3_d01_n_13x9", 8), ("m_c3_d04_n_13x9", 8), ("m_c6_d16_n_13x9", 16), ("t_gray_d02_n", 2) })
@@ -333,16 +340,17 @@ public class PngTests
         var moved = Assemble(chunks.Where(c => c.type != "eXIf" && c.type != "IEND").Select(c => c.bytes)
             .Append(chunks.Single(c => c.type == "eXIf").bytes).Append(chunks[^1].bytes));
         Assert.Equal(0, Png.GetInfo(moved).Orientation);
-        Assert.Equal(6, Png.Decode(moved).Metadata!.Orientation);
-        Assert.Equal(info with { Orientation = 0 }, Png.GetInfo(moved));
+        Assert.Equal(6, Png.Decode(moved, Stored).Metadata!.Orientation);
+        Assert.Equal(info with { Orientation = 0, OrientationApplied = false, Width = info.Height, Height = info.Width, DpiX = info.DpiY, DpiY = info.DpiX },
+            Png.GetInfo(moved));
 
         // ancillary chunks with a wrong CRC are dropped by both
         foreach (var type in new[] { "pHYs", "iCCP", "eXIf" })
         {
             var damaged = Assemble(chunks.Select(c => { var b = (byte[])c.bytes.Clone(); if (c.type == type) b[^1] ^= 1; return b; }));
             var i = Png.GetInfo(damaged);
-            var m = Png.Decode(damaged).Metadata!;
-            Assert.Equal((m.DpiX, m.DpiY, m.Orientation, m.IccProfile != null), (i.DpiX, i.DpiY, i.Orientation, i.HasIccProfile));
+            var m = Png.Decode(damaged, Stored).Metadata!;
+            Assert.Equal((m.DpiX, m.DpiY, m.Orientation, m.IccProfile != null), i.Orientation >= 5 ? (i.DpiY, i.DpiX, i.Orientation, i.HasIccProfile) : (i.DpiX, i.DpiY, i.Orientation, i.HasIccProfile));
             Assert.NotEqual(info, i);
         }
 
@@ -393,8 +401,8 @@ public class PngTests
         }
 
         // a damaged ancillary chunk is dropped, the image still decodes
-        var badGamma = Png.Decode(Damage("gAMA"));
-        TestUtil.AssertEqual(Png.Decode(good), badGamma);
+        var badGamma = Png.Decode(Damage("gAMA"), Stored);
+        TestUtil.AssertEqual(Png.Decode(good, Stored), badGamma);
         Assert.Equal(0, badGamma.Metadata!.Gamma);
         Assert.Equal(300.0, badGamma.Metadata.DpiX);
         // an unknown ancillary chunk is never checked
@@ -692,7 +700,7 @@ public class PngTests
         var exif = Load("png/meta_all.exif");
         img.Metadata = new ImageMetadata { Gamma = 0.45455, DpiX = 72, DpiY = 300, IccProfile = icc, Exif = exif };
         var png = Png.Encode(img);
-        var back = Png.Decode(png);
+        var back = Png.Decode(png, Stored);
         TestUtil.AssertEqual(img, back);
         var m = back.Metadata!;
         Assert.Equal(0.45455, m.Gamma, 9);
@@ -710,7 +718,7 @@ public class PngTests
 
         // orientation without an EXIF blob is written as a minimal one
         img.Metadata = new ImageMetadata { Orientation = 8 };
-        var o = Png.Decode(Png.Encode(img)).Metadata!;
+        var o = Png.Decode(Png.Encode(img), Stored).Metadata!;
         Assert.Equal(8, o.Orientation);
         Assert.NotNull(o.Exif);
         Assert.Equal(0, o.Gamma);

@@ -131,7 +131,10 @@ namespace Aardvark.Base
         static PixImage<T> Wrap<T>(RawImage img, T[] data)
             => new PixImage<T>(ColFormat(img.Color, img.Channels), data.CreateImageVolume(new V3l(img.Width, img.Height, img.Channels)));
 
-        /// <summary>Wraps the decoded samples in a PixImage without copying (half floats are widened to float).</summary>
+        /// <summary>
+        /// Wraps the decoded samples in a PixImage without copying (half floats are widened to float). The volume always has the
+        /// canonical dense image layout: channel fastest, then x, then y (DZ = 1, DX = channels, DY = width * channels, first index 0).
+        /// </summary>
         public static PixImage ToPixImage(RawImage img) => img.SampleType switch
         {
             // by SampleType, not by array pattern: sbyte[] would also match `byte[]` (CLR array covariance)
@@ -241,31 +244,31 @@ namespace Aardvark.Base
 
         /// <summary>
         /// Decodes an image file into a PixImage of the file's sample type (PixImage&lt;byte&gt;, &lt;ushort&gt;, &lt;float&gt;, ...)
-        /// without copying the samples. Half floats become float. With <paramref name="applyOrientation"/> the EXIF/TIFF
-        /// orientation is applied, so the image is upright as viewers show it.
+        /// without copying the samples. Half floats become float. The EXIF/TIFF orientation is already applied (the image is
+        /// upright as viewers show it) and the volume has the dense image layout (channel, x, y; see <see cref="PixCodecLoader.ToPixImage"/>).
         /// </summary>
-        public static PixImage Load(string path, bool applyOrientation = false) => Convert(ImageCodec.Decode(path), applyOrientation);
-        /// <inheritdoc cref="Load(string, bool)"/>
-        public static PixImage Load(Stream stream, bool applyOrientation = false) => Convert(ImageCodec.Decode(stream), applyOrientation);
-        /// <inheritdoc cref="Load(string, bool)"/>
-        public static PixImage Load(ReadOnlySpan<byte> data, bool applyOrientation = false) => Convert(ImageCodec.Decode(data), applyOrientation);
+        public static PixImage Load(string path) => Convert(ImageCodec.Decode(path));
+        /// <inheritdoc cref="Load(string)"/>
+        public static PixImage Load(Stream stream) => Convert(ImageCodec.Decode(stream));
+        /// <inheritdoc cref="Load(string)"/>
+        public static PixImage Load(ReadOnlySpan<byte> data) => Convert(ImageCodec.Decode(data));
 
         /// <summary>Decodes into a PixImage&lt;T&gt;, converting the samples if the file has another type (e.g. 16 bit to byte).</summary>
-        public static PixImage<T> Load<T>(string path, bool applyOrientation = false) => As<T>(Load(path, applyOrientation));
-        /// <inheritdoc cref="Load{T}(string, bool)"/>
-        public static PixImage<T> Load<T>(Stream stream, bool applyOrientation = false) => As<T>(Load(stream, applyOrientation));
-        /// <inheritdoc cref="Load{T}(string, bool)"/>
-        public static PixImage<T> Load<T>(ReadOnlySpan<byte> data, bool applyOrientation = false) => As<T>(Load(data, applyOrientation));
+        public static PixImage<T> Load<T>(string path) => As<T>(Load(path));
+        /// <inheritdoc cref="Load{T}(string)"/>
+        public static PixImage<T> Load<T>(Stream stream) => As<T>(Load(stream));
+        /// <inheritdoc cref="Load{T}(string)"/>
+        public static PixImage<T> Load<T>(ReadOnlySpan<byte> data) => As<T>(Load(data));
 
         /// <summary>
         /// Decodes every image in the file: TIFF pages, the frames of animated GIF / PNG / WebP (each the whole canvas as shown), or
         /// the single image.
         /// </summary>
-        public static PixImage[] LoadAll(string path, bool applyOrientation = false) => ConvertAll(ImageCodec.DecodeAll(path), applyOrientation);
-        /// <inheritdoc cref="LoadAll(string, bool)"/>
-        public static PixImage[] LoadAll(Stream stream, bool applyOrientation = false) => ConvertAll(ImageCodec.DecodeAll(stream), applyOrientation);
-        /// <inheritdoc cref="LoadAll(string, bool)"/>
-        public static PixImage[] LoadAll(ReadOnlySpan<byte> data, bool applyOrientation = false) => ConvertAll(ImageCodec.DecodeAll(data), applyOrientation);
+        public static PixImage[] LoadAll(string path) => ConvertAll(ImageCodec.DecodeAll(path));
+        /// <inheritdoc cref="LoadAll(string)"/>
+        public static PixImage[] LoadAll(Stream stream) => ConvertAll(ImageCodec.DecodeAll(stream));
+        /// <inheritdoc cref="LoadAll(string)"/>
+        public static PixImage[] LoadAll(ReadOnlySpan<byte> data) => ConvertAll(ImageCodec.DecodeAll(data));
 
         /// <summary>Reads only the headers: format, size, channels, sample type, orientation, dpi, ... (see <see cref="ImageInfo"/>).</summary>
         public static ImageInfo GetInfo(string path) => ImageCodec.GetInfo(path);
@@ -295,11 +298,9 @@ namespace Aardvark.Base
             _ => throw new ArgumentException($"cannot infer the image format from '{path}'"),
         };
 
-        static PixImage Convert(RawImage img, bool applyOrientation)
-            => PixCodecLoader.ToPixImage(applyOrientation ? ImageOps.ApplyOrientation(img) : img);
+        static PixImage Convert(RawImage img) => PixCodecLoader.ToPixImage(img);
 
-        static PixImage[] ConvertAll(RawImage[] imgs, bool applyOrientation)
-            => Array.ConvertAll(imgs, i => Convert(i, applyOrientation));
+        static PixImage[] ConvertAll(RawImage[] imgs) => Array.ConvertAll(imgs, Convert);
 
         static PixImage<T> As<T>(PixImage pi) => pi as PixImage<T> ?? pi.ToPixImage<T>();
 
@@ -309,7 +310,10 @@ namespace Aardvark.Base
     /// <summary>Conversions between PixCodec's RawImage and PixImage.</summary>
     public static class PixCodecRawImageExtensions
     {
-        /// <summary>Wraps the decoded samples in a PixImage without copying (half floats are widened to float).</summary>
+        /// <summary>
+        /// Wraps the decoded samples in a PixImage without copying (half floats are widened to float). The volume always has the
+        /// canonical dense image layout: channel fastest, then x, then y (DZ = 1, DX = channels, DY = width * channels, first index 0).
+        /// </summary>
         public static PixImage ToPixImage(this RawImage image) => PixCodecLoader.ToPixImage(image);
 
         /// <summary>Views a PixImage as a RawImage (no copy when it already has RGB(A)/gray image layout; BGR(A) is reordered).</summary>

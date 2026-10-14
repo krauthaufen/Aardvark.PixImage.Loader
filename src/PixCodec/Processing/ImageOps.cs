@@ -99,7 +99,7 @@ namespace PixCodec
         /// <summary>
         /// Turns an image stored with EXIF/TIFF orientation <paramref name="orientation"/> (1..8) upright, so that it looks as a viewer
         /// shows it. Without an argument the orientation in <see cref="RawImage.Metadata"/> is used. The result's metadata says
-        /// orientation 1. Orientation 0 or 1 returns the image unchanged (the same instance).
+        /// orientation 1. Orientation 0 or 1 returns the image unchanged (the same instance). Decoders already do this by default.
         /// </summary>
         public static RawImage ApplyOrientation(RawImage image, int? orientation = null)
         {
@@ -108,7 +108,11 @@ namespace PixCodec
             if (o < 0 || o > 8) throw new ArgumentOutOfRangeException(nameof(orientation), "EXIF orientation is 1..8");
             if (o <= 1) return image;
             var r = Reorient(image, o);
-            if (r.Metadata != null) r.Metadata.Orientation = 1;
+            if (r.Metadata is { } m)
+            {
+                m.Orientation = 1;
+                if (m.Exif != null) m.Exif = ExifTags.WithOrientation(m.Exif, 1);
+            }
             return r;
         }
 
