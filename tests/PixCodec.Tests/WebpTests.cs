@@ -83,19 +83,19 @@ public class WebpTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// The conformance vectors of libwebp; references are hashes of libwebp's output (vectors/refs.txt). The vector
-    /// files themselves are not in the repository (their upstream carries no licence file): fetch them with
-    /// tests/oracle/fetch_webp_vectors.sh. Without them this test checks nothing.
+    /// The conformance vectors of libwebp; references are hashes of libwebp's output (fixtures/webp/vectors/refs.txt of
+    /// the test-data repository). The vector files themselves are not committed anywhere (their upstream carries no
+    /// licence file): fetch them with fetch/fetch_webp_vectors.sh there. Without them this test is skipped.
     /// </summary>
-    [Fact]
+    [TestDataFact("fixtures/webp/vectors/alpha_color_cache.webp")]
     public void VectorsMatchReference()
     {
-        var dir = Fixture(Path.Combine("webp", "vectors"));
+        var dir = TestData(Path.Combine("fixtures", "webp", "vectors"));
         foreach (var refLine in File.ReadAllLines(Path.Combine(dir, "refs.txt")))
         {
             var line = refLine.Split(' ');
             var path = Path.Combine(dir, line[0]);
-            if (!File.Exists(path)) continue;
+            Assert.True(File.Exists(path), line[0] + " missing: run fetch/fetch_webp_vectors.sh of the test-data repository again");
             var data = File.ReadAllBytes(path);
             var img = Webp.Decode(data);
             Assert.Equal((int.Parse(line[1]), int.Parse(line[2]), int.Parse(line[3])), (img.Width, img.Height, img.Channels));

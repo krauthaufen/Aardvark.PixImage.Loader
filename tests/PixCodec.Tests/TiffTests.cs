@@ -149,15 +149,14 @@ public class TiffTests
 
     /// <summary>
     /// libtiff's classic sample pictures - files from real old writers (NeXT and HP old-style JPEG, SGI LogLuv,
-    /// ThunderScan, fax machines). They are not in the repository (no explicit licence): run
-    /// tests/oracle/fetch_tiff_samples.py once to download them and build the third-party references; without them
-    /// this test checks nothing.
+    /// ThunderScan, fax machines). They are not committed anywhere (no explicit licence): run
+    /// tests/oracle/fetch_tiff_samples.py once to download them into the test-data repository and build the
+    /// third-party references; without them this test is skipped.
     /// </summary>
-    [Fact]
+    [TestDataFact("downloads/tiff-samples/caspian.tif.ref")]
     public void RealWorldSamples()
     {
-        var dir = Path.Combine(TestUtil.FixtureDir, "_tmp", "tiff-samples");
-        if (!Directory.Exists(dir)) return;
+        var dir = TestUtil.TestData(Path.Combine("downloads", "tiff-samples"));
         int checkedFiles = 0;
         foreach (var path in Directory.GetFiles(dir, "*.tif").OrderBy(f => f, StringComparer.Ordinal))
         {
@@ -194,14 +193,14 @@ public class TiffTests
 
     /// <summary>
     /// A real Aperio slide with JPEG 2000 tiles holding subsampled YCbCr components (compression 33003), from the
-    /// OpenSlide test data. Fetched by `fetch_tiff_samples.py --aperio` (64 MB); without it this test checks nothing.
+    /// OpenSlide test data. Fetched into the test-data repository by `fetch_tiff_samples.py --aperio` (64 MB); without
+    /// it this test is skipped.
     /// OpenJPEG rounds the 9/7 wavelet and the colour conversion slightly differently.
     /// </summary>
-    [Fact]
+    [TestDataFact("downloads/tiff-samples/JP2K-33003-1.svs.3.ref")]
     public void AperioJpeg2000Sample()
     {
-        var path = Path.Combine(TestUtil.FixtureDir, "_tmp", "tiff-samples", "JP2K-33003-1.svs");
-        if (!File.Exists(path) || !File.Exists(path + ".3.ref")) return;
+        var path = TestUtil.TestData(Path.Combine("downloads", "tiff-samples", "JP2K-33003-1.svs"));
         using var fs = File.OpenRead(path);
         Assert.Equal(6, Tiff.GetImageCount(fs));
         var infos = Tiff.GetInfos(fs);
@@ -214,16 +213,15 @@ public class TiffTests
     }
 
     /// <summary>
-    /// The TIFF files of GDAL's test suite (fetched by `fetch_tiff_samples.py --gdal`; without them this test checks
-    /// nothing): what GDAL writes with every codec and layout it has, and its collection of broken files. Where the
+    /// The TIFF files of GDAL's test suite (fetched into the test-data repository by `fetch_tiff_samples.py --gdal`;
+    /// without them this test is skipped): what GDAL writes with every codec and layout it has, and its collection of broken files. Where the
     /// script stored GDAL's reading of a file, the stored samples have to be the same; no file may make the decoder
     /// fail with anything but the two documented exceptions.
     /// </summary>
-    [Fact]
+    [TestDataFact("downloads/gdal-samples")]
     public void GdalAutotestSamples()
     {
-        var dir = Path.Combine(TestUtil.FixtureDir, "_tmp", "gdal-samples");
-        if (!Directory.Exists(dir)) return;
+        var dir = TestUtil.TestData(Path.Combine("downloads", "gdal-samples"));
         var raw = new TiffDecodeOptions { BitScaling = TiffBitScaling.None, ConvertToRgb = false };
         int same = 0;
         var unsupported = new List<string>();

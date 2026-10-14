@@ -22,10 +22,9 @@ Encoders / decoders used by the generator:
 The tests need none of these tools; they only use `imagecodecs` to decode what PixCodec's encoder writes, and
 check less when it is missing.
 
-## conformance/
+## Conformance
 
-`limits.txt` lists the codestreams of the Rec. ITU-T T.803 | ISO/IEC 15444-4 (02/2024) decoder conformance test,
-class 1 (Part 1 profile 0 and 1, the HTJ2K sets derived from them, the high fidelity pair), with SHA-256 hashes, the
-reference images and the error bounds of the standard. The files themselves may be used for conformance testing
-only and are therefore not in the repository; `tests/oracle/fetch_jp2_conformance.sh` downloads them (93 MB) and
-`Jp2ConformanceTests` then runs them. PixCodec passes all 65.
+The Rec. ITU-T T.803 | ISO/IEC 15444-4 (02/2024) decoder conformance test, class 1, may be used for conformance
+testing only and is not in this repository: its list (`limits.txt`, with hashes and the error bounds of the standard)
+and download script are in the test-data repository (see the README there), `Jp2ConformanceTests` runs it.
+PixCodec passes all 65.

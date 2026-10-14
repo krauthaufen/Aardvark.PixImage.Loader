@@ -5,14 +5,20 @@ namespace PixCodec.Tests;
 
 public class InfoTests
 {
-    public static IEnumerable<object[]> AllFixtures()
+    public static IEnumerable<object[]> AllFixtures() => Chunks(TestUtil.FixtureDir);
+
+    /// <summary>The image files in fixtures/ of the test-data repository.</summary>
+    public static IEnumerable<object[]> ThirdPartyFixtures()
+        => TestUtil.TestDataFixtureDir == null ? Enumerable.Empty<object[]>() : Chunks(TestUtil.TestDataFixtureDir);
+
+    static IEnumerable<object[]> Chunks(string fixtures)
     {
         var exts = new HashSet<string> { ".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".exr", ".webp", ".jp2", ".j2k", ".j2c", ".jph", ".jhc" };
-        return Directory.EnumerateFiles(TestUtil.FixtureDir, "*", SearchOption.AllDirectories)
+        return Directory.EnumerateFiles(fixtures, "*", SearchOption.AllDirectories)
             .Where(f => exts.Contains(Path.GetExtension(f).ToLowerInvariant()) && !f.Contains("_tmp"))
             .OrderBy(f => f, StringComparer.Ordinal)
             .Chunk(100)
-            .Select(c => new object[] { Path.GetRelativePath(TestUtil.FixtureDir, c[0]), c });
+            .Select(c => new object[] { Path.GetRelativePath(fixtures, c[0]), c });
     }
 
     sealed class CountingStream(Stream inner, bool seekable) : Stream
@@ -40,6 +46,10 @@ public class InfoTests
     /// The header-only entry points must report exactly what parsing the complete file reports - for every fixture
     /// of every format, from a tiny first read (forcing the grow path), seekable or not.
     /// </summary>
+    [TestDataTheory]
+    [MemberData(nameof(ThirdPartyFixtures))]
+    public void ThirdPartyStreamInfoEqualsFullInfo(string first, string[] files) => StreamInfoEqualsFullInfo(first, files);
+
     [Theory]
     [MemberData(nameof(AllFixtures))]
     public void StreamInfoEqualsFullInfo(string first, string[] files)

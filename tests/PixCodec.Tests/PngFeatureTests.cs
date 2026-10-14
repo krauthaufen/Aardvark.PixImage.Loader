@@ -279,16 +279,26 @@ public class PngFeatureTests
     public void EncodeIndexedPairsWithKeepIndexed()
     {
         // decode -> encode keeps a palette file intact
-        foreach (var name in new[] { "m_c3_d01_n_33x17", "m_c3_d04_i_33x17", "t_pal_d2_n", "t_pal_d8_i", "pal_short", "pngsuite/tbbn3p08", "pngsuite/basn3p08" })
-        {
-            var source = Load($"png/{name}.png");
-            var indices = Png.Decode(source, new PngDecodeOptions { KeepIndexed = true });
-            var palette = Png.ReadPalette(source)!;
-            var png = Png.EncodeIndexed(indices, palette);
-            Assert.Equal(3, png[25]);
-            TestUtil.AssertEqual(Png.Decode(source), Png.Decode(png));
-            Assert.Equal(palette, Png.ReadPalette(png));
-        }
+        foreach (var name in new[] { "m_c3_d01_n_33x17", "m_c3_d04_i_33x17", "t_pal_d2_n", "t_pal_d8_i", "pal_short" })
+            EncodeIndexedPair(name);
+    }
+
+    [TestDataFact]
+    public void EncodeIndexedPairsWithKeepIndexedSuite()
+    {
+        foreach (var name in new[] { "pngsuite/tbbn3p08", "pngsuite/basn3p08" })
+            EncodeIndexedPair(name);
+    }
+
+    static void EncodeIndexedPair(string name)
+    {
+        var source = Load($"png/{name}.png");
+        var indices = Png.Decode(source, new PngDecodeOptions { KeepIndexed = true });
+        var palette = Png.ReadPalette(source)!;
+        var png = Png.EncodeIndexed(indices, palette);
+        Assert.Equal(3, png[25]);
+        TestUtil.AssertEqual(Png.Decode(source), Png.Decode(png));
+        Assert.Equal(palette, Png.ReadPalette(png));
     }
 
     [Fact]
@@ -307,10 +317,16 @@ public class PngFeatureTests
 
     // ------------------------------------------------------------------ ancillary chunks
 
-    public static IEnumerable<object[]> MetadataFixtures()
+    public static IEnumerable<object[]> MetadataFixtures() => MetadataFiles(TestUtil.FixtureDir, "png", "png/apng");
+
+    /// <summary>The PngSuite files with metadata sidecars (in the test-data repository).</summary>
+    public static IEnumerable<object[]> SuiteMetadataFixtures()
+        => TestUtil.TestDataFixtureDir == null ? Enumerable.Empty<object[]>() : MetadataFiles(TestUtil.TestDataFixtureDir, "png/pngsuite");
+
+    static IEnumerable<object[]> MetadataFiles(string fixtures, params string[] dirs)
     {
-        foreach (var dir in new[] { "png", "png/pngsuite", "png/apng" })
-            foreach (var f in Directory.GetFiles(Path.Combine(TestUtil.FixtureDir, dir), "*.png.meta.json").OrderBy(f => f, StringComparer.Ordinal))
+        foreach (var dir in dirs)
+            foreach (var f in Directory.GetFiles(Path.Combine(fixtures, dir), "*.png.meta.json").OrderBy(f => f, StringComparer.Ordinal))
                 yield return new object[] { Path.Combine(dir, Path.GetFileName(f)[..^".meta.json".Length]) };
     }
 
@@ -455,12 +471,29 @@ public class PngFeatureTests
     }
 
     [Fact]
-    public void MetadataFixturesArePresent() => Assert.True(MetadataFixtures().Count() > 150);
+    public void MetadataFixturesArePresent() => Assert.True(MetadataFixtures().Count() > 40);
+
+    [TestDataFact]
+    public void SuiteMetadataFixturesArePresent() => Assert.True(SuiteMetadataFixtures().Count() > 140);
 
     [Theory]
     [MemberData(nameof(MetadataFixtures))]
-    public void ReadsMetadataLikeThirdPartyReaders(string rel)
+    public void ReadsMetadataLikeThirdPartyReaders(string rel) => ReadsMetadataLikeOracle(rel);
+
+    [TestDataTheory]
+    [MemberData(nameof(SuiteMetadataFixtures))]
+    public void ReadsSuiteMetadataLikeThirdPartyReaders(string rel) => ReadsMetadataLikeOracle(rel);
+
+    static void ReadsMetadataLikeOracle(string rel)
         => AssertMatchesOracle(JsonDocument.Parse(File.ReadAllText(TestUtil.Fixture(rel) + ".meta.json")).RootElement, Load(rel));
+
+    [TestDataFact]
+    public void ReadsSuiteSignificantBits()
+    {
+        // PngSuite documents the significant bits: cs3n2c16 = 13 bits, cs3n3p08 = 3, cs5 = 5 (cs8, the reference, has no sBIT)
+        foreach (var (name, bits) in new[] { ("cs3n2c16", 13), ("cs3n3p08", 3), ("cs5n2c08", 5), ("cs5n3p08", 5) })
+            Assert.Equal(new[] { (byte)bits, (byte)bits, (byte)bits }, Png.ReadMetadata(Load($"png/pngsuite/{name}.png")).SignificantBits);
+    }
 
     [Fact]
     public void ReadsKnownChunkValues()
@@ -488,10 +521,6 @@ public class PngFeatureTests
         Assert.Equal(new byte[] { 3 }, Png.ReadMetadata(Load("png/meta_bkgd_gray4.png")).SignificantBits);
         var pal = Png.ReadPalette(Load("png/meta_bkgd_palette.png"))!;
         Assert.Equal(new PngBackground(pal[16], pal[17], pal[18], 4), Png.ReadMetadata(Load("png/meta_bkgd_palette.png")).Background);
-
-        // PngSuite documents the significant bits: cs3n2c16 = 13 bits, cs3n3p08 = 3, cs5 = 5 (cs8, the reference, has no sBIT)
-        foreach (var (name, bits) in new[] { ("cs3n2c16", 13), ("cs3n3p08", 3), ("cs5n2c08", 5), ("cs5n3p08", 5) })
-            Assert.Equal(new[] { (byte)bits, (byte)bits, (byte)bits }, Png.ReadMetadata(Load($"png/pngsuite/{name}.png")).SignificantBits);
 
         Assert.True(Png.ReadMetadata(Load("png/m_c2_d08_n_13x9.png")).IsEmpty);
 

@@ -278,7 +278,7 @@ public class ExrFeatureTests
     static Dictionary<string, string> Hashes(string path)
         => File.ReadAllLines(path).Where(l => l.Length > 0).ToDictionary(l => l.Substring(0, l.LastIndexOf(' ')), l => l.Substring(l.LastIndexOf(' ') + 1));
 
-    [Theory]
+    [TestDataTheory]
     [InlineData("ColorCodedLevels.exr")]
     [InlineData("MirrorPattern.exr")]
     public void OfficialMipMaps(string name)
@@ -454,7 +454,7 @@ public class ExrFeatureTests
         Assert.True(overlapping > 10, "fixture should have overlapping volume samples");
     }
 
-    [Fact]
+    [TestDataFact]
     public void OfficialDeepImage()
     {
         // Trunks.exr of the openexr-images collection: deep scan line, ZIPS, 1024x435
@@ -760,11 +760,19 @@ public class ExrFeatureTests
     // ------------------------------------------------------------------ image info
 
     public static IEnumerable<object[]> AllExr =>
-        new[] { "", "dwa", "yc", "levels", "deep", "encref", "official", "selfcheck" }.SelectMany(d => TestUtil.Files(Path.Combine("exr", d), ".exr"));
+        new[] { "", "dwa", "yc", "levels", "deep", "encref", "selfcheck" }.SelectMany(d => TestUtil.Files(Path.Combine("exr", d), ".exr"));
+
+    public static IEnumerable<object[]> OfficialExr => TestUtil.ThirdPartyFiles(Path.Combine("exr", "official"), ".exr");
 
     [Theory]
     [MemberData(nameof(AllExr))]
-    public void InfoMatchesDecode(string file)
+    public void InfoMatchesDecode(string file) => InfoMatchesDecodeOf(file);
+
+    [TestDataTheory]
+    [MemberData(nameof(OfficialExr))]
+    public void OfficialInfoMatchesDecode(string file) => InfoMatchesDecodeOf(file);
+
+    static void InfoMatchesDecodeOf(string file)
     {
         var data = File.ReadAllBytes(TestUtil.Fixture(file));
         var info = Exr.GetInfo(data);

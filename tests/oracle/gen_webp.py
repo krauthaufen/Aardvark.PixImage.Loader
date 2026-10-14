@@ -17,8 +17,9 @@ stills it is cross checked against the plain libwebp decoder of `imagecodecs`. P
 alpha flag is unset; PixCodec also returns alpha for a lossless image with the alpha hint (see output_has_alpha), so
 the alpha plane is always taken from the decoder's RGBA output and the channel count from the rule in Webp.cs.
 
-vectors/: a selection of the libwebp conformance vectors (see vectors/README); their references are SHA-256 hashes
-of libwebp's output in vectors/refs.txt, written by this script from the committed files.
+A selection of the libwebp conformance vectors is checked through fixtures/webp/vectors of the test-data repository
+(see the README there and pxref.testdata_dir); their references are SHA-256 hashes of libwebp's output in
+vectors/refs.txt there, written by this script from the fetched files.
 
 usage: python3 gen_webp.py [--report]
 """
@@ -31,7 +32,7 @@ import subprocess
 import sys
 import numpy as np
 from PIL import Image, _webp
-from pxref import write_ref, test_pattern
+from pxref import write_ref, test_pattern, testdata_dir
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fixtures', 'webp')
 REPORT = '--report' in sys.argv
@@ -1031,8 +1032,8 @@ def gen_container():
 # ---------------------------------------------------------------- conformance vectors
 
 def gen_vectors():
-    d = os.path.join(OUT, 'vectors')
-    if not os.path.isdir(d):
+    d = testdata_dir('fixtures', 'webp', 'vectors')
+    if d is None:
         return
     lines = []
     for name in sorted(os.listdir(d)):
@@ -1047,7 +1048,7 @@ def gen_vectors():
         if not np.array_equal(other[:, :, :c], px[:, :, :c]):
             raise RuntimeError('vector %s: Pillow and imagecodecs disagree' % name)
         lines.append('%s %d %d %d %s' % (name, px.shape[1], px.shape[0], px.shape[2], hashlib.sha256(px.tobytes()).hexdigest()))
-    # the vector files are not part of the repository (see vectors/README): keep the list when they are not here
+    # the vector files are not committed (see vectors/README): keep the list when they are not fetched
     if not lines:
         return
     with open(os.path.join(d, 'refs.txt'), 'w') as f:

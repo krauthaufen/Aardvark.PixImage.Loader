@@ -3,8 +3,8 @@
 usage: python3 fetch_tiff_samples.py       (from tests/oracle; needs network access once)
 
 The files are libtiff's classic sample pictures (pics-3.8.0.tar.gz from download.osgeo.org). They come without an
-explicit licence, so they are NOT part of the repository: this script downloads the archive, checks its SHA-256
-and unpacks it into tests/fixtures/_tmp/tiff-samples (git-ignored). Among them are the only files from actual old
+explicit licence, so they are not committed anywhere: this script downloads the archive, checks its SHA-256 and
+unpacks it into downloads/tiff-samples of the test-data repository (git-ignored there; see pxref.testdata_dir). Among them are the only files from actual old
 writers we know for some layouts: old-style JPEG in tiles (NeXT, with studio range ReferenceBlackWhite) and strips
 (HP), SGI LogL / LogLuv 24 / LogLuv 32 from Greg Ward Larson, ThunderScan, Group 3 2D fax, planar LZW.
 
@@ -17,7 +17,7 @@ are JPEG 2000 codestreams with YCbCr 4:2:2 components (compression 33003), for T
 References: tifffile + OpenJPEG (which converts the subsampled YCbCr to RGB), for directory 3 and a region of directory 2.
 
 With --gdal it fetches the GDAL 3.11.0 autotest archive (18 MB, download.osgeo.org) and unpacks the 363 TIFF files of
-gcore/data into tests/fixtures/_tmp/gdal-samples, for TiffTests.GdalAutotestSamples: files GDAL itself writes (LERC
+gcore/data into downloads/gdal-samples of the test-data repository, for TiffTests.GdalAutotestSamples: files GDAL itself writes (LERC
 with all its variants and masks, ZSTD, LZMA, WebP, JPEG, sparse and cloud optimized layouts, complex and odd sample
 types) and its collection of broken files. References: the installed GDAL (rasterio), stored samples band by band.
 Files where GDAL interprets the samples differently from PixCodec's raw decoding get no reference (see GDAL_SKIP).
@@ -39,7 +39,7 @@ import cv2  # noqa: E402
 from PIL import Image  # noqa: E402
 
 import gen_tiff as g  # noqa: E402
-from pxref import write_ref  # noqa: E402
+from pxref import write_ref, testdata_dir  # noqa: E402
 
 URL = 'https://download.osgeo.org/libtiff/pics-3.8.0.tar.gz'
 SHA256 = 'e0e34732b61e1ce49eff2c7a079994c856d2a5f772f5228c84678272bc6829a9'
@@ -63,7 +63,7 @@ GDAL_SKIP = {
     'size_of_stripbytecount_at_1_and_lower_than_stripcount.tif': 'too few StripByteCounts: GDAL reads the strips without one as empty, PixCodec recovers them',
     'size_of_stripbytecount_lower_than_stripcount.tif': 'too few StripByteCounts: GDAL reads the strips without one as empty, PixCodec recovers them',
 }
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fixtures', '_tmp', 'tiff-samples')
+OUT = testdata_dir('downloads', 'tiff-samples')
 
 
 def magick(path, fmt, shape):
@@ -146,6 +146,8 @@ def gdal():
 
 
 def main():
+    if OUT is None:
+        return 1
     os.makedirs(OUT, exist_ok=True)
     if '--aperio' in sys.argv:
         aperio()

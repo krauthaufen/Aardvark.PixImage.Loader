@@ -10,15 +10,18 @@ namespace PixCodec.Tests;
 /// profile 0 and 1, the HTJ2K sets derived from them (HT only and mixed with Part 1 code-blocks, with placeholder
 /// passes, several layers, SigProp / MagRef passes) and the high fidelity pair. Every component has to stay within the
 /// peak error and mean squared error the standard allows against its reference image (limits.txt).
-/// The suite may only be used for conformance testing and is not in the repository: tests/oracle/fetch_jp2_conformance.sh
-/// downloads it (93 MB). Without the files these tests check nothing.
+/// The suite may only be used for conformance testing and is not committed anywhere: fetch/fetch_jp2_conformance.sh of
+/// the test-data repository downloads it (93 MB) next to limits.txt there. Without the files these tests are skipped.
 /// </summary>
 public class Jp2ConformanceTests
 {
-    static readonly string Dir = Fixture(Path.Combine("jp2", "conformance"));
+    const string Fetched = "fixtures/jp2/conformance/codestreams_profile0";
+
+    static string Dir => TestData(Path.Combine("fixtures", "jp2", "conformance"));
 
     public static IEnumerable<object[]> Streams()
     {
+        if (TestDataSkipReason(new[] { Fetched }) != null) yield break;
         foreach (var line in File.ReadAllLines(Path.Combine(Dir, "limits.txt")))
             if (!line.StartsWith('#') && line.Length > 0) yield return new object[] { line.Split(' ')[0] };
     }
@@ -46,12 +49,12 @@ public class Jp2ConformanceTests
         return (s, w, h);
     }
 
-    [Theory, MemberData(nameof(Streams))]
+    [TestDataTheory(Fetched), MemberData(nameof(Streams))]
     public void Class1(string stream)
     {
         var line = File.ReadAllLines(Path.Combine(Dir, "limits.txt")).First(l => l.StartsWith(stream + " ")).Split(' ');
         var path = Path.Combine(Dir, stream);
-        if (!File.Exists(path)) return;
+        Assert.True(File.Exists(path), "codestream missing: run fetch/fetch_jp2_conformance.sh of the test-data repository again");
         var data = File.ReadAllBytes(path);
         Assert.Equal(line[1], Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant());
         int reduce = int.Parse(line[2]);
@@ -62,7 +65,7 @@ public class Jp2ConformanceTests
         for (int c = 0; 3 + 4 * c < line.Length; c++)
         {
             var refPath = Path.Combine(Dir, line[3 + 4 * c]);
-            Assert.True(File.Exists(refPath), "reference image missing: run tests/oracle/fetch_jp2_conformance.sh again");
+            Assert.True(File.Exists(refPath), "reference image missing: run fetch/fetch_jp2_conformance.sh of the test-data repository again");
             Assert.Equal(line[4 + 4 * c], Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(refPath))).ToLowerInvariant());
             int peakLimit = int.Parse(line[5 + 4 * c]);
             double mseLimit = double.Parse(line[6 + 4 * c], System.Globalization.CultureInfo.InvariantCulture);

@@ -13,8 +13,9 @@ files are read back with OpenCV, because the python bindings only write level 0 
 Directories: . (flat images, bit exact), dwa/ (DWAA/DWAB, bit exact), yc/ (luminance/chroma; .ref is the RGBA
 interface output as float16 RGBA), levels/ (mip/rip maps; name.exr.l<lx>_<ly>.ref per level, all channels),
 deep/ (name.exr.partN.deep raw samples, .fileorder.ref the reference library's flattening, .flat.ref depth sorted
-"tidy" flattening computed here), official/ (files of the openexr-images collection with SHA-256 of reference
-decodes), encref/ (an RGBA image and the luminance/chroma file the reference encoder makes of it).
+"tidy" flattening computed here), encref/ (an RGBA image and the luminance/chroma file the reference encoder makes of it).
+A few files of the openexr-images collection, with SHA-256 of reference decodes, are in the test-data repository
+(fixtures/exr/official of pixcodec-testdata, see pxref.testdata_dir).
 
 Sidecars:  name.exr.ref        what Exr.Decode returns with default options (float16 when all channels are HALF)
            name.exr.all.ref    all channels in file order via Exr.DecodeChannels (optional)
@@ -27,7 +28,7 @@ import subprocess
 import sys
 import numpy as np
 import OpenEXR as X
-from pxref import write_ref, test_pattern
+from pxref import write_ref, test_pattern, testdata_dir
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fixtures', 'exr')
 COMP = {'none': X.NO_COMPRESSION, 'rle': X.RLE_COMPRESSION, 'zips': X.ZIPS_COMPRESSION, 'zip': X.ZIP_COMPRESSION,
@@ -162,7 +163,7 @@ def clean(sub):
     d = os.path.join(OUT, sub)
     os.makedirs(d, exist_ok=True)
     for f in os.listdir(d):
-        if not f.startswith('LICENSE') and not (sub == 'official' and f.endswith('.exr')):
+        if not f.startswith('LICENSE'):
             os.remove(os.path.join(d, f))
     return d
 
@@ -560,10 +561,17 @@ OFFICIAL = 'https://raw.githubusercontent.com/AcademySoftwareFoundation/openexr-
 
 
 def gen_official():
-    """A few small files of the openexr-images collection (BSD licence, see LICENSE there); hashes of reference decodes."""
+    """A few small files of the openexr-images collection (BSD licence, see LICENSE there); hashes of reference decodes.
+    They live in the test-data repository (fixtures/exr/official there)."""
     import hashlib
     import urllib.request
-    d = clean('official')
+    d = testdata_dir('fixtures', 'exr', 'official')
+    if d is None:
+        return
+    os.makedirs(d, exist_ok=True)
+    for f in os.listdir(d):
+        if not f.startswith('LICENSE') and not f.endswith('.exr'):
+            os.remove(os.path.join(d, f))
 
     def fetch(rel, name):
         path = os.path.join(d, name)

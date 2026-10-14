@@ -6,6 +6,21 @@ using Xunit;
 
 namespace PixCodec.Tests;
 
+/// <summary>
+/// A fact on third-party test data (see <see cref="TestUtil.TestDataDir"/>): skipped when the test-data repository, or
+/// one of the paths given (relative to it), is missing.
+/// </summary>
+public sealed class TestDataFactAttribute : FactAttribute
+{
+    public TestDataFactAttribute(params string[] requires) => Skip = TestUtil.TestDataSkipReason(requires);
+}
+
+/// <summary>A theory on third-party test data, skipped like <see cref="TestDataFactAttribute"/>.</summary>
+public sealed class TestDataTheoryAttribute : TheoryAttribute
+{
+    public TestDataTheoryAttribute(params string[] requires) => Skip = TestUtil.TestDataSkipReason(requires);
+}
+
 public static class TestUtil
 {
     /// <summary>tests/fixtures (found by walking up from the test binary).</summary>
@@ -24,12 +39,66 @@ public static class TestUtil
         throw new DirectoryNotFoundException(rel);
     }
 
-    public static string Fixture(string relative) => Path.Combine(FixtureDir, relative);
+    /// <summary>
+    /// The test-data repository with the third-party test files (PngSuite, openexr-images, Esri's LERC samples, the
+    /// lists of downloaded conformance files): $PIXCODEC_TESTDATA, or pixcodec-testdata next to this repository.
+    /// Null when there is none; the tests that need it are then skipped (<see cref="TestDataFactAttribute"/>).
+    /// </summary>
+    public static string? TestDataDir { get; } = FindTestData();
+
+    /// <summary>fixtures/ of the test-data repository: the same layout as tests/fixtures.</summary>
+    public static string? TestDataFixtureDir => TestDataDir == null ? null : Path.Combine(TestDataDir, "fixtures");
+
+    static string TestDataCandidate()
+    {
+        var env = Environment.GetEnvironmentVariable("PIXCODEC_TESTDATA");
+        return Path.GetFullPath(string.IsNullOrEmpty(env) ? Path.Combine(FixtureDir, "..", "..", "..", "pixcodec-testdata") : env);
+    }
+
+    static string? FindTestData()
+    {
+        var d = TestDataCandidate();
+        return Directory.Exists(Path.Combine(d, "fixtures")) ? d : null;
+    }
+
+    /// <summary>Why a test on third-party data can not run (null if it can): no test-data repository, or one of
+    /// <paramref name="requires"/> (paths relative to it) is missing there.</summary>
+    public static string? TestDataSkipReason(string[] requires)
+    {
+        if (TestDataDir == null)
+            return $"no third-party test data at {TestDataCandidate()} (set PIXCODEC_TESTDATA or check out pixcodec-testdata next to this repository)";
+        foreach (var r in requires)
+            if (!File.Exists(Path.Combine(TestDataDir, r)) && !Directory.Exists(Path.Combine(TestDataDir, r)))
+                return $"{r} is missing in {TestDataDir} (downloaded files: see the README there)";
+        return null;
+    }
+
+    /// <summary>A path in the test-data repository; only for tests marked <see cref="TestDataFactAttribute"/>.</summary>
+    public static string TestData(string relative)
+        => Path.Combine(TestDataDir ?? throw new InvalidOperationException("no test-data repository"), relative);
+
+    /// <summary>A fixture in tests/fixtures, or else at the same place in fixtures/ of the test-data repository.</summary>
+    public static string Fixture(string relative)
+    {
+        var own = Path.Combine(FixtureDir, relative);
+        if (TestDataFixtureDir == null || File.Exists(own) || Directory.Exists(own)) return own;
+        var third = Path.Combine(TestDataFixtureDir, relative);
+        return File.Exists(third) || Directory.Exists(third) ? third : own;
+    }
 
     /// <summary>All fixture files in tests/fixtures/&lt;dir&gt; with the extension, as xunit MemberData rows (relative paths).</summary>
-    public static IEnumerable<object[]> Files(string dir, params string[] extensions)
+    public static IEnumerable<object[]> Files(string dir, params string[] extensions) => FilesIn(FixtureDir, dir, extensions);
+
+    /// <summary>
+    /// <see cref="Files"/> for fixtures/&lt;dir&gt; of the test-data repository (no rows without it): MemberData of a
+    /// <see cref="TestDataTheoryAttribute"/> theory. <see cref="Fixture"/> finds the files from the rows.
+    /// </summary>
+    public static IEnumerable<object[]> ThirdPartyFiles(string dir, params string[] extensions)
+        => TestDataFixtureDir == null ? Enumerable.Empty<object[]>() : FilesIn(TestDataFixtureDir, dir, extensions);
+
+    static IEnumerable<object[]> FilesIn(string fixtures, string dir, string[] extensions)
     {
-        var root = Path.Combine(FixtureDir, dir);
+        var root = Path.Combine(fixtures, dir);
         if (!Directory.Exists(root)) yield break;
         foreach (var f in Directory.GetFiles(root).OrderBy(f => f, StringComparer.Ordinal))
             if (extensions.Contains(Path.GetExtension(f).ToLowerInvariant()))

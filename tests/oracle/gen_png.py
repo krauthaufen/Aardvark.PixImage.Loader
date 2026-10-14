@@ -13,8 +13,8 @@ OpenCV (libpng), ImageMagick and netpbm's pngtopam (libpng, each with its own tr
 decoder) and Pillow (its own PNG decoder, where it can represent the result). At least two must produce a result and all that do must agree
 bit for bit, otherwise generation fails.
 
-tests/fixtures/png/pngsuite holds the official PngSuite (http://www.schaik.com/pngsuite/, free to use, see
-PngSuite.LICENSE there). Those files are committed as downloaded; this script only (re)creates their refs.
+The official PngSuite (http://www.schaik.com/pngsuite/) is in the test-data repository (fixtures/png/pngsuite of
+pixcodec-testdata, see pxref.testdata_dir); this script only (re)creates the refs there when it finds it.
 The x*.png files in it are intentionally corrupt and get no ref.
 """
 import glob
@@ -26,11 +26,11 @@ import zlib
 
 import numpy as np
 
-from pxref import write_ref, test_pattern
+from pxref import write_ref, test_pattern, testdata_dir
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.normpath(os.path.join(HERE, '..', 'fixtures', 'png'))
-SUITE = os.path.join(OUT, 'pngsuite')
+SUITE = None   # the PngSuite in the test-data repository, set by main()
 
 TMP = os.path.normpath(os.path.join(HERE, '..', '..', '.tmp'))
 TOOLS = os.path.join(TMP, 'tools')
@@ -1227,7 +1227,7 @@ def gen_meta():
     written.append(('im_chunks', who))
 
     count = 0
-    for d in (OUT, SUITE, APNG):
+    for d in (OUT, SUITE, APNG) if SUITE else (OUT, APNG):
         for path in sorted(glob.glob(os.path.join(d, '*.png'))):
             if os.path.basename(path).startswith('x') and d == SUITE:
                 continue
@@ -1241,9 +1241,12 @@ def gen_meta():
 
 
 def main():
+    global SUITE
+    SUITE = testdata_dir('fixtures', 'png', 'pngsuite')
     os.makedirs(OUT, exist_ok=True)
-    stale = [os.path.join(OUT, '*.png'), os.path.join(OUT, '*.ref'), os.path.join(OUT, '*.json'), os.path.join(SUITE, '*.ref'),
-             os.path.join(SUITE, '*.json'), os.path.join(APNG, '*')]
+    stale = [os.path.join(OUT, '*.png'), os.path.join(OUT, '*.ref'), os.path.join(OUT, '*.json'), os.path.join(APNG, '*')]
+    if SUITE:
+        stale += [os.path.join(SUITE, '*.ref'), os.path.join(SUITE, '*.json')]
     for f in [f for pattern in stale for f in glob.glob(pattern)]:
         os.remove(f)
     gen_matrix()
@@ -1251,7 +1254,7 @@ def main():
     gen_transparency()
     gen_chunks()
     gen_third_party()
-    if os.path.isdir(SUITE):
+    if SUITE:
         gen_suite_refs()
     gen_apng()
     finish_anims()

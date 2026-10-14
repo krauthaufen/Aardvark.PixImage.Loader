@@ -12,12 +12,18 @@ public class PngTests
 
     static bool IsCorruptSuiteFile(string rel) => Path.GetFileName(rel).StartsWith('x');
 
-    public static IEnumerable<object[]> Fixtures()
-        => TestUtil.Files("png", ".png").Concat(TestUtil.Files("png/pngsuite", ".png")).Concat(TestUtil.Files("png/apng", ".png"))
-            .Where(r => !IsCorruptSuiteFile((string)r[0]));
+    public static IEnumerable<object[]> Fixtures() => TestUtil.Files("png", ".png").Concat(TestUtil.Files("png/apng", ".png"));
+
+    /// <summary>The valid files of the PngSuite (in the test-data repository).</summary>
+    public static IEnumerable<object[]> SuiteFiles()
+        => TestUtil.ThirdPartyFiles("png/pngsuite", ".png").Where(r => !IsCorruptSuiteFile((string)r[0]));
 
     public static IEnumerable<object[]> CorruptSuiteFiles()
-        => TestUtil.Files("png/pngsuite", ".png").Where(r => IsCorruptSuiteFile((string)r[0]));
+        => TestUtil.ThirdPartyFiles("png/pngsuite", ".png").Where(r => IsCorruptSuiteFile((string)r[0]));
+
+    /// <summary>Every decodable fixture: ours and, when the test data is there, the PngSuite.</summary>
+    static IEnumerable<object[]> AllDecodable()
+        => TestUtil.Files("png", ".png").Concat(SuiteFiles()).Concat(TestUtil.Files("png/apng", ".png"));
 
     internal static byte[] Load(string name) => File.ReadAllBytes(TestUtil.Fixture(name));
 
@@ -86,15 +92,24 @@ public class PngTests
     // ------------------------------------------------------------------ decoding
 
     [Fact]
-    public void FixturesArePresent()
+    public void FixturesArePresent() => Assert.True(Fixtures().Count() > 250);
+
+    [TestDataFact]
+    public void SuiteFilesArePresent()
     {
-        Assert.True(Fixtures().Count() > 300);
+        Assert.True(SuiteFiles().Count() > 150);
         Assert.True(CorruptSuiteFiles().Count() >= 14);
     }
 
     [Theory]
     [MemberData(nameof(Fixtures))]
-    public void DecodesFixture(string rel)
+    public void DecodesFixture(string rel) => Decodes(rel);
+
+    [TestDataTheory]
+    [MemberData(nameof(SuiteFiles))]
+    public void DecodesSuiteFile(string rel) => Decodes(rel);
+
+    static void Decodes(string rel)
     {
         var bytes = Load(rel);
         var expected = TestUtil.LoadRef(TestUtil.Fixture(rel) + ".ref");
@@ -122,7 +137,7 @@ public class PngTests
         TestUtil.AssertEqual(expected, Png.Decode(bytes, new PngDecodeOptions { VerifyChecksums = false }));
     }
 
-    [Theory]
+    [TestDataTheory]
     [MemberData(nameof(CorruptSuiteFiles))]
     public void RejectsCorruptSuiteFile(string rel)
     {
@@ -477,7 +492,7 @@ public class PngTests
         var noCrc = new PngDecodeOptions { VerifyChecksums = false };
         var def = new PngDecodeOptions();
         int n = 0;
-        foreach (var row in Fixtures())
+        foreach (var row in AllDecodable())
         {
             var bytes = Load((string)row[0]);
             var offsets = new SortedSet<int>();
@@ -505,7 +520,7 @@ public class PngTests
         var def = new PngDecodeOptions();
         var rnd = new Random(12345);
         int n = 0;
-        foreach (var row in Fixtures())
+        foreach (var row in AllDecodable())
         {
             var bytes = Load((string)row[0]);
             for (int round = 0; round < 40; round++)
