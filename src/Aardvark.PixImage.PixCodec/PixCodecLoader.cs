@@ -314,13 +314,76 @@ namespace Aardvark.Base
             return new PixCube(sides);
         }
 
-        /// <summary>Saves a mip map as DDS (uncompressed; every level half the size of the previous one).</summary>
-        public static void SaveDds(PixImageMipMap mipmap, Stream stream)
-            => Dds.EncodeMipmaps(Array.ConvertAll(mipmap.ImageArray, PixCodecLoader.ToRawImage), stream);
+        /// <summary>
+        /// Saves an image as DDS: uncompressed, or block compressed (BC1 to BC7) per <see cref="DdsEncodeOptions.Compression"/>,
+        /// optionally with a computed mip chain (<see cref="DdsEncodeOptions.Mipmaps"/>).
+        /// </summary>
+        public static void SaveDds(PixImage image, Stream stream, DdsEncodeOptions? options = null)
+            => Dds.Encode(PixCodecLoader.ToRawImage(image), stream, options);
+
+        /// <summary>Saves a mip map as DDS (every level half the size of the previous one, rounded down).</summary>
+        public static void SaveDds(PixImageMipMap mipmap, Stream stream, DdsEncodeOptions? options = null)
+            => Dds.EncodeMipmaps(Array.ConvertAll(mipmap.ImageArray, PixCodecLoader.ToRawImage), stream, options);
 
         /// <summary>Saves a PixCube as a DDS cube map, each side with its mip chain.</summary>
-        public static void SaveDds(PixCube cube, Stream stream)
-            => Dds.EncodeCube(Array.ConvertAll(cube.MipMapArray, m => (IReadOnlyList<RawImage>)Array.ConvertAll(m.ImageArray, PixCodecLoader.ToRawImage)), stream);
+        public static void SaveDds(PixCube cube, Stream stream, DdsEncodeOptions? options = null)
+            => Dds.EncodeCube(Array.ConvertAll(cube.MipMapArray, m => (IReadOnlyList<RawImage>)Array.ConvertAll(m.ImageArray, PixCodecLoader.ToRawImage)), stream, options);
+
+        /// <summary>
+        /// Saves a PixVolume as a DDS volume texture (no mip levels); block compression, if chosen, applies to each slice.
+        /// </summary>
+        public static void SaveDds(PixVolume volume, Stream stream, DdsEncodeOptions? options = null)
+            => Dds.EncodeVolume(VolumeSlices(volume), stream, options);
+
+        /// <summary>The z slices of a PixVolume as RawImages (BGR(A) reordered to RGB(A)).</summary>
+        public static RawImage[] VolumeSlices(PixVolume volume) => volume switch
+        {
+            PixVolume<byte> v => Slices(v),
+            PixVolume<ushort> v => Slices(v),
+            PixVolume<uint> v => Slices(v),
+            PixVolume<float> v => Slices(v),
+            PixVolume<double> v => Slices(v),
+            PixVolume<sbyte> v => Slices(v),
+            PixVolume<short> v => Slices(v),
+            PixVolume<int> v => Slices(v),
+            PixVolume<ulong> v => Slices(v),
+            PixVolume<long> v => Slices(v),
+            _ => throw new NotSupportedException($"unsupported PixVolume type {volume.GetType()}"),
+        };
+
+        static RawImage[] Slices<T>(PixVolume<T> v)
+        {
+            var t = v.Tensor4;
+            long w = t.Size.X, h = t.Size.Y, d = t.Size.Z, c = t.Size.W;
+            var dl = t.Delta;
+            var src = t.Data;
+            long f0 = t.FirstIndex;
+            bool bgr = v.Format is Col.Format.BGR or Col.Format.BGRA && c >= 3;
+            var color = v.Format switch
+            {
+                Col.Format.Gray or Col.Format.BW or Col.Format.Alpha => ColorModel.Gray,
+                Col.Format.GrayAlpha => ColorModel.GrayAlpha,
+                Col.Format.RGB or Col.Format.BGR => ColorModel.Rgb,
+                Col.Format.RGBA or Col.Format.BGRA => ColorModel.Rgba,
+                Col.Format.RG => ColorModel.Other,
+                _ => c <= 4 ? RawImage.DefaultColorModel((int)c) : ColorModel.Other,
+            };
+            var r = new RawImage[d];
+            for (long z = 0; z < d; z++)
+            {
+                var data = new T[w * h * c];
+                long o = 0;
+                for (long y = 0; y < h; y++)
+                    for (long x = 0; x < w; x++)
+                        for (long k = 0; k < c; k++)
+                        {
+                            long sk = bgr && k < 3 ? 2 - k : k;
+                            data[o++] = src[f0 + x * dl.X + y * dl.Y + z * dl.Z + sk * dl.W];
+                        }
+                r[z] = new RawImage((int)w, (int)h, color, data, (int)c);
+            }
+            return r;
+        }
 
         /// <summary>Reads only the headers: format, size, channels, sample type, orientation, dpi, ... (see <see cref="ImageInfo"/>).</summary>
         public static ImageInfo GetInfo(string path) => ImageCodec.GetInfo(path);

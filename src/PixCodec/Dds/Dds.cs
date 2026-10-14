@@ -35,15 +35,59 @@ namespace PixCodec
         Generate,
     }
 
+    /// <summary>The stored pixel format of written textures.</summary>
+    public enum DdsCompression
+    {
+        /// <summary>Uncompressed (the format follows the image's sample type and colour model).</summary>
+        None,
+        /// <summary>RGB with optional 1 bit alpha (texels with alpha below 128 become transparent black), 4 bits per pixel.</summary>
+        BC1,
+        /// <summary>RGB with 4 bit explicit alpha, 8 bits per pixel.</summary>
+        BC2,
+        /// <summary>RGB with interpolated alpha, 8 bits per pixel.</summary>
+        BC3,
+        /// <summary>One channel (the first), 4 bits per pixel; SNORM for signed integer images.</summary>
+        BC4,
+        /// <summary>Two channels (the first two), 8 bits per pixel; SNORM for signed integer images.</summary>
+        BC5,
+        /// <summary>HDR RGB as half floats (alpha is dropped), 8 bits per pixel; SF16 when any value is negative.</summary>
+        BC6H,
+        /// <summary>RGB or RGBA, 8 bits per pixel, the best quality of the 8 bit formats.</summary>
+        BC7,
+    }
+
+    /// <summary>Speed versus quality of the block compression encoders.</summary>
+    public enum BcQuality
+    {
+        /// <summary>Endpoints from the extremes along the principal axis, refined by least squares; few BC6H / BC7 modes.</summary>
+        Fast,
+        /// <summary>Least squares refinement and endpoint search (BC1 to BC5), the best ranked partitions (BC6H / BC7).</summary>
+        Normal,
+        /// <summary>Cluster fit (BC1 to BC3), wider searches (more partitions and modes, endpoint refinement); several times slower.</summary>
+        High,
+    }
+
     public sealed class DdsEncodeOptions
     {
+        /// <summary>
+        /// Block compression (<see cref="DdsCompression.None"/> by default). Integer images are scaled to 8 bits (BC1 to BC5,
+        /// BC7); float images are clamped to [0, 1] for those formats. Gray images are replicated to RGB.
+        /// </summary>
+        public DdsCompression Compression { get; set; } = DdsCompression.None;
+
+        /// <summary>Speed versus quality of the block compression.</summary>
+        public BcQuality Quality { get; set; } = BcQuality.Normal;
+
+        /// <summary>Upper bound on the threads used for block compression and mip generation, &lt;= 0 for all cores.</summary>
+        public int MaxDegreeOfParallelism { get; set; }
+
         /// <summary>Whether to add a computed mip chain when encoding single images.</summary>
         public DdsMipmaps Mipmaps { get; set; } = DdsMipmaps.None;
 
         /// <summary>Filter for computed mip levels (each level is resized from the full image, alpha premultiplied while filtering).</summary>
         public ResampleFilter MipmapFilter { get; set; } = ResampleFilter.Box;
 
-        /// <summary>Mark 8 bit colour data as sRGB (DX10 header with an _SRGB format).</summary>
+        /// <summary>Mark 8 bit colour data as sRGB (DX10 header with an _SRGB format; for BC1 to BC3 and BC7, ignored by the others).</summary>
         public bool Srgb { get; set; }
     }
 
@@ -106,7 +150,8 @@ namespace PixCodec
     /// legacy bit mask formats (RGB, luminance, alpha, bump map), and the common uncompressed DXGI formats (8 / 16 / 32 bit
     /// integer and float, 10:10:10:2, 5:6:5, 5:5:5:1, 4:4:4:4, R11G11B10 and RGB9E5 float). Block compressed surfaces decode
     /// to UInt8 (BC1 to BC3 and BC7 as Rgba, BC4 as Gray, BC5 as two channels, the signed variants as Int8) and BC6H to
-    /// Float16 Rgb. Writes uncompressed textures, optionally with computed mip chains, and cube maps.
+    /// Float16 Rgb. Writes 2D textures (optionally with computed mip chains), cube maps and volume textures, uncompressed or
+    /// block compressed (BC1 to BC7, see <see cref="DdsEncodeOptions.Compression"/>).
     /// </summary>
     public static class Dds
     {
@@ -140,7 +185,7 @@ namespace PixCodec
         {
             ArgumentNullException.ThrowIfNull(image);
             options ??= new DdsEncodeOptions();
-            DdsWriter.Write(output, new[] { DdsWriter.Chain(image, options) }, DdsTextureKind.Texture2D, options);
+            DdsWriter.Write(output, new[] { Slices(DdsWriter.Chain(image, options)) }, DdsTextureKind.Texture2D, options);
         }
 
         public static byte[] Encode(RawImage image, DdsEncodeOptions? options = null) => ToBytes(s => Encode(image, s, options));
@@ -149,8 +194,10 @@ namespace PixCodec
         public static void EncodeMipmaps(IReadOnlyList<RawImage> levels, Stream output, DdsEncodeOptions? options = null)
         {
             ArgumentNullException.ThrowIfNull(levels);
-            DdsWriter.Write(output, new[] { levels }, DdsTextureKind.Texture2D, options ?? new DdsEncodeOptions());
+            DdsWriter.Write(output, new[] { Slices(levels) }, DdsTextureKind.Texture2D, options ?? new DdsEncodeOptions());
         }
+
+        public static byte[] EncodeMipmaps(IReadOnlyList<RawImage> levels, DdsEncodeOptions? options = null) => ToBytes(s => EncodeMipmaps(levels, s, options));
 
         /// <summary>
         /// Writes a cube map from six square faces in the order +X, -X, +Y, -Y, +Z, -Z, each a mip chain (or a single image,
@@ -161,9 +208,31 @@ namespace PixCodec
             ArgumentNullException.ThrowIfNull(faces);
             options ??= new DdsEncodeOptions();
             if (faces.Count != 6) throw new ArgumentException("a cube map has six faces", nameof(faces));
-            var chains = new IReadOnlyList<RawImage>[6];
-            for (int i = 0; i < 6; i++) chains[i] = faces[i].Count == 1 ? DdsWriter.Chain(faces[i][0], options) : faces[i];
+            var chains = new IReadOnlyList<IReadOnlyList<RawImage>>[6];
+            for (int i = 0; i < 6; i++) chains[i] = Slices(faces[i].Count == 1 ? DdsWriter.Chain(faces[i][0], options) : faces[i]);
             DdsWriter.Write(output, chains, DdsTextureKind.CubeMap, options);
+        }
+
+        public static byte[] EncodeCube(IReadOnlyList<IReadOnlyList<RawImage>> faces, DdsEncodeOptions? options = null) => ToBytes(s => EncodeCube(faces, s, options));
+
+        /// <summary>
+        /// Writes a volume (3D) texture from its slices, front to back, all of the same size and format. Written without mip
+        /// levels (<see cref="DdsEncodeOptions.Mipmaps"/> is ignored). Block compression applies to each slice.
+        /// </summary>
+        public static void EncodeVolume(IReadOnlyList<RawImage> slices, Stream output, DdsEncodeOptions? options = null)
+        {
+            ArgumentNullException.ThrowIfNull(slices);
+            if (slices.Count == 0) throw new ArgumentException("a volume needs at least one slice", nameof(slices));
+            DdsWriter.Write(output, new[] { new[] { slices } }, DdsTextureKind.Texture3D, options ?? new DdsEncodeOptions());
+        }
+
+        public static byte[] EncodeVolume(IReadOnlyList<RawImage> slices, DdsEncodeOptions? options = null) => ToBytes(s => EncodeVolume(slices, s, options));
+
+        static IReadOnlyList<IReadOnlyList<RawImage>> Slices(IReadOnlyList<RawImage> levels)
+        {
+            var r = new IReadOnlyList<RawImage>[levels.Count];
+            for (int m = 0; m < r.Length; m++) r[m] = new[] { levels[m] };
+            return r;
         }
 
         static byte[] ToBytes(Action<Stream> write)

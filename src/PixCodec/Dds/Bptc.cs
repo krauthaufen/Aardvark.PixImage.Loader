@@ -13,7 +13,7 @@ namespace PixCodec.DdsImpl
         // ------------------------------------------------------------------ tables (Khronos Data Format Specification, BPTC)
 
         // 2 subsets: bit i = subset of texel i
-        static readonly ushort[] Partition2 =
+        internal static readonly ushort[] Partition2 =
         {
             0xCCCC, 0x8888, 0xEEEE, 0xECC8, 0xC880, 0xFEEC, 0xFEC8, 0xEC80,
             0xC800, 0xFFEC, 0xFE80, 0xE800, 0xFFE8, 0xFF00, 0xFFF0, 0xF000,
@@ -25,7 +25,7 @@ namespace PixCodec.DdsImpl
             0x9336, 0x9CC6, 0x817E, 0xE718, 0xCCF0, 0x0FCC, 0x7744, 0xEE22,
         };
         // 3 subsets: 2 bits per texel, texel i at bits 2i
-        static readonly uint[] Partition3 =
+        internal static readonly uint[] Partition3 =
         {
             0xAA685050, 0x6A5A5040, 0x5A5A4200, 0x5450A0A8, 0xA5A50000, 0xA0A05050, 0x5555A0A0, 0x5A5A5050,
             0xAA550000, 0xAA555500, 0xAAAA5500, 0x90909090, 0x94949494, 0xA4A4A4A4, 0xA9A59450, 0x2A0A4250,
@@ -36,21 +36,21 @@ namespace PixCodec.DdsImpl
             0xAA444444, 0x54A854A8, 0x95809580, 0x96969600, 0xA85454A8, 0x80959580, 0xAA141414, 0x96960000,
             0xAAAA1414, 0xA05050A0, 0xA0A5A5A0, 0x96000000, 0x40804080, 0xA9A8A9A8, 0xAAAAAA44, 0x2A4A5254,
         };
-        static readonly byte[] Anchor2 =
+        internal static readonly byte[] Anchor2 =
         {
             15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
             15, 2, 8, 2, 2, 8, 8, 15, 2, 8, 2, 2, 8, 8, 2, 2,
             15, 15, 6, 8, 2, 8, 15, 15, 2, 8, 2, 2, 2, 15, 15, 6,
             6, 2, 6, 8, 15, 15, 2, 2, 15, 15, 15, 15, 15, 2, 2, 15,
         };
-        static readonly byte[] Anchor3Second =
+        internal static readonly byte[] Anchor3Second =
         {
             3, 3, 15, 15, 8, 3, 15, 15, 8, 8, 6, 6, 6, 5, 3, 3,
             3, 3, 8, 15, 3, 3, 6, 10, 5, 8, 8, 6, 8, 5, 15, 15,
             8, 15, 3, 5, 6, 10, 8, 15, 15, 3, 15, 5, 15, 15, 15, 15,
             3, 15, 5, 5, 5, 8, 5, 10, 5, 10, 8, 13, 15, 12, 3, 3,
         };
-        static readonly byte[] Anchor3Third =
+        internal static readonly byte[] Anchor3Third =
         {
             15, 8, 8, 3, 15, 15, 3, 8, 15, 15, 15, 15, 15, 15, 15, 8,
             15, 8, 15, 3, 15, 8, 15, 8, 3, 15, 6, 10, 15, 15, 10, 8,
@@ -58,11 +58,11 @@ namespace PixCodec.DdsImpl
             15, 3, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 3, 15, 15, 8,
         };
 
-        static readonly byte[] W2 = { 0, 21, 43, 64 };
-        static readonly byte[] W3 = { 0, 9, 18, 27, 37, 46, 55, 64 };
-        static readonly byte[] W4 = { 0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64 };
+        internal static readonly byte[] W2 = { 0, 21, 43, 64 };
+        internal static readonly byte[] W3 = { 0, 9, 18, 27, 37, 46, 55, 64 };
+        internal static readonly byte[] W4 = { 0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64 };
 
-        static ReadOnlySpan<byte> Weights(int bits) => bits == 2 ? W2 : bits == 3 ? W3 : W4;
+        internal static ReadOnlySpan<byte> Weights(int bits) => bits == 2 ? W2 : bits == 3 ? W3 : W4;
 
         /// <summary>Reads the bits of a 128 bit block, least significant first.</summary>
         ref struct Bits
@@ -83,7 +83,7 @@ namespace PixCodec.DdsImpl
 
         // mode: subsets, partition bits, rotation bits, index selection bit, colour bits, alpha bits, endpoint P-bits,
         // shared P-bits, index bits, second index bits
-        static readonly byte[,] Bc7Modes =
+        internal static readonly byte[,] Bc7Modes =
         {
             { 3, 4, 0, 0, 4, 0, 1, 0, 3, 0 },
             { 2, 6, 0, 0, 6, 0, 0, 1, 3, 0 },
@@ -173,11 +173,11 @@ namespace PixCodec.DdsImpl
             }
         }
 
-        static int Expand(int v, int bits) { v <<= 8 - bits; return v | v >> bits; }
+        internal static int Expand(int v, int bits) { v <<= 8 - bits; return v | v >> bits; }
 
         // ------------------------------------------------------------------ BC6H
 
-        sealed class Bc6Mode
+        internal sealed class Bc6Mode
         {
             public int Prec, Regions;
             public int[] Delta = new int[3];
@@ -187,11 +187,11 @@ namespace PixCodec.DdsImpl
         }
 
         // fields: rw gw bw rx gx bx ry gy by rz gz bz d (endpoint value of channel c: A0 = c, B0 = 3 + c, A1 = 6 + c, B1 = 9 + c)
-        static readonly string[] FieldNames = { "rw", "gw", "bw", "rx", "gx", "bx", "ry", "gy", "by", "rz", "gz", "bz", "d" };
+        internal static readonly string[] FieldNames = { "rw", "gw", "bw", "rx", "gx", "bx", "ry", "gy", "by", "rz", "gz", "bz", "d" };
 
         // bit layouts after the mode bits, in reading order ("a..b": bits a to b, "rw:15..10" reads bit 15 first), from
         // the endpoint format table of the BC6H documentation
-        static readonly (int code, int modeBits, int prec, int dr, int dg, int db, bool transformed, int regions, string layout)[] Bc6Defs =
+        internal static readonly (int code, int modeBits, int prec, int dr, int dg, int db, bool transformed, int regions, string layout)[] Bc6Defs =
         {
             (0x00, 2, 10, 5, 5, 5, true, 2, "gy:4 by:4 bz:4 rw:0..9 gw:0..9 bw:0..9 rx:0..4 gz:4 gy:0..3 gx:0..4 bz:0 gz:0..3 bx:0..4 bz:1 by:0..3 ry:0..4 bz:2 rz:0..4 bz:3 d:0..4"),
             (0x01, 2, 7, 6, 6, 6, true, 2, "gy:5 gz:4 gz:5 rw:0..6 bz:0 bz:1 by:4 gw:0..6 by:5 bz:2 gy:4 bw:0..6 bz:3 bz:5 bz:4 rx:0..5 gy:0..3 gx:0..5 gz:0..3 bx:0..5 by:0..3 ry:0..5 rz:0..5 d:0..4"),
@@ -209,7 +209,7 @@ namespace PixCodec.DdsImpl
             (0x0F, 5, 16, 4, 4, 4, true, 1, "rw:0..9 gw:0..9 bw:0..9 rx:0..3 rw:15..10 gx:0..3 gw:15..10 bx:0..3 bw:15..10"),
         };
 
-        static readonly Bc6Mode?[] Bc6Modes = BuildBc6Modes();
+        internal static readonly Bc6Mode?[] Bc6Modes = BuildBc6Modes();
 
         static Bc6Mode?[] BuildBc6Modes()
         {
@@ -282,9 +282,9 @@ namespace PixCodec.DdsImpl
             }
         }
 
-        static int SignExtend(int v, int bits) => v << (32 - bits) >> (32 - bits);
+        internal static int SignExtend(int v, int bits) => v << (32 - bits) >> (32 - bits);
 
-        static int Unquantize(int comp, int bits, bool signed)
+        internal static int Unquantize(int comp, int bits, bool signed)
         {
             if (!signed)
             {
@@ -300,7 +300,7 @@ namespace PixCodec.DdsImpl
             return neg ? -unq : unq;
         }
 
-        static ushort Finish(int comp, bool signed)
+        internal static ushort Finish(int comp, bool signed)
         {
             if (!signed) return (ushort)((comp * 31) >> 6);
             comp = comp < 0 ? -(((-comp) * 31) >> 5) : (comp * 31) >> 5;

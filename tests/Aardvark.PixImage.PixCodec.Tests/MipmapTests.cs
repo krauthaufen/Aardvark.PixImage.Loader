@@ -107,4 +107,42 @@ public class MipmapTests
         Assert.Equal(Bytes((PixImage<byte>)rg), Bytes((PixImage<byte>)rg2));
         Assert.Equal(new V2i(13, 7), PixImagePixCodec.Loader.GetInfoFromFile(Fixture("dds/bc7_13x7.dds")).Size);
     }
+
+    [Fact]
+    public void CompressedAndVolumeDds()
+    {
+        // block compressed with a computed mip chain
+        var img = PixImagePixCodec.Load(Fixture("jpeg/photo_444.jpg"));
+        var ms = new MemoryStream();
+        PixImagePixCodec.SaveDds(img, ms, new DdsEncodeOptions { Compression = DdsCompression.BC7, Mipmaps = DdsMipmaps.Generate });
+        var info = Dds.GetTextureInfo(ms.ToArray());
+        Assert.Equal(("BC7_UNORM", 8), (info.Format, info.MipLevels));
+        var mm = PixImagePixCodec.LoadMipmap(new MemoryStream(ms.ToArray()));
+        Assert.Equal((8, Col.Format.RGBA, new V2i(160, 120)), (mm.LevelCount, mm.ImageArray[0].Format, mm.ImageArray[0].Size));
+
+        // a BGR volume: slices come back in RGB order
+        var vol = new PixVolume<byte>(Col.Format.BGR, 7, 5, 3);
+        var t = vol.Tensor4;
+        for (int z = 0; z < 3; z++)
+            for (int y = 0; y < 5; y++)
+                for (int x = 0; x < 7; x++)
+                    for (int c = 0; c < 3; c++) t[x, y, z, c] = (byte)(x * 30 + y * 7 + z * 50 + c * 3);
+        var vs = new MemoryStream();
+        PixImagePixCodec.SaveDds(vol, vs);
+        var tex = Dds.DecodeTexture(vs.ToArray());
+        Assert.Equal((DdsTextureKind.Texture3D, 7, 5, 3), (tex.Kind, tex.Width, tex.Height, tex.Depth));
+        var slices = tex.GetSlices();
+        for (int z = 0; z < 3; z++)
+        {
+            var d = slices[z].GetData<byte>();
+            int cs = slices[z].Channels;
+            for (int y = 0; y < 5; y++)
+                for (int x = 0; x < 7; x++)
+                    for (int c = 0; c < 3; c++) Assert.Equal(t[x, y, z, 2 - c], d[(y * 7 + x) * cs + c]);
+        }
+        // and compressed
+        var bs = new MemoryStream();
+        PixImagePixCodec.SaveDds(vol, bs, new DdsEncodeOptions { Compression = DdsCompression.BC1 });
+        Assert.Equal((DdsTextureKind.Texture3D, 3, "BC1_UNORM"), (Dds.GetTextureInfo(bs.ToArray()).Kind, Dds.GetTextureInfo(bs.ToArray()).Depth, Dds.GetTextureInfo(bs.ToArray()).Format));
+    }
 }

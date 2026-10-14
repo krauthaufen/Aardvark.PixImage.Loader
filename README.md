@@ -12,7 +12,7 @@ Little-endian hosts only (x64 and arm64 are tested).
 | OpenEXR | scanline, tiled, multi-part, deep, mip/rip levels, half/float/uint, luminance/chroma, all compressions incl. PIZ, B44, DWA, ZSTD, HTJ2K, region decode from a stream | scanline, tiled, multi-part, deep, luminance/chroma, all of those compressions |
 | WebP | lossy, lossless, alpha, animation | lossy, lossless, alpha, animation |
 | BMP | all header versions (OS/2 1.x/2.x, V1..V5), 1/2/4/8/16/24/32 bit, palettes, bit fields of any width (>8 bit fields give 16 bit samples), alpha masks, RLE4/RLE8/RLE24, embedded JPEG/PNG, ICC; checked against the BMP Suite | 8 bit gray, RGB, RGBA (gray+alpha as RGBA), resolution, ICC |
-| DDS | 1D, 2D, volume and cube map textures, arrays, mip chains, legacy and DX10 headers; BC1..BC7 (BC6H as half float, signed BC4/BC5), legacy bit mask formats, the common uncompressed DXGI formats (8/16/32 bit int and float, 10:10:10:2, 5:6:5, 5:5:5:1, 4:4:4:4, R11G11B10F, RGB9E5) | uncompressed 8/16 bit, half and float, mip chains (given or computed), cube maps |
+| DDS | 1D, 2D, volume and cube map textures, arrays, mip chains, legacy and DX10 headers; BC1..BC7 (BC6H as half float, signed BC4/BC5), legacy bit mask formats, the common uncompressed DXGI formats (8/16/32 bit int and float, 10:10:10:2, 5:6:5, 5:5:5:1, 4:4:4:4, R11G11B10F, RGB9E5) | uncompressed 8/16 bit, half and float, or block compressed BC1..BC7 (incl. BC6H, signed BC4/BC5; three quality levels); mip chains (given or computed), cube maps, volume textures |
 | TGA | colour-mapped, true-colour (15/16/24/32 bit), gray (+alpha), RLE, every origin, TGA 2.0 alpha type | gray, gray+alpha, RGB, RGBA, optional RLE |
 | LERC | LERC1 and LERC2 v2..v6 (bands, depth, masks, no-data, lossless float) | decode only |
 | JBIG1 | the whole of T.82 (layers, all stripe orders, bit planes) | single layer, 1..8 bit planes |
@@ -36,6 +36,8 @@ ImageInfo info = ImageCodec.GetInfo("scan.tif");    // reads only the headers
 if (ImageCodec.TryGetInfo(path, out var i)) { /* ... */ }
 RawImage[] levels = ImageCodec.DecodeMipmaps("tex.dds");   // stored mip levels (DDS, OpenEXR), else just the image
 DdsTexture tex = Dds.DecodeTexture(bytes);              // every surface: tex.GetImage(mip, item, face, slice)
+Dds.Encode(img, stream, new DdsEncodeOptions { Compression = DdsCompression.BC7, Mipmaps = DdsMipmaps.Generate });
+Dds.EncodeVolume(slices, stream, new DdsEncodeOptions { Compression = DdsCompression.BC4 });   // 3D texture
 ```
 
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
@@ -107,6 +109,7 @@ PixImage p = rawImage.ToPixImage();   RawImage r = pixImage.ToRawImage();
 PixImageMipMap mm  = PixImagePixCodec.LoadMipmap("tex.dds");                     // also PixImageMipMap.Load (IPixMipmapLoader)
 PixCube cube       = PixImagePixCodec.LoadCube("sky.dds");                        // DDS cube map, every side with its mip chain
 PixImagePixCodec.SaveDds(cube, stream);
+PixImagePixCodec.SaveDds(volume, stream, new DdsEncodeOptions { Compression = DdsCompression.BC1 });   // PixVolume
 ```
 
 `Init()` also registers `PixCodecProcessor`, so `PixImage.Scaled`, `Resized`, `Rotated`, `Remapped` and `PixImageMipMap.Create`

@@ -29,6 +29,8 @@ def decode(path):
         return decode_jp2(path)
     if ext == '.lerc':
         return decode_lerc(path)
+    if ext == '.dds' and dds_block_compressed(path):
+        return decode_dds(path)
     from PIL import Image
     im = Image.open(path)
     if ext == '.png':
@@ -325,6 +327,37 @@ def decode_exr(path):
         arrs.append(a)
     dt = np.uint32 if all(a.dtype == np.uint32 for a in arrs) else np.float32
     return np.stack([a.astype(dt) for a in arrs], axis=-1)
+
+
+def dds_block_compressed(path):
+    with open(path, 'rb') as f:
+        d = f.read(148)
+    cc = d[84:88]
+    if cc == b'DX10':
+        return 70 <= int.from_bytes(d[128:132], 'little') <= 99 and int.from_bytes(d[128:132], 'little') not in range(85, 94)
+    return cc in (b'DXT1', b'DXT3', b'DXT5', b'ATI1', b'ATI2')
+
+
+def decode_dds(path):
+    """Top surface of a block compressed DDS with bcdec (imagecodecs.bcn_decode); signed BC4 / BC5 are not covered."""
+    import struct
+    import imagecodecs
+    with open(path, 'rb') as f:
+        d = f.read()
+    h, w = struct.unpack_from('<II', d, 12)
+    cc = d[84:88]
+    legacy = {b'DXT1': 71, b'DXT3': 74, b'DXT5': 77, b'ATI1': 80, b'ATI2': 83}
+    if cc == b'DX10':
+        dxgi, off = struct.unpack_from('<I', d, 128)[0], 148
+    else:
+        dxgi, off = legacy[cc], 128
+    dxgi = {72: 71, 75: 74, 78: 77, 99: 98}.get(dxgi, dxgi)
+    fmt, bb, ch = {71: (1, 8, 4), 74: (2, 16, 4), 77: (3, 16, 4), 80: (4, 8, 1), 83: (5, 16, 2),
+                   95: (6, 16, 3), 96: (-6, 16, 3), 98: (7, 16, 4)}[dxgi]
+    bw, bh = max(1, (w + 3) // 4), max(1, (h + 3) // 4)
+    shape = (bh * 4, bw * 4) if ch == 1 else (bh * 4, bw * 4, ch)
+    a = imagecodecs.bcn_decode(d[off:off + bw * bh * bb], fmt, shape=shape)
+    return a[:h, :w]
 
 
 def decode_lerc(path):
