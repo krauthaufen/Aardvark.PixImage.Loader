@@ -23,6 +23,8 @@ def decode(path):
             return imagecodecs.jpeg8_decode(f.read())
     if ext == '.webp':
         return decode_webp(path)
+    if ext == '.lerc':
+        return decode_lerc(path)
     from PIL import Image
     im = Image.open(path)
     if ext == '.png':
@@ -237,6 +239,36 @@ def decode_exr(path):
         arrs.append(a)
     dt = np.uint32 if all(a.dtype == np.uint32 for a in arrs) else np.float32
     return np.stack([a.astype(dt) for a in arrs], axis=-1)
+
+
+def decode_lerc(path):
+    """LERC blob decoded by Esri's liblerc (pip package `lerc`, through gen_lerc.py): (rows, cols, bands * depth),
+    invalid pixels 0. The validity mask goes to <out>.mask as uint8 (rows, cols, 1 or bands) if any pixel is invalid,
+    the per band no-data values (only for blobs that keep no-data values) to <out>.nodata as text. Exit status 77
+    when the `lerc` package is not installed."""
+    try:
+        import lerc  # noqa: F401
+    except ImportError:
+        sys.exit(77)
+    from gen_lerc import lerc_decode
+    with open(path, 'rb') as f:
+        blob = f.read()
+    data, masks, nodata = lerc_decode(blob)
+    nb, nr, nc, nd = data.shape
+    valid = np.ones((nb, nr, nc), np.uint8) if masks is None else (masks != 0).astype(np.uint8)
+    if valid.shape[0] != nb:
+        valid = np.repeat(valid, nb, axis=0)
+    data = data * valid[..., None].astype(data.dtype)
+    if np.issubdtype(data.dtype, np.floating):
+        data[valid == 0] = 0
+    out = sys.argv[2]
+    if not valid.all():
+        same = all(np.array_equal(valid[b], valid[0]) for b in range(nb))
+        write_ref(out + '.mask', np.ascontiguousarray((valid[:1] if same else valid).transpose(1, 2, 0)))
+    if nodata is not None:
+        with open(out + '.nodata', 'w') as f:
+            f.write(' '.join(repr(v) if u else 'x' for u, v in nodata))
+    return np.ascontiguousarray(data.transpose(1, 2, 0, 3).reshape(nr, nc, nb * nd))
 
 
 if __name__ == '__main__':
