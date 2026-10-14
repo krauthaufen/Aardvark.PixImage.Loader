@@ -19,6 +19,7 @@ public class TiffTests
     public static IEnumerable<object[]> LzmaFixtures => Dirs("lzma");
     public static IEnumerable<object[]> WebpFixtures => Dirs("webp");
     public static IEnumerable<object[]> JpegFixtures => Dirs("jpeg");
+    public static IEnumerable<object[]> LercFixtures => Dirs("lerc");
 
     static readonly TiffDecodeOptions Serial = new() { Parallel = false };
     static TiffDecodeOptions ForcedParallel(int index = 0) => new() { ParallelThreshold = 0, ImageIndex = index };
@@ -247,9 +248,6 @@ public class TiffTests
                 problems.Add($"{name}: samples differ from GDAL's by up to {TestUtil.MaxDiff(expected, img)}");
             else same++;
         }
-        // LERC is not supported (patent): all of GDAL's LERC files are refused
-        int lerc = unsupported.RemoveAll(n => n.Contains("lerc", StringComparison.OrdinalIgnoreCase));
-        Assert.Equal(19, lerc);
         Assert.True(problems.Count == 0, string.Join("\n", problems));
         // the one broken file GDAL still reads (with a warning: its strip is said to be longer than the file)
         Assert.Equal(new[] { "minimum_tiff_tags_with_warning.tif" }, rejected);
@@ -262,7 +260,7 @@ public class TiffTests
             "gtiff_unsupported_codec_unknown.tif", "huge-number-strips.tif", "huge4GB.tif", "int12_ycbcr_contig.tif", "leak-ZIPSetupDecode.tif",
             "next_default_case.tif", "next_literalrow.tif", "next_literalspan.tif", "strip_larger_than_2GB_header.tif", "tiff_dos_strip_chop.tif", "unknown_compression.tif",
         }, unsupported);
-        Assert.True(same >= 270, $"only {same} files compared");
+        Assert.True(same >= 290, $"only {same} files compared");
     }
 
     [Fact]
@@ -1418,26 +1416,9 @@ public class TiffTests
         Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Gray, SampleType.Float32, 1), new TiffEncodeOptions { Compression = TiffCompression.Jpeg2000 }));
     }
 
-    /// <summary>LERC (34887) is recognised and refused: a hand-built file with arbitrary strip bytes.</summary>
-    [Fact]
-    public void RejectsLerc()
-    {
-        var f = new List<byte>();
-        void U16(int v) { f.Add((byte)v); f.Add((byte)(v >> 8)); }
-        void U32(long v) { for (int i = 0; i < 4; i++) f.Add((byte)(v >> (8 * i))); }
-        f.AddRange("II"u8.ToArray()); U16(42); U32(8);
-        var tags = new (int Id, int Type, long Value)[] { (256, 3, 4), (257, 3, 2), (258, 3, 32), (259, 3, 34887), (262, 3, 1), (273, 4, 8 + 2 + 9 * 12 + 4), (277, 3, 1), (279, 4, 16), (339, 3, 3) };
-        U16(tags.Length);
-        foreach (var (id, type, value) in tags) { U16(id); U16(type); U32(1); U32(value); }
-        U32(0);
-        f.AddRange(Enumerable.Range(0, 16).Select(i => (byte)(i * 37)));
-        var file = f.ToArray();
-        var info = Tiff.GetInfo(file);
-        Assert.Equal((4, 2, SampleType.Float32), (info.Width, info.Height, info.SampleType));
-        var e = Assert.Throws<ImageNotSupportedException>(() => Tiff.Decode(file));
-        Assert.Equal("TIFF: LERC compression is not supported", e.Message);
-        Assert.Throws<ImageNotSupportedException>(() => Tiff.Decode(new MemoryStream(file)));
-    }
+    [Theory]
+    [MemberData(nameof(LercFixtures))]
+    public void DecodesLercFixture(string file) => CheckFixture(file);
 
     [Theory]
     [InlineData(TiffCompression.Deflate, 0, false)]

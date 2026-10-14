@@ -221,9 +221,33 @@ namespace PixCodec
 
 namespace PixCodec
 {
-    /// <summary>The calls into the JPEG 2000 codec that the TIFF encoder needs, in one place.</summary>
+    /// <summary>The calls into the LERC and JPEG 2000 codecs that the TIFF codec needs, in one place.</summary>
     internal static class TiffForeignCodecs
     {
+        /// <summary>
+        /// Decodes one LERC blob of width x height pixels into interleaved native samples (channels per pixel in
+        /// <paramref name="destination"/>; the blob may hold fewer). Blob channel = band * depth + index.
+        /// <paramref name="masks"/> (channels * width * height bytes) receives 1 = valid, band after band, for as many
+        /// bands as the blob has masks: one (shared by all bands) or one per band.
+        /// </summary>
+        public static void LercDecode(ReadOnlySpan<byte> blob, SampleType type, int width, int height, Span<byte> destination, int channels,
+            Span<byte> masks, out int bands, out int depth, out int maskCount)
+        {
+            var info = Lerc.GetInfo(blob);
+            if (info.Width != width || info.Height != height) throw new ImageFormatException("TIFF: LERC strip/tile does not match the image layout");
+            if (info.SampleType != type) throw new ImageFormatException("TIFF: LERC strip/tile holds another data type than the image");
+            bands = info.Bands; depth = info.Depth;
+            if (info.Channels > channels || info.Channels < 1) throw new ImageFormatException("TIFF: LERC strip/tile does not match the image layout");
+            var img = Lerc.Decode(blob, out var valid, new LercDecodeOptions { MaxPixels = (long)width * height });
+            int n = width * height, bps = RawImage.BytesPerSample(type), have = img.Channels;
+            var src = img.GetBytes();
+            if (have == channels) src.CopyTo(destination);
+            else
+                for (int i = 0; i < n; i++) src.Slice(i * have * bps, have * bps).CopyTo(destination.Slice(i * channels * bps));
+            maskCount = valid == null ? 0 : valid.Length / n;
+            valid?.CopyTo(masks);
+        }
+
         /// <summary>
         /// Encodes width x height pixels of <paramref name="samples"/> interleaved native samples as one strip / tile.
         /// <paramref name="rgb"/>: the first three samples are RGB (JPEG 2000 then uses its reversible colour transform).

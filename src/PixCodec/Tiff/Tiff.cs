@@ -279,7 +279,8 @@ namespace PixCodec
     /// <list type="bullet">
     /// <item>Compression: none, LZW, Deflate, PackBits, CCITT RLE / Group 3 / Group 4 (incl. uncompressed mode), JPEG
     /// (8 and 12 bit DCT, lossless, old-style in strips, tiles and planes), ZSTD, LZMA, WebP, JPEG 2000 (34712 and
-    /// Aperio's 33003 / 33005), JBIG, SGI LogLuv (32 and 24 bit) and LogL, PixarLog, ThunderScan. Predictors 2 and 3.</item>
+    /// Aperio's 33003 / 33005), LERC (with its Deflate / ZSTD variants and validity masks), JBIG, SGI LogLuv (32 and
+    /// 24 bit) and LogL, PixarLog, ThunderScan. Predictors 2 and 3.</item>
     /// <item>Samples: unsigned and signed integers of 1..64 bits, floats of 16, 24, 32 and 64 bits, complex numbers
     /// (two channels each). Samples of an odd bit depth arrive with their stored values in the next larger type
     /// (12 bit: UInt16 0..4095; 24-bit floats: Float32); only 1, 2 and 4 bit unsigned samples are stretched to 0..255
@@ -291,13 +292,15 @@ namespace PixCodec
     /// <item>Exactly one extra sample marked as alpha gives GrayAlpha/Rgba (associated alpha is un-premultiplied).
     /// Any other surplus samples (unspecified extras, more than one extra) keep ALL samples as stored and report
     /// <see cref="ColorModel.Other"/>.</item>
+    /// <item>LERC validity masks, as in GDAL: invalid float samples are NaN, a mask standing in for the alpha
+    /// channel of an 8-bit image gives alpha 0 / 255; invalid integer samples are 0.</item>
     /// <item>Orientation is reported in the metadata, never applied. Resolution, ICC profile and EXIF are returned.</item>
     /// </list>
     /// <para>Encoding: all sample types and colour models, packed depths of 1..32 bits, palettes, CMYK / Lab / YCbCr /
     /// MinIsWhite photometrics, contiguous or planar; none, LZW, Deflate, Zstd, LZMA, PackBits, JPEG (8 / 12 bit, YCbCr
     /// or RGB), WebP, JPEG 2000 (lossless), CCITT RLE / Group 3 / Group 4 and JBIG; strips or tiles; multi-page
     /// files, mask directories, generated overviews and the cloud optimized layout of GDAL; either byte order;
-    /// arbitrary extra tags.</para>
+    /// arbitrary extra tags. LERC is read but not written (Esri holds patents on LERC compression).</para>
     /// <para>Limits: a strip or tile must decode to less than 2 GB unless it is uncompressed, LZW, PackBits or
     /// Deflate; compressed data of more than 2 GB per strip or tile is read from streams for those three only.</para>
     /// </summary>
