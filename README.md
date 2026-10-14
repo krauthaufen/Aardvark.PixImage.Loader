@@ -9,10 +9,11 @@ Little-endian hosts only (x64 and arm64 are tested).
 | JPEG | baseline, progressive, lossless, hierarchical, arithmetic coding, 8 and 12 bit, CMYK/YCCK, scaled decode | baseline, progressive, lossless, arithmetic, 8 and 12 bit |
 | TIFF | classic + BigTIFF, strips + tiles, 1..64 bit int, 16/24/32/64 bit float, LZW, Deflate, PackBits, CCITT, JPEG (incl. old-style, 12 bit, lossless), ZSTD, LZMA, WebP, PixarLog, LogLuv, Lab, multi-page, raw tags, regions, files > 4 GB | every sample type, strips or tiles, None / LZW / Deflate / PackBits / ZSTD / JPEG / CCITT G4, multi-page, overviews, cloud-optimized layout, extra tags |
 | GIF | 87a/89a, interlace, transparency, animations (compositing verified against Chromium) | single images and animations, quantizer + dithering |
-| OpenEXR | scanline, tiled, multi-part, deep, mip/rip levels, half/float/uint, luminance/chroma, all compressions incl. PIZ, B44, DWA | scanline, tiled, multi-part, deep, luminance/chroma, all of those compressions |
+| OpenEXR | scanline, tiled, multi-part, deep, mip/rip levels, half/float/uint, luminance/chroma, all compressions incl. PIZ, B44, DWA, ZSTD, HTJ2K, region decode from a stream | scanline, tiled, multi-part, deep, luminance/chroma, all of those compressions |
 | WebP | lossy, lossless, alpha, animation | lossy, lossless, alpha, animation |
+| JPEG 2000 | Part 1 and HTJ2K (.j2k / .jph codestreams, JP2 / JPH container), 1..38 bit, region / reduced resolution / layer limited decode | Part 1 and HTJ2K, lossless and lossy (up to 16 bit), target bitrate, tiles, progression orders |
 
-Not supported: JPEG 2000 / JPEG XL / JPEG XR / LERC / JBIG inside TIFF, HTJ2K and ZSTD compressed EXR.
+Not supported: JPEG XL / JPEG XR inside TIFF, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions, ICC colour conversion.
 
 ## Core library
 
@@ -30,7 +31,7 @@ if (ImageCodec.TryGetInfo(path, out var i)) { /* ... */ }
 ```
 
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
-in R,G,B,A order with straight alpha. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`)
+in R,G,B,A order with straight alpha. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`)
 with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data.
 
@@ -42,7 +43,7 @@ files flagged as carrying EXIF/ICC need the whole file; TIFF directories are loc
 ## Compression
 
 `PixCodec.Compression` holds fully managed deflate/inflate (zlib, levels 0..9, streaming `Inflater`), Zstandard
-(decode incl. dictionaries, encode), XZ / LZMA (decode incl. BCJ filters, encode) and vectorised CRC-32 / Adler-32.
+(decode and encode, both with dictionaries), XZ / LZMA (decode incl. BCJ filters, encode up to an optimal parser, multi-threaded) and vectorised CRC-32 / Adler-32.
 The managed deflate is the default; `Zlib.Backend = ZlibBackend.Bcl` (or `PIXCODEC_ZLIB=bcl`) switches to
 `System.IO.Compression`.
 
@@ -58,7 +59,7 @@ pi.Save("dem.exr");
 ```
 
 Half float EXR channels load as `PixImage<float>`. BGR(A) images are saved as RGB(A). The existing `PixSaveParams`
-classes (JPEG quality, PNG level, TIFF / EXR compression, WebP quality / lossless) are honoured.
+classes (JPEG quality, PNG level, TIFF / EXR compression, WebP quality / lossless, JPEG 2000) are honoured.
 
 ## Tests
 
