@@ -83,6 +83,8 @@ namespace PixCodec.JpegImpl
         int _padding;
         /// <summary>Set when the code stream turned out to be inconsistent; the rest of the scan is not decodable.</summary>
         public bool Corrupt;
+        /// <summary>JBIG stripes may end long before the decoder stops asking for bytes; there, zeros are supplied without limit.</summary>
+        public bool UnlimitedPadding;
 
         public JpegArith()
         {
@@ -107,6 +109,13 @@ namespace PixCodec.JpegImpl
             _a = 0x10000;
         }
 
+        /// <summary>The coder registers, for callers that run the decoding loop with them in locals (see JBIG).</summary>
+        internal void GetRegisters(out uint a, out uint c, out int ct) { a = _a; c = _c; ct = _ct; }
+        internal void SetRegisters(uint a, uint c, int ct) { _a = a; _c = c; _ct = ct; }
+
+        /// <summary>Feeds the next byte into the code register (it must have been handed over with <see cref="SetRegisters"/>).</summary>
+        internal void NextByte() => ByteIn();
+
         void ByteIn()
         {
             uint b = _p < _end ? *_p : 0xFFu;
@@ -117,7 +126,7 @@ namespace PixCodec.JpegImpl
                 {
                     // A marker (or the end of the data) ends the segment. The coder may have dropped a few trailing
                     // zero bytes, so zeros are supplied - but a decoder that keeps asking has lost the stream.
-                    if (++_padding > 64) Corrupt = true;
+                    if (++_padding > 64 && !UnlimitedPadding) Corrupt = true;
                     return;
                 }
             }
@@ -125,8 +134,12 @@ namespace PixCodec.JpegImpl
             _c += b << 8;
         }
 
+        /// <summary>
+        /// Decodes one binary decision with the adaptive state at st (index | sense of the more probable symbol &lt;&lt; 7,
+        /// initially 0). Also the entry point for other users of the coder (JBIG), which keep their own state arrays.
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        int Decode(byte* st)
+        internal int Decode(byte* st)
         {
             uint sv = *st, e = s_tablePtr[sv], qe = e & 0xFFFF;
             int d = (int)(sv >> 7);
@@ -192,11 +205,13 @@ namespace PixCodec.JpegImpl
         readonly byte[] _losslessStats = GC.AllocateArray<byte>(4 * LosslessBins, pinned: true);
 
         /// <summary>0 = zero, 1 / 2 = small positive / negative, 3 / 4 = large positive / negative.</summary>
-        int Classify(int d, int table)
+        int Classify(int d, int table) => Classify(d, DcL[table], DcU[table]);
+
+        internal static int Classify(int d, int lower, int upper)
         {
             int a = Math.Abs(d);
-            if (a <= (1 << DcL[table]) >> 1) return 0;
-            return (a <= 1 << DcU[table] ? 1 : 3) + (d < 0 ? 1 : 0);
+            if (a <= (1 << lower) >> 1) return 0;
+            return (a <= 1 << upper ? 1 : 3) + (d < 0 ? 1 : 0);
         }
 
         /// <summary>One prediction difference of a lossless scan, given the differences to the left (da) and above (db).</summary>
@@ -366,6 +381,7 @@ namespace PixCodec.JpegImpl
         public void Start()
         {
             _stats.AsSpan().Clear();
+            _losslessStats.AsSpan().Clear();
             Length = 0;
             _a = 0x10000; _c = 0; _ct = 11;
             _pending = -1; _stackedFF = 0;
@@ -398,8 +414,9 @@ namespace PixCodec.JpegImpl
             _c &= 0x7FFFF;
         }
 
+        /// <summary>Codes one binary decision with the adaptive state at st (see <see cref="JpegArith.Decode"/>).</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void Encode(byte* st, int bit)
+        internal void Encode(byte* st, int bit)
         {
             uint sv = *st, e = JpegArith.Table[sv], qe = e & 0xFFFF;
             _a -= qe;
@@ -525,6 +542,38 @@ namespace PixCodec.JpegImpl
         }
 
         public void EncodeDcRefine(int bit) => EncodeFixed(bit & 1);
+
+        readonly byte[] _losslessStats = GC.AllocateArray<byte>(4 * 158, pinned: true);
+
+        /// <summary>
+        /// One prediction difference of a lossless scan (-32768 .. 32767), in the context of the differences to the left (da) and above (db); mirrors JpegArith.DecodeLosslessDifference.
+        /// </summary>
+        public void EncodeLosslessDifference(int table, int da, int db, int diff)
+        {
+            fixed (byte* all = _losslessStats)
+            {
+                byte* stats = all + table * 158;
+                int ca = JpegArith.Classify(da, DcL, DcU), cb = JpegArith.Classify(db, DcL, DcU);
+                byte* st = stats + 4 * (5 * ca + cb);
+                if (diff == 0) { Encode(st, 0); return; }
+                Encode(st, 1);
+                // differences are taken modulo 65536 into -32768 .. 32767
+                int sign = diff < 0 ? 1 : 0, v = Math.Abs(diff) - 1, m = 0;
+                Encode(st + 1, sign);
+                st += 2 + sign;
+                if (v == 0) Encode(st, 0);
+                else
+                {
+                    Encode(st, 1);
+                    m = 1;
+                    st = stats + (cb >= 3 ? 129 : 100);
+                    for (int v2 = v; (v2 >>= 1) != 0; st++) { Encode(st, 1); m <<= 1; }
+                    Encode(st, 0);
+                }
+                st += 14;
+                while ((m >>= 1) != 0) Encode(st, (m & v) != 0 ? 1 : 0);
+            }
+        }
 
         /// <summary>Progressive refinement of a band from precision ah to al = ah - 1 (G.1.3.3).</summary>
         public void EncodeAcRefine(int table, short* blk, int ss, int se, int ah, int al)
