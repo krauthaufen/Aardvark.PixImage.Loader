@@ -40,8 +40,8 @@ public static class TestUtil
     }
 
     /// <summary>
-    /// The test-data repository with the third-party test files (PngSuite, openexr-images, Esri's LERC samples, the
-    /// lists of downloaded conformance files): $PIXCODEC_TESTDATA, or pixcodec-testdata next to this repository.
+    /// The test-data repository with the third-party test files (PngSuite, openexr-images samples, the lists of
+    /// downloaded conformance files): $PIXCODEC_TESTDATA, or pixcodec-testdata next to this repository.
     /// Null when there is none; the tests that need it are then skipped (<see cref="TestDataFactAttribute"/>).
     /// </summary>
     public static string? TestDataDir { get; } = FindTestData();
