@@ -192,15 +192,6 @@ namespace PixCodec
         /// <summary>Quality 0..100 of lossy WebP.</summary>
         public int WebpQuality { get; set; } = 75;
 
-        /// <summary>For <see cref="TiffCompression.Lerc"/>: largest error allowed per sample, 0 = lossless.</summary>
-        public double LercMaxError { get; set; }
-
-        /// <summary>
-        /// For <see cref="TiffCompression.Lerc"/>: a second compression applied to every LERC blob, as GDAL's
-        /// LERC_DEFLATE and LERC_ZSTD do. None (default), Deflate or Zstd; <see cref="CompressionLevel"/> applies to it.
-        /// </summary>
-        public TiffCompression LercSecondCompression { get; set; } = TiffCompression.None;
-
         /// <summary>Colormap entries from 8-bit R, G, B triples.</summary>
         public static ushort[] PaletteFromRgb8(ReadOnlySpan<byte> rgb)
         {
@@ -288,8 +279,7 @@ namespace PixCodec
     /// <list type="bullet">
     /// <item>Compression: none, LZW, Deflate, PackBits, CCITT RLE / Group 3 / Group 4 (incl. uncompressed mode), JPEG
     /// (8 and 12 bit DCT, lossless, old-style in strips, tiles and planes), ZSTD, LZMA, WebP, JPEG 2000 (34712 and
-    /// Aperio's 33003 / 33005), LERC (with its Deflate / ZSTD variants and validity masks), JBIG, SGI LogLuv (32 and
-    /// 24 bit) and LogL, PixarLog, ThunderScan. Predictors 2 and 3.</item>
+    /// Aperio's 33003 / 33005), JBIG, SGI LogLuv (32 and 24 bit) and LogL, PixarLog, ThunderScan. Predictors 2 and 3.</item>
     /// <item>Samples: unsigned and signed integers of 1..64 bits, floats of 16, 24, 32 and 64 bits, complex numbers
     /// (two channels each). Samples of an odd bit depth arrive with their stored values in the next larger type
     /// (12 bit: UInt16 0..4095; 24-bit floats: Float32); only 1, 2 and 4 bit unsigned samples are stretched to 0..255
@@ -301,13 +291,11 @@ namespace PixCodec
     /// <item>Exactly one extra sample marked as alpha gives GrayAlpha/Rgba (associated alpha is un-premultiplied).
     /// Any other surplus samples (unspecified extras, more than one extra) keep ALL samples as stored and report
     /// <see cref="ColorModel.Other"/>.</item>
-    /// <item>LERC validity masks, as in GDAL: invalid float samples are NaN, a mask standing in for the alpha
-    /// channel of an 8-bit image gives alpha 0 / 255; invalid integer samples are 0.</item>
     /// <item>Orientation is reported in the metadata, never applied. Resolution, ICC profile and EXIF are returned.</item>
     /// </list>
     /// <para>Encoding: all sample types and colour models, packed depths of 1..32 bits, palettes, CMYK / Lab / YCbCr /
     /// MinIsWhite photometrics, contiguous or planar; none, LZW, Deflate, Zstd, LZMA, PackBits, JPEG (8 / 12 bit, YCbCr
-    /// or RGB), WebP, JPEG 2000 (lossless), LERC, CCITT RLE / Group 3 / Group 4 and JBIG; strips or tiles; multi-page
+    /// or RGB), WebP, JPEG 2000 (lossless), CCITT RLE / Group 3 / Group 4 and JBIG; strips or tiles; multi-page
     /// files, mask directories, generated overviews and the cloud optimized layout of GDAL; either byte order;
     /// arbitrary extra tags.</para>
     /// <para>Limits: a strip or tile must decode to less than 2 GB unless it is uncompressed, LZW, PackBits or
@@ -608,15 +596,6 @@ namespace PixCodec
         CcittGroup3,
         /// <summary>CCITT modified Huffman run length coding (compression 2): 1-bit bilevel output from an 8-bit Gray image.</summary>
         CcittRle,
-        /// <summary>
-        /// LERC (compression 34887): integers of 8, 16 and 32 bits and floats of 32 and 64 bits, lossless or with
-        /// <see cref="TiffEncodeOptions.LercMaxError"/>, optionally followed by Deflate or Zstd
-        /// (<see cref="TiffEncodeOptions.LercSecondCompression"/>). As in GDAL / libtiff, NaN samples of float images
-        /// and the alpha channel of 8-bit images whose alpha is 0 or 255 everywhere are stored as LERC validity masks
-        /// (so fully transparent pixels come back with colour 0). In big endian files floats and lossy coding of samples
-        /// wider than 8 bits are refused: libtiff hands LERC byte-swapped numbers there.
-        /// </summary>
-        Lerc,
         /// <summary>JPEG 2000 (compression 34712), lossless: 8 or 16 bit integer samples.</summary>
         Jpeg2000,
         /// <summary>
