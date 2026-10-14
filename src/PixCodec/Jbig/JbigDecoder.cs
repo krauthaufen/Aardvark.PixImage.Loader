@@ -357,26 +357,61 @@ namespace PixCodec.JbigImpl
                     // the adaptive pixel: by default right of the template in the line above
                     bool moved = st.Tx != 0 || st.Ty != 0;
                     byte* at = moved ? Row(pixels, stride, y - st.Ty, y0, st.Reset, zero) - st.Tx : up1 + 2;
-                    if (twoLine)
-                    {
-                        for (int x = 0; x < w; x++)
-                        {
-                            int cx = up1[x - 3] << 9 | up1[x - 2] << 8 | up1[x - 1] << 7 | up1[x] << 6 | up1[x + 1] << 5 | at[x] << 4
-                                | row[x - 4] << 3 | row[x - 3] << 2 | row[x - 2] << 1 | row[x - 1];
-                            row[x] = (byte)_coder.Decode(stats + cx);
-                        }
-                    }
-                    else
-                    {
-                        for (int x = 0; x < w; x++)
-                        {
-                            int cx = up2[x - 1] << 9 | up2[x] << 8 | up2[x + 1] << 7 | up1[x - 2] << 6 | up1[x - 1] << 5 | up1[x] << 4 | up1[x + 1] << 3
-                                | at[x] << 2 | row[x - 2] << 1 | row[x - 1];
-                            row[x] = (byte)_coder.Decode(stats + cx);
-                        }
-                    }
+                    DecodeLowestLine(row, up1, up2, at, w, stats, twoLine);
                 }
             }
+        }
+
+        /// <summary>
+        /// One line of the lowest resolution layer. The template is kept in shift registers and the arithmetic decoder
+        /// runs on local copies of its registers (T.82 6.8.3, the same coder as in JpegArith.Decode).
+        /// </summary>
+        void DecodeLowestLine(byte* row, byte* up1, byte* up2, byte* at, int w, byte* stats, bool twoLine)
+        {
+            uint* table = JpegArith.Table;
+            _coder.GetRegisters(out uint a, out uint c, out int ct);
+            // template bits that move along: two lines above, the line above, the current line
+            int r2 = up2[-1] << 2 | up2[0] << 1 | up2[1];
+            int r1 = twoLine ? up1[-3] << 4 | up1[-2] << 3 | up1[-1] << 2 | up1[0] << 1 | up1[1] : up1[-2] << 3 | up1[-1] << 2 | up1[0] << 1 | up1[1];
+            int r0 = 0;
+            for (int x = 0; x < w; x++)
+            {
+                int cx = twoLine ? r1 << 5 | at[x] << 4 | r0 : r2 << 7 | r1 << 3 | at[x] << 2 | r0;
+                byte* st = stats + cx;
+                uint sv = *st, e = table[sv], qe = e & 0xFFFF;
+                int d = (int)(sv >> 7);
+                a -= qe;
+                if (c >> 16 < a)
+                {
+                    if (a >= 0x8000) goto decided; // the common case: more probable symbol, no renormalization
+                    if (a < qe) { d ^= 1; *st = (byte)(e >> 24); }
+                    else *st = (byte)(e >> 16);
+                }
+                else
+                {
+                    c -= a << 16;
+                    if (a < qe) *st = (byte)(e >> 16);
+                    else { d ^= 1; *st = (byte)(e >> 24); }
+                    a = qe;
+                }
+                do
+                {
+                    if (ct == 0)
+                    {
+                        _coder.SetRegisters(a, c, ct);
+                        _coder.NextByte();
+                        _coder.GetRegisters(out a, out c, out _);
+                        ct = 8;
+                    }
+                    a <<= 1; c <<= 1; ct--;
+                } while (a < 0x8000);
+            decided:
+                row[x] = (byte)d;
+                r0 = (r0 << 1 | d) & (twoLine ? 15 : 3);
+                r1 = (r1 << 1 | up1[x + 2]) & (twoLine ? 31 : 15);
+                r2 = (r2 << 1 | up2[x + 2]) & 7;
+            }
+            _coder.SetRegisters(a, c, ct);
         }
 
         // context of the differential layer typical prediction pseudo-pixel: phase 3, all high resolution template
