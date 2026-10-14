@@ -1420,11 +1420,11 @@ public class TiffTests
         Assert.Throws<ArgumentException>(() => Encode(MakeImage(8, 8, ColorModel.Gray, SampleType.Float32, 1), new TiffEncodeOptions { Compression = TiffCompression.Jpeg2000 }));
     }
 
-    // Un-skip when the LERC codec (codec/lerc) is merged and TiffForeignCodecs.LercDecode / LercEncode call it.
-    [Theory(Skip = "needs the LERC codec (codec/lerc)")]
+    [Theory]
     [MemberData(nameof(LercFixtures))]
     public void DecodesLercFixture(string file) => CheckFixture(file);
 
+    // Un-skip when codec/lerc has an encoder and TiffForeignCodecs.LercEncode calls it.
     [Theory(Skip = "needs the LERC encoder (codec/lerc)")]
     [InlineData(SampleType.Float32, 1, 0, TiffCompression.None, 0.0)]
     [InlineData(SampleType.Float32, 1, 32, TiffCompression.Zstd, 0.01)]
