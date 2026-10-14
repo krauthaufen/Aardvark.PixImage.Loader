@@ -109,6 +109,13 @@ namespace PixCodec.JpegImpl
             _a = 0x10000;
         }
 
+        /// <summary>The coder registers, for callers that run the decoding loop with them in locals (see JBIG).</summary>
+        internal void GetRegisters(out uint a, out uint c, out int ct) { a = _a; c = _c; ct = _ct; }
+        internal void SetRegisters(uint a, uint c, int ct) { _a = a; _c = c; _ct = ct; }
+
+        /// <summary>Feeds the next byte into the code register (it must have been handed over with <see cref="SetRegisters"/>).</summary>
+        internal void NextByte() => ByteIn();
+
         void ByteIn()
         {
             uint b = _p < _end ? *_p : 0xFFu;

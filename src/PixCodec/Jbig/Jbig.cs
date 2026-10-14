@@ -154,6 +154,30 @@ namespace PixCodec
         public static void Encode(RawImage image, Stream output, JbigEncodeOptions? options = null)
             => JbigEncoder.Encode(image, output, options ?? new JbigEncodeOptions());
 
+        /// <summary>
+        /// Decodes a single plane BIE (one TIFF strip) to packed rows: most significant bit first, (width + 7) / 8 bytes
+        /// per row, bits exactly as coded (1 = JBIG foreground), padding bits 0. The height is the final one (after
+        /// NEWLEN). Multi-plane entities throw <see cref="ImageNotSupportedException"/>. Thread safe.
+        /// </summary>
+        internal static byte[] DecodeBits(ReadOnlySpan<byte> bie, out int width, out int height)
+        {
+            var header = JbigHeader.Parse(bie);
+            if (header.P != 1) throw new ImageNotSupportedException($"JBIG entity with {header.P} bit planes; one was expected");
+            var d = new JbigDecoder();
+            d.Decode(bie, s_defaults.MaxPixels, null);
+            width = d.Width; height = d.Height;
+            int rowBytes = (width + 7) / 8;
+            var bits = new byte[checked(rowBytes * height)];
+            var (pixels, stride, offset) = d.Plane(0);
+            for (int y = 0; y < height; y++)
+            {
+                var src = pixels.AsSpan(y * stride + offset, width);
+                var dst = bits.AsSpan(y * rowBytes, rowBytes);
+                for (int x = 0; x < width; x++) dst[x >> 3] |= (byte)(src[x] << (7 - (x & 7)));
+            }
+            return bits;
+        }
+
         /// <summary>Encodes packed 1 bit rows (as <see cref="DecodeForTiff"/> produces them) into one BIE for a TIFF strip. Thread safe.</summary>
         internal static void EncodeForTiff(ReadOnlySpan<byte> packedRows, int width, int height, JbigEncodeOptions options, Stream output)
         {
