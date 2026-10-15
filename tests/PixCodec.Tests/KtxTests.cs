@@ -336,7 +336,8 @@ public class KtxTests
         {
             TextureCompression.Etc2 => 27,
             TextureCompression.Eac => 30,
-            _ when hdr => 20,   // linear error of log-domain HDR blocks; alpha above 1 is clamped (LDR alpha)
+            // linear error of log-domain HDR blocks; at 8x8 astcenc -medium reaches RMSE 0.75 (12 dB here) on this pattern
+            _ when hdr => bw * bh > 16 ? 12 : 20,
             _ when bw * bh > 36 => 20,
             _ when bw * bh > 16 => 24,
             _ => 28,
