@@ -857,12 +857,18 @@ namespace Aardvark.ImageCodecs
             return cnt;
         }
 
+        /// <summary>
+        /// v[i] = x. The .NET 10 ARM64 JIT folds the indexer setter on a vector that started as a constant (Vector4.Zero or
+        /// One) as if i were 0, so element writes with a variable index go through memory.
+        /// </summary>
+        static void SetElement(ref Vector4 v, int i, float x) => System.Runtime.CompilerServices.Unsafe.Add(ref System.Runtime.CompilerServices.Unsafe.As<Vector4, float>(ref v), i) = x;
+
         /// <summary>Residual of the principal line of a covariance (rows r) without channel k: trace minus the largest
         /// eigenvalue.</summary>
         static float SubResidual(ReadOnlySpan<Vector4> r, int k)
         {
             Vector4 m = Vector4.One;
-            m[k] = 0;
+            SetElement(ref m, k, 0);
             Vector4 r0 = r[0] * m * m.X, r1 = r[1] * m * m.Y, r2 = r[2] * m * m.Z, r3 = r[3] * m * m.W;
             float tr = r0.X + r1.Y + r2.Z + r3.W;
             Vector4 a = r0;
@@ -898,7 +904,7 @@ namespace Aardvark.ImageCodecs
             c.Dual = dual; c.Ccs = dual ? ccs : -1;
             int n0 = 0;
             Vector4 m = Vector4.Zero;
-            for (int k = 0; k < c.Ch; k++) if (!dual || k != ccs) { c.Ch0[n0++] = k; m[k] = 1; }
+            for (int k = 0; k < c.Ch; k++) if (!dual || k != ccs) { c.Ch0[n0++] = k; SetElement(ref m, k, 1); }
             c.NCh0 = n0;
             c.Mask0 = m;
         }
@@ -1699,7 +1705,7 @@ namespace Aardvark.ImageCodecs
                     }
                     SW[(p * 2 + pl) * 3] = a; SW[(p * 2 + pl) * 3 + 1] = b; SW[(p * 2 + pl) * 3 + 2] = d;
                     if (pl == 0) { t0 = x0; t1 = x1; }
-                    else { t0[c.Ccs] = x0[c.Ccs]; t1[c.Ccs] = x1[c.Ccs]; }
+                    else { SetElement(ref t0, c.Ccs, x0[c.Ccs]); SetElement(ref t1, c.Ccs, x1[c.Ccs]); }
                 }
                 for (int k = 0; k < 4; k++) { T0[p * 4 + k] = t0[k]; T1[p * 4 + k] = t1[k]; }
             }
