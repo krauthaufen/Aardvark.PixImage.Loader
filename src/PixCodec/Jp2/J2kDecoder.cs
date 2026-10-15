@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 using System.Threading.Tasks;
 
 namespace PixCodec
@@ -374,13 +375,24 @@ namespace PixCodec
                             {
                                 uint* src = d32 + si;
                                 if (roi == 0)
-                                    for (int x = 0; x < cw; x++)
+                                {
+                                    int x = 0;
+                                    if (Vector128.IsHardwareAccelerated)
+                                        for (; x + 4 <= cw; x += 4)
+                                        {
+                                            var v = Vector128.Load(src + x);
+                                            var m = Vector128.ShiftRightLogical(v & Vector128.Create(0x7FFFFFFFu), 1).AsInt32();
+                                            var sg = Vector128.ShiftRightArithmetic(v.AsInt32(), 31);
+                                            ((m ^ sg) - sg).Store(dst + x);
+                                        }
+                                    for (; x < cw; x++)
                                     {
                                         uint v = src[x];
                                         int m = (int)((v & 0x7FFFFFFF) >> 1);
                                         int s = (int)v >> 31;
                                         dst[x] = (m ^ s) - s;
                                     }
+                                }
                                 else
                                     for (int x = 0; x < cw; x++)
                                     {
@@ -425,7 +437,16 @@ namespace PixCodec
                                 else
                                 {
                                     uint* src = d32 + si;
-                                    for (int x = 0; x < cw; x++)
+                                    int x = 0;
+                                    if (roi == 0 && Vector128.IsHardwareAccelerated)
+                                        for (; x + 4 <= cw; x += 4)
+                                        {
+                                            // the scalar loop below: the magnitude times step, the sign bit carried over
+                                            var v = Vector128.Load(src + x);
+                                            var f = Vector128.ConvertToSingle((v & Vector128.Create(0x7FFFFFFFu)).AsInt32()) * Vector128.Create(step);
+                                            (f.AsUInt32() ^ (v & Vector128.Create(0x80000000u))).AsSingle().Store(dst + x);
+                                        }
+                                    for (; x < cw; x++)
                                     {
                                         uint v = src[x];
                                         uint m = v & 0x7FFFFFFF;
@@ -529,7 +550,8 @@ namespace PixCodec
             int n = _sink!.Channels, ch = _sink.ChannelOf[comp];
             void Rows(int y0, int y1)
             {
-                var tmp = res.Buffer is float[] ? new int[w] : null;
+                // (interleaved integer output is clamped a row at a time first, then spread out)
+                var tmp = res.Buffer is float[] || res.Buffer is int[] && n != 1 ? new int[w] : null;
                 fixed (int* t = tmp)
                     for (int y = y0; y < y1; y++)
                     {
@@ -550,11 +572,10 @@ namespace PixCodec
                                     {
                                         if (n == 1) { ShiftClampNarrow(s, d, w, shift, max); }
                                         else
-                                            for (int x = 0; x < w; x++)
-                                            {
-                                                int v = s[x] + shift;
-                                                d[(long)x * n] = (byte)((uint)v > (uint)max ? (v < 0 ? 0 : max) : v);
-                                            }
+                                        {
+                                            ShiftClamp(s, t, w, shift, 0, max);
+                                            for (int x = 0; x < w; x++) d[(long)x * n] = (byte)t[x];
+                                        }
                                     }
                                 else for (int x = 0; x < w; x++) d[(long)x * n] = (byte)shift;
                             }
@@ -564,11 +585,20 @@ namespace PixCodec
                                 if (src != null) for (int x = 0; x < w; x++) d[(long)x * n] = (ushort)src[x];
                                 else if (res.Buffer is int[] ib)
                                     fixed (int* s = &ib[si])
-                                        for (int x = 0; x < w; x++)
+                                    {
+                                        int* c = t;
+                                        if (c == null)
+                                            for (int x = 0; x < w; x++)
+                                            {
+                                                int v = s[x] + shift;
+                                                d[(long)x * n] = (ushort)((uint)v > (uint)max ? (v < 0 ? 0 : max) : v);
+                                            }
+                                        else
                                         {
-                                            int v = s[x] + shift;
-                                            d[(long)x * n] = (ushort)((uint)v > (uint)max ? (v < 0 ? 0 : max) : v);
+                                            ShiftClamp(s, c, w, shift, 0, max);
+                                            for (int x = 0; x < w; x++) d[(long)x * n] = (ushort)c[x];
                                         }
+                                    }
                                 else for (int x = 0; x < w; x++) d[(long)x * n] = (ushort)shift;
                             }
                     }

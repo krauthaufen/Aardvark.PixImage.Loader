@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
@@ -71,6 +72,16 @@ namespace PixCodec
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Fill()
             {
+                // four bytes at once while none of them can be a stuffed one (low seven bits all ones)
+                while (Bits <= 32 && Pos - 3 >= Min)
+                {
+                    uint x = Unsafe.ReadUnaligned<uint>(D + Pos - 3), y = x | 0x80808080u;
+                    if (((~y - 0x01010101u) & y & 0x80808080u) != 0) break;
+                    Buf |= (ulong)BinaryPrimitives.ReverseEndianness(x) << Bits;
+                    Bits += 32;
+                    Pos -= 4;
+                    Last = x & 0xFF;
+                }
                 while (Bits <= 56)
                 {
                     uint t = Pos >= Min ? D[Pos] : 0u;
@@ -106,6 +117,16 @@ namespace PixCodec
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Fill()
             {
+                // four bytes at once while neither they nor the byte before them is 0xFF
+                while (Bits <= 32 && Last != 0xFF && Pos + 4 <= End)
+                {
+                    uint x = Unsafe.ReadUnaligned<uint>(D + Pos);
+                    if (((~x - 0x01010101u) & x & 0x80808080u) != 0) break;
+                    Buf |= (ulong)x << Bits;
+                    Bits += 32;
+                    Pos += 4;
+                    Last = x >> 24;
+                }
                 while (Bits <= 56)
                 {
                     uint t = Pos < End ? D[Pos] : Pad;
@@ -120,33 +141,227 @@ namespace PixCodec
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public ulong Take(int n)
             {
-                if (n > 32)
-                {
-                    ulong lo = Take(32);
-                    return lo | Take(n - 32) << 32;
-                }
+                if (n > 32) return TakeLong(n);
                 if (Bits < n) Fill();
                 ulong v = Buf & ((1UL << n) - 1);
                 Buf >>= n; Bits -= n;
                 return v;
             }
+
+            // more than 32 bits (not part of Take: a recursive call would keep it from being inlined)
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            ulong TakeLong(int n)
+            {
+                ulong lo = Take(32);
+                return lo | Take(n - 32) << 32;
+            }
+        }
+
+        /// <summary>One quad's context (from its neighbours' significance), MEL symbol and VLC codeword; returns the table entry (0: insignificant).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int QuadVlc(ref Mel mel, ref Reverse vlc, ushort* lut, bool firstRow, int rhoLeft, int aboveLeft, int above, int aboveRight)
+        {
+            int c = firstRow
+                ? ((rhoLeft & 3) != 0 ? 1 : 0) | (rhoLeft >> 1 & 2) | (rhoLeft >> 1 & 4)
+                : ((aboveLeft | above << 2) >> 3 & 1)                                 // (aboveLeft & 8) | (above & 2)
+                  | ((rhoLeft & 12) != 0 ? 2 : 0)
+                  | ((above | aboveRight << 2) >> 1 & 4);                             // (above & 8) | (aboveRight & 2)
+            if (c == 0 && mel.Sym() == 0) return 0;
+            vlc.Fill();
+            int e = lut[c << 7 | (int)(vlc.Buf & 0x7F)];
+            vlc.Skip(e & 7);
+            return e;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int UPrefixIf(ref Reverse vlc, int on)
+        {
+            int e = (int)(0x1122_1133_1122_1135UL >> (int)(((uint)vlc.Buf & 7) << 3)) & 0xFF & -on;
+            vlc.Skip(e >> 4);
+            return e & 15;
+        }
+
+        /// <summary>
+        /// Pass 1 of a quad row: significance, EMB patterns and residuals from the MEL and VLC streams (7.3.5, 7.3.6), into
+        /// rhoCur, quadE and quadU; rhoAbove (the row above) is only read. A method of its own, with the streams in local copies.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        static bool VlcRow(ref Mel melRef, ref Reverse vlcRef, ushort* lut, bool firstRow, byte* rhoAbove, byte* rhoCur, ushort* quadE, byte* quadU, int qw)
+        {
+            var mel = melRef;
+            var vlc = vlcRef;
+            int rhoLeft = 0;             // pattern of the quad to the left in this row
+            rhoCur[-1] = 0;
+            for (int qx = 0; qx < qw; qx += 2)
+            {
+                bool two = qx + 1 < qw;
+                int aboveLeft = rhoAbove[qx - 1];
+                int eA = QuadVlc(ref mel, ref vlc, lut, firstRow, rhoLeft, aboveLeft, rhoAbove[qx], rhoAbove[qx + 1]);
+                rhoLeft = eA >> 4 & 15;
+                int eB = 0;
+                if (two)
+                {
+                    eB = QuadVlc(ref mel, ref vlc, lut, firstRow, rhoLeft, rhoAbove[qx], rhoAbove[qx + 1], rhoAbove[qx + 2]);
+                    rhoLeft = eB >> 4 & 15;
+                }
+                // --- unsigned residuals (7.3.6) ---
+                vlc.Fill();
+                int uA, uB;
+                int offA = eA >> 3 & 1, offB = eB >> 3 & 1;
+                if (two && firstRow && offA != 0 && offB != 0)
+                {
+                    if (mel.Sym() == 1)
+                    {
+                        int p0 = UPrefix(ref vlc), p1 = UPrefix(ref vlc);
+                        int s0 = USuffix(ref vlc, p0), s1 = USuffix(ref vlc, p1);
+                        uA = 2 + p0 + s0 + 4 * UExt(ref vlc, s0);
+                        uB = 2 + p1 + s1 + 4 * UExt(ref vlc, s1);
+                    }
+                    else
+                    {
+                        int p0 = UPrefix(ref vlc);
+                        if (p0 > 2)
+                        {
+                            int ubit = vlc.Take(1);
+                            int s0 = USuffix(ref vlc, p0);
+                            uA = p0 + s0 + 4 * UExt(ref vlc, s0);
+                            uB = ubit + 1;
+                        }
+                        else
+                        {
+                            int p1 = UPrefix(ref vlc);
+                            int s0 = USuffix(ref vlc, p0), s1 = USuffix(ref vlc, p1);
+                            uA = p0 + s0 + 4 * UExt(ref vlc, s0);
+                            uB = p1 + s1 + 4 * UExt(ref vlc, s1);
+                        }
+                    }
+                }
+                else
+                {
+                    // (a quad without residual reads no prefix: its offset bit masks the table's length)
+                    int p0 = UPrefixIf(ref vlc, offA), p1 = UPrefixIf(ref vlc, offB);
+                    int s0 = USuffix(ref vlc, p0), s1 = USuffix(ref vlc, p1);
+                    uA = p0 + s0 + 4 * UExt(ref vlc, s0);
+                    uB = p1 + s1 + 4 * UExt(ref vlc, s1);
+                }
+                if (vlc.Bits < 0) { melRef = mel; vlcRef = vlc; return false; }
+                rhoCur[qx] = (byte)(eA >> 4 & 15); quadE[qx] = (ushort)eA; quadU[qx] = (byte)uA;
+                if (two) { rhoCur[qx + 1] = (byte)(eB >> 4 & 15); quadE[qx + 1] = (ushort)eB; quadU[qx + 1] = (byte)uB; }
+            }
+            melRef = mel; vlcRef = vlc;
+            return true;
+        }
+
+        /// <summary>
+        /// Pass 2 of a quad row: exponent bounds and MagSgn values (7.3.7, 7.3.8). A method of its own, with the stream in
+        /// a local copy, so that its state gets the registers.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        static bool MagSgnRow<T>(ref Forward msRef, T* row0, T* row1, byte* rhoCur, ushort* quadE, byte* quadU, byte* expAbove,
+            int qw, int w, bool firstRow, bool hasRow1, int p, int maxBits, T half, T signBit) where T : unmanaged, IBinaryInteger<T>
+        {
+            var ms = msRef;
+            // the bit buffer in locals; the structure is only touched by refills
+            ulong buf = ms.Buf;
+            int bits = ms.Bits;
+            int oldExpLeft = 0;          // expAbove[2q - 1] of the row above
+            for (int q = 0; q < qw; q++)
+            {
+                int r = rhoCur[q];
+                int x = 2 * q;
+                // exponents of the row above around this quad; expAbove is being overwritten as we go
+                int eNw = oldExpLeft, eN = expAbove[x], eNe = expAbove[x + 1], eNf = expAbove[x + 2];
+                oldExpLeft = eNe;
+                int eb0 = 0, eb1 = 0;    // exponents of the two bottom samples
+                if (r != 0)
+                {
+                    // (maxima without branches: the operands are small, the outcomes irregular)
+                    int kappa = 1;
+                    if (!firstRow && (r & (r - 1)) != 0)
+                        kappa = Max(1, Max(Max(eNw, eN), Max(eNe, eNf)) - 1);
+                    int U = kappa + quadU[q];
+                    if (U > maxBits + 1) return false;
+                    int e = quadE[q];
+                    int k = e >> 8 & 15, i1 = e >> 12;
+                    // the four samples unrolled; an insignificant one takes 0 bits and writes nothing
+                    bool bad = false;
+                    ulong v0 = Sample(ref buf, ref bits, ref ms, U, k, i1, r, 0, maxBits, ref bad);
+                    ulong v1 = Sample(ref buf, ref bits, ref ms, U, k, i1, r, 1, maxBits, ref bad);
+                    ulong v2 = Sample(ref buf, ref bits, ref ms, U, k, i1, r, 2, maxBits, ref bad);
+                    ulong v3 = Sample(ref buf, ref bits, ref ms, U, k, i1, r, 3, maxBits, ref bad);
+                    // padded samples are never significant
+                    if (bad || (x + 1 >= w && (r & 12) != 0) || (!hasRow1 && (r & 10) != 0)) return false;
+                    eb0 = Exp(v1, r >> 1 & 1);
+                    eb1 = Exp(v3, r >> 3 & 1);
+                    // (the block was cleared: insignificant samples write 0, no branch on the pattern)
+                    row0[x] = Value<T>(v0, r & 1, p, half, signBit);
+                    if (x + 1 < w) row0[x + 1] = Value<T>(v2, r >> 2 & 1, p, half, signBit);
+                    if (hasRow1)
+                    {
+                        row1[x] = Value<T>(v1, r >> 1 & 1, p, half, signBit);
+                        if (x + 1 < w) row1[x + 1] = Value<T>(v3, r >> 3 & 1, p, half, signBit);
+                    }
+                }
+                expAbove[x] = (byte)eb0;
+                expAbove[x + 1] = (byte)eb1;
+            }
+            ms.Buf = buf; ms.Bits = bits;
+            msRef = ms;
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int Max(int a, int b) => a - ((a - b) & ((a - b) >> 31));
+
+        /// <summary>The MagSgn value of sample j of a quad (0 bits and 0 if it is not significant); sets bad on an impossible value.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static ulong Sample(ref ulong buf, ref int bits, ref Forward ms, int U, int k, int i1, int r, int j, int maxBits, ref bool bad)
+        {
+            int sig = r >> j & 1;
+            int m = (U - (k >> j & 1)) & -sig;
+            ulong raw;
+            if (m > 32 || bits < m)
+            {
+                ms.Buf = buf; ms.Bits = bits;
+                raw = ms.Take(m);
+                buf = ms.Buf; bits = ms.Bits;
+            }
+            else
+            {
+                raw = buf & ((1UL << m) - 1);
+                buf >>= m; bits -= m;
+            }
+            ulong v = raw | (ulong)(i1 >> j & sig) << m;
+            ulong mu = (v >> 1) + 1;
+            bad |= (64 - BitOperations.LeadingZeroCount(v | 1) > maxBits + 1 || mu >> maxBits != 0) & sig != 0;
+            return v;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int Exp(ulong v, int sig) => (64 - BitOperations.LeadingZeroCount(v | 1)) & -sig;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static T Value<T>(ulong v, int sig, int p, T half, T signBit) where T : unmanaged, IBinaryInteger<T>
+        {
+            T val = T.CreateTruncating(((v >> 1) + 1) << (p + 1)) | half | (signBit & T.CreateTruncating(0 - (v & 1)));
+            return val & T.CreateTruncating(0 - (ulong)sig);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int UPrefix(ref Reverse vlc)
         {
-            uint b = (uint)vlc.Buf;
-            if ((b & 1) != 0) { vlc.Skip(1); return 1; }
-            if ((b & 2) != 0) { vlc.Skip(2); return 2; }
-            vlc.Skip(3);
-            return (b & 4) != 0 ? 3 : 5;
+            // by table on the next three bits (prefix | length << 4): 1 "1", 2 "01", 3 "001", 5 "000"
+            int e = (int)(0x1122_1133_1122_1135UL >> (int)(((uint)vlc.Buf & 7) << 3)) & 0xFF;
+            vlc.Skip(e >> 4);
+            return e & 15;
         }
 
+        // suffix bits per prefix: 0 for 1 and 2, 1 for 3, 5 for 5 (no branches: the prefixes are irregular)
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int USuffix(ref Reverse vlc, int pfx) => pfx < 3 ? 0 : vlc.Take(pfx == 3 ? 1 : 5);
+        static int USuffix(ref Reverse vlc, int pfx) => vlc.Take((0x501000 >> (4 * pfx)) & 15);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int UExt(ref Reverse vlc, int sfx) => sfx < 28 ? 0 : vlc.Take(4);
+        static int UExt(ref Reverse vlc, int sfx) => vlc.Take((27 - sfx) >> 31 & 4);
 
         /// <summary>
         /// Decodes an HT set into data (w * h, row-major; representation as in <see cref="J2kBlockCoder"/>).
@@ -196,128 +411,26 @@ namespace PixCodec
                 byte* rhoAbove = rhoRow + 1;   // rhoAbove[q] for q = -1 .. qw
                 byte* expAbove = expRow + 1;   // expAbove[x] for x = -1 .. 2 qw
 
-                int* rho = stackalloc int[2], uoff = stackalloc int[2], ek = stackalloc int[2], e1 = stackalloc int[2], u = stackalloc int[2];
+                // per quad of the current row: the VLC table entry and the residual u; two significance rows (index quad + 1)
+                ushort* quadE = stackalloc ushort[qw + 2];
+                byte* quadU = stackalloc byte[qw + 2];
+                byte* rhoSecond = stackalloc byte[qw + 2];
+                new Span<byte>(rhoSecond, qw + 2).Clear();
+                byte* rhoCur = rhoSecond + 1;
                 for (int qy = 0; qy < qh; qy++)
                 {
                     bool firstRow = qy == 0;
                     ushort* lut = firstRow ? lut0 : lut1;
-                    int rhoLeft = 0;             // pattern of the quad to the left in this row
-                    int prevAboveRho = 0;        // rhoAbove[q - 1] before it was overwritten
-                    int oldExpLeft = 0;          // expAbove[2q - 1] of the row above
                     T* row0 = data + 2 * qy * w;
                     T* row1 = row0 + w;
                     bool hasRow1 = 2 * qy + 1 < h;
-                    for (int qx = 0; qx < qw; qx += 2)
-                    {
-                        int pair = qx + 1 < qw ? 2 : 1;
-                        // --- significance patterns and EMB patterns (7.3.5) ---
-                        int aboveLeft = prevAboveRho;
-                        uoff[1] = 0;
-                        for (int i = 0; i < pair; i++)
-                        {
-                            int q = qx + i;
-                            int c;
-                            if (firstRow) c = ((rhoLeft & 3) != 0 ? 1 : 0) | (rhoLeft >> 1 & 2) | (rhoLeft >> 1 & 4);
-                            else
-                            {
-                                int above = rhoAbove[q], aboveRight = rhoAbove[q + 1];
-                                c = ((aboveLeft & 8) != 0 || (above & 2) != 0 ? 1 : 0)
-                                    | ((rhoLeft & 12) != 0 ? 2 : 0)
-                                    | ((above & 8) != 0 || (aboveRight & 2) != 0 ? 4 : 0);
-                                aboveLeft = above;
-                            }
-                            if (c == 0 && mel.Sym() == 0)
-                            {
-                                rho[i] = uoff[i] = ek[i] = e1[i] = 0;
-                            }
-                            else
-                            {
-                                vlc.Fill();
-                                int e = lut[c << 7 | (int)(vlc.Buf & 0x7F)];
-                                vlc.Skip(e & 7);
-                                uoff[i] = e >> 3 & 1; rho[i] = e >> 4 & 15; ek[i] = e >> 8 & 15; e1[i] = e >> 12;
-                            }
-                            rhoLeft = rho[i];
-                        }
-                        // --- unsigned residuals (7.3.6) ---
-                        vlc.Fill();
-                        u[0] = u[1] = 0;
-                        if (pair == 2 && firstRow && uoff[0] != 0 && uoff[1] != 0)
-                        {
-                            if (mel.Sym() == 1)
-                            {
-                                int p0 = UPrefix(ref vlc), p1 = UPrefix(ref vlc);
-                                int s0 = USuffix(ref vlc, p0), s1 = USuffix(ref vlc, p1);
-                                u[0] = 2 + p0 + s0 + 4 * UExt(ref vlc, s0);
-                                u[1] = 2 + p1 + s1 + 4 * UExt(ref vlc, s1);
-                            }
-                            else
-                            {
-                                int p0 = UPrefix(ref vlc);
-                                if (p0 > 2)
-                                {
-                                    int ubit = vlc.Take(1);
-                                    int s0 = USuffix(ref vlc, p0);
-                                    u[0] = p0 + s0 + 4 * UExt(ref vlc, s0);
-                                    u[1] = ubit + 1;
-                                }
-                                else
-                                {
-                                    int p1 = UPrefix(ref vlc);
-                                    int s0 = USuffix(ref vlc, p0), s1 = USuffix(ref vlc, p1);
-                                    u[0] = p0 + s0 + 4 * UExt(ref vlc, s0);
-                                    u[1] = p1 + s1 + 4 * UExt(ref vlc, s1);
-                                }
-                            }
-                        }
-                        else
-                        {
-                            int p0 = uoff[0] != 0 ? UPrefix(ref vlc) : 0, p1 = uoff[1] != 0 ? UPrefix(ref vlc) : 0;
-                            int s0 = USuffix(ref vlc, p0), s1 = USuffix(ref vlc, p1);
-                            u[0] = p0 + s0 + 4 * UExt(ref vlc, s0);
-                            u[1] = p1 + s1 + 4 * UExt(ref vlc, s1);
-                        }
-                        if (vlc.Bits < 0) return false;
-                        // --- exponent bounds and MagSgn values (7.3.7, 7.3.8) ---
-                        for (int i = 0; i < pair; i++)
-                        {
-                            int q = qx + i;
-                            int r = rho[i];
-                            int x = 2 * q;
-                            // exponents of the row above around this quad; expAbove is being overwritten as we go
-                            int eNw = oldExpLeft, eN = expAbove[x], eNe = expAbove[x + 1], eNf = expAbove[x + 2];
-                            oldExpLeft = eNe;
-                            prevAboveRho = rhoAbove[q];
-                            rhoAbove[q] = (byte)r;
-                            int kappa = 1;
-                            if (!firstRow && (r & (r - 1)) != 0)
-                                kappa = Math.Max(1, Math.Max(Math.Max(eNw, eN), Math.Max(eNe, eNf)) - 1);
-                            int U = kappa + u[i];
-                            int eb0 = 0, eb1 = 0;    // exponents of the two bottom samples
-                            if (r != 0)
-                            {
-                                if (U > maxBits + 1) return false;
-                                int k = ek[i], i1 = e1[i];
-                                for (int j = 0; j < 4; j++)
-                                {
-                                    if ((r >> j & 1) == 0) continue;
-                                    int m = U - (k >> j & 1);
-                                    ulong v = ms.Take(m) | (ulong)(i1 >> j & 1) << m;
-                                    ulong mu = (v >> 1) + 1;
-                                    int exp = 64 - BitOperations.LeadingZeroCount(v | 1);
-                                    if (exp > maxBits + 1 || mu >> maxBits != 0) return false;
-                                    int sx = x + (j >> 1);
-                                    if ((j & 1) != 0) { if ((j & 2) == 0) eb0 = exp; else eb1 = exp; }
-                                    if (sx >= w || ((j & 1) != 0 && !hasRow1)) return false;   // padded samples are never significant
-                                    T val = T.CreateTruncating(mu << (p + 1)) | half;
-                                    if ((v & 1) != 0) val |= signBit;
-                                    if ((j & 1) == 0) row0[sx] = val; else row1[sx] = val;
-                                }
-                            }
-                            expAbove[x] = (byte)eb0;
-                            expAbove[x + 1] = (byte)eb1;
-                        }
-                    }
+                    // pass 1: the quad row's significance, EMB patterns and residuals from the MEL and VLC streams; the new
+                    // significance goes to rhoCur, the row above (rhoAbove) is only read
+                    if (!VlcRow(ref mel, ref vlc, lut, firstRow, rhoAbove, rhoCur, quadE, quadU, qw)) return false;
+                    // pass 2: exponent bounds and MagSgn values (7.3.7, 7.3.8)
+                    if (!MagSgnRow(ref ms, row0, row1, rhoCur, quadE, quadU, expAbove, qw, w, firstRow, hasRow1, p, maxBits, half, signBit)) return false;
+                    // the new row becomes the row above
+                    { byte* t = rhoAbove; rhoAbove = rhoCur; rhoCur = t; }
                 }
 
                 if (zblk > 1)
