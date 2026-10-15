@@ -308,6 +308,51 @@ public class AstcEncodeTests
         }
     }
 
+    /// <summary>
+    /// Regression: HDR RGBA content whose channels run independently down to 0 (37 x 21, partial edge blocks). The
+    /// logarithmic fit once chose endpoints far above the data, decoding values up to 45 from data within 0..2.5. The
+    /// decoded values must stay in a sane range (at most about one stop above the brightest input) and the RGB error
+    /// bounded. For reference astcenc -ch on the same pattern (numpy noise instead of System.Random): RMSE 0.29 / 0.22
+    /// at 4x4 -fast / -medium, 0.59 / 0.75 at 8x8, with maxima of 2.1 to 17.
+    /// </summary>
+    [Theory]
+    [InlineData(4, BcQuality.Fast, 0.35)]
+    [InlineData(4, BcQuality.Normal, 0.35)]
+    [InlineData(6, BcQuality.Normal, 0.6)]
+    [InlineData(8, BcQuality.Fast, 0.9)]
+    [InlineData(8, BcQuality.Normal, 0.9)]
+    [InlineData(8, BcQuality.High, 0.9)]
+    [InlineData(12, BcQuality.Normal, 1.0)]
+    public void HdrIndependentChannelsStaySane(int bs, BcQuality q, double maxRmse)
+    {
+        int w = 37, h = 21, seed = 7;
+        var r = new Random(seed);
+        var px = new ushort[w * h * 4];
+        float max = 0;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                for (int k = 0; k < 4; k++)
+                {
+                    double v = 0.5 + 0.4 * Math.Sin(x * 0.4 + k) * Math.Cos(y * 0.3 + seed) + 0.02 * r.NextDouble();
+                    float f = Math.Max(0, (float)(v * 3 - 0.5));
+                    px[(y * w + x) * 4 + k] = BitConverter.HalfToUInt16Bits((Half)f);
+                    if (k < 3) max = Math.Max(max, f);
+                }
+        var dec = DecodeFloat16(AstcEncoder.EncodeImageFloat16(px, w, h, bs, bs, q), w, h, bs, bs);
+        double se = 0, worst = 0;
+        for (int i = 0; i < w * h; i++)
+            for (int k = 0; k < 3; k++)
+            {
+                double a = (double)BitConverter.UInt16BitsToHalf(px[i * 4 + k]), b = (double)BitConverter.UInt16BitsToHalf(dec[i * 4 + k]);
+                Assert.True(b >= 0 && b <= 2.2 * max, $"texel {i} channel {k}: {a} decoded as {b}");
+                se += (a - b) * (a - b);
+                worst = Math.Max(worst, Math.Abs(a - b));
+            }
+        double rmse = Math.Sqrt(se / (w * h * 3));
+        _out.WriteLine($"{bs}x{bs} {q}: rmse {rmse:F3}, max error {worst:F2}");
+        Assert.True(rmse <= maxRmse, $"rmse {rmse:F3}");
+    }
+
     /// <summary>Constant blocks decode exactly (void extent), LDR, sRGB and HDR.</summary>
     [Fact]
     public void ConstantBlocksExact()
