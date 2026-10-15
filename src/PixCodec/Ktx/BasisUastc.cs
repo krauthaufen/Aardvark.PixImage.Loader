@@ -10,6 +10,7 @@ namespace PixCodec
     /// result is bit exact (ASTC decode mode RGBA8, endpoints expanded as linear, not sRGB). UASTC HDR 4x4 (a different
     /// format, KTX2 DFD model UASTC with an HDR vkFormat / transfer) is not handled here.
     /// </summary>
+    [System.Runtime.CompilerServices.SkipLocalsInit]
     internal static class BasisUastc
     {
         // ------------------------------------------------------------------ mode tables (UASTC specification)
@@ -26,7 +27,7 @@ namespace PixCodec
         // per mode: components, subsets, planes, weight bits, endpoint range, pattern table (0 none, 2, 3, 7 = 2 subset
         // ASTC / 3 subset BC7), pattern field offset, pattern field bits, component selector offset (-1 none), offset
         // of the endpoint data (ETQ, else EBITS); weights follow the endpoint bits
-        static readonly sbyte[,] Modes =
+        internal static readonly sbyte[,] Modes =
         {
             //  c  s  p  w   er  pt  po  pb  cs  data
             { 3, 1, 1, 4, 19, 0, 0, 0, -1, 19 },   // 0
@@ -51,7 +52,7 @@ namespace PixCodec
         };
 
         // ASTC 6 bit weights for 1 to 5 bit weight indices
-        static readonly byte[][] WeightValues =
+        internal static readonly byte[][] WeightValues =
         {
             Array.Empty<byte>(),
             new byte[] { 0, 64 },
@@ -86,7 +87,31 @@ namespace PixCodec
         // what the specification's anchor tables list.
 
         static readonly byte[] Single = new byte[16];
-        static readonly byte[][] Partitions2 = Parse(Patterns2), Partitions3 = Parse(Patterns3), Partitions7 = Parse(Patterns7);
+
+        // Modes flattened (mode * 10 + column) and the unquantization of every endpoint range, for the decoder
+        static readonly sbyte[] ModeTab = FlattenModes();
+        static readonly byte[][] UnquantizeTables = BuildUnquantizeTables();
+
+        static sbyte[] FlattenModes()
+        {
+            var t = new sbyte[19 * 10];
+            for (int m = 0; m < 19; m++) for (int c = 0; c < 10; c++) t[m * 10 + c] = Modes[m, c];
+            return t;
+        }
+
+        static byte[][] BuildUnquantizeTables()
+        {
+            var r = new byte[21][];
+            foreach (int range in new[] { 7, 8, 11, 12, 13, 18, 19, 20 })
+            {
+                var (bits, tq) = Range(range);
+                int levels = (tq == 0 ? 1 : tq == 1 ? 3 : 5) << bits;
+                r[range] = new byte[levels];
+                for (int i = 0; i < levels; i++) r[range][i] = (byte)Unquantize(i, range);
+            }
+            return r;
+        }
+        internal static readonly byte[][] Partitions2 = Parse(Patterns2), Partitions3 = Parse(Patterns3), Partitions7 = Parse(Patterns7);
 
         static byte[][] Parse(string[] p)
         {
@@ -100,7 +125,7 @@ namespace PixCodec
         }
 
         // endpoint ranges: bits, trits (1) or quints (2)
-        static (int bits, int tq) Range(int range) => range switch
+        internal static (int bits, int tq) Range(int range) => range switch
         {
             7 => (2, 1), 8 => (4, 0), 11 => (5, 0), 12 => (3, 2), 13 => (4, 1), 18 => (5, 2), 19 => (6, 1), 20 => (8, 0),
             _ => throw new ArgumentOutOfRangeException(nameof(range)),
@@ -142,24 +167,25 @@ namespace PixCodec
                 return;
             }
 
-            int comps = Modes[mode, 0], subsets = Modes[mode, 1], planes = Modes[mode, 2], wbits = Modes[mode, 3];
-            int range = Modes[mode, 4], patTable = Modes[mode, 5];
+            var md = ModeTab.AsSpan(mode * 10, 10);
+            int comps = md[0], subsets = md[1], planes = md[2], wbits = md[3];
+            int range = md[4], patTable = md[5];
             int ccs = -1;
-            if (planes == 2) { ccs = 3; if (Modes[mode, 8] >= 0) { r.Pos = Modes[mode, 8]; ccs = r.Read(2); } }
+            if (planes == 2) { ccs = 3; if (md[8] >= 0) { r.Pos = md[8]; ccs = r.Read(2); } }
 
             // partition
             byte[] subset = Single;
             if (patTable != 0)
             {
-                r.Pos = Modes[mode, 6];
-                int pat = r.Read(Modes[mode, 7]);
+                r.Pos = md[6];
+                int pat = r.Read(md[7]);
                 var tab = patTable == 2 ? Partitions2 : patTable == 3 ? Partitions3 : Partitions7;
                 if (pat >= tab.Length) { o.Clear(); return; }   // invalid pattern index
                 subset = tab[pat];
             }
 
             // endpoints: all trit / quint codes first, then the low bits of every value
-            r.Pos = Modes[mode, 9];
+            r.Pos = md[9];
             int nv = comps * 2 * subsets;
             var (bits, tq) = Range(range);
             Span<int> ev = stackalloc int[18];
@@ -175,19 +201,20 @@ namespace PixCodec
                     for (int i = 0; i < k; i++) { ev[g + i] = code % bse; code /= bse; }
                 }
             }
-            for (int i = 0; i < nv; i++) ev[i] = Unquantize(ev[i] << bits | r.Read(bits), range);
+            var unq = UnquantizeTables[range];
+            for (int i = 0; i < nv; i++) ev[i] = unq[ev[i] << bits | r.Read(bits)];
 
-            // endpoint colours per subset, expanded to RGBA (LA -> LLLA)
-            Span<byte> lo = stackalloc byte[12], hi = stackalloc byte[12];
+            // endpoint colours per subset, expanded to RGBA (LA -> LLLA), times 257 (8 to 16 bits)
+            Span<int> lo = stackalloc int[12], hi = stackalloc int[12];
             for (int s = 0; s < subsets; s++)
             {
                 var e = ev.Slice(s * comps * 2);
                 for (int c = 0; c < 4; c++)
                 {
                     int src = comps == 2 ? (c < 3 ? 0 : 1) : c;
-                    if (src >= comps) { lo[s * 4 + c] = 255; hi[s * 4 + c] = 255; continue; }
-                    lo[s * 4 + c] = (byte)e[src * 2];
-                    hi[s * 4 + c] = (byte)e[src * 2 + 1];
+                    if (src >= comps) { lo[s * 4 + c] = 255 * 257; hi[s * 4 + c] = 255 * 257; continue; }
+                    lo[s * 4 + c] = e[src * 2] * 257;
+                    hi[s * 4 + c] = e[src * 2 + 1] * 257;
                 }
             }
 
@@ -206,11 +233,11 @@ namespace PixCodec
             for (int t = 0; t < 16; t++)
             {
                 int s = subset[t] * 4;
+                int w0 = w[t * planes], w1 = planes == 2 ? w[t * 2 + 1] : w0;
                 for (int c = 0; c < 4; c++)
                 {
-                    int wt = w[t * planes + (c == ccs ? 1 : 0)];
-                    int l = lo[s + c] * 257, h = hi[s + c] * 257;
-                    o[t * 4 + c] = (byte)(((l * (64 - wt) + h * wt + 32) >> 6) >> 8);
+                    int wt = c == ccs ? w1 : w0;
+                    o[t * 4 + c] = (byte)(((lo[s + c] * (64 - wt) + hi[s + c] * wt + 32) >> 6) >> 8);
                 }
             }
         }
@@ -265,15 +292,32 @@ namespace PixCodec
             int bx = (width + 3) >> 2, by = (height + 3) >> 2;
             if (blocks.Length < (long)bx * by * 16) throw new ImageFormatException("UASTC: image data truncated");
             if (rgba.Length < (long)width * height * 4) throw new ArgumentException("output too small", nameof(rgba));
-            Span<byte> px = stackalloc byte[64];
-            for (int y = 0; y < by; y++)
-                for (int x = 0; x < bx; x++)
+            if ((long)bx * by >= 256)
+            {
+                // block rows in parallel (one copy of the input; the output written through an array)
+                var src = blocks.Slice(0, bx * by * 16).ToArray();
+                var dst = new byte[(long)width * height * 4];
+                System.Threading.Tasks.Parallel.For(0, by, y =>
                 {
-                    DecodeBlock(blocks.Slice((y * bx + x) * 16, 16), px);
-                    int w = Math.Min(4, width - 4 * x), h = Math.Min(4, height - 4 * y);
-                    for (int py = 0; py < h; py++)
-                        px.Slice(py * 16, w * 4).CopyTo(rgba.Slice(((4 * y + py) * width + 4 * x) * 4));
-                }
+                    Span<byte> px = stackalloc byte[64];
+                    DecodeRow(src, bx, y, width, height, px, dst);
+                });
+                dst.AsSpan().CopyTo(rgba);
+                return;
+            }
+            Span<byte> one = stackalloc byte[64];
+            for (int y = 0; y < by; y++) DecodeRow(blocks, bx, y, width, height, one, rgba);
+        }
+
+        static void DecodeRow(ReadOnlySpan<byte> blocks, int bx, int y, int width, int height, Span<byte> px, Span<byte> rgba)
+        {
+            for (int x = 0; x < bx; x++)
+            {
+                DecodeBlock(blocks.Slice((y * bx + x) * 16, 16), px);
+                int w = Math.Min(4, width - 4 * x), h = Math.Min(4, height - 4 * y);
+                for (int py = 0; py < h; py++)
+                    px.Slice(py * 16, w * 4).CopyTo(rgba.Slice(((4 * y + py) * width + 4 * x) * 4));
+            }
         }
     }
 }

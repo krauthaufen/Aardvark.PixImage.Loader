@@ -31,7 +31,8 @@ namespace PixCodec.KtxImpl
             => h.Length < 12 ? 0 : h.Slice(0, 12).SequenceEqual(Id1) ? 1 : h.Slice(0, 12).SequenceEqual(Id2) ? 2 : 0;
 
         // data format descriptor colour models of the Basis Universal formats
-        const int ModelAstc = 162, ModelEtc1s = 163, ModelUastc = 166;
+        const int ModelAstc = 162, ModelEtc1s = 163, ModelUastc = 166, ModelUastcHdr4x4 = 167;
+        const int AstcHdr4x4 = 1000066000;   // VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK
 
         public static KtxParsed Parse(ReadOnlySpan<byte> d)
         {
@@ -103,6 +104,16 @@ namespace PixCodec.KtxImpl
                 // ASTC described by the data format descriptor alone (3D footprints have no Vulkan format)
                 p.Format = KtxFormats.Astc(blockDims[0], blockDims[1], blockDims[2], p.Info.Transfer == TransferFunction.Srgb, floatSamples);
                 SetFormat(p);
+            }
+            else if (model == ModelUastcHdr4x4 && (vk == 0 || vk == AstcHdr4x4))
+            {
+                // UASTC HDR 4x4: standard ASTC 4x4 HDR blocks (KTX2 requires vkFormat ASTC_4x4_SFLOAT_BLOCK; UNDEFINED is
+                // read the same way)
+                if (scheme == 1) throw new ImageFormatException("KTX2: BasisLZ needs ETC1S data");
+                p.Format = KtxFormats.FromVk(AstcHdr4x4)!;
+                SetFormat(p);
+                p.Info.VkFormat = AstcHdr4x4;
+                p.Info.Format = "UASTC_HDR_4x4";
             }
             else if (vk == 0)
             {

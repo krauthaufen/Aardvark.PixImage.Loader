@@ -221,7 +221,7 @@ namespace PixCodec.DdsImpl
             _ => throw new ImageNotSupportedException($"DDS: {img.SampleType} samples cannot be block compressed"),
         };
 
-        static byte ToUnorm8(RawImage img, long i)
+        internal static byte ToUnorm8(RawImage img, long i)
             => img.SampleType == SampleType.UInt8 ? ((byte[])img.Data)[i] : (byte)MathF.Round(Math.Clamp(Normalized(img, i), 0, 1) * 255);
 
         static int ToSnorm8(RawImage img, long i)

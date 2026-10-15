@@ -29,6 +29,13 @@ namespace PixCodec
         BC6H,
         /// <summary>RGB or RGBA, 8 bits per pixel, the best quality of the 8 bit formats.</summary>
         BC7,
+        /// <summary>
+        /// Basis Universal ETC1S with BasisLZ supercompression (KTX 2 only): RGB(A) at roughly 0.3 to 3 bits per pixel,
+        /// transcodable to every GPU format. Size versus quality: <see cref="KtxEncodeOptions.Etc1sQuality"/>.
+        /// </summary>
+        Etc1s,
+        /// <summary>Basis Universal UASTC LDR 4x4 (KTX 2 only): RGB(A), 8 bits per pixel before the optional Zstandard supercompression.</summary>
+        Uastc,
     }
 
     public sealed class KtxDecodeOptions
@@ -53,8 +60,23 @@ namespace PixCodec
         /// <summary>Block compression (<see cref="TextureCompression.None"/> by default). See <see cref="DdsEncodeOptions.Compression"/> for the conversions.</summary>
         public TextureCompression Compression { get; set; } = TextureCompression.None;
 
-        /// <summary>Speed versus quality of the block compression.</summary>
+        /// <summary>
+        /// Speed versus quality of the block compression: for UASTC the modes and partitions tried, for ETC1S the codebook
+        /// refinement (search widths and passes).
+        /// </summary>
         public BcQuality Quality { get; set; } = BcQuality.Normal;
+
+        /// <summary>
+        /// ETC1S size versus quality, 1 to 255 (default 128, like basisu's -q): sets the endpoint and selector codebook sizes
+        /// and how strongly blocks reuse their neighbours' codes.
+        /// </summary>
+        public int Etc1sQuality { get; set; } = 128;
+
+        /// <summary>ETC1S: explicit endpoint codebook size (1 to 16128) instead of the one <see cref="Etc1sQuality"/> gives.</summary>
+        public int? Etc1sMaxEndpoints { get; set; }
+
+        /// <summary>ETC1S: explicit selector codebook size (1 to 16128) instead of the one <see cref="Etc1sQuality"/> gives.</summary>
+        public int? Etc1sMaxSelectors { get; set; }
 
         /// <summary>Whether to add a computed mip chain to single images (and cube faces).</summary>
         public bool GenerateMipmaps { get; set; }
@@ -68,7 +90,10 @@ namespace PixCodec
         /// </summary>
         public bool? Srgb { get; set; }
 
-        /// <summary>Supercompression of the mip levels: <see cref="KtxSupercompression.Zstd"/> (default) or None. BasisLZ is not written.</summary>
+        /// <summary>
+        /// Supercompression of the mip levels: <see cref="KtxSupercompression.Zstd"/> (default), Zlib or None. ETC1S is always
+        /// written with BasisLZ (this setting is ignored), UASTC with Zstd or None.
+        /// </summary>
         public KtxSupercompression Supercompression { get; set; } = KtxSupercompression.Zstd;
 
         /// <summary>Zstandard level (1 to 22).</summary>
@@ -151,11 +176,12 @@ namespace PixCodec
     /// Khronos texture containers KTX 1.1 and KTX 2.0: 1D, 2D, 3D and cube map textures, arrays and mip chains. Reads the
     /// uncompressed Vulkan / OpenGL formats (8 to 64 bit integer and float components in any order, packed 16 and 32 bit
     /// formats, R11G11B10 and RGB9E5 float), BC1 to BC7, ETC1 / ETC2 / EAC, ASTC (LDR and HDR, 2D footprints) and the Basis
-    /// Universal formats ETC1S (BasisLZ) and UASTC, with Zstandard and zlib supercompression. Results are like those of
-    /// <see cref="Dds"/>; ETC2 and ASTC decode to UInt8 Rgb / Rgba, EAC to UInt16 / Int16, ASTC HDR to Float16.
+    /// Universal formats ETC1S (BasisLZ), UASTC LDR 4x4 and UASTC HDR 4x4, with Zstandard and zlib supercompression.
+    /// Results are like those of <see cref="Dds"/>; ETC2 and ASTC decode to UInt8 Rgb / Rgba, EAC to UInt16 / Int16,
+    /// ASTC HDR (and UASTC HDR) to Float16, ETC1S and UASTC LDR to UInt8 Rgba.
     /// Writes KTX 2 textures (single images with optional computed mip chains, given mip chains, cube maps, arrays and
-    /// volumes), uncompressed or BC1 to BC7 compressed, with Zstandard supercompression and a complete data format
-    /// descriptor.
+    /// volumes), uncompressed, BC1 to BC7 compressed or Basis Universal ETC1S (BasisLZ, one codebook for all images) /
+    /// UASTC LDR 4x4, with Zstandard supercompression and a complete data format descriptor.
     /// </summary>
     public static class Ktx
     {

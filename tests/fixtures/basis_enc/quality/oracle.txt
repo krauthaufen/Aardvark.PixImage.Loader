@@ -1,0 +1,7 @@
+# image format basisu_psnr_rgb_db basisu_bits_per_pixel  (basisu -linear; -uastc level 2, -etc1s -q 128)
+photo_rgb_192x128 uastc 42.893 7.7503
+photo_rgb_192x128 etc1s 32.086 1.5592
+photo2_rgb_160x160 uastc 42.151 7.7550
+photo2_rgb_160x160 etc1s 31.177 1.5606
+photo_rgba_128x96 uastc 39.389 7.8464
+photo_rgba_128x96 etc1s 29.330 2.8965
