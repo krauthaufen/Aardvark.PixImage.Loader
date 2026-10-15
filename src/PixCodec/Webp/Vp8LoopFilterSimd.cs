@@ -147,6 +147,7 @@ namespace PixCodec
         }
 
         // The filters return false when no position of the edge passes the thresholds: nothing to write back then.
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static bool Simple(Vector128<byte> p1, ref Vector128<byte> p0, ref Vector128<byte> q0, Vector128<byte> q1, int limit)
         {
             var mask = EdgeMask(p1, p0, q0, q1, Vector128.Create((byte)limit)).AsSByte();
@@ -174,6 +175,7 @@ namespace PixCodec
         }
 
         /// <summary>The filter for edges between sub-blocks: changes p1, p0, q0, q1.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static bool Inner(Vector128<byte> p3, Vector128<byte> p2, ref Vector128<byte> p1, ref Vector128<byte> p0, ref Vector128<byte> q0, ref Vector128<byte> q1,
             Vector128<byte> q2, Vector128<byte> q3, int limit, int interior, int hevThresh)
         {
@@ -205,6 +207,7 @@ namespace PixCodec
         }
 
         /// <summary>The filter for edges between macroblocks: changes p2 .. q2.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static bool Macroblock(Vector128<byte> p3, ref Vector128<byte> p2, ref Vector128<byte> p1, ref Vector128<byte> p0, ref Vector128<byte> q0,
             ref Vector128<byte> q1, ref Vector128<byte> q2, Vector128<byte> q3, int limit, int interior, int hevThresh)
         {
@@ -250,6 +253,7 @@ namespace PixCodec
         /// Loads 8 pixels around a vertical edge from each of 16 rows (a: rows 0..7, b: rows 8..15) and turns them into
         /// eight vectors, one per column: p3 p2 p1 p0 q0 q1 q2 q3.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void LoadColumns(byte* a, byte* b, int stride, out Vector128<byte> c0, out Vector128<byte> c1, out Vector128<byte> c2, out Vector128<byte> c3,
             out Vector128<byte> c4, out Vector128<byte> c5, out Vector128<byte> c6, out Vector128<byte> c7)
         {
@@ -267,6 +271,7 @@ namespace PixCodec
             c4 = ZipLo64(v2, w2); c5 = ZipHi64(v2, w2); c6 = ZipLo64(v3, w3); c7 = ZipHi64(v3, w3);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void StoreColumns(byte* a, byte* b, int stride, Vector128<byte> c0, Vector128<byte> c1, Vector128<byte> c2, Vector128<byte> c3,
             Vector128<byte> c4, Vector128<byte> c5, Vector128<byte> c6, Vector128<byte> c7)
         {
@@ -289,6 +294,7 @@ namespace PixCodec
         // ---- entry points; p is the first pixel after the edge
 
         /// <summary>Horizontal edge over 16 luma pixels (the pixels across the edge lie one stride apart).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void HorizontalEdge16(byte* p, int stride, int kind, int limit, int interior, int hev)
         {
             var p1 = Vector128.Load(p - 2 * stride); var p0 = Vector128.Load(p - stride);
@@ -314,6 +320,7 @@ namespace PixCodec
         }
 
         /// <summary>Horizontal edge over 8 pixels of each chroma plane.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void HorizontalEdge8(byte* u, byte* v, int stride, int kind, int limit, int interior, int hev)
         {
             var p3 = Pair(u - 4 * stride, v - 4 * stride); var p2 = Pair(u - 3 * stride, v - 3 * stride);
@@ -335,6 +342,7 @@ namespace PixCodec
 
         /// <summary>Vertical edge over 16 rows: a and b point at the first pixel right of the edge in rows 0 and 8
         /// (luma: b = a + 8 * stride; chroma: the two planes).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void VerticalEdge(byte* a, byte* b, int stride, int kind, int limit, int interior, int hev)
         {
             LoadColumns(a - 4, b - 4, stride, out var p3, out var p2, out var p1, out var p0, out var q0, out var q1, out var q2, out var q3);
@@ -345,6 +353,7 @@ namespace PixCodec
         }
 
         /// <summary>Transposes a 16x16 block of bytes held in sixteen vectors (rows to columns or back).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void Transpose16(Vector128<byte>* m)
         {
             Vector128<byte>* t = stackalloc Vector128<byte>[16];
@@ -367,6 +376,7 @@ namespace PixCodec
         /// The three vertical edges inside a luma macroblock (at x = 4, 8, 12), left to right. The block is turned
         /// on its side once for all three instead of once per edge.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void InnerVerticalEdges16(byte* p, int stride, bool simple, int limit, int interior, int hev)
         {
             Vector128<byte>* c = stackalloc Vector128<byte>[16];

@@ -1,5 +1,8 @@
 using System;
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace PixCodec.DdsImpl
 {
@@ -11,11 +14,15 @@ namespace PixCodec.DdsImpl
 
         public void Write(int value, int n)
         {
-            for (int k = 0; k < n; k++, Pos++)
+            if (n <= 0) return;
+            ulong v = (ulong)(uint)value & ((1UL << n) - 1);   // n <= 32
+            if (Pos >= 64) hi |= v << (Pos - 64);
+            else
             {
-                ulong bit = (ulong)(value >> k & 1);
-                if (Pos < 64) lo |= bit << Pos; else hi |= bit << (Pos - 64);
+                lo |= v << Pos;
+                if (Pos + n > 64) hi |= v >> (64 - Pos);
             }
+            Pos += n;
         }
 
         public void Store(Span<byte> o)
@@ -92,28 +99,85 @@ namespace PixCodec.DdsImpl
         /// Index assignment for the given endpoints: error over the texels in <paramref name="members"/> of the channels the spec
         /// covers.
         /// </summary>
-        static long Assign(ReadOnlySpan<byte> px, ReadOnlySpan<byte> members, int count, in Spec s, Fit f)
+        /// <remarks>
+        /// Stops early, returning a total of at least <paramref name="bound"/>, once the error reaches it (the indices are then
+        /// incomplete). The palette is searched four entries at a time: keys error * 16 + index, whose minimum is the first
+        /// index of least error.
+        /// </remarks>
+        [SkipLocalsInit]
+        static long Assign(ReadOnlySpan<byte> px, ReadOnlySpan<byte> members, int count, in Spec s, Fit f, long bound = long.MaxValue)
         {
-            var w = Bptc.Weights(s.IndexBits);
+            var w = IntWeights(s.IndexBits);
             int nw = w.Length;
-            Span<int> pal = stackalloc int[16 * 4];
             int c0 = s.Channels == 1 ? 3 : 0, c1 = s.Channels == 3 ? 3 : 4;
-            for (int k = 0; k < nw; k++)
-                for (int c = c0; c < c1; c++)
-                    pal[k * 4 + c] = ((64 - w[k]) * f.Value[c] + w[k] * f.Value[4 + c] + 32) >> 6;
+            // palette per channel (channel * 16 + entry); only the channels of the spec are written and read
+            Span<int> pal = stackalloc int[4 * 16];
+            ref int p0 = ref pal[0];
+            ref int wr = ref MemoryMarshal.GetArrayDataReference(w);
+            var value = f.Value;
+            for (int c = c0; c < c1; c++)
+            {
+                var a = Vector128.Create(value[c]); var b = Vector128.Create(value[4 + c]);
+                for (int k = 0; k < nw; k += 4)
+                {
+                    var wk = Vector128.LoadUnsafe(ref wr, (nuint)k);
+                    Vector128.ShiftRightArithmetic((Vector128.Create(64) - wk) * a + wk * b + Vector128.Create(32), 6).StoreUnsafe(ref p0, (nuint)(c * 16 + k));
+                }
+            }
+            return c1 - c0 == 4 ? AssignLoop<Rgba>(px, members, count, nw, ref p0, f.Index, bound)
+                : c1 - c0 == 3 ? AssignLoop<Rgb>(px, members, count, nw, ref p0, f.Index, bound)
+                : AssignLoop<AlphaOnly>(px, members, count, nw, ref p0, f.Index, bound);
+        }
+
+        static readonly int[] IntW2 = Array.ConvertAll(Bptc.W2, x => (int)x), IntW3 = Array.ConvertAll(Bptc.W3, x => (int)x),
+            IntW4 = Array.ConvertAll(Bptc.W4, x => (int)x);
+
+        static int[] IntWeights(int bits) => bits == 2 ? IntW2 : bits == 3 ? IntW3 : IntW4;
+
+        interface IChannels { }
+        struct Rgba : IChannels { }
+        struct Rgb : IChannels { }
+        struct AlphaOnly : IChannels { }
+
+        static long AssignLoop<T>(ReadOnlySpan<byte> px, ReadOnlySpan<byte> members, int count, int nw, ref int p0, byte[] index, long bound)
+            where T : struct, IChannels
+        {
+            bool color = typeof(T) != typeof(AlphaOnly), alpha = typeof(T) != typeof(Rgb);
+            var step = Vector128.Create(4);
             long total = 0;
             for (int m = 0; m < count; m++)
             {
                 int i = members[m];
-                int be = int.MaxValue, bi = 0;
-                for (int k = 0; k < nw; k++)
+                var x = px.Slice(i * 4, 4);
+                var best = Vector128.Create(int.MaxValue);
+                var idx = Vector128.Create(0, 1, 2, 3);
+                for (int k = 0; k < nw; k += 4)
                 {
-                    int e = 0;
-                    for (int c = c0; c < c1; c++) { int d = px[i * 4 + c] - pal[k * 4 + c]; e += d * d; }
-                    if (e < be) { be = e; bi = k; }
+                    Vector128<int> e;
+                    if (color)
+                    {
+                        var d0 = Vector128.Create((int)x[0]) - Vector128.LoadUnsafe(ref p0, (nuint)k);
+                        var d1 = Vector128.Create((int)x[1]) - Vector128.LoadUnsafe(ref p0, (nuint)(16 + k));
+                        var d2 = Vector128.Create((int)x[2]) - Vector128.LoadUnsafe(ref p0, (nuint)(32 + k));
+                        e = d0 * d0 + d1 * d1 + d2 * d2;
+                        if (alpha)
+                        {
+                            var d3 = Vector128.Create((int)x[3]) - Vector128.LoadUnsafe(ref p0, (nuint)(48 + k));
+                            e += d3 * d3;
+                        }
+                    }
+                    else
+                    {
+                        var d3 = Vector128.Create((int)x[3]) - Vector128.LoadUnsafe(ref p0, (nuint)(48 + k));
+                        e = d3 * d3;
+                    }
+                    best = Vector128.Min(best, Vector128.ShiftLeft(e, 4) | idx);
+                    idx += step;
                 }
-                f.Index[i] = (byte)bi;
-                total += be;
+                int key = Math.Min(Math.Min(best.GetElement(0), best.GetElement(1)), Math.Min(best.GetElement(2), best.GetElement(3)));
+                index[i] = (byte)(key & 15);
+                total += key >> 4;
+                if (total >= bound) return total;
             }
             return total;
         }
@@ -170,14 +234,6 @@ namespace PixCodec.DdsImpl
             }
         }
 
-        static void Requantize(Fit f, in Spec s)
-        {
-            int c0 = s.Channels == 1 ? 3 : 0, c1 = s.Channels == 3 ? 3 : 4;
-            for (int k = 0; k < 2; k++)
-                for (int c = c0; c < c1; c++)
-                    f.Value[k * 4 + c] = Value(f.Stored[k * 4 + c], c == 3 ? s.AlphaBits : s.ColorBits, f.PBit[k]);
-        }
-
         /// <summary>Fits one subset. <paramref name="cur"/> is scratch; the result is in <paramref name="best"/>.</summary>
         static void FitSubset(ReadOnlySpan<byte> px, ReadOnlySpan<byte> members, int count, in Spec s, BcQuality q, Fit best, Fit cur)
         {
@@ -229,11 +285,12 @@ namespace PixCodec.DdsImpl
                             {
                                 int old = cur.Stored[k * 4 + c], v = old + d;
                                 if (v < 0 || v > max) continue;
+                                int bits = c == 3 ? s.AlphaBits : s.ColorBits, oldValue = cur.Value[k * 4 + c];
                                 cur.Stored[k * 4 + c] = v;
-                                Requantize(cur, s);
-                                cur.Error = Assign(px, members, count, s, cur);
+                                cur.Value[k * 4 + c] = Value(v, bits, cur.PBit[k]);
+                                cur.Error = Assign(px, members, count, s, cur, best.Error);
                                 if (cur.Error < best.Error) { best.CopyFrom(cur); improved = true; }
-                                else { cur.Stored[k * 4 + c] = old; Requantize(cur, s); }
+                                else { cur.Stored[k * 4 + c] = old; cur.Value[k * 4 + c] = oldValue; }
                             }
                         }
                 }
@@ -246,36 +303,32 @@ namespace PixCodec.DdsImpl
             => subsets == 2 ? Bptc.Partition2[part] >> i & 1 : subsets == 3 ? (int)(Bptc.Partition3[part] >> (2 * i) & 3) : 0;
 
         /// <summary>For each partition: sum over subsets of the squared distances of the texels to their principal line.</summary>
+        /// <remarks>
+        /// Four partitions at a time, one per vector lane, with every lane doing the arithmetic of
+        /// <see cref="BcEncoder.PrincipalAxis"/> in the same order (non-members contribute exact zeros), so the scores are those
+        /// of the scalar computation. dim is 3 or 4.
+        /// </remarks>
         static void RankPartitions(ReadOnlySpan<byte> px, int subsets, int count, int dim, Span<int> order)
         {
             Span<float> score = stackalloc float[64];
-            Span<float> pts = stackalloc float[64];
-            Span<float> mean = stackalloc float[4], axis = stackalloc float[4];
-            for (int part = 0; part < count; part++)
+            Span<float> p = stackalloc float[64];   // channel * 16 + texel
+            for (int i = 0; i < 16; i++)
+                for (int c = 0; c < 4; c++) p[c * 16 + i] = px[i * 4 + c];
+            for (int part = 0; part < count; part += 4)
             {
-                float total = 0;
-                for (int s = 0; s < subsets; s++)
+                var total = Vector128<float>.Zero;
+                for (int sub = 0; sub < subsets; sub++)
                 {
-                    int n = 0;
-                    for (int i = 0; i < 16; i++)
-                        if (SubsetOf(subsets, part, i) == s)
-                        {
-                            for (int c = 0; c < dim; c++) pts[n * dim + c] = px[i * 4 + c];
-                            n++;
-                        }
-                    if (n < 2) continue;
-                    BcEncoder.PrincipalAxis(pts.Slice(0, n * dim), n, dim, mean, axis);
-                    for (int m = 0; m < n; m++)
-                    {
-                        float t = 0, d2 = 0;
-                        for (int c = 0; c < dim; c++) t += (pts[m * dim + c] - mean[c]) * axis[c];
-                        for (int c = 0; c < dim; c++) { float d = pts[m * dim + c] - mean[c] - t * axis[c]; d2 += d * d; }
-                        total += d2;
-                    }
+                    // membership per lane and texel: bits of the four partitions' subset numbers
+                    var parts = Vector128.Create(part, part + 1, part + 2, part + 3);
+                    Vector128<int> code = subsets == 2
+                        ? Vector128.Create((int)Bptc.Partition2[part], Bptc.Partition2[part + 1], Bptc.Partition2[part + 2], Bptc.Partition2[part + 3])
+                        : Vector128.Create((int)Bptc.Partition3[part], (int)Bptc.Partition3[part + 1], (int)Bptc.Partition3[part + 2], (int)Bptc.Partition3[part + 3]);
+                    total = dim == 4 ? RankSubset<Rgba>(p, code, subsets == 2 ? 1 : 2, sub, total) : RankSubset<Rgb>(p, code, subsets == 2 ? 1 : 2, sub, total);
                 }
-                score[part] = total;
-                order[part] = part;
+                total.StoreUnsafe(ref score[part]);
             }
+            for (int part = 0; part < count; part++) order[part] = part;
             // sort by score
             for (int i = 1; i < count; i++)
             {
@@ -283,6 +336,112 @@ namespace PixCodec.DdsImpl
                 while (j >= 0 && score[order[j]] > v) { order[j + 1] = order[j]; j--; }
                 order[j + 1] = k;
             }
+        }
+
+        /// <summary>Adds the subset's residuals to total, per lane (see <see cref="RankPartitions"/>).</summary>
+        static Vector128<float> RankSubset<T>(ReadOnlySpan<float> p, Vector128<int> code, int bitsPerTexel, int sub, Vector128<float> total)
+            where T : struct, IChannels
+        {
+            bool four = typeof(T) == typeof(Rgba);
+            int codeMask = (1 << bitsPerTexel) - 1;
+            Span<int> maskStore = stackalloc int[64];
+            var subV = Vector128.Create(sub);
+            var n = Vector128<int>.Zero;
+            var zero = Vector128<float>.Zero;
+            Vector128<float> m0 = zero, m1 = zero, m2 = zero, m3 = zero;
+            ref float pr = ref MemoryMarshal.GetReference(p);
+            for (int i = 0; i < 16; i++)
+            {
+                var member = Vector128.Equals(Vector128.ShiftRightLogical(code, i * bitsPerTexel) & Vector128.Create(codeMask), subV);
+                member.StoreUnsafe(ref maskStore[i * 4]);
+                n -= member;
+                var mf = member.AsSingle();
+                m0 += Vector128.Create(Unsafe.Add(ref pr, i)) & mf;
+                m1 += Vector128.Create(Unsafe.Add(ref pr, 16 + i)) & mf;
+                m2 += Vector128.Create(Unsafe.Add(ref pr, 32 + i)) & mf;
+                if (four) m3 += Vector128.Create(Unsafe.Add(ref pr, 48 + i)) & mf;
+            }
+            var nf = Vector128.ConvertToSingle(Vector128.Max(n, Vector128.Create(1)));
+            m0 /= nf; m1 /= nf; m2 /= nf; if (four) m3 /= nf;
+            Vector128<float> c00 = zero, c01 = zero, c02 = zero, c03 = zero, c11 = zero, c12 = zero, c13 = zero, c22 = zero, c23 = zero, c33 = zero;
+            for (int i = 0; i < 16; i++)
+            {
+                var mf = Vector128.LoadUnsafe(ref maskStore[i * 4]).AsSingle();
+                var d0 = (Vector128.Create(Unsafe.Add(ref pr, i)) - m0) & mf;
+                var d1 = (Vector128.Create(Unsafe.Add(ref pr, 16 + i)) - m1) & mf;
+                var d2 = (Vector128.Create(Unsafe.Add(ref pr, 32 + i)) - m2) & mf;
+                c00 += d0 * d0; c01 += d0 * d1; c02 += d0 * d2;
+                c11 += d1 * d1; c12 += d1 * d2;
+                c22 += d2 * d2;
+                if (four)
+                {
+                    var d3 = (Vector128.Create(Unsafe.Add(ref pr, 48 + i)) - m3) & mf;
+                    c03 += d0 * d3; c13 += d1 * d3; c23 += d2 * d3; c33 += d3 * d3;
+                }
+            }
+            // start row: the largest diagonal entry (first on ties)
+            var diag = c00;
+            Vector128<float> v0 = c00, v1 = c01, v2 = c02, v3 = c03;
+            var sel = Vector128.GreaterThan(c11, diag);
+            diag = Vector128.ConditionalSelect(sel, c11, diag);
+            v0 = Vector128.ConditionalSelect(sel, c01, v0); v1 = Vector128.ConditionalSelect(sel, c11, v1); v2 = Vector128.ConditionalSelect(sel, c12, v2); v3 = Vector128.ConditionalSelect(sel, c13, v3);
+            sel = Vector128.GreaterThan(c22, diag);
+            diag = Vector128.ConditionalSelect(sel, c22, diag);
+            v0 = Vector128.ConditionalSelect(sel, c02, v0); v1 = Vector128.ConditionalSelect(sel, c12, v1); v2 = Vector128.ConditionalSelect(sel, c22, v2); v3 = Vector128.ConditionalSelect(sel, c23, v3);
+            if (four)
+            {
+                sel = Vector128.GreaterThan(c33, diag);
+                v0 = Vector128.ConditionalSelect(sel, c03, v0); v1 = Vector128.ConditionalSelect(sel, c13, v1); v2 = Vector128.ConditionalSelect(sel, c23, v2); v3 = Vector128.ConditionalSelect(sel, c33, v3);
+            }
+            var len = zero + v0 * v0 + v1 * v1 + v2 * v2;
+            if (four) len += v3 * v3;
+            var degenerate = Vector128.Equals(len, zero);
+            var active = ~degenerate;
+            var one = Vector128.Create(1f);
+            for (int it = 0; it < 8 && active != Vector128<float>.Zero; it++)
+            {
+                var w0 = zero + c00 * v0 + c01 * v1 + c02 * v2;
+                var w1 = zero + c01 * v0 + c11 * v1 + c12 * v2;
+                var w2 = zero + c02 * v0 + c12 * v1 + c22 * v2;
+                Vector128<float> w3 = zero;
+                if (four)
+                {
+                    w0 += c03 * v3; w1 += c13 * v3; w2 += c23 * v3;
+                    w3 = zero + c03 * v0 + c13 * v1 + c23 * v2 + c33 * v3;
+                }
+                len = zero + w0 * w0 + w1 * w1 + w2 * w2;
+                if (four) len += w3 * w3;
+                active &= ~Vector128.Equals(len, zero);    // a zero length stops that lane
+                len = one / Vector128.Sqrt(len);
+                v0 = Vector128.ConditionalSelect(active, w0 * len, v0);
+                v1 = Vector128.ConditionalSelect(active, w1 * len, v1);
+                v2 = Vector128.ConditionalSelect(active, w2 * len, v2);
+                if (four) v3 = Vector128.ConditionalSelect(active, w3 * len, v3);
+            }
+            len = zero + v0 * v0 + v1 * v1 + v2 * v2;
+            if (four) len += v3 * v3;
+            len = Vector128.ConditionalSelect(Vector128.GreaterThan(len, zero), one / Vector128.Sqrt(len), zero);
+            var a0 = Vector128.ConditionalSelect(degenerate, one, v0 * len);
+            var a1 = Vector128.ConditionalSelect(degenerate, zero, v1 * len);
+            var a2 = Vector128.ConditionalSelect(degenerate, zero, v2 * len);
+            var a3 = Vector128.ConditionalSelect(degenerate, zero, v3 * len);
+            // residuals: subsets of fewer than two texels are skipped (they would add zeros)
+            var counted = Vector128.GreaterThan(n, Vector128.Create(1)).AsSingle();
+            for (int i = 0; i < 16; i++)
+            {
+                var mf = Vector128.LoadUnsafe(ref maskStore[i * 4]).AsSingle() & counted;
+                var d0 = Vector128.Create(Unsafe.Add(ref pr, i)) - m0;
+                var d1 = Vector128.Create(Unsafe.Add(ref pr, 16 + i)) - m1;
+                var d2 = Vector128.Create(Unsafe.Add(ref pr, 32 + i)) - m2;
+                var d3 = four ? Vector128.Create(Unsafe.Add(ref pr, 48 + i)) - m3 : zero;
+                var t = zero + d0 * a0 + d1 * a1 + d2 * a2;
+                if (four) t += d3 * a3;
+                var r0 = d0 - t * a0; var r1 = d1 - t * a1; var r2 = d2 - t * a2;
+                var e = zero + r0 * r0 + r1 * r1 + r2 * r2;
+                if (four) { var r3 = d3 - t * a3; e += r3 * r3; }
+                total += e & mf;
+            }
+            return total;
         }
 
         // ------------------------------------------------------------------ block
@@ -318,9 +477,9 @@ namespace PixCodec.DdsImpl
                 int rotations = q == BcQuality.Fast ? 1 : 4;
                 for (int rot = 0; rot < rotations && best > 0; rot++)
                 {
-                    Keep(SingleSubset(px, 5, rot, 0, opaque, q, sc), sc, ref best);
+                    Keep(SingleSubset(px, 5, rot, 0, opaque, q, sc, best), sc, ref best);
                     if (q >= BcQuality.Normal)
-                        for (int im = 0; im < 2; im++) Keep(SingleSubset(px, 4, rot, im, opaque, q, sc), sc, ref best);
+                        for (int im = 0; im < 2; im++) Keep(SingleSubset(px, 4, rot, im, opaque, q, sc, best), sc, ref best);
                 }
             }
             if (best == 0) { bestBlock.CopyTo(o); return; }
@@ -332,22 +491,22 @@ namespace PixCodec.DdsImpl
             int top2 = q == BcQuality.Fast ? 1 : q == BcQuality.Normal ? 4 : 12;
             int[] twoModes = opaque ? (q >= BcQuality.High ? new[] { 1, 3, 7 } : new[] { 1, 3 }) : new[] { 7 };
             for (int k = 0; k < top2 && best > 0; k++)
-                foreach (int mode in twoModes) Keep(Partitioned(px, mode, order2[k], opaque, q, sc), sc, ref best);
+                foreach (int mode in twoModes) Keep(Partitioned(px, mode, order2[k], opaque, q, sc, best), sc, ref best);
             if (opaque && q >= BcQuality.Normal && best > 0)
             {
                 RankPartitions(px, 3, 64, 3, order3);
                 int top3 = q == BcQuality.Normal ? 2 : 8;
                 for (int k = 0; k < top3 && best > 0; k++)
                 {
-                    Keep(Partitioned(px, 2, order3[k], opaque, q, sc), sc, ref best);
-                    if (order3[k] < 16) Keep(Partitioned(px, 0, order3[k], opaque, q, sc), sc, ref best);
+                    Keep(Partitioned(px, 2, order3[k], opaque, q, sc, best), sc, ref best);
+                    if (order3[k] < 16) Keep(Partitioned(px, 0, order3[k], opaque, q, sc, best), sc, ref best);
                 }
                 // mode 0 only has the first 16 partitions: their best one too
                 if (q >= BcQuality.High)
                 {
                     int b16 = -1;
                     for (int k = 0; k < 64 && b16 < 0; k++) if (order3[k] < 16) b16 = order3[k];
-                    Keep(Partitioned(px, 0, b16, opaque, q, sc), sc, ref best);
+                    Keep(Partitioned(px, 0, b16, opaque, q, sc, best), sc, ref best);
                 }
             }
             bestBlock.CopyTo(o);
@@ -364,7 +523,7 @@ namespace PixCodec.DdsImpl
         static readonly byte[] AllTexels = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
 
         /// <summary>Modes 0 to 3 and 7; writes the block into the scratch and returns its error.</summary>
-        static long Partitioned(ReadOnlySpan<byte> px, int mode, int part, bool opaque, BcQuality q, Scratch sc)
+        static long Partitioned(ReadOnlySpan<byte> px, int mode, int part, bool opaque, BcQuality q, Scratch sc, long bound)
         {
             int ns = Bptc.Bc7Modes[mode, 0], cb = Bptc.Bc7Modes[mode, 4], ab = Bptc.Bc7Modes[mode, 5];
             int pbits = Bptc.Bc7Modes[mode, 6] != 0 ? 1 : Bptc.Bc7Modes[mode, 7] != 0 ? 2 : 0, ib = Bptc.Bc7Modes[mode, 8];
@@ -377,6 +536,7 @@ namespace PixCodec.DdsImpl
                 for (int i = 0; i < 16; i++) if (SubsetOf(ns, part, i) == s) members[n++] = (byte)i;
                 FitSubset(px, members, n, spec, q, sc.Subset[s], sc.Cur);
                 err += sc.Subset[s].Error;
+                if (err >= bound) return long.MaxValue; // cannot win: not packed
             }
             // merge the subsets' indices, fix the anchors and pack
             Span<byte> idx = stackalloc byte[16];
@@ -427,7 +587,7 @@ namespace PixCodec.DdsImpl
         }
 
         /// <summary>Modes 4, 5 (rotation, index mode) and 6; writes the block into the scratch and returns its error.</summary>
-        static long SingleSubset(ReadOnlySpan<byte> px, int mode, int rotation, int indexMode, bool opaque, BcQuality q, Scratch sc)
+        static long SingleSubset(ReadOnlySpan<byte> px, int mode, int rotation, int indexMode, bool opaque, BcQuality q, Scratch sc, long bound = long.MaxValue)
         {
             int cb = Bptc.Bc7Modes[mode, 4], ab = Bptc.Bc7Modes[mode, 5];
             int ib = Bptc.Bc7Modes[mode, 8], ib2 = Bptc.Bc7Modes[mode, 9];
@@ -463,6 +623,7 @@ namespace PixCodec.DdsImpl
             var fc = sc.Subset[0];
             var fa = sc.Alpha;
             FitSubset(src, AllTexels, 16, cs, q, fc, sc.Cur);
+            if (fc.Error >= bound) return long.MaxValue;
             FitSubset(src, AllTexels, 16, asp, q, fa, sc.AlphaCur);
             err = fc.Error + fa.Error;
             int cTop = (1 << colorIb) - 1, aTop = (1 << alphaIb) - 1;
@@ -523,7 +684,9 @@ namespace PixCodec.DdsImpl
                 for (int k = c - 1; k <= c + 1; k++)
                 {
                     int x = Math.Clamp(k, 0, max);
-                    float e = Math.Abs(Bptc.Unquantize(x, prec, false) - u);
+                    // Bptc.Unquantize(x, prec, false) for prec < 15
+                    int unq = x == 0 ? 0 : x == max ? 0xFFFF : ((x << 16) + 0x8000) >> prec;
+                    float e = Math.Abs(unq - u);
                     if (e < be) { be = e; best = x; }
                 }
                 return best;
@@ -556,6 +719,17 @@ namespace PixCodec.DdsImpl
             public readonly Region[] R = { new(), new() };
             public readonly Region Cur = new();
             public readonly byte[] Block = new byte[16], BestBlock = new byte[16];
+            // fits of the two regions of the current partition per precision (modes of equal precision share them)
+            public readonly Region[] Fitted = CreateRegions(2 * 17);
+            public readonly bool[] HasFit = new bool[17];
+            public readonly Line[] Lines = { new(), new(), new() };
+        }
+
+        static Region[] CreateRegions(int n)
+        {
+            var r = new Region[n];
+            for (int i = 0; i < n; i++) r[i] = new Region();
+            return r;
         }
 
         [ThreadStatic] static Scratch? _scratch;
@@ -567,6 +741,24 @@ namespace PixCodec.DdsImpl
             Span<int> e = stackalloc int[6];
             for (int i = 0; i < 6; i++) e[i] = Bptc.Unquantize(r.Q[i], prec, signed);
             Span<int> pal = stackalloc int[16 * 3];
+            if (!signed)
+            {
+                // unsigned: targets and palette in 0..0x7BFF, so a squared distance fits in 32 unsigned bits; four entries at a time
+                // Decoded(c) for unsigned is c * 31 >> 6
+                ref int pr = ref MemoryMarshal.GetReference(pal);
+                ref int wr = ref MemoryMarshal.GetArrayDataReference(ib == 4 ? W4 : W3);
+                for (int c = 0; c < 3; c++)
+                {
+                    var ea = Vector128.Create(e[c]); var eb = Vector128.Create(e[3 + c]);
+                    for (int k = 0; k < nw; k += 4)
+                    {
+                        var wk = Vector128.LoadUnsafe(ref wr, (nuint)k);
+                        var v = Vector128.ShiftRightArithmetic(ea * (Vector128.Create(64) - wk) + eb * wk + Vector128.Create(32), 6);
+                        Vector128.ShiftRightArithmetic(v * 31, 6).StoreUnsafe(ref pr, (nuint)(c * 16 + k));
+                    }
+                }
+                return AssignUnsigned(t, members, count, r, nw, pal);
+            }
             for (int k = 0; k < nw; k++)
                 for (int c = 0; c < 3; c++) pal[k * 3 + c] = Decoded((e[c] * (64 - w[k]) + e[3 + c] * w[k] + 32) >> 6, signed);
             long total = 0;
@@ -586,10 +778,55 @@ namespace PixCodec.DdsImpl
             return total;
         }
 
-        /// <summary>Fits one region at precision prec (endpoints not yet constrained by deltas).</summary>
-        static void FitRegion(ReadOnlySpan<int> t, ReadOnlySpan<byte> members, int count, int prec, int ib, bool signed, BcQuality q, Region best, Region cur)
+        static readonly int[] W3 = Array.ConvertAll(Bptc.W3, x => (int)x), W4 = Array.ConvertAll(Bptc.W4, x => (int)x);
+
+        static long AssignUnsigned(ReadOnlySpan<int> t, ReadOnlySpan<byte> members, int count, Region r, int nw, ReadOnlySpan<int> pal)
         {
-            Span<float> pts = stackalloc float[48];
+            ref int p0 = ref MemoryMarshal.GetReference(pal);
+            long total = 0;
+            for (int m = 0; m < count; m++)
+            {
+                int i = members[m];
+                var x0 = Vector128.Create(t[i * 3]);
+                var x1 = Vector128.Create(t[i * 3 + 1]);
+                var x2 = Vector128.Create(t[i * 3 + 2]);
+                var best = Vector128.Create(uint.MaxValue);
+                var bestIdx = Vector128<int>.Zero;
+                var idx = Vector128.Create(0, 1, 2, 3);
+                for (int k = 0; k < nw; k += 4)
+                {
+                    var d0 = x0 - Vector128.LoadUnsafe(ref p0, (nuint)k);
+                    var d1 = x1 - Vector128.LoadUnsafe(ref p0, (nuint)(16 + k));
+                    var d2 = x2 - Vector128.LoadUnsafe(ref p0, (nuint)(32 + k));
+                    var er = (d0 * d0).AsUInt32() + (d1 * d1).AsUInt32() + (d2 * d2).AsUInt32();
+                    var lt = Vector128.LessThan(er, best);
+                    best = Vector128.ConditionalSelect(lt, er, best);
+                    bestIdx = Vector128.ConditionalSelect(lt.AsInt32(), idx, bestIdx);
+                    idx += Vector128.Create(4);
+                }
+                // lane j holds the first best of the entries j, j + 4, ...: the least error, then the lowest index
+                uint be = best.GetElement(0); int bi = bestIdx.GetElement(0);
+                for (int j = 1; j < 4; j++)
+                {
+                    uint ej = best.GetElement(j); int ij = bestIdx.GetElement(j);
+                    if (ej < be || ej == be && ij < bi) { be = ej; bi = ij; }
+                }
+                r.Index[i] = (byte)bi;
+                total += be;
+            }
+            return total;
+        }
+
+        /// <summary>The texels of a region in the endpoint domain and their principal line's extremes (shared by all precisions).</summary>
+        sealed class Line
+        {
+            public readonly float[] Pts = new float[48];
+            public readonly float[] A = new float[3], B = new float[3];
+        }
+
+        static void Prepare(ReadOnlySpan<int> t, ReadOnlySpan<byte> members, int count, bool signed, Line line)
+        {
+            var pts = line.Pts.AsSpan();
             for (int m = 0; m < count; m++)
                 for (int c = 0; c < 3; c++) pts[m * 3 + c] = Unfinish(t[members[m] * 3 + c], signed);
             Span<float> mean = stackalloc float[4], axis = stackalloc float[4];
@@ -600,8 +837,15 @@ namespace PixCodec.DdsImpl
                 float x = (pts[m * 3] - mean[0]) * axis[0] + (pts[m * 3 + 1] - mean[1]) * axis[1] + (pts[m * 3 + 2] - mean[2]) * axis[2];
                 tmin = Math.Min(tmin, x); tmax = Math.Max(tmax, x);
             }
+            for (int c = 0; c < 3; c++) { line.A[c] = mean[c] + tmin * axis[c]; line.B[c] = mean[c] + tmax * axis[c]; }
+        }
+
+        /// <summary>Fits one region at precision prec (endpoints not yet constrained by deltas), starting from the prepared line.</summary>
+        static void FitRegion(ReadOnlySpan<int> t, ReadOnlySpan<byte> members, int count, Line line, int prec, int ib, bool signed, BcQuality q, Region best, Region cur)
+        {
+            ReadOnlySpan<float> pts = line.Pts;
             Span<float> a = stackalloc float[3], b = stackalloc float[3], wts = stackalloc float[16];
-            for (int c = 0; c < 3; c++) { a[c] = mean[c] + tmin * axis[c]; b[c] = mean[c] + tmax * axis[c]; }
+            line.A.CopyTo(a); line.B.CopyTo(b);
             var w = Bptc.Weights(ib);
             best.Error = long.MaxValue;
             int iterations = q == BcQuality.Fast ? 1 : q == BcQuality.Normal ? 2 : 3;
@@ -631,11 +875,12 @@ namespace PixCodec.DdsImpl
             Span<byte> members = stackalloc byte[16];
             for (int i = 0; i < 16; i++) members[i] = (byte)i;
 
+            Prepare(t, members, 16, signed, sc.Lines[0]);
             foreach (int code in OneRegion)
             {
                 var mode = Bptc.Bc6Modes[code]!;
-                FitRegion(t, members, 16, mode.Prec, 4, signed, q, sc.R[0], sc.Cur);
-                long e = Pack(t, code, mode, 0, signed, sc);
+                FitRegion(t, members, 16, sc.Lines[0], mode.Prec, 4, signed, q, sc.R[0], sc.Cur);
+                long e = Pack(t, code, mode, 0, signed, sc, best);
                 if (e < best) { best = e; sc.Block.CopyTo(sc.BestBlock, 0); }
                 if (best == 0) break;
             }
@@ -650,12 +895,22 @@ namespace PixCodec.DdsImpl
                     int part = order[k];
                     int n0 = 0, n1 = 0;
                     for (int i = 0; i < 16; i++) if ((Bptc.Partition2[part] >> i & 1) == 0) m0[n0++] = (byte)i; else m1[n1++] = (byte)i;
+                    Array.Clear(sc.HasFit);
+                    Prepare(t, m0, n0, signed, sc.Lines[1]);
+                    Prepare(t, m1, n1, signed, sc.Lines[2]);
                     foreach (int code in TwoRegions)
                     {
                         var mode = Bptc.Bc6Modes[code]!;
-                        FitRegion(t, m0, n0, mode.Prec, 3, signed, q, sc.R[0], sc.Cur);
-                        FitRegion(t, m1, n1, mode.Prec, 3, signed, q, sc.R[1], sc.Cur);
-                        long e = Pack(t, code, mode, part, signed, sc);
+                        int prec = mode.Prec;
+                        if (!sc.HasFit[prec])
+                        {
+                            FitRegion(t, m0, n0, sc.Lines[1], prec, 3, signed, q, sc.Fitted[prec * 2], sc.Cur);
+                            FitRegion(t, m1, n1, sc.Lines[2], prec, 3, signed, q, sc.Fitted[prec * 2 + 1], sc.Cur);
+                            sc.HasFit[prec] = true;
+                        }
+                        Copy(sc.Fitted[prec * 2], sc.R[0]);
+                        Copy(sc.Fitted[prec * 2 + 1], sc.R[1]);
+                        long e = Pack(t, code, mode, part, signed, sc, best);
                         if (e < best) { best = e; sc.Block.CopyTo(sc.BestBlock, 0); }
                     }
                 }
@@ -698,9 +953,9 @@ namespace PixCodec.DdsImpl
 
         /// <summary>
         /// Fixes anchors, expresses the endpoints in the mode (clamping deltas that do not fit, then re-assigning indices),
-        /// writes the block into the scratch and returns its error.
+        /// writes the block into the scratch and returns its error (or long.MaxValue without writing when it is not below bound).
         /// </summary>
-        static long Pack(ReadOnlySpan<int> t, int code, Bptc.Bc6Mode mode, int part, bool signed, Scratch sc)
+        static long Pack(ReadOnlySpan<int> t, int code, Bptc.Bc6Mode mode, int part, bool signed, Scratch sc, long bound)
         {
             int regions = mode.Regions, prec = mode.Prec, ib = regions == 2 ? 3 : 4, top = (1 << ib) - 1;
             int anchor1 = regions == 2 ? Bptc.Anchor2[part] : 0;
@@ -777,6 +1032,7 @@ namespace PixCodec.DdsImpl
             {
                 err = sc.R[0].Error + (regions == 2 ? sc.R[1].Error : 0);
             }
+            if (err >= bound) return long.MaxValue;   // cannot win: not packed
 
             var bw = new BitWriter();
             bw.Write(code, mode.ModeBits);

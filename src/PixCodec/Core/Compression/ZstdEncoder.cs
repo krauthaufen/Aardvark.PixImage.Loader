@@ -93,6 +93,10 @@ namespace PixCodec.Compression
 
         // lazy levels: hash chains
         int[] chainHead = Array.Empty<int>(), chain = Array.Empty<int>();
+        // price based levels: binary trees of the positions per hash of their first four bytes (see BtFind)
+        int[] btHead = Array.Empty<int>(), tree = Array.Empty<int>();
+        int btHashLog, btMask, btNice;
+        bool useTree;
         int chainHashLog, chainMask, searchDepth, lazySteps;
         // estimated cost in bits of each literal byte value, from the last Huffman coded literals section
         readonly byte[] litCost = new byte[256];
@@ -861,6 +865,57 @@ namespace PixCodec.Compression
             }
         }
 
+        // ------------------------------------------------------------------- binary tree match finder
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        uint BtHash(byte* p) => (Unsafe.ReadUnaligned<uint>(p) * 2654435761u) >> (32 - btHashLog);
+
+        /// <summary>
+        /// Inserts position pos into the tree of its hash bucket and reports the matches found on the way, each longer than
+        /// the one before and than minLen: lengths to outLen, offsets to outOff (at most 64). The tree of a bucket orders
+        /// its positions by the bytes that follow them; the new position becomes the root, the walk from the old root
+        /// splits the tree into the part before and the part after the new suffix (the common prefix with the nearest
+        /// nodes on either side bounds how much of each comparison is already known). Positions before low, and walks
+        /// longer than depth, end the search. Returns the number of matches.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        int BtFind(byte* src, int pos, byte* end, int low, int minLen, int depth, int* outLen, uint* outOff)
+        {
+            byte* p = src + pos;
+            int count = 0, best = minLen, nice = btNice;
+            int maxLen = (int)(end - p);
+            fixed (int* head = btHead, t = tree)
+            {
+                uint h = BtHash(p);
+                int cur = head[h];
+                head[h] = pos;
+                int* smaller = t + 2 * (pos & btMask), larger = smaller + 1;
+                int lenS = 0, lenL = 0;
+                while (cur >= low && depth-- > 0)
+                {
+                    byte* c = src + cur;
+                    int len = Math.Min(lenS, lenL);
+                    len += MatchLength(c + len, p + len, end);
+                    int* node = t + 2 * (cur & btMask);
+                    if (len > best)
+                    {
+                        best = len;
+                        if (count < 64) { outLen[count] = len; outOff[count] = (uint)(pos - cur); count++; }
+                    }
+                    if (len >= nice || len == maxLen)
+                    {
+                        // equal as far as can be told: the new node takes over cur's subtrees
+                        *smaller = node[0]; *larger = node[1];
+                        return count;
+                    }
+                    if (c[len] < p[len]) { *smaller = cur; smaller = node + 1; cur = node[1]; lenS = len; }
+                    else { *larger = cur; larger = node; cur = node[0]; lenL = len; }
+                }
+                *smaller = -1; *larger = -1;
+            }
+            return count;
+        }
+
         // ---------------------------------------------------------- price based parsing (levels >= 16)
 
         int[] optPrice = Array.Empty<int>(), optLen = Array.Empty<int>();
@@ -889,6 +944,8 @@ namespace PixCodec.Compression
             fixed (Seq* sq = seqs)
             fixed (byte* lit = lits)
             {
+                int* foundLen = stackalloc int[64];
+                uint* foundOff = stackalloc uint[64];
                 byte* baseP = src + start;
                 int searchEnd = length - 8; // positions that can be hashed
                 for (int i = 1; i <= length; i++) price[i] = int.MaxValue;
@@ -919,39 +976,66 @@ namespace PixCodec.Compression
                         }
                         covered = n;
                     }
-                    uint h = ChainHash(p);
-                    int cand = chainHead[h];
-                    chain[pos & chainMask] = cand;
-                    chainHead[h] = pos;
-                    int low = Math.Max(0, pos - Math.Min(window, chainMask));
-                    for (int steps = searchDepth; cand >= low && steps > 0 && covered < length - i; steps--)
+                    if (useTree)
                     {
-                        byte* c = src + cand;
-                        if (Unsafe.ReadUnaligned<uint>(c) == first && c[covered] == p[covered])
+                        int low = Math.Max(0, pos - Math.Min(window, btMask));
+                        int found = BtFind(src, pos, end, low, covered, searchDepth, foundLen, foundOff);
+                        for (int f = 0; f < found; f++)
                         {
-                            int n = 4 + MatchLength(c + 4, p + 4, end);
-                            if (n > covered)
+                            int n = foundLen[f];
+                            if (n < 4) continue;
+                            uint off = foundOff[f];
+                            int offPrice = seqBase + 8 * (BitOperations.Log2(off + 3) + 6);
+                            int from = n >= Sufficient ? n : Math.Max(covered + 1, 4);
+                            for (int l = from; l <= n; l++)
                             {
-                                uint off = (uint)(pos - cand);
-                                int offPrice = seqBase + 8 * (BitOperations.Log2(off + 3) + 6);
-                                int from = n >= Sufficient ? n : Math.Max(covered + 1, 4);
-                                for (int l = from; l <= n; l++)
-                                {
-                                    int cst = offPrice + MatchLengthPrice(l);
-                                    if (cst < price[i + l]) { price[i + l] = cst; mlen[i + l] = l; moff[i + l] = off; mrep[i + l] = off; }
-                                }
-                                covered = n;
+                                int cst = offPrice + MatchLengthPrice(l);
+                                if (cst < price[i + l]) { price[i + l] = cst; mlen[i + l] = l; moff[i + l] = off; mrep[i + l] = off; }
                             }
+                            covered = n;
                         }
-                        int next = chain[cand & chainMask];
-                        if (next >= cand) break;
-                        cand = next;
+                    }
+                    else
+                    {
+                        uint h = ChainHash(p);
+                        int cand = chainHead[h];
+                        chain[pos & chainMask] = cand;
+                        chainHead[h] = pos;
+                        int low = Math.Max(0, pos - Math.Min(window, chainMask));
+                        for (int steps = searchDepth; cand >= low && steps > 0 && covered < length - i; steps--)
+                        {
+                            byte* c = src + cand;
+                            if (Unsafe.ReadUnaligned<uint>(c) == first && c[covered] == p[covered])
+                            {
+                                int n = 4 + MatchLength(c + 4, p + 4, end);
+                                if (n > covered)
+                                {
+                                    uint off = (uint)(pos - cand);
+                                    int offPrice = seqBase + 8 * (BitOperations.Log2(off + 3) + 6);
+                                    int from = n >= Sufficient ? n : Math.Max(covered + 1, 4);
+                                    for (int l = from; l <= n; l++)
+                                    {
+                                        int cst = offPrice + MatchLengthPrice(l);
+                                        if (cst < price[i + l]) { price[i + l] = cst; mlen[i + l] = l; moff[i + l] = off; mrep[i + l] = off; }
+                                    }
+                                    covered = n;
+                                }
+                            }
+                            int next = chain[cand & chainMask];
+                            if (next >= cand) break;
+                            cand = next;
+                        }
                     }
                     if (covered >= Sufficient)
                     {
                         // jump over the long match (its end is priced through this position only)
                         int stop = Math.Min(i + covered, searchEnd);
-                        for (int q = i + 1; q < stop; q++) { ChainInsert(src, start + q); price[q] = int.MaxValue - (1 << 28); }
+                        for (int q = i + 1; q < stop; q++)
+                        {
+                            if (useTree) BtFind(src, start + q, end, Math.Max(0, start + q - Math.Min(window, btMask)), int.MaxValue, searchDepth, foundLen, foundOff);
+                            else ChainInsert(src, start + q);
+                            price[q] = int.MaxValue - (1 << 28);
+                        }
                         i += covered - 1;
                     }
                 }
@@ -1083,6 +1167,19 @@ namespace PixCodec.Compression
                 if (chain.Length != chainSize) chain = new int[chainSize];
                 chainMask = chainSize - 1;
                 chainHead.AsSpan().Fill(-1);
+                useTree = level >= 16;
+                if (useTree)
+                {
+                    btHashLog = Math.Clamp(windowLog, 12, 20);
+                    int nodes = 1 << Math.Min(windowLog, 23);
+                    if (btHead.Length != 1 << btHashLog) btHead = new int[1 << btHashLog];
+                    if (tree.Length != 2 * nodes) tree = new int[2 * nodes];
+                    btMask = nodes - 1;
+                    btHead.AsSpan().Fill(-1);
+                    // a tree walk finds better matches than a chain walk of the same length: shorter walks do
+                    btNice = level >= 18 ? 256 : level == 17 ? 128 : 64;
+                    searchDepth = level >= 19 ? 256 : level == 18 ? 128 : level == 17 ? 64 : 48;
+                }
             }
             litCost.AsSpan().Fill(8);
             rep = 1; rep0 = 1; rep1 = 4; rep2 = 8;
@@ -1103,6 +1200,12 @@ namespace PixCodec.Compression
                             ht[Hash(src + i, 64 - 8 * hashBytes, hashShift)] = i;
                             if (useLong) lt[Hash8(src + i, longShift)] = i;
                         }
+                }
+                else if (useTree)
+                {
+                    int* fl = stackalloc int[64];
+                    uint* fo = stackalloc uint[64];
+                    for (int i = 0; i + 8 <= start; i++) BtFind(src, i, src + start, Math.Max(0, i - Math.Min(window, btMask)), int.MaxValue, searchDepth, fl, fo);
                 }
                 else for (int i = 0; i + 8 <= start; i++) ChainInsert(src, i);
                 int pos = start;

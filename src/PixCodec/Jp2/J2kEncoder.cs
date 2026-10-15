@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
+using System.Runtime.Intrinsics;
 using System.Threading.Tasks;
 
 namespace PixCodec
@@ -606,12 +607,22 @@ namespace PixCodec
                         {
                             uint* dst = d32 + y * w;
                             fixed (int* src = &ib[si])
-                                for (int x = 0; x < w; x++)
+                            {
+                                int x = 0;
+                                if (Vector128.IsHardwareAccelerated)
+                                    for (; x + 4 <= w; x += 4)
+                                    {
+                                        var v = Vector128.Load(src + x);
+                                        var s = Vector128.ShiftRightArithmetic(v, 31);
+                                        (((v ^ s) - s).AsUInt32() | Vector128.ShiftLeft(s.AsUInt32(), 31)).Store(dst + x);
+                                    }
+                                for (; x < w; x++)
                                 {
                                     int v = src[x];
                                     int s = v >> 31;
                                     dst[x] = (uint)((v ^ s) - s) | (uint)s << 31;
                                 }
+                            }
                             break;
                         }
                         case long[] lb:
@@ -630,13 +641,33 @@ namespace PixCodec
                             uint* dst = d32 + y * w;
                             float inv = 1f / band.Step;
                             fixed (float* src = &fb[si])
-                                for (int x = 0; x < w; x++)
+                            {
+                                int x = 0;
+                                if (Vector128.IsHardwareAccelerated)
+                                {
+                                    // the scalar loop below, four at a time
+                                    var vinv = Vector128.Create(inv);
+                                    var limit = Vector128.Create(1073741824f);
+                                    var top = Vector128.Create(0x3FFFFFFFu);
+                                    var signBit = Vector128.Create(0x80000000u);
+                                    for (; x + 4 <= w; x += 4)
+                                    {
+                                        var v = Vector128.Load(src + x);
+                                        var a = Vector128.Abs(v) * vinv;
+                                        var m = Vector128.ConditionalSelect(Vector128.GreaterThanOrEqual(a, limit).AsUInt32(), top,
+                                            Vector128.ConvertToInt32(a).AsUInt32());
+                                        var neg = Vector128.LessThan(v, Vector128<float>.Zero).AsUInt32() & ~Vector128.Equals(m, Vector128<uint>.Zero);
+                                        (m | (neg & signBit)).Store(dst + x);
+                                    }
+                                }
+                                for (; x < w; x++)
                                 {
                                     float v = src[x];
                                     float a = MathF.Abs(v) * inv;
                                     uint m = a >= 1073741824f ? 0x3FFFFFFFu : (uint)a;
                                     dst[x] = m | (v < 0 && m != 0 ? 0x80000000u : 0u);
                                 }
+                            }
                             break;
                         }
                     }
