@@ -4,6 +4,7 @@ authors Aardvark Platform Team
 owners Aardvark Platform Team
 projectUrl https://github.com/krauthaufen/Aardvark.PixImage.PixCodec
 licenseExpression MIT
+licenseUrl https://licenses.nuget.org/MIT
 repositoryType git
 repositoryUrl https://github.com/krauthaufen/Aardvark.PixImage.PixCodec
 tags aardvark piximage image codec png jpeg tiff gif exr webp jpeg2000 dds ktx hdr
