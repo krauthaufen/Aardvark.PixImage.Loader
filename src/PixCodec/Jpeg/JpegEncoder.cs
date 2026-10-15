@@ -13,7 +13,7 @@ namespace PixCodec.JpegImpl
     /// Baseline / progressive Huffman JPEG encoder. All quantized coefficients are kept in memory (zigzag order),
     /// which makes optimized Huffman tables and multi scan output a matter of walking them more than once.
     /// </summary>
-    internal sealed unsafe class JpegEncoder
+    internal sealed unsafe partial class JpegEncoder
     {
         sealed class Comp
         {
@@ -26,6 +26,7 @@ namespace PixCodec.JpegImpl
             public ushort[]? Plane16; // 12 bit samples
             public short[] Coefs = null!;
             public int Pred;
+            public int LastDc; // DC of the block coded last (padding blocks repeat it)
             public int ArithContext, ArithTable; // arithmetic coding: DC conditioning state, statistics table (0 luma, 1 chroma)
             public HuffEnc Dc = null!, Ac = null!;
         }
@@ -305,6 +306,37 @@ namespace PixCodec.JpegImpl
         readonly int _precision = 8;
         readonly int _maxAcSize = 10; // largest AC magnitude category the precision allows
 
+
+        /// <summary>
+        /// Whether a block of an interleaved scan lies wholly in the MCU padding beyond the image. Such blocks are
+        /// coded as libjpeg does: no AC coefficients and the DC value of the component's previous block, which costs a
+        /// few bits instead of a transform of replicated edge pixels.
+        /// </summary>
+        bool IsDummy(Comp c, int bx, int by) => _comps.Length > 1 && (bx >= c.ScanBlocksW || by >= c.ScanBlocksH);
+
+        bool HasDummies => _comps.Length > 1 && _comps.Any(c => c.ScanBlocksW < c.BlocksW || c.ScanBlocksH < c.BlocksH);
+
+        /// <summary>Gives the (already zeroed) padding blocks the DC value of the block coded before them, in MCU order.</summary>
+        void FillDummyDc()
+        {
+            if (!HasDummies) return;
+            foreach (var c in _comps)
+                fixed (short* coefs = c.Coefs)
+                {
+                    int prev = 0;
+                    for (int my = 0; my < _mcusY; my++)
+                        for (int mx = 0; mx < _mcusX; mx++)
+                            for (int by = 0; by < c.V; by++)
+                                for (int bx = 0; bx < c.H; bx++)
+                                {
+                                    int x = mx * c.H + bx, y = my * c.V + by;
+                                    short* b = coefs + ((nint)y * c.BlocksW + x) * 64;
+                                    if (IsDummy(c, x, y)) b[0] = (short)prev;
+                                    prev = b[0];
+                                }
+                }
+        }
+
         public static void Encode(RawImage image, Stream output, JpegEncodeOptions options)
         {
             ArgumentNullException.ThrowIfNull(image);
@@ -397,13 +429,22 @@ namespace PixCodec.JpegImpl
                 c.Coefs = GC.AllocateUninitializedArray<short>((int)size);
             }
 
-            // IJG quality scaling of the Annex K tables
+            // IJG quality scaling of the base tables (the tuned ones are given in tenths)
             int scale = quality < 50 ? 5000 / quality : 200 - quality * 2;
+            bool annexK = opt.QuantTables == JpegQuantTables.AnnexK;
             for (int t = 0; t < 2; t++)
             {
-                var basis = t == 0 ? JpegTables.LumaQuant : JpegTables.ChromaQuant;
                 var q = new byte[64];
-                for (int i = 0; i < 64; i++) q[i] = (byte)Math.Clamp((basis[i] * scale + 50) / 100, 1, 255);
+                if (annexK)
+                {
+                    var basis = t == 0 ? JpegTables.LumaQuant : JpegTables.ChromaQuant;
+                    for (int i = 0; i < 64; i++) q[i] = (byte)Math.Clamp((basis[i] * scale + 50) / 100, 1, 255);
+                }
+                else
+                {
+                    var basis = t == 0 ? JpegTables.TunedLumaQuant : JpegTables.TunedChromaQuant;
+                    for (int i = 0; i < 64; i++) q[i] = (byte)Math.Clamp((basis[i] * scale + 500) / 1000, 1, 255);
+                }
                 _quant[t] = q;
             }
         }
@@ -422,7 +463,9 @@ namespace PixCodec.JpegImpl
             }
             else
             {
-                Transform();
+                if (UseTrellis) { TransformRaw(); RunTrellis(); }
+                else Transform();
+                FillDummyDc();
                 WriteHeaders(image.Metadata);
                 if (_opt.Progressive) WriteProgressive();
                 else WriteBaseline();
@@ -434,6 +477,7 @@ namespace PixCodec.JpegImpl
 
         // ---------------------------------------------------------------- color conversion and downsampling
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)] // runs once per image: no point in starting unoptimized
         void FillPlanes(RawImage image)
         {
             int ch = image.Channels, w = _w, h = _h;
@@ -603,6 +647,7 @@ namespace PixCodec.JpegImpl
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void Downsample(byte[] full, int fullW, Span<byte> dst)
         {
             if (_hMax == 1) { full.AsSpan(0, fullW).CopyTo(dst); return; }
@@ -660,6 +705,7 @@ namespace PixCodec.JpegImpl
             => Ssse3.IsSupported ? Ssse3.Shuffle(v, idx) : AdvSimd.Arm64.VectorTableLookup(v, idx);
 
         /// <summary>JFIF (BT.601 full range) RGB to YCbCr in 16 bit fixed point.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void RgbToYcc(ReadOnlySpan<byte> src, int ch, Span<byte> yo, Span<byte> cbo, Span<byte> cro, int w)
         {
             const int half = 32768, center = (128 << 16) + 32767;
@@ -736,6 +782,10 @@ namespace PixCodec.JpegImpl
 
         // ---------------------------------------------------------------- DCT
 
+        /// <summary>The factor the quantizers multiply the DCT output (8 times the coefficient) with.</summary>
+        internal static float Reciprocal(int q) => 1f / (8 * q);
+
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)] // runs once per image: no point in starting unoptimized
         void Transform()
         {
             float* recip = stackalloc float[64];
@@ -744,7 +794,7 @@ namespace PixCodec.JpegImpl
             {
                 var q = _quant[c.Tq];
                 // the quantizers want the divisors transposed and scaled by the DCT's factor of 8
-                for (int i = 0; i < 64; i++) recip[(i & 7) * 8 + (i >> 3)] = 1f / (8 * q[i]);
+                for (int i = 0; i < 64; i++) recip[(i & 7) * 8 + (i >> 3)] = Reciprocal(q[i]);
                 // statistics for optimized tables are taken while the block is still in the cache
                 int[]? stats = OptimizedBaseline ? c.Ac.Freq : null;
                 fixed (byte* plane = c.Plane)
@@ -760,6 +810,12 @@ namespace PixCodec.JpegImpl
                             byte* row = plane + (nint)by * 8 * c.Stride;
                             for (int bx = 0; bx < c.BlocksW; bx++, o += 64)
                             {
+                                if (IsDummy(c, bx, by))
+                                {
+                                    new Span<short>(o, 64).Clear();
+                                    if (freq != null) freq[0]++; // just an end of block
+                                    continue;
+                                }
                                 JpegDct.FdctQuantize(row + bx * 8, c.Stride, recip, o);
                                 if (freq != null && bx < c.StatBlocksW && by < c.StatBlocksH) GatherAc(o, freq, _maxAcSize);
                             }
@@ -767,6 +823,12 @@ namespace PixCodec.JpegImpl
                         }
                         for (int bx = 0; bx < c.BlocksW; bx++, o += 64)
                         {
+                            if (IsDummy(c, bx, by))
+                            {
+                                new Span<short>(o, 64).Clear();
+                                if (freq != null) freq[0]++;
+                                continue;
+                            }
                             JpegDct.FdctQuantizeWide(plane16 + ((nint)by * c.Stride + bx) * 8, c.Stride, 1 << (_precision - 1), recip, o);
                             if (freq != null && bx < c.StatBlocksW && by < c.StatBlocksH) GatherAc(o, freq, _maxAcSize);
                         }
@@ -862,7 +924,7 @@ namespace PixCodec.JpegImpl
 
         // ---------------------------------------------------------------- scans
 
-        bool SinglePass => !_opt.Progressive && !_opt.Arithmetic && !OptimizedBaseline && _precision == 8;
+        bool SinglePass => !UseTrellis && !_opt.Progressive && !_opt.Arithmetic && !OptimizedBaseline && _precision == 8;
 
         bool OptimizedBaseline => !_opt.Progressive && !_opt.Arithmetic && (_opt.OptimizeHuffman || _precision != 8);
 
@@ -881,6 +943,7 @@ namespace PixCodec.JpegImpl
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)] // runs once per image: no point in starting unoptimized
         void EncodeSinglePass()
         {
             bool color = _comps.Length == 3, single = !color;
@@ -891,22 +954,26 @@ namespace PixCodec.JpegImpl
             int nc = _comps.Length;
             float* recips = stackalloc float[2 * 64];
             for (int t = 0; t < 2; t++)
-                for (int i = 0; i < 64; i++) recips[t * 64 + (i & 7) * 8 + (i >> 3)] = 1f / (8 * _quant[t][i]);
+                for (int i = 0; i < 64; i++) recips[t * 64 + (i & 7) * 8 + (i >> 3)] = Reciprocal(_quant[t][i]);
             short* blk = stackalloc short[64];
             int mcusX = single ? _comps[0].ScanBlocksW : _mcusX, mcusY = single ? _comps[0].ScanBlocksH : _mcusY;
             int todo = _restart, rst = 0;
-            foreach (var c in _comps) c.Pred = 0;
+            foreach (var c in _comps) { c.Pred = 0; c.LastDc = 0; }
             var c0 = _comps[0]; var c1 = _comps[nc > 1 ? 1 : 0]; var c2 = _comps[nc > 2 ? 2 : 0];
             fixed (byte* buf = _buf, p0 = c0.Plane, p1 = c1.Plane, p2 = c2.Plane)
-            fixed (uint* dc0 = c0.Dc.Packed, ac0 = c0.Ac.Packed, dc1 = c1.Dc.Packed, ac1 = c1.Ac.Packed)
+            fixed (uint* dc0 = c0.Dc.Packed, dc1 = c1.Dc.Packed)
             fixed (ulong* acx0 = c0.Ac.Extended, acx1 = c1.Ac.Extended)
             {
                 byte** planes = stackalloc byte*[3];
                 planes[0] = p0; planes[1] = p1; planes[2] = p2;
+                BitSink sink = default;
+                sink.Acc = _acc; sink.Bits = _accBits; sink.Out = (nint)(buf + _pos);
                 for (int my = 0; my < mcusY; my++)
                 {
                     for (int mx = 0; mx < mcusX; mx++)
                     {
+                        // the bit state lives in the sink while blocks are coded; the stream methods see the fields
+                        _acc = sink.Acc; _accBits = sink.Bits; _pos = (int)((byte*)sink.Out - buf);
                         if (_restart != 0)
                         {
                             if (todo == 0)
@@ -920,6 +987,7 @@ namespace PixCodec.JpegImpl
                             todo--;
                         }
                         Reserve(10 * 600);
+                        sink.Acc = _acc; sink.Bits = _accBits; sink.Out = (nint)(buf + _pos);
                         for (int i = 0; i < nc; i++)
                         {
                             var c = _comps[i];
@@ -929,14 +997,29 @@ namespace PixCodec.JpegImpl
                             for (int by = 0; by < v; by++, src += 8 * stride)
                                 for (int bx = 0; bx < h; bx++)
                                 {
-                                    JpegDct.FdctQuantizeTransposed(src + bx * 8, stride, recips + (i == 0 ? 0 : 64), blk);
-                                    ulong mask = JpegTables.TransposedMaskToZigZag(JpegTables.NonZeroMask(blk));
-                                    if (i == 0) EmitBlockFast(blk, mask, c, buf, dc0, ac0, acx0);
-                                    else EmitBlockFast(blk, mask, c, buf, dc1, ac1, acx1);
+                                    ulong mask;
+                                    if (!single && (mx * h + bx >= c.ScanBlocksW || my * v + by >= c.ScanBlocksH))
+                                    {
+                                        // padding block (see IsDummy)
+                                        new Span<short>(blk, 64).Clear();
+                                        blk[0] = (short)c.LastDc;
+                                        mask = blk[0] != 0 ? 1UL : 0;
+                                    }
+                                    else
+                                    {
+                                        JpegDct.FdctQuantizeTransposed(src + bx * 8, stride, recips + (i == 0 ? 0 : 64), blk);
+                                        mask = JpegTables.TransposedMaskToZigZag(JpegTables.NonZeroMask(blk));
+                                    }
+                                    c.LastDc = blk[0];
+                                    int diff = blk[0] - c.Pred;
+                                    c.Pred = blk[0];
+                                    if (i == 0) EmitBlockFast(blk, JpegTables.ZigZagTransposed, mask, diff, dc0, acx0, &sink);
+                                    else EmitBlockFast(blk, JpegTables.ZigZagTransposed, mask, diff, dc1, acx1, &sink);
                                 }
                         }
                     }
                 }
+                _acc = sink.Acc; _accBits = sink.Bits; _pos = (int)((byte*)sink.Out - buf);
             }
             FlushBits();
         }
@@ -1105,8 +1188,14 @@ namespace PixCodec.JpegImpl
         /// Runs over all MCUs of a scan. Sequential scans either count symbols (<see cref="_gather"/>) or write them,
         /// progressive scans record tokens for <see cref="Replay"/>.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)] // runs once per image: no point in starting unoptimized
         void EncodeScan(Comp[] comps, int ss, int se, int ah, int al)
         {
+            if (!_opt.Progressive && !_gather && _precision == 8)
+            {
+                EncodeSequentialScan(comps);
+                return;
+            }
             bool single = comps.Length == 1, progressive = _opt.Progressive;
             int mcusX = single ? comps[0].ScanBlocksW : _mcusX, mcusY = single ? comps[0].ScanBlocksH : _mcusY;
             int todo = _restart, rst = 0;
@@ -1159,6 +1248,61 @@ namespace PixCodec.JpegImpl
             if (!progressive && !_gather) FlushBits();
         }
 
+        /// <summary>Writes a sequential 8 bit scan from the stored coefficients with <see cref="EmitBlockFast"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)] // runs once per image: no point in starting unoptimized
+        void EncodeSequentialScan(Comp[] comps)
+        {
+            bool single = comps.Length == 1;
+            int mcusX = single ? comps[0].ScanBlocksW : _mcusX, mcusY = single ? comps[0].ScanBlocksH : _mcusY;
+            int todo = _restart, rst = 0;
+            foreach (var c in comps) c.Pred = 0;
+            BitSink sink = default;
+            fixed (byte* buf = _buf)
+            {
+                for (int my = 0; my < mcusY; my++)
+                {
+                    for (int mx = 0; mx < mcusX; mx++)
+                    {
+                        if (_restart != 0)
+                        {
+                            if (todo == 0)
+                            {
+                                FlushBits();
+                                Marker(0xD0 + rst);
+                                rst = (rst + 1) & 7;
+                                todo = _restart;
+                                foreach (var c in comps) c.Pred = 0;
+                            }
+                            todo--;
+                        }
+                        Reserve(10 * 600);
+                        sink.Acc = _acc; sink.Bits = _accBits; sink.Out = (nint)(buf + _pos);
+                        foreach (var c in comps)
+                        {
+                            int h = single ? 1 : c.H, v = single ? 1 : c.V;
+                            fixed (short* coefs = c.Coefs)
+                            fixed (uint* dc = c.Dc.Packed)
+                            fixed (ulong* acx = c.Ac.Extended)
+                            {
+                                for (int by = 0; by < v; by++)
+                                {
+                                    short* blk = coefs + ((nint)(my * v + by) * c.BlocksW + mx * h) * 64;
+                                    for (int bx = 0; bx < h; bx++, blk += 64)
+                                    {
+                                        int diff = blk[0] - c.Pred;
+                                        c.Pred = blk[0];
+                                        EmitBlockFast(blk, JpegTables.Identity, JpegTables.NonZeroMask(blk), diff, dc, acx, &sink);
+                                    }
+                                }
+                            }
+                        }
+                        _acc = sink.Acc; _accBits = sink.Bits; _pos = (int)((byte*)sink.Out - buf);
+                    }
+                }
+            }
+            FlushBits();
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int BitLength(int abs) => 32 - BitOperations.LeadingZeroCount((uint)abs);
 
@@ -1187,6 +1331,7 @@ namespace PixCodec.JpegImpl
         }
 
         /// <summary>Statistics for optimized tables, AC part: counts the run/size symbols <see cref="EmitBlock"/> would write for the block.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void GatherAc(short* blk, int* freq, int maxSize)
         {
             ulong mask = JpegTables.NonZeroMask(blk) & ~1UL;
@@ -1207,6 +1352,7 @@ namespace PixCodec.JpegImpl
         /// <param name="blk">The coefficients, in any storage order.</param>
         /// <param name="order">Zigzag position -> index into blk.</param>
         /// <param name="mask">Nonzero coefficients by zigzag position.</param>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void EmitBlock(short* blk, byte* order, ulong mask, Comp c, byte* buf, uint* dc, uint* ac, ulong* acx)
         {
             ulong acc = _acc;
@@ -1284,28 +1430,35 @@ namespace PixCodec.JpegImpl
         }
 
         /// <summary>
-        /// Block coder of the single pass path (8 bit samples, coefficients in transposed order): symbol and value
-        /// bits come from two table lookups, and the 64 bit accumulator is emptied only when the next symbol would
-        /// not fit - 4 to 8 bytes at a time with one test for 0xFF bytes. Uses the accumulator differently from
-        /// <see cref="EmitBlock"/> (up to 64 pending bits), so the two must not be mixed within a scan.
+        /// Block coder of sequential 8 bit scans (coefficients in any order, <paramref name="order"/> maps zigzag positions to them): symbol and value
+        /// bits come from two table lookups. Fewer than 32 bits stay pending between symbols: after each symbol the
+        /// next 32 bits are stored unconditionally and the output pointer moves on only when they are complete, so
+        /// the only branch is the rare one for a 0xFF byte that needs stuffing. Keeps the accumulator under a
+        /// different invariant than <see cref="EmitBlock"/>, so the two must not be mixed within a scan.
         /// </summary>
-        void EmitBlockFast(short* blk, ulong mask, Comp c, byte* buf, uint* dc, uint* ac, ulong* acx)
+        /// <summary>Bit writer state of the single pass coder, handed to <see cref="EmitBlockFast"/> by pointer.</summary>
+        struct BitSink
         {
-            ulong acc = _acc;
-            int n = _accBits;
-            byte* o = buf + _pos;
-            byte* order = JpegTables.ZigZagTransposed;
+            public ulong Acc;
+            public nint Out;
+            public int Bits;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        static void EmitBlockFast(short* blk, byte* order, ulong mask, int v, uint* dc, ulong* acx, BitSink* sink)
+        {
+            // (everything in plain locals: a reference to the accumulator would keep it in memory)
+            ulong acc = sink->Acc;
+            int n = sink->Bits;
+            nint o = sink->Out;
             ushort* valueBits = s_valueBitsPtr;
 
-            int v = blk[0] - c.Pred;
-            c.Pred = blk[0];
             int sign = v >> 31;
             int s = BitLength((v ^ sign) - sign);
             uint e = dc[s];
             int len = (int)(e & 255) + s;
-            if (n + len > 64) { o = Drain(o, acc, n); n &= 7; }
             acc = acc << len | (e >> 8) << s | ((uint)(v + sign) & ~(uint.MaxValue << s));
-            n += len;
+            (o, n) = Flush(o, acc, n + len);
 
             mask &= ~1UL;
             int prev = 0; // zigzag index of the previous nonzero coefficient
@@ -1317,13 +1470,12 @@ namespace PixCodec.JpegImpl
                 prev = k;
                 if (run > 15)
                 {
-                    uint zrl = ac[0xF0];
-                    len = (int)(zrl & 255);
+                    ulong zrl = acx[0xF0]; // (size 0: the plain code)
                     do
                     {
-                        if (n + len > 64) { o = Drain(o, acc, n); n &= 7; }
+                        len = (int)zrl & 63;
                         acc = acc << len | (zrl >> 8);
-                        n += len;
+                        (o, n) = Flush(o, acc, n + len);
                         run -= 16;
                     } while (run > 15);
                 }
@@ -1331,43 +1483,42 @@ namespace PixCodec.JpegImpl
                 uint t = valueBits[(nuint)blk[order[(nuint)k]] & 2047];
                 ulong x = acx[(nuint)(run << 4 | (t & 15))]; // code already shifted up by the size, total length in the low byte
                 len = (int)x & 63;
-                if (n + len > 64) { o = Drain(o, acc, n); n &= 7; }
                 acc = acc << len | x >> 8 | (t >> 4);
-                n += len;
+                (o, n) = Flush(o, acc, n + len);
             }
             if (prev != 63)
             {
-                e = ac[0];
-                len = (int)(e & 255);
-                if (n + len > 64) { o = Drain(o, acc, n); n &= 7; }
-                acc = acc << len | (e >> 8);
-                n += len;
+                ulong eob = acx[0];
+                len = (int)eob & 63;
+                acc = acc << len | (eob >> 8);
+                (o, n) = Flush(o, acc, n + len);
             }
-            _acc = acc; _accBits = n; _pos = (int)(o - buf);
+            sink->Acc = acc; sink->Bits = n; sink->Out = o;
         }
 
         /// <summary>
-        /// Writes the whole bytes among the n pending bits (at least 39 of them when called from the block coder);
-        /// the caller keeps the remaining n &amp; 7 bits.
+        /// After a symbol: n bits (at most 58) are pending in acc. Stores the oldest 32 of them and moves on when they
+        /// are complete, so that fewer than 32 remain; returns the new output position and pending count.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static byte* Drain(byte* o, ulong acc, int n)
+        static (nint, int) Flush(nint o, ulong acc, int n)
         {
-            ulong top = acc << (64 - n);
-            int bytes = n >> 3;
-            // one test for 0xFF among the bytes going out; only then they are written one by one with stuffing
-            ulong flushed = top & (ulong.MaxValue << ((8 - bytes) * 8)); // (bytes is 4..8 here)
-            if (((~flushed - 0x0101010101010101UL) & flushed & 0x8080808080808080UL) != 0) return DrainStuffed(o, top, bytes);
-            Unsafe.WriteUnaligned(o, System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(top));
-            return o + bytes;
+            uint word = (uint)(acc << (64 - n) >> 32); // the oldest 32 pending bits (garbage below them if fewer)
+            int full = n >> 5;                        // 1 when they are all there
+            bool stuff = ((~word - 0x01010101u) & word & 0x80808080u) != 0; // a 0xFF byte among the 4
+            if ((full != 0) & stuff) // (no short circuit: one well predicted branch)
+                return ((nint)WriteStuffed((byte*)o, word), n - 32);
+            Unsafe.WriteUnaligned((byte*)o, System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(word));
+            return (o + (full << 2), n - (full << 5));
         }
 
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        static byte* DrainStuffed(byte* o, ulong top, int bytes)
+        // inlined although rarely needed: a call in the block coder's loop would force its state out of registers
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static byte* WriteStuffed(byte* o, uint word)
         {
-            for (int i = 0; i < bytes; i++)
+            for (int i = 24; i >= 0; i -= 8)
             {
-                byte b = (byte)(top >> (56 - 8 * i));
+                byte b = (byte)(word >> i);
                 *o++ = b;
                 if (b == 0xFF) *o++ = 0;
             }

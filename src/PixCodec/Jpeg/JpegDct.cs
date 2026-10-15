@@ -133,6 +133,8 @@ namespace PixCodec.JpegImpl
             Sse2.StoreScalar((long*)dst, Sse2.PackUnsignedSaturate(s, s).AsInt64());
         }
 
+        // kept out of line: inlined into Idct, the JIT runs out of inlining budget for the passes below
+        [MethodImpl(MethodImplOptions.NoInlining)]
         static void Idct8(short* coef, int* quant, byte* dst, nint stride)
         {
             Vector.Widen(Vector.Load(coef), out var r0, out var r1);

@@ -120,6 +120,35 @@ namespace PixCodec.JpegImpl
             99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
         ];
 
+        // Tables tuned for this encoder (natural order, in tenths of a step at quality 50). Own design: the step size
+        // at horizontal / vertical frequency (u, v) follows 1 + a r^c with r = (u^p + v^p)^(1/p), the DC step is set
+        // separately, and each table is scaled to a fixed geometric mean (that of the Annex K table for luma, 0.61 of
+        // it for chroma). The parameters (luma a = 0.1, c = 1.925, p = 1.25, DC 0.71; chroma a = 0.83, c = 1.35,
+        // p = 1.5, DC 1.58) were found by a coordinate search minimizing the SSIMULACRA2 BD-rate on the Kodak images.
+        public static ReadOnlySpan<short> TunedLumaQuant =>
+        [
+            77, 120, 150, 199, 266, 350, 451, 569,
+            120, 140, 180, 236, 310, 401, 509, 633,
+            150, 180, 229, 295, 378, 478, 593, 726,
+            199, 236, 295, 371, 463, 572, 697, 837,
+            266, 310, 378, 463, 565, 683, 816, 966,
+            350, 401, 478, 572, 683, 810, 952, 1111,
+            451, 509, 593, 697, 816, 952, 1104, 1272,
+            569, 633, 726, 837, 966, 1111, 1272, 1448,
+        ];
+
+        public static ReadOnlySpan<short> TunedChromaQuant =>
+        [
+            84, 97, 165, 247, 339, 440, 548, 662,
+            97, 135, 201, 281, 371, 471, 578, 692,
+            165, 201, 263, 340, 429, 527, 633, 746,
+            247, 281, 340, 415, 502, 599, 703, 814,
+            339, 371, 429, 502, 587, 682, 785, 895,
+            440, 471, 527, 599, 682, 775, 877, 985,
+            548, 578, 633, 703, 785, 877, 977, 1084,
+            662, 692, 746, 814, 895, 985, 1084, 1190,
+        ];
+
         // Annex K.3 typical Huffman tables: 16 code length counts followed by the symbols.
         public static ReadOnlySpan<byte> DcLumaCounts => [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
         public static ReadOnlySpan<byte> DcChromaCounts => [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0];
