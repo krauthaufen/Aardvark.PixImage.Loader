@@ -37,9 +37,18 @@ namespace PixCodec
                 return (int)(Tmp >> Bits) & 1;
             }
 
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public int Sym()
             {
-                if (Run == 0 && !One)
+                // the common cases inline: inside a run of zeros, or the one that ends it
+                if (Run > 0) { Run--; return 0; }
+                if (One) { One = false; return 1; }
+                return Next();
+            }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            int Next()
+            {
                 {
                     int eval = MelExp[K];
                     if (Bit() == 1)
