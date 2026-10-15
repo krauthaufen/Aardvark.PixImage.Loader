@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.Intrinsics;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
@@ -363,13 +364,65 @@ namespace PixCodec
     internal static unsafe class TiffPredict
     {
         /// <summary>Undoes horizontal differencing on one row of <paramref name="count"/> samples (native byte order).</summary>
+        // byte shuffle with run time indices, 0 for indices of 16 and up
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        static Vector128<byte> Shuf(Vector128<byte> v, Vector128<byte> idx)
+        {
+            if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
+                return System.Runtime.Intrinsics.X86.Ssse3.Shuffle(v, idx | Vector128.GreaterThan(idx, Vector128.Create((byte)15)));
+            if (System.Runtime.Intrinsics.Arm.AdvSimd.Arm64.IsSupported) return System.Runtime.Intrinsics.Arm.AdvSimd.Arm64.VectorTableLookup(v, idx);
+            return Vector128.Shuffle(v, idx);
+        }
+
+        /// <summary>
+        /// Byte samples, 3 or 4 per pixel: a running sum per channel, a vector at a time (15 bytes for 3 channels, 16 for 4).
+        /// Within the vector the sums are built in log steps of shifts by whole pixels, then the previous pixel is added.
+        /// Byte arithmetic wraps exactly as the scalar loop's.
+        /// </summary>
+        static void UndoHorizontalBytes(byte* row, int count, int stride)
+        {
+            int step = stride == 3 ? 15 : 16;
+            Vector128<byte> Shift(Vector128<byte> v, int k)
+            {
+                // byte i takes byte i - k, zero below (out of range shuffle indices give 0)
+                var idx = Vector128.Create((byte)0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15) - Vector128.Create((byte)k);
+                return Shuf(v, idx);
+            }
+            // previous pixel repeated over the lanes; the last pixel of a vector repeated the same way
+            var spread = stride == 3
+                ? Vector128.Create((byte)0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0)
+                : Vector128.Create((byte)0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3);
+            var lastSpread = spread + Vector128.Create((byte)(step - stride));
+            var keep = stride == 3 ? Vector128.Create(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (byte)0xFF) : Vector128<byte>.Zero;
+            // the first pixel stays; the carry starts as it
+            var carry = Shuf(Vector128.LoadUnsafe(ref *row), spread);
+            int i = stride;
+            // the next vector is loaded before this one is stored: they overlap by a byte for 3 channels, and a load right
+            // after a partly overlapping store would wait for it
+            var x = Vector128.LoadUnsafe(ref row[i]);
+            for (; i + 16 + step <= count; i += step)
+            {
+                var y = x + Shift(x, stride);
+                y += Shift(y, 2 * stride);
+                if (stride == 3) y += Shift(y, 4 * stride);
+                y += carry;
+                var next = Vector128.LoadUnsafe(ref row[i + step]);
+                Vector128.ConditionalSelect(keep, x, y).StoreUnsafe(ref row[i]);
+                carry = Shuf(y, lastSpread);
+                x = next;
+            }
+            for (; i < count; i++) row[i] = (byte)(row[i] + row[i - stride]);
+        }
+
         public static void UndoHorizontal(byte* row, int count, int stride, int bps)
         {
             if (count <= stride) return;
             switch (bps)
             {
                 case 1:
-                    if (stride == 3)
+                    if ((stride == 3 || stride == 4) && Vector128.IsHardwareAccelerated && count >= 32)
+                        UndoHorizontalBytes(row, count, stride);
+                    else if (stride == 3)
                     {
                         byte r = row[0], g = row[1], b = row[2];
                         byte* p = row + 3, end = row + count - 2;
