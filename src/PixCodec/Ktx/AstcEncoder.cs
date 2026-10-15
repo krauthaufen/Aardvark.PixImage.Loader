@@ -694,7 +694,7 @@ namespace PixCodec
             public readonly float[] DX = new float[2 * 13], DY = new float[2 * 13];   // per plane: 1D decimation errors per grid width / height
             public long LineDone;   // which of DX / DY are computed in this trial: bit plane * 26 + dir * 13 + size; Gram matrices bits 52..55
             public readonly float[] GramX = new float[2 * 144], GramY = new float[2 * 144];
-            public readonly float[] ColErr = new float[4 * 21];
+            public readonly float[] ColErr = new float[4 * 21], ColErrExact = new float[4 * 21];
             public readonly int[] ERnd = new int[32];
             public readonly float[] PMax = new float[16];   // HDR: per partition and channel the largest value (fitting domain)   // per trial: the ideal endpoints rounded to 8 bits [p * 8 + e * 4 + c]
             public readonly float[] VP = new float[2 * ProjStride], VV = new float[2];   // projection inputs per plane
@@ -902,6 +902,7 @@ namespace PixCodec
             float impSum = 0;
             for (int t = 0; t < n; t++) impSum += c.Imp[t] + (dual ? c.Imp[MaxN + t] : 0);
             c.ColErr.AsSpan(0, 21 * cems.Length).Fill(-1f);
+            if (c.Hdr) c.ColErrExact.AsSpan(0, 21 * cems.Length).Fill(-1f);
             for (int p = 0; p < c.P; p++)
                 for (int k = 0; k < 4; k++) { c.ERnd[p * 8 + k] = R8(c.E0[p * 4 + k]); c.ERnd[p * 8 + 4 + k] = R8(c.E1[p * 4 + k]); }
 
@@ -924,7 +925,7 @@ namespace PixCodec
             // decimation is only computed when its estimate without it can still enter the list.
             // ranked with the unclamped least squares decimation error; the decimation proper of the best few
             // candidates' grids then corrects their estimates
-            int K = Math.Min(8, prm.Candidates + prm.Spare), Kfinal = prm.Candidates;
+            int K = Math.Min(8, prm.Candidates + prm.Spare + (c.Hdr ? HdrSpare : 0)), Kfinal = prm.Candidates;
             Span<float> topEst = stackalloc float[8], topDec = stackalloc float[8];
             Span<int> topMode = stackalloc int[8], topCem = stackalloc int[8], topCq = stackalloc int[8];
             int found = 0;
@@ -1002,6 +1003,13 @@ namespace PixCodec
             Span<int> dGrid = stackalloc int[8];
             Span<float> dVal = stackalloc float[8];
             int nd = 0;
+            if (c.Hdr)
+                for (int i = 0; i < found; i++)
+                {
+                    int ci = 0;
+                    while (cems[ci] != topCem[i]) ci++;
+                    topEst[i] += ExactHdrColour(c, ci, topCem[i], topCq[i]) - colErr[ci * 21 + topCq[i]];
+                }
             for (int i = 0; i < found; i++)
             {
                 if (topDec[i] < 0) continue;
@@ -1262,6 +1270,7 @@ namespace PixCodec
         }
 
         const int ProjStride = 152;
+        const int HdrSpare = 2;   // HDR: extra candidates whose colour error is measured exactly
 
         /// <summary>
         /// Least squares decimation error of a plane on a grid, through the (nearly exact) separable form of the infill:
@@ -1377,15 +1386,11 @@ namespace PixCodec
             float total = 0;
             if (c.Hdr)
             {
-                // the HDR modes pack their values irregularly: run the quantizer, measure through the quadratic error
-                for (int p = 0; p < c.P; p++)
-                {
-                    c.CurP = p;
-                    var a = c.E0.AsSpan(p * 4, 4);
-                    var b = c.E1.AsSpan(p * 4, 4);
-                    float qe = QuantPart(c, cem, cq, a, b, c.PCodes, c.PE);
-                    total += Math.Max(0, qe - IdealError(c, a, b));
-                }
+                // the HDR modes pack their values irregularly: the error of the mode's own representation at full
+                // colour precision (the quantizer run once per endpoint mode), plus the expected error of quantizing
+                // its values to range cq
+                float full = ExactHdrColour(c, ci, cem, 20);
+                total = full + colUnit * (InvQ2[cq] - InvQ2[20]);
             }
             else
             {
@@ -1919,6 +1924,23 @@ namespace PixCodec
             return Math.Min(s, r);
         }
 
+        /// <summary>HDR: the endpoint quantization error estimate with the quantizer run at range cq (cached per trial).</summary>
+        static float ExactHdrColour(Ctx c, int ci, int cem, int cq)
+        {
+            ref float slot = ref c.ColErrExact[ci * 21 + cq];
+            if (slot >= 0) return slot;
+            float f = 0;
+            for (int p = 0; p < c.P; p++)
+            {
+                c.CurP = p;
+                var a = c.E0.AsSpan(p * 4, 4);
+                var b = c.E1.AsSpan(p * 4, 4);
+                f += Math.Max(0, QuantPart(c, cem, cq, a, b, c.PCodes, c.PE) - IdealError(c, a, b));
+            }
+            slot = f;
+            return f;
+        }
+
         /// <summary>The quadratic error (as <see cref="EndpointError"/>) of unquantized endpoints a, b.</summary>
         static float IdealError(Ctx c, ReadOnlySpan<float> a, ReadOnlySpan<float> b)
         {
@@ -2249,18 +2271,24 @@ namespace PixCodec
             u[7] = Math.Clamp((int)MathF.Round(hi[3] * 16 / 257), 0, 255);
             int maj = hi[0] >= hi[1] && hi[0] >= hi[2] ? 0 : hi[1] >= hi[2] ? 1 : 2;
             int p0 = Perm(maj, 0), p1 = Perm(maj, 1), p2 = Perm(maj, 2);
-            for (int m = 0; m < 8; m++)
+            // submodes from the most precise (smallest shift) down; the first two whose fields hold the values unclamped
+            // are tried (all when none does)
+            int tried = 0;
+            for (int pass = 0; pass < 2 && (tried == 0 || best >= 1e8f); pass++)
+            for (int m = 7; m >= 0 && (tried < 2 || pass == 1); m--)
             {
                 int sh = (m >> 1) ^ 3;
                 float s = 1 << sh;
                 int db = M11D[m], dmax = (1 << (db - 1)) - 1;
-                int qa = Fits((int)MathF.Round(hi[p0] / s), M11Mask[m, 0]);
+                int ra = (int)MathF.Round(hi[p0] / s), qa = Fits(ra, M11Mask[m, 0]);
                 float A = qa * s;
-                int qc = Fits((int)MathF.Round((A - lo[p0]) / s), M11Mask[m, 1]);
-                int qb0 = Fits((int)MathF.Round((A - hi[p1]) / s), M11Mask[m, 2]);
-                int qb1 = Fits((int)MathF.Round((A - hi[p2]) / s), M11Mask[m, 3]);
-                int qd0 = Math.Clamp((int)MathF.Round((A - (qb0 + qc) * s - lo[p1]) / s), -dmax - 1, dmax);
-                int qd1 = Math.Clamp((int)MathF.Round((A - (qb1 + qc) * s - lo[p2]) / s), -dmax - 1, dmax);
+                int rc = (int)MathF.Round((A - lo[p0]) / s), qc = Fits(rc, M11Mask[m, 1]);
+                int rb0 = (int)MathF.Round((A - hi[p1]) / s), qb0 = Fits(rb0, M11Mask[m, 2]);
+                int rb1 = (int)MathF.Round((A - hi[p2]) / s), qb1 = Fits(rb1, M11Mask[m, 3]);
+                int rd0 = (int)MathF.Round((A - (qb0 + qc) * s - lo[p1]) / s), qd0 = Math.Clamp(rd0, -dmax - 1, dmax);
+                int rd1 = (int)MathF.Round((A - (qb1 + qc) * s - lo[p2]) / s), qd1 = Math.Clamp(rd1, -dmax - 1, dmax);
+                if (pass == 0 && (ra != qa || rc != qc || rb0 != qb0 || rb1 != qb1 || rd0 != qd0 || rd1 != qd1)) continue;
+                tried++;
                 fv[0] = qa; fv[1] = qc; fv[2] = qb0; fv[3] = qb1;
                 x.Clear();
                 foreach (var t in M11) if ((t.mask >> m & 1) != 0) x[t.x] = fv[t.f] >> t.bit & 1;
@@ -2291,7 +2319,9 @@ namespace PixCodec
             float best = float.MaxValue;
             float S = Math.Max(0, ((hi[0] - lo[0]) + (hi[1] - lo[1]) + (hi[2] - lo[2])) / 3);
             int argmax = hi[0] >= hi[1] && hi[0] >= hi[2] ? 0 : hi[1] >= hi[2] ? 1 : 2;
-            for (int mode = 0; mode < 6; mode++)
+            int tried = 0;
+            for (int pass = 0; pass < 2 && (tried == 0 || best >= 1e8f); pass++)
+            for (int mode = 0; mode < 6 && (tried < 2 || pass == 1); mode++)
             {
                 int maj = mode == 5 ? 0 : argmax;
                 int p0 = Perm(maj, 0), p1 = Perm(maj, 1), p2 = Perm(maj, 2);
@@ -2309,6 +2339,16 @@ namespace PixCodec
                     qb = Fits((int)MathF.Round(hi[p2] / s), M7Mask[mode, 2]);
                 }
                 int qs = Fits((int)MathF.Round(S / s), M7Mask[mode, 3]);
+                if (pass == 0)
+                {
+                    // skip submodes whose fields clamp
+                    int rr = (int)MathF.Round(hi[p0] / s);
+                    int rg = mode < 5 ? (int)MathF.Round((qr * s - hi[p1]) / s) : (int)MathF.Round(hi[p1] / s);
+                    int rbb = mode < 5 ? (int)MathF.Round((qr * s - hi[p2]) / s) : (int)MathF.Round(hi[p2] / s);
+                    int rs = (int)MathF.Round(S / s);
+                    if (rr != qr || rg != qg || rbb != qb || rs != qs) continue;
+                }
+                tried++;
                 fv[0] = qr; fv[1] = qg; fv[2] = qb; fv[3] = qs;
                 x.Clear();
                 foreach (var t in M7) if ((t.mask >> mode & 1) != 0) x[t.x] = fv[t.f] >> t.bit & 1;
