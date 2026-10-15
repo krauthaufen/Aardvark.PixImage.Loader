@@ -1,0 +1,21 @@
+{
+ "Composite:ImageSize": "32 24",
+ "Composite:Megapixels": 0.000768,
+ "File:ExifByteOrder": "MM",
+ "File:FileType": "PNG",
+ "File:FileTypeExtension": "PNG",
+ "File:MIMEType": "image/png",
+ "IFD0:Copyright": "only this",
+ "IFD0:Orientation": 1,
+ "IFD0:YCbCrPositioning": 1,
+ "PNG:BitDepth": 8,
+ "PNG:ColorType": 2,
+ "PNG:Compression": 0,
+ "PNG:Filter": 0,
+ "PNG:ImageHeight": 24,
+ "PNG:ImageWidth": 32,
+ "PNG:Interlace": 0,
+ "System:FileSize": 2687,
+ "XMP-dc:Rights": "only this",
+ "XMP-x:XMPToolkit": "PixCodec"
+}

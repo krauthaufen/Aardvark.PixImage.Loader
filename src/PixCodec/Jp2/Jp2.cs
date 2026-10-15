@@ -261,8 +261,8 @@ namespace PixCodec
                 options = options.With(ExifTags.StoredRegion(hdr.Orientation, sw, sh, (region.X, region.Y, x1 - region.X, y1 - region.Y)));
             }
             var img = DecodeImage(codestream, options, hdr, options.RawComponents || options.Components != null);
-            if (hdr.Icc != null || hdr.Exif != null || hdr.DpiX > 0 || hdr.Orientation != 0)
-                img.Metadata = new ImageMetadata { IccProfile = hdr.Icc, Exif = hdr.Exif, DpiX = hdr.DpiX, DpiY = hdr.DpiY, Orientation = hdr.Orientation };
+            if (hdr.Icc != null || hdr.Exif != null || hdr.Xmp != null || hdr.DpiX > 0 || hdr.Orientation != 0)
+                img.Metadata = new ImageMetadata { IccProfile = hdr.Icc, Exif = hdr.Exif, Xmp = hdr.Xmp, DpiX = hdr.DpiX, DpiY = hdr.DpiY, Orientation = hdr.Orientation };
             return orient ? ImageOps.ApplyOrientation(img) : img;
         }
 

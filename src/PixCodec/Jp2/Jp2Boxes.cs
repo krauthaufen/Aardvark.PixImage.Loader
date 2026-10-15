@@ -362,6 +362,14 @@ namespace PixCodec
                 exif.CopyTo(u, 16);
                 Box(s, Uuid, u);
             }
+            if (ExifTags.XmpForWriting(meta) is { Length: > 0 } xmp)
+            {
+                // XMP part 3: a uuid box with the XMP UUID
+                var u = new byte[16 + xmp.Length];
+                XmpUuid.CopyTo(u, 0);
+                xmp.CopyTo(u, 16);
+                Box(s, Uuid, u);
+            }
 
             Span<byte> h = stackalloc byte[16];
             if (codestreamLength + 8 <= uint.MaxValue)

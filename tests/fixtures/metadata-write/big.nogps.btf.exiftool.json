@@ -1,0 +1,20 @@
+{
+ "Composite:ImageSize": "40 30",
+ "Composite:Megapixels": 0.0012,
+ "File:FileType": "BTF",
+ "File:FileTypeExtension": "BTF",
+ "File:MIMEType": "image/x-tiff-big",
+ "IFD0:BitsPerSample": "8 8 8",
+ "IFD0:Compression": 8,
+ "IFD0:ImageHeight": 30,
+ "IFD0:ImageWidth": 40,
+ "IFD0:PhotometricInterpretation": 2,
+ "IFD0:PlanarConfiguration": 1,
+ "IFD0:Predictor": 2,
+ "IFD0:RowsPerStrip": 8,
+ "IFD0:SampleFormat": "1 1 1",
+ "IFD0:SamplesPerPixel": 3,
+ "IFD0:StripByteCounts": "64 65 66 52",
+ "IFD0:StripOffsets": "336 400 465 531",
+ "System:FileSize": 584
+}

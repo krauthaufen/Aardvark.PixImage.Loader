@@ -5,7 +5,7 @@ using System.IO;
 namespace PixCodec
 {
     /// <summary>Format independent entry points: sniff the format, then dispatch to the codec.</summary>
-    public static class ImageCodec
+    public static partial class ImageCodec
     {
         public static ImageFormat DetectFormat(ReadOnlySpan<byte> header)
         {

@@ -1,0 +1,18 @@
+{
+ "Composite:ImageSize": "32 24",
+ "Composite:Megapixels": 0.000768,
+ "File:ExifByteOrder": "MM",
+ "File:FileType": "Extended WEBP (lossless)",
+ "File:FileTypeExtension": "WEBP",
+ "File:MIMEType": "image/webp",
+ "IFD0:Copyright": "only this",
+ "IFD0:Orientation": 1,
+ "IFD0:YCbCrPositioning": 1,
+ "RIFF:AlphaIsUsed": 0,
+ "RIFF:ImageHeight": 24,
+ "RIFF:ImageWidth": 32,
+ "RIFF:WebP_Flags": 12,
+ "System:FileSize": 3624,
+ "XMP-dc:Rights": "only this",
+ "XMP-x:XMPToolkit": "PixCodec"
+}

@@ -1,0 +1,7 @@
+6 Warnings
+Invalid value for IFD0 tag 0x0103 Compression
+Missing required TIFF IFD0 tag 0x0111 StripOffsets
+Missing required TIFF IFD0 tag 0x0116 RowsPerStrip
+Missing required TIFF IFD0 tag 0x0117 StripByteCounts
+Missing required TIFF IFD0 tag 0x011a XResolution
+Missing required TIFF IFD0 tag 0x011b YResolution

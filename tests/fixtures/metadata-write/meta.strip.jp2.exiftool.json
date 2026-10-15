@@ -1,0 +1,28 @@
+{
+ "Composite:ImageSize": "32 24",
+ "Composite:Megapixels": 0.000768,
+ "File:ExifByteOrder": "MM",
+ "File:FileType": "JP2",
+ "File:FileTypeExtension": "JP2",
+ "File:MIMEType": "image/jp2",
+ "IFD0:Copyright": "only this",
+ "IFD0:Orientation": 1,
+ "IFD0:YCbCrPositioning": 1,
+ "Jpeg2000:BitsPerComponent": 7,
+ "Jpeg2000:ColorSpace": 16,
+ "Jpeg2000:ColorSpecApproximation": 0,
+ "Jpeg2000:ColorSpecMethod": 1,
+ "Jpeg2000:ColorSpecPrecedence": 0,
+ "Jpeg2000:CompatibleBrands": [
+  "jp2 "
+ ],
+ "Jpeg2000:Compression": 7,
+ "Jpeg2000:ImageHeight": 24,
+ "Jpeg2000:ImageWidth": 32,
+ "Jpeg2000:MajorBrand": "jp2 ",
+ "Jpeg2000:MinorVersion": "0.0.0",
+ "Jpeg2000:NumberOfComponents": 3,
+ "System:FileSize": 2964,
+ "XMP-dc:Rights": "only this",
+ "XMP-x:XMPToolkit": "PixCodec"
+}

@@ -1,0 +1,3 @@
+2 Warnings
+Missing required JPEG ExifIFD tag 0xa002 ExifImageWidth
+Missing required JPEG ExifIFD tag 0xa003 ExifImageHeight
