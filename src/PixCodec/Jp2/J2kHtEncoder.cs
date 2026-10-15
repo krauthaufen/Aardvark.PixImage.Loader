@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using System.Runtime.Intrinsics;
 
 namespace PixCodec
 {
@@ -7,6 +8,49 @@ namespace PixCodec
     internal static unsafe class J2kHtEncoder
     {
         static ReadOnlySpan<byte> MelExp => new byte[] { 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 4, 5 };
+
+        /// <summary>
+        /// MagSgn values (sign + 2 (mu - 1)) and exponents (bit length of 2 mu - 1, 0 for mu = 0) of a sample row, zero from
+        /// filled to pw. 32-bit samples whose magnitudes have at most 23 bits go four at a time: the bit length is read
+        /// from the exponent of the value converted to float, which is exact below 2^24.
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
+        static void PrepareRow<T>(T* row, int filled, int pw, int p, int magBits, T magMask, T signBit, byte* ex, ulong* vx)
+            where T : unmanaged, IBinaryInteger<T>
+        {
+            int x = 0;
+            if (typeof(T) == typeof(uint) && Vector128.IsHardwareAccelerated && magBits - p <= 23)
+            {
+                uint* src = (uint*)row;
+                var mask = Vector128.Create(0x7FFFFFFFu);
+                var one = Vector128<uint>.One;
+                for (; x + 4 <= filled; x += 4)
+                {
+                    var t = Vector128.Load(src + x);
+                    var mu = Vector128.ShiftRightLogical(t & mask, p);
+                    var v = Vector128.ShiftRightLogical(t, 31) + Vector128.ShiftLeft(mu - one, 1);      // sign + 2 (mu - 1)
+                    var y = Vector128.ShiftLeft(mu, 1) - one;                                          // 2 mu - 1 (all ones for 0)
+                    var e = Vector128.ShiftRightLogical(Vector128.ConvertToSingle(y.AsInt32()).AsUInt32(), 23) - Vector128.Create(126u);
+                    e = Vector128.AndNot(e, Vector128.Equals(mu, Vector128<uint>.Zero));
+                    // (for mu = 0 the value differs from the scalar code's, but such a sample is never emitted)
+                    var (lo, hi) = Vector128.Widen(v);
+                    lo.Store(vx + x); hi.Store(vx + x + 2);
+                    var e16 = Vector128.Narrow(e, e);
+                    *(uint*)(ex + x) = Vector128.Narrow(e16, e16).AsUInt32().ToScalar();
+                }
+            }
+            for (; x < filled; x++)
+            {
+                T t = row[x];
+                ulong mu = ulong.CreateTruncating((t & magMask) >> p);
+                ulong sign = (t & signBit) != T.Zero ? 1UL : 0UL;
+                vx[x] = sign + 2 * (mu - 1);
+                // the bit length of 2 * mu - 1, or 0 for mu = 0 (without a branch: zeros are frequent and random)
+                long t1 = (long)(2 * mu) - 1;
+                ex[x] = (byte)(64 - BitOperations.LeadingZeroCount((ulong)(t1 & ~(t1 >> 63))));
+            }
+            for (; x < pw; x++) { ex[x] = 0; vx[x] = 0; }
+        }
 
         [ThreadStatic] static byte[]? _exps;
         [ThreadStatic] static ulong[]? _vals;
@@ -358,18 +402,7 @@ namespace PixCodec
                         T* row = k == 0 ? row0 : row1;
                         byte* ex = exps + k * pw;
                         ulong* vx = vals + k * pw;
-                        int filled = row == null ? 0 : w;
-                        for (int x = 0; x < filled; x++)
-                        {
-                            T t = row[x];
-                            ulong mu = ulong.CreateTruncating((t & magMask) >> p);
-                            ulong sign = (t & signBit) != T.Zero ? 1UL : 0UL;
-                            vx[x] = sign + 2 * (mu - 1);
-                            // the bit length of 2 * mu - 1, or 0 for mu = 0 (without a branch: zeros are frequent and random)
-                            long t1 = (long)(2 * mu) - 1;
-                            ex[x] = (byte)(64 - BitOperations.LeadingZeroCount((ulong)(t1 & ~(t1 >> 63))));
-                        }
-                        for (int x = filled; x < pw; x++) { ex[x] = 0; vx[x] = 0; }
+                        PrepareRow(row, row == null ? 0 : w, pw, p, magBits, magMask, signBit, ex, vx);
                     }
                     byte* ex0 = exps, ex1 = exps + pw;
                     ulong* vx0 = vals, vx1 = vals + pw;
