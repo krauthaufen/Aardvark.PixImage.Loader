@@ -49,4 +49,11 @@ jobs:
       run: bash ./build.sh
 
     - name: Test
-      run: dotnet test Aardvark.PixImage.PixCodec.slnx -c Release --no-build --nologo
+      run: dotnet test Aardvark.PixImage.PixCodec.slnx -c Release --no-build --nologo --blame --results-directory TestResults
+
+    - name: Upload test diagnostics
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.os }}
+        path: TestResults

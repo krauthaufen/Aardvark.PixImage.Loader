@@ -279,7 +279,7 @@ public class JpegTests
             var small = Jpeg.Decode(data, new JpegDecodeOptions { ScaleDenominator = scale });
             Assert.Equal(full.SampleType, small.SampleType);
             Assert.Equal(full.Channels, small.Channels);
-            if (file.Contains("/ll_"))
+            if (Path.GetFileName(file).StartsWith("ll_"))
             {
                 TestUtil.AssertEqual(full, small, 0); // lossless ignores the scale
                 continue;

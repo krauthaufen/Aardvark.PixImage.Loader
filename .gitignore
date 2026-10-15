@@ -10,3 +10,4 @@ tests/oracle/exr_oracle
 /.paket
 /paket-files
 /bin/pack
+/TestResults

@@ -104,12 +104,20 @@ public class MiscFormatTests
         return new RawImage(img.Width, img.Height, img.Color, f, img.Channels);
     }
 
+    /// <summary>What ImageMagick should hand back for <paramref name="img"/>: a Q16 build clamps to [0, 1], an HDRI build keeps the values.</summary>
+    static RawImage MagickExpected(RawImage img) => MagickHdri.Value ? img : Clamp01(img);
+
+    /// <summary>ImageMagick passes floats through 16 bit quantum steps (HDRI: as floats scaled by 65535).</summary>
+    static double MagickTolerance(RawImage img) => Math.Max(1.0, img.GetData<float>().Max(Math.Abs)) / 65535;
+
+    static readonly Lazy<bool> MagickHdri = new(() => System.Text.Encoding.UTF8.GetString(RunTool("magick", "-version")).Contains("HDRI"));
+
     static double Clean(float v) => float.IsNaN(v) || v < 0 ? 0 : Math.Min(v, Math.ScaleB(255.0 / 256, 127));
 
     [Fact]
     public void HdrOracleReadsOurFiles()
     {
-        // ImageMagick reads our RLE files the same way (the build is not HDRI: values are clamped to 1)
+        // ImageMagick reads our RLE files the same way
         if (!ToolAvailable("magick")) return;
         var src = RandomFloat(40, 20, 3, 4, 1);
         var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hdr");
@@ -118,7 +126,8 @@ public class MiscFormatTests
             File.WriteAllBytes(path, Hdr.Encode(src));
             var pfm = RunTool("magick", $"\"{path}\" -depth 32 -define quantum:format=floating-point pfm:-");
             var theirs = Pfm.Decode(pfm);
-            AssertEqual(Clamp01(Hdr.Decode(File.ReadAllBytes(path))), theirs, 1.0 / 65535);
+            var ours = MagickExpected(Hdr.Decode(File.ReadAllBytes(path)));
+            AssertEqual(ours, theirs, MagickTolerance(ours));
         }
         finally { File.Delete(path); }
     }
@@ -197,9 +206,9 @@ public class MiscFormatTests
             var src = RandomFloat(11, 6, c == ColorModel.Gray ? 1 : 3, 8);
             var enc = Pfm.Encode(src, new PfmEncodeOptions { BigEndian = bigEndian });
             AssertEqual(src, Pfm.Decode(enc));
-            // ImageMagick reads it (and clamps to [0, 1]: this build is not HDRI)
+            // ImageMagick reads it
             if (ToolAvailable("magick"))
-                AssertEqual(Clamp01(src), Pfm.Decode(RunTool("magick", "pfm:- -depth 32 -define quantum:format=floating-point pfm:-", enc)), 1.0 / 65535);   // (Q16: 16 bit steps)
+                AssertEqual(MagickExpected(src), Pfm.Decode(RunTool("magick", "pfm:- -depth 32 -define quantum:format=floating-point pfm:-", enc)), MagickTolerance(MagickExpected(src)));
         }
     }
 
