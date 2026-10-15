@@ -147,7 +147,18 @@ namespace PixCodec
                 bool bad = false;
                 switch (image.SampleType)
                 {
-                    case SampleType.UInt8: { var s = (byte[])image.Data; for (long i = 0, j = c; i < count; i++, j += n) d[i] = s[j]; break; }
+                    case SampleType.UInt8:
+                    {
+                        var s = (byte[])image.Data;
+                        if (s.Length < count * n) throw new ArgumentException("image data too short");
+                        fixed (byte* ps = s)
+                        fixed (int* pd = d)
+                        {
+                            byte* q = ps + c;
+                            for (long i = 0; i < count; i++, q += n) pd[i] = *q;
+                        }
+                        break;
+                    }
                     case SampleType.Int8: { var s = (sbyte[])image.Data; for (long i = 0, j = c; i < count; i++, j += n) d[i] = s[j]; break; }
                     case SampleType.UInt16: { var s = (ushort[])image.Data; for (long i = 0, j = c; i < count; i++, j += n) d[i] = s[j]; break; }
                     case SampleType.Int16: { var s = (short[])image.Data; for (long i = 0, j = c; i < count; i++, j += n) d[i] = s[j]; break; }
@@ -452,7 +463,11 @@ namespace PixCodec
                     {
                         var src = plane.Data.AsSpan((y0 + y) * plane.Width + x0, w);
                         var dst = buf.AsSpan(y * w, w);
-                        for (int x = 0; x < w; x++) dst[x] = src[x] - s;
+                        int x = 0;
+                        if (Vector128.IsHardwareAccelerated)
+                            for (var vs = Vector128.Create(s); x + 4 <= w; x += 4)
+                                (Vector128.LoadUnsafe(ref src[x]) - vs).StoreUnsafe(ref dst[x]);
+                        for (; x < w; x++) dst[x] = src[x] - s;
                     }
                     top.Buffer = buf;
                 }

@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 namespace PixCodec
 {
@@ -36,9 +37,18 @@ namespace PixCodec
                 return (int)(Tmp >> Bits) & 1;
             }
 
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public int Sym()
             {
-                if (Run == 0 && !One)
+                // the common cases inline: inside a run of zeros, or the one that ends it
+                if (Run > 0) { Run--; return 0; }
+                if (One) { One = false; return 1; }
+                return Next();
+            }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            int Next()
+            {
                 {
                     int eval = MelExp[K];
                     if (Bit() == 1)
@@ -157,9 +167,83 @@ namespace PixCodec
             }
         }
 
-        /// <summary>One quad's context (from its neighbours' significance), MEL symbol and VLC codeword; returns the table entry (0: insignificant).</summary>
+        /// <summary>
+        /// Pass 1 of a quad row: significance, EMB patterns and residuals from the MEL and VLC streams (7.3.5, 7.3.6), into
+        /// rhoCur, quadE and quadU; rhoAbove (the row above) is only read. A method of its own, with the streams in local copies.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        static bool VlcRow(ref Mel melRef, ref Reverse vlc, ushort* lut, bool firstRow, byte* rhoAbove, byte* rhoCur, ushort* quadE, byte* quadU, int qw)
+        {
+            var mel = melRef;
+            // The VLC bit buffer lives in locals; a pair of quads takes at most 7 + 7 + 24 bits, so one refill of the
+            // structure (to more than 56 bits) per pair leaves every read below unchecked.
+            ulong buf = vlc.Buf;
+            int bits = vlc.Bits;
+            int rhoLeft = 0;             // pattern of the quad to the left in this row
+            rhoCur[-1] = 0;
+            for (int qx = 0; qx < qw; qx += 2)
+            {
+                if (bits < 38) { vlc.Buf = buf; vlc.Bits = bits; vlc.Fill(); buf = vlc.Buf; bits = vlc.Bits; }
+                bool two = qx + 1 < qw;
+                int eA = QuadCode(ref mel, ref buf, ref bits, lut, firstRow, rhoLeft, rhoAbove[qx - 1], rhoAbove[qx], rhoAbove[qx + 1]);
+                rhoLeft = eA >> 4 & 15;
+                int eB = 0;
+                if (two)
+                {
+                    eB = QuadCode(ref mel, ref buf, ref bits, lut, firstRow, rhoLeft, rhoAbove[qx], rhoAbove[qx + 1], rhoAbove[qx + 2]);
+                    rhoLeft = eB >> 4 & 15;
+                }
+                // --- unsigned residuals (7.3.6) ---
+                int uA, uB;
+                int offA = eA >> 3 & 1, offB = eB >> 3 & 1;
+                if (two && firstRow && offA != 0 && offB != 0)
+                {
+                    if (mel.Sym() == 1)
+                    {
+                        int p0 = Prefix(ref buf, ref bits, 1), p1 = Prefix(ref buf, ref bits, 1);
+                        int s0 = Suffix(ref buf, ref bits, p0), s1 = Suffix(ref buf, ref bits, p1);
+                        uA = 2 + p0 + s0 + 4 * Ext(ref buf, ref bits, s0);
+                        uB = 2 + p1 + s1 + 4 * Ext(ref buf, ref bits, s1);
+                    }
+                    else
+                    {
+                        int p0 = Prefix(ref buf, ref bits, 1);
+                        if (p0 > 2)
+                        {
+                            int ubit = Bits(ref buf, ref bits, 1);
+                            int s0 = Suffix(ref buf, ref bits, p0);
+                            uA = p0 + s0 + 4 * Ext(ref buf, ref bits, s0);
+                            uB = ubit + 1;
+                        }
+                        else
+                        {
+                            int p1 = Prefix(ref buf, ref bits, 1);
+                            int s0 = Suffix(ref buf, ref bits, p0), s1 = Suffix(ref buf, ref bits, p1);
+                            uA = p0 + s0 + 4 * Ext(ref buf, ref bits, s0);
+                            uB = p1 + s1 + 4 * Ext(ref buf, ref bits, s1);
+                        }
+                    }
+                }
+                else
+                {
+                    // (a quad without residual reads no prefix: its offset bit masks the table's length)
+                    int p0 = Prefix(ref buf, ref bits, offA), p1 = Prefix(ref buf, ref bits, offB);
+                    int s0 = Suffix(ref buf, ref bits, p0), s1 = Suffix(ref buf, ref bits, p1);
+                    uA = p0 + s0 + 4 * Ext(ref buf, ref bits, s0);
+                    uB = p1 + s1 + 4 * Ext(ref buf, ref bits, s1);
+                }
+                if (bits < 0) { melRef = mel; vlc.Buf = buf; vlc.Bits = bits; return false; }
+                rhoCur[qx] = (byte)(eA >> 4 & 15); quadE[qx] = (ushort)eA; quadU[qx] = (byte)uA;
+                if (two) { rhoCur[qx + 1] = (byte)(eB >> 4 & 15); quadE[qx + 1] = (ushort)eB; quadU[qx + 1] = (byte)uB; }
+            }
+            melRef = mel;
+            vlc.Buf = buf; vlc.Bits = bits;
+            return true;
+        }
+
+        /// <summary>One quad's context, MEL symbol and VLC codeword on the bit buffer in locals; returns the table entry (0: insignificant).</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int QuadVlc(ref Mel mel, ref Reverse vlc, ushort* lut, bool firstRow, int rhoLeft, int aboveLeft, int above, int aboveRight)
+        static int QuadCode(ref Mel mel, ref ulong buf, ref int bits, ushort* lut, bool firstRow, int rhoLeft, int aboveLeft, int above, int aboveRight)
         {
             int c = firstRow
                 ? ((rhoLeft & 3) != 0 ? 1 : 0) | (rhoLeft >> 1 & 2) | (rhoLeft >> 1 & 4)
@@ -167,90 +251,34 @@ namespace PixCodec
                   | ((rhoLeft & 12) != 0 ? 2 : 0)
                   | ((above | aboveRight << 2) >> 1 & 4);                             // (above & 8) | (aboveRight & 2)
             if (c == 0 && mel.Sym() == 0) return 0;
-            vlc.Fill();
-            int e = lut[c << 7 | (int)(vlc.Buf & 0x7F)];
-            vlc.Skip(e & 7);
+            int e = lut[c << 7 | (int)(buf & 0x7F)];
+            buf >>= e & 7; bits -= e & 7;
             return e;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int UPrefixIf(ref Reverse vlc, int on)
+        static int Bits(ref ulong buf, ref int bits, int n)
         {
-            int e = (int)(0x1122_1133_1122_1135UL >> (int)(((uint)vlc.Buf & 7) << 3)) & 0xFF & -on;
-            vlc.Skip(e >> 4);
+            int v = (int)(buf & ((1u << n) - 1));
+            buf >>= n; bits -= n;
+            return v;
+        }
+
+        // U-VLC prefix by table on the next three bits (prefix | length << 4): 1 "1", 2 "01", 3 "001", 5 "000"; none if on is 0
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int Prefix(ref ulong buf, ref int bits, int on)
+        {
+            int e = (int)(0x1122_1133_1122_1135UL >> (int)(((uint)buf & 7) << 3)) & 0xFF & -on;
+            buf >>= e >> 4; bits -= e >> 4;
             return e & 15;
         }
 
-        /// <summary>
-        /// Pass 1 of a quad row: significance, EMB patterns and residuals from the MEL and VLC streams (7.3.5, 7.3.6), into
-        /// rhoCur, quadE and quadU; rhoAbove (the row above) is only read. A method of its own, with the streams in local copies.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        static bool VlcRow(ref Mel melRef, ref Reverse vlcRef, ushort* lut, bool firstRow, byte* rhoAbove, byte* rhoCur, ushort* quadE, byte* quadU, int qw)
-        {
-            var mel = melRef;
-            var vlc = vlcRef;
-            int rhoLeft = 0;             // pattern of the quad to the left in this row
-            rhoCur[-1] = 0;
-            for (int qx = 0; qx < qw; qx += 2)
-            {
-                bool two = qx + 1 < qw;
-                int aboveLeft = rhoAbove[qx - 1];
-                int eA = QuadVlc(ref mel, ref vlc, lut, firstRow, rhoLeft, aboveLeft, rhoAbove[qx], rhoAbove[qx + 1]);
-                rhoLeft = eA >> 4 & 15;
-                int eB = 0;
-                if (two)
-                {
-                    eB = QuadVlc(ref mel, ref vlc, lut, firstRow, rhoLeft, rhoAbove[qx], rhoAbove[qx + 1], rhoAbove[qx + 2]);
-                    rhoLeft = eB >> 4 & 15;
-                }
-                // --- unsigned residuals (7.3.6) ---
-                vlc.Fill();
-                int uA, uB;
-                int offA = eA >> 3 & 1, offB = eB >> 3 & 1;
-                if (two && firstRow && offA != 0 && offB != 0)
-                {
-                    if (mel.Sym() == 1)
-                    {
-                        int p0 = UPrefix(ref vlc), p1 = UPrefix(ref vlc);
-                        int s0 = USuffix(ref vlc, p0), s1 = USuffix(ref vlc, p1);
-                        uA = 2 + p0 + s0 + 4 * UExt(ref vlc, s0);
-                        uB = 2 + p1 + s1 + 4 * UExt(ref vlc, s1);
-                    }
-                    else
-                    {
-                        int p0 = UPrefix(ref vlc);
-                        if (p0 > 2)
-                        {
-                            int ubit = vlc.Take(1);
-                            int s0 = USuffix(ref vlc, p0);
-                            uA = p0 + s0 + 4 * UExt(ref vlc, s0);
-                            uB = ubit + 1;
-                        }
-                        else
-                        {
-                            int p1 = UPrefix(ref vlc);
-                            int s0 = USuffix(ref vlc, p0), s1 = USuffix(ref vlc, p1);
-                            uA = p0 + s0 + 4 * UExt(ref vlc, s0);
-                            uB = p1 + s1 + 4 * UExt(ref vlc, s1);
-                        }
-                    }
-                }
-                else
-                {
-                    // (a quad without residual reads no prefix: its offset bit masks the table's length)
-                    int p0 = UPrefixIf(ref vlc, offA), p1 = UPrefixIf(ref vlc, offB);
-                    int s0 = USuffix(ref vlc, p0), s1 = USuffix(ref vlc, p1);
-                    uA = p0 + s0 + 4 * UExt(ref vlc, s0);
-                    uB = p1 + s1 + 4 * UExt(ref vlc, s1);
-                }
-                if (vlc.Bits < 0) { melRef = mel; vlcRef = vlc; return false; }
-                rhoCur[qx] = (byte)(eA >> 4 & 15); quadE[qx] = (ushort)eA; quadU[qx] = (byte)uA;
-                if (two) { rhoCur[qx + 1] = (byte)(eB >> 4 & 15); quadE[qx + 1] = (ushort)eB; quadU[qx + 1] = (byte)uB; }
-            }
-            melRef = mel; vlcRef = vlc;
-            return true;
-        }
+        // suffix bits per prefix: 0 for 1 and 2, 1 for 3, 5 for 5; extension of 4 bits for suffixes from 28
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int Suffix(ref ulong buf, ref int bits, int pfx) => Bits(ref buf, ref bits, (0x501000 >> (4 * pfx)) & 15);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int Ext(ref ulong buf, ref int bits, int sfx) => Bits(ref buf, ref bits, (27 - sfx) >> 31 & 4);
 
         /// <summary>
         /// Pass 2 of a quad row: exponent bounds and MagSgn values (7.3.7, 7.3.8). A method of its own, with the stream in
@@ -264,25 +292,51 @@ namespace PixCodec
             // the bit buffer in locals; the structure is only touched by refills
             ulong buf = ms.Buf;
             int bits = ms.Bits;
-            int oldExpLeft = 0;          // expAbove[2q - 1] of the row above
+            // the largest exponent of the row above around each quad (columns x - 1 .. x + 2), before expAbove is overwritten
+            byte* above = stackalloc byte[qw + 16];
+            if (!firstRow) AboveMaxima(expAbove, qw, above);
             for (int q = 0; q < qw; q++)
             {
                 int r = rhoCur[q];
                 int x = 2 * q;
-                // exponents of the row above around this quad; expAbove is being overwritten as we go
-                int eNw = oldExpLeft, eN = expAbove[x], eNe = expAbove[x + 1], eNf = expAbove[x + 2];
-                oldExpLeft = eNe;
                 int eb0 = 0, eb1 = 0;    // exponents of the two bottom samples
                 if (r != 0)
                 {
                     // (maxima without branches: the operands are small, the outcomes irregular)
                     int kappa = 1;
                     if (!firstRow && (r & (r - 1)) != 0)
-                        kappa = Max(1, Max(Max(eNw, eN), Max(eNe, eNf)) - 1);
+                        kappa = Max(1, above[q] - 1);
                     int U = kappa + quadU[q];
                     if (U > maxBits + 1) return false;
                     int e = quadE[q];
                     int k = e >> 8 & 15, i1 = e >> 12;
+                    // bits the quad's significant samples take
+                    int quadBits = 4 * U - BitOperations.PopCount((uint)(k & r)) - (4 - BitOperations.PopCount((uint)r)) * U;
+                    if (typeof(T) == typeof(uint) && VectorQuads && quadBits <= 56 && U <= 16)
+                    {
+                        // the whole quad at once (its bits, at most 56, are in the buffer after one refill)
+                        if (bits < quadBits) { ms.Buf = buf; ms.Bits = bits; ms.Fill(); buf = ms.Buf; bits = ms.Bits; }
+                        if (!QuadVector(ref buf, ref bits, U, k, i1, r, maxBits, p, uint.CreateTruncating(half), out var vals, out uint q1, out uint q3))
+                            return false;
+                        if ((x + 1 >= w && (r & 12) != 0) || (!hasRow1 && (r & 10) != 0)) return false;
+                        eb0 = (32 - BitOperations.LeadingZeroCount(q1 | 1)) & -(r >> 1 & 1);
+                        eb1 = (32 - BitOperations.LeadingZeroCount(q3 | 1)) & -(r >> 3 & 1);
+                        // lanes: x row 0, x row 1, x + 1 row 0, x + 1 row 1 -> the two rows' pairs
+                        var pairs = Vector128.Shuffle(vals, Vector128.Create(0u, 2, 1, 3)).AsUInt64();
+                        uint* r0 = (uint*)row0 + x, r1 = (uint*)row1 + x;
+                        if (x + 1 < w)
+                        {
+                            *(ulong*)r0 = pairs.GetElement(0);
+                            if (hasRow1) *(ulong*)r1 = pairs.GetElement(1);
+                        }
+                        else
+                        {
+                            *r0 = vals.GetElement(0);
+                            if (hasRow1) *r1 = vals.GetElement(1);
+                        }
+                    }
+                    else
+                    {
                     // the four samples unrolled; an insignificant one takes 0 bits and writes nothing
                     bool bad = false;
                     ulong v0 = Sample(ref buf, ref bits, ref ms, U, k, i1, r, 0, maxBits, ref bad);
@@ -301,6 +355,7 @@ namespace PixCodec
                         row1[x] = Value<T>(v1, r >> 1 & 1, p, half, signBit);
                         if (x + 1 < w) row1[x + 1] = Value<T>(v3, r >> 3 & 1, p, half, signBit);
                     }
+                    }
                 }
                 expAbove[x] = (byte)eb0;
                 expAbove[x + 1] = (byte)eb1;
@@ -308,6 +363,70 @@ namespace PixCodec
             ms.Buf = buf; ms.Bits = bits;
             msRef = ms;
             return true;
+        }
+
+        /// <summary>max(e[2q - 1], e[2q], e[2q + 1], e[2q + 2]) for every quad q of a row, sixteen at a time.</summary>
+        static void AboveMaxima(byte* e, int qw, byte* dst)
+        {
+            int q = 0;
+            if (Vector128.IsHardwareAccelerated)
+            {
+                var low = Vector128.Create((ushort)0xFF);
+                for (; q + 8 <= qw; q += 8)
+                {
+                    var a = Vector128.Load((ushort*)(e + 2 * q - 1)); var b = Vector128.Load((ushort*)(e + 2 * q + 1));
+                    var m = Vector128.Max(Vector128.Max(a & low, Vector128.ShiftRightLogical(a, 8)), Vector128.Max(b & low, Vector128.ShiftRightLogical(b, 8)));
+                    *(ulong*)(dst + q) = Vector128.Narrow(m, m).AsUInt64().ToScalar();
+                }
+            }
+            for (; q < qw; q++)
+            {
+                int x = 2 * q;
+                dst[q] = (byte)Math.Max(Math.Max(e[x - 1], e[x]), Math.Max(e[x + 1], e[x + 2]));
+            }
+        }
+
+        // per lane variable shifts are what the quad at once needs
+        static readonly bool VectorQuads = System.Runtime.Intrinsics.X86.Avx2.IsSupported || System.Runtime.Intrinsics.Arm.AdvSimd.IsSupported;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<uint> ShiftRight(Vector128<uint> a, Vector128<uint> n)
+            => System.Runtime.Intrinsics.X86.Avx2.IsSupported ? System.Runtime.Intrinsics.X86.Avx2.ShiftRightLogicalVariable(a, n)
+                : System.Runtime.Intrinsics.Arm.AdvSimd.ShiftLogical(a, -n.AsInt32());
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<uint> ShiftLeft(Vector128<uint> a, Vector128<uint> n)
+            => System.Runtime.Intrinsics.X86.Avx2.IsSupported ? System.Runtime.Intrinsics.X86.Avx2.ShiftLeftLogicalVariable(a, n)
+                : System.Runtime.Intrinsics.Arm.AdvSimd.ShiftLogical(a, n.AsInt32());
+
+        /// <summary>
+        /// The MagSgn values of a whole quad whose samples take at most 56 bits, U &lt;= 16 (32-bit samples), one vector lane per sample in the order of
+        /// <see cref="Sample"/>: each lane extracts its bits from the low 32 bits of the buffer at its offset (the sum of the
+        /// lengths before it). Returns the decoded sample values (0 for insignificant ones) and the raw values of samples 1
+        /// and 3; false for an impossible value.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static bool QuadVector(ref ulong buf, ref int bits, int U, int k, int i1, int r, int maxBits, int p, uint half,
+            out Vector128<uint> vals, out uint v1, out uint v3)
+        {
+            int m0 = (U - (k & 1)) & -(r & 1), m1 = (U - (k >> 1 & 1)) & -(r >> 1 & 1);
+            int m2 = (U - (k >> 2 & 1)) & -(r >> 2 & 1), m3 = (U - (k >> 3 & 1)) & -(r >> 3 & 1);
+            int o2 = m0 + m1, o3 = o2 + m2, total = o3 + m3;
+            var lanes = Vector128.Create(1u, 2, 4, 8);
+            var sig = ~Vector128.Equals(Vector128.Create((uint)r) & lanes, Vector128<uint>.Zero);
+            var m = Vector128.Create((uint)m0, (uint)m1, (uint)m2, (uint)m3);
+            // samples 0 and 1 from the low 32 bits of the buffer, 2 and 3 from the 32 bits from offset o2 (U <= 16: each pair
+            // fits its word)
+            var raw = ShiftRight(Vector128.Create((uint)buf, (uint)buf, (uint)(buf >> o2), (uint)(buf >> o2)), Vector128.Create(0u, (uint)m0, 0u, (uint)m2))
+                & (ShiftLeft(Vector128<uint>.One, m) - Vector128<uint>.One);
+            var e1 = ~Vector128.Equals(Vector128.Create((uint)i1) & lanes, Vector128<uint>.Zero) & sig & Vector128<uint>.One;
+            var v = raw | ShiftLeft(e1, m);
+            buf >>= total; bits -= total;
+            var mu = Vector128.ShiftRightLogical(v, 1) + Vector128<uint>.One;
+            vals = (Vector128.ShiftLeft(mu, p + 1) | Vector128.Create(half) | Vector128.ShiftLeft(v, 31)) & sig;
+            v1 = v.GetElement(1); v3 = v.GetElement(3);
+            var bad = (Vector128.ShiftRightLogical(v, maxBits + 1) | Vector128.ShiftRightLogical(mu, maxBits)) & sig;
+            return bad == Vector128<uint>.Zero;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -346,22 +465,6 @@ namespace PixCodec
             T val = T.CreateTruncating(((v >> 1) + 1) << (p + 1)) | half | (signBit & T.CreateTruncating(0 - (v & 1)));
             return val & T.CreateTruncating(0 - (ulong)sig);
         }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int UPrefix(ref Reverse vlc)
-        {
-            // by table on the next three bits (prefix | length << 4): 1 "1", 2 "01", 3 "001", 5 "000"
-            int e = (int)(0x1122_1133_1122_1135UL >> (int)(((uint)vlc.Buf & 7) << 3)) & 0xFF;
-            vlc.Skip(e >> 4);
-            return e & 15;
-        }
-
-        // suffix bits per prefix: 0 for 1 and 2, 1 for 3, 5 for 5 (no branches: the prefixes are irregular)
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int USuffix(ref Reverse vlc, int pfx) => vlc.Take((0x501000 >> (4 * pfx)) & 15);
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int UExt(ref Reverse vlc, int sfx) => vlc.Take((27 - sfx) >> 31 & 4);
 
         /// <summary>
         /// Decodes an HT set into data (w * h, row-major; representation as in <see cref="J2kBlockCoder"/>).

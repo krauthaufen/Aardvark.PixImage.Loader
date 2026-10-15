@@ -452,8 +452,22 @@ namespace PixCodec
         /// <summary>out[n] = src[2n + start]</summary>
         static void Deinterleave(int* src, int w, int a, int* E, int nL, int* O, int nH)
         {
-            for (int n = 0; n < nL; n++) E[n] = src[2 * n + a];
-            for (int n = 0; n < nH; n++) O[n] = src[2 * n + 1 - a];
+            int n = 0;
+            if (System.Runtime.Intrinsics.Vector128.IsHardwareAccelerated)
+            {
+                // eight samples at a time: the even ones are the low halves of the 64-bit pairs, the odd ones the high halves
+                int* s0 = src + a, s1 = src + 1 - a;
+                int both = Math.Min(nL, nH) - 4;   // (the loads reach 7 samples past 2 n)
+                for (; n <= both - 1; n += 4)
+                {
+                    var e = System.Runtime.Intrinsics.Vector128.Load((long*)(s0 + 2 * n)); var e2 = System.Runtime.Intrinsics.Vector128.Load((long*)(s0 + 2 * n + 4));
+                    System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Narrow(e, e2), E + n);
+                    var o = System.Runtime.Intrinsics.Vector128.Load((long*)(s1 + 2 * n)); var o2 = System.Runtime.Intrinsics.Vector128.Load((long*)(s1 + 2 * n + 4));
+                    System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Narrow(o, o2), O + n);
+                }
+            }
+            for (int k = n; k < nL; k++) E[k] = src[2 * k + a];
+            for (int k = n; k < nH; k++) O[k] = src[2 * k + 1 - a];
         }
 
         static void Analyze53Row(int* row, int nL, int nH, int a, int* tmp)
