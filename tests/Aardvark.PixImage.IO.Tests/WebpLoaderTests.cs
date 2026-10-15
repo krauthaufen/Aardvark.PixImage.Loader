@@ -1,13 +1,14 @@
+using Aardvark.Data;
 using Aardvark.Base;
 using Xunit;
 
-namespace PixImageIOTests;
+namespace PixCodecTests;
 
 using PixImage = Aardvark.Base.PixImage;
 
 public class WebpLoaderTests
 {
-    static readonly PixImageIOLoader Loader = PixImageIO.Loader;
+    static readonly PixCodecLoader Loader = PixCodec.Loader;
 
     static PixImage<byte> Make(Col.Format format, int w, int h)
     {

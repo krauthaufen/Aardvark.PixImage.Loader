@@ -1,14 +1,15 @@
+using Aardvark.Data;
 using Aardvark.Base;
 using Aardvark.ImageCodecs;
 using Xunit;
 
-namespace PixImageIOTests;
+namespace PixCodecTests;
 
 using PixImage = Aardvark.Base.PixImage;
 
 public class ProcessorTests
 {
-    static ProcessorTests() => PixImageIO.Init();
+    static ProcessorTests() => PixCodec.Init();
 
     static PixImage<T> Make<T>(Col.Format format, int w, int h, Func<int, T> value)
     {
@@ -23,9 +24,9 @@ public class ProcessorTests
     [Fact]
     public void ProcessorIsRegisteredFirst()
     {
-        Assert.Same(PixImageIO.Processor, PixImage.GetProcessors(PixProcessorCaps.Scale)[0]);
-        Assert.Same(PixImageIO.Processor, PixImage.GetProcessors(PixProcessorCaps.Rotate)[0]);
-        Assert.Same(PixImageIO.Processor, PixImage.GetProcessors(PixProcessorCaps.Remap)[0]);
+        Assert.Same(PixCodec.Processor, PixImage.GetProcessors(PixProcessorCaps.Scale)[0]);
+        Assert.Same(PixCodec.Processor, PixImage.GetProcessors(PixProcessorCaps.Rotate)[0]);
+        Assert.Same(PixCodec.Processor, PixImage.GetProcessors(PixProcessorCaps.Remap)[0]);
     }
 
     [Theory]
@@ -41,7 +42,7 @@ public class ProcessorTests
             Assert.Equal(Col.Format.RGB, r.Format);
             // (Aardvark itself replaces SuperSample by Cubic when enlarging)
             var eip = ip == ImageInterpolation.SuperSample && (size.X > 41 || size.Y > 29) ? ImageInterpolation.Cubic : ip;
-            var exp = ImageOps.Resize(img.ToRawImage(), size.X, size.Y, PixImageIOProcessor.Filter(eip));
+            var exp = ImageOps.Resize(img.ToRawImage(), size.X, size.Y, PixCodecProcessor.Filter(eip));
             Assert.Equal((byte[])exp.Data, r.Volume.Data);
         }
         var s = img.Scaled(0.5, ip);
@@ -150,22 +151,22 @@ public class ProcessorTests
         try
         {
             var rgb = Make(Col.Format.RGB, 9, 7, Noise);
-            PixImageIO.Save(rgb, p8);
-            var l = Assert.IsType<PixImage<byte>>(PixImageIO.Load(p8));
+            PixCodec.Save(rgb, p8);
+            var l = Assert.IsType<PixImage<byte>>(PixCodec.Load(p8));
             Assert.Equal(rgb.Volume.Data, l.Volume.Data);
 
             var g16 = Make(Col.Format.Gray, 9, 7, i => (ushort)(i * 1000));
-            PixImageIO.Save(g16, p16);
-            Assert.IsType<PixImage<ushort>>(PixImageIO.Load(p16));
-            var asByte = PixImageIO.Load<byte>(p16);
+            PixCodec.Save(g16, p16);
+            Assert.IsType<PixImage<ushort>>(PixCodec.Load(p16));
+            var asByte = PixCodec.Load<byte>(p16);
             Assert.Equal((byte)(g16.Volume.Data[5] >> 8), asByte.Volume.Data[5]);
 
             var f = Make(Col.Format.RGBA, 9, 7, i => i * 0.25f);
-            PixImageIO.Save(f, pexr);
-            var lf = Assert.IsType<PixImage<float>>(PixImageIO.Load(File.ReadAllBytes(pexr)));
+            PixCodec.Save(f, pexr);
+            var lf = Assert.IsType<PixImage<float>>(PixCodec.Load(File.ReadAllBytes(pexr)));
             Assert.Equal(f.Volume.Data, lf.Volume.Data);
 
-            var info = PixImageIO.GetInfo(p16);
+            var info = PixCodec.GetInfo(p16);
             Assert.Equal((ImageFormat.Png, 9, 7, SampleType.UInt16), (info.Format, info.Width, info.Height, info.SampleType));
         }
         finally { File.Delete(p8); File.Delete(p16); File.Delete(pexr); }
@@ -180,9 +181,9 @@ public class ProcessorTests
         for (int i = 0; i < d.Length; i++) d[i] = (System.Half)(i * 0.5f);
         var ms = new MemoryStream();
         Tiff.Encode(raw, ms);
-        var pi = Assert.IsType<PixImage<float>>(PixImageIO.Load(ms.ToArray()));
+        var pi = Assert.IsType<PixImage<float>>(PixCodec.Load(ms.ToArray()));
         Assert.Equal(7.5f, pi.Volume.Data[15]);
-        var loader = Assert.IsType<PixImage<float>>(PixImageIO.Loader.LoadFromStream(new MemoryStream(ms.ToArray())));
+        var loader = Assert.IsType<PixImage<float>>(PixCodec.Loader.LoadFromStream(new MemoryStream(ms.ToArray())));
         Assert.Equal(pi.Volume.Data, loader.Volume.Data);
     }
 
@@ -194,13 +195,13 @@ public class ProcessorTests
         ((byte[])b.Data).AsSpan().Fill(200);
         var tiff = new MemoryStream();
         Tiff.Encode(new[] { a, b }, tiff);
-        var pages = PixImageIO.LoadAll(tiff.ToArray());
+        var pages = PixCodec.LoadAll(tiff.ToArray());
         Assert.Equal(2, pages.Length);
         Assert.Equal((byte)200, ((PixImage<byte>)pages[1]).Volume.Data[0]);
 
         var gif = new MemoryStream();
         Gif.EncodeAnimation(new[] { new GifInputFrame(a), new GifInputFrame(b), new GifInputFrame(a) }, gif);
-        var frames = PixImageIO.LoadAll(gif.ToArray());
+        var frames = PixCodec.LoadAll(gif.ToArray());
         Assert.Equal(3, frames.Length);
         Assert.All(frames, f => Assert.Equal(Col.Format.RGBA, f.Format));
     }
@@ -216,10 +217,10 @@ public class ProcessorTests
         try
         {
             ImageCodec.Encode(raw, path);
-            var info = PixImageIO.GetInfo(path);
+            var info = PixCodec.GetInfo(path);
             Assert.Equal((6, 8, 16), (info.Orientation, info.Width, info.Height));
-            Assert.Equal(new V2i(8, 16), PixImage.GetInfoFromFile(path, PixImageIO.Loader).Size);
-            foreach (var up in new[] { PixImageIO.Load<byte>(path), PixImageIO.LoadAll(path)[0].ToPixImage<byte>(), PixImage.Load(path, PixImageIO.Loader).ToPixImage<byte>() })
+            Assert.Equal(new V2i(8, 16), PixImage.GetInfoFromFile(path, PixCodec.Loader).Size);
+            foreach (var up in new[] { PixCodec.Load<byte>(path), PixCodec.LoadAll(path)[0].ToPixImage<byte>(), PixImage.Load(path, PixCodec.Loader).ToPixImage<byte>() })
             {
                 Assert.Equal(new V2i(8, 16), up.Size);
                 Assert.True(up.Volume[7, 0, 0] > 128); // top-left went to top-right (rotated clockwise)

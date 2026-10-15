@@ -1,8 +1,9 @@
+using Aardvark.Data;
 using Aardvark.Base;
 using Aardvark.ImageCodecs;
 using Xunit;
 
-namespace PixImageIOTests;
+namespace PixCodecTests;
 
 using PixImage = Aardvark.Base.PixImage;
 
@@ -72,21 +73,21 @@ public class LayoutTests
             var bytes = File.ReadAllBytes(path);
             var images = new List<PixImage>
             {
-                PixImageIO.Load(path), PixImageIO.Load(bytes), PixImageIO.Load(new MemoryStream(bytes)),
-                PixImageIO.LoadAll(path)[0], PixImageIO.Loader.LoadFromFile(path),
-                PixImageIO.Loader.LoadFromStream(new MemoryStream(bytes)), PixImage.LoadRaw(path, PixImageIO.Loader),
+                PixCodec.Load(path), PixCodec.Load(bytes), PixCodec.Load(new MemoryStream(bytes)),
+                PixCodec.LoadAll(path)[0], PixCodec.Loader.LoadFromFile(path),
+                PixCodec.Loader.LoadFromStream(new MemoryStream(bytes)), PixImage.LoadRaw(path, PixCodec.Loader),
                 ImageCodec.Decode(path).ToPixImage(),
             };
             // converted on loading (Aardvark converts only between some types, and only colour formats)
             if (raw.SampleType is not (SampleType.Int16 or SampleType.UInt32))
-                images.AddRange(new PixImage[] { PixImage.Load(path, PixImageIO.Loader), PixImageIO.Load<byte>(path), PixImageIO.Load<float>(path), PixImageIO.Load<ushort>(bytes) });
+                images.AddRange(new PixImage[] { PixImage.Load(path, PixCodec.Loader), PixCodec.Load<byte>(path), PixCodec.Load<float>(path), PixCodec.Load<ushort>(bytes) });
             foreach (var pi in images)
             {
                 AssertDense(pi);
                 Assert.Equal(size, pi.Size);
             }
-            Assert.Equal(size, PixImageIO.Loader.GetInfoFromFile(path).Size);
-            var info = PixImageIO.GetInfo(path);
+            Assert.Equal(size, PixCodec.Loader.GetInfoFromFile(path).Size);
+            var info = PixCodec.GetInfo(path);
             Assert.Equal((size.X, size.Y), (info.Width, info.Height));
             // the marked stored top-left pixel ends up top-right after the clockwise turn of orientation 6
             var up = ImageCodec.Decode(path);
@@ -105,7 +106,7 @@ public class LayoutTests
         var data = big.Volume.Data;
         for (int i = 0; i < data.Length; i++) data[i] = (byte)(i * 7);
         var view = new PixImage<byte>(Col.Format.BGRA, big.Volume.SubVolume(new V3l(1, 2, 0), new V3l(20, 25, 4), new V3l(8, 160, 1)));
-        PixImage.AddProcessor(PixImageIO.Processor);
+        PixImage.AddProcessor(PixCodec.Processor);
         foreach (var pi in new PixImage[]
         {
             view.Scaled(0.5), view.Scaled(new V2d(1.7, 1.3), ImageInterpolation.Lanczos), view.Resized(new V2i(33, 9)), view.Rotated(0.3),

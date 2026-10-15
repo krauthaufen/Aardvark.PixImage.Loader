@@ -1,18 +1,19 @@
+using Aardvark.Base;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using Aardvark.ImageCodecs;
 
-namespace Aardvark.Base
+namespace Aardvark.Data
 {
     /// <summary>
     /// PixImage loader backed by the fully managed Aardvark.PixImage.IO library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA,
     /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO).
-    /// Register with <see cref="PixImageIO.Init"/> (done automatically by Aardvark.Init()).
+    /// Register with <see cref="PixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
-    public sealed class PixImageIOLoader : IPixMipmapLoader
+    public sealed class PixCodecLoader : IPixMipmapLoader
     {
-        public string Name => "Aardvark.PixImage.IO";
+        public string Name => "PixCodec";
         public bool CanEncode => true;
         public bool CanDecode => true;
 
@@ -266,12 +267,12 @@ namespace Aardvark.Base
         #endregion
     }
 
-    public static class PixImageIO
+    public static class PixCodec
     {
-        public static PixImageIOLoader Loader { get; } = new PixImageIOLoader();
+        public static PixCodecLoader Loader { get; } = new PixCodecLoader();
 
         /// <summary>The image processor (resize, rotate, remap) used by PixImage.Scaled / Resized / Rotated / Remapped.</summary>
-        public static PixImageIOProcessor Processor { get; } = new PixImageIOProcessor();
+        public static PixCodecProcessor Processor { get; } = new PixCodecProcessor();
 
         /// <summary>
         /// Registers the Aardvark.PixImage.IO loader and image processor with highest priority among the currently registered ones.
@@ -288,7 +289,7 @@ namespace Aardvark.Base
         /// <summary>
         /// Decodes an image file into a PixImage of the file's sample type (PixImage&lt;byte&gt;, &lt;ushort&gt;, &lt;float&gt;, ...)
         /// without copying the samples. Half floats become float. The EXIF/TIFF orientation is already applied (the image is
-        /// upright as viewers show it) and the volume has the dense image layout (channel, x, y; see <see cref="PixImageIOLoader.ToPixImage"/>).
+        /// upright as viewers show it) and the volume has the dense image layout (channel, x, y; see <see cref="PixCodecLoader.ToPixImage"/>).
         /// </summary>
         public static PixImage Load(string path) => Convert(ImageCodec.Decode(path));
         /// <inheritdoc cref="Load(string)"/>
@@ -317,9 +318,9 @@ namespace Aardvark.Base
         /// The image with its stored mip levels (DDS mip chains, OpenEXR mip maps), largest first; files without levels give a
         /// single level. <see cref="PixImageMipMap.Create"/> computes levels.
         /// </summary>
-        public static PixImageMipMap LoadMipmap(string path) => PixImageIOLoader.ToMipMap(ImageCodec.DecodeMipmaps(path));
+        public static PixImageMipMap LoadMipmap(string path) => PixCodecLoader.ToMipMap(ImageCodec.DecodeMipmaps(path));
         /// <inheritdoc cref="LoadMipmap(string)"/>
-        public static PixImageMipMap LoadMipmap(Stream stream) => PixImageIOLoader.ToMipMap(ImageCodec.DecodeMipmaps(stream));
+        public static PixImageMipMap LoadMipmap(Stream stream) => PixCodecLoader.ToMipMap(ImageCodec.DecodeMipmaps(stream));
 
         /// <summary>
         /// A DDS cube map as a PixCube: each side with its mip chain (Aardvark's CubeSide order is the order DDS stores the
@@ -337,7 +338,7 @@ namespace Aardvark.Base
             var t = Ktx.DecodeTexture(data);
             if (t.Kind != KtxTextureKind.CubeMap) throw new ImageLoadException($"not a cube map but a {t.Kind}");
             var sides = new PixImageMipMap[6];
-            for (int i = 0; i < 6; i++) sides[i] = PixImageIOLoader.ToMipMap(t.GetMipChain(item, i));
+            for (int i = 0; i < 6; i++) sides[i] = PixCodecLoader.ToMipMap(t.GetMipChain(item, i));
             return new PixCube(sides);
         }
 
@@ -405,15 +406,15 @@ namespace Aardvark.Base
         /// computed mip chain, Zstandard supercompressed by default.
         /// </summary>
         public static void SaveKtx(PixImage image, Stream stream, KtxEncodeOptions? options = null)
-            => Ktx.Encode(PixImageIOLoader.ToRawImage(image), stream, options);
+            => Ktx.Encode(PixCodecLoader.ToRawImage(image), stream, options);
 
         /// <summary>Saves a mip map as KTX 2 (every level half the size of the previous one, rounded down).</summary>
         public static void SaveKtx(PixImageMipMap mipmap, Stream stream, KtxEncodeOptions? options = null)
-            => Ktx.EncodeMipmaps(Array.ConvertAll(mipmap.ImageArray, PixImageIOLoader.ToRawImage), stream, options);
+            => Ktx.EncodeMipmaps(Array.ConvertAll(mipmap.ImageArray, PixCodecLoader.ToRawImage), stream, options);
 
         /// <summary>Saves a PixCube as a KTX 2 cube map, each side with its mip chain.</summary>
         public static void SaveKtx(PixCube cube, Stream stream, KtxEncodeOptions? options = null)
-            => Ktx.EncodeCube(Array.ConvertAll(cube.MipMapArray, m => (IReadOnlyList<RawImage>)Array.ConvertAll(m.ImageArray, PixImageIOLoader.ToRawImage)), stream, options);
+            => Ktx.EncodeCube(Array.ConvertAll(cube.MipMapArray, m => (IReadOnlyList<RawImage>)Array.ConvertAll(m.ImageArray, PixCodecLoader.ToRawImage)), stream, options);
 
         /// <summary>Saves a PixVolume as a KTX 2 volume texture, with a 3D mip chain if <see cref="KtxEncodeOptions.GenerateMipmaps"/> is set.</summary>
         public static void SaveKtx(PixVolume volume, Stream stream, KtxEncodeOptions? options = null)
@@ -423,7 +424,7 @@ namespace Aardvark.Base
         {
             if (t.Kind != DdsTextureKind.CubeMap) throw new ImageLoadException($"not a cube map but a {t.Kind}");
             var sides = new PixImageMipMap[6];
-            for (int i = 0; i < t.Faces.Count; i++) sides[t.Faces[i]] = PixImageIOLoader.ToMipMap(t.GetMipChain(item, i));
+            for (int i = 0; i < t.Faces.Count; i++) sides[t.Faces[i]] = PixCodecLoader.ToMipMap(t.GetMipChain(item, i));
             return new PixCube(sides);
         }
 
@@ -432,15 +433,15 @@ namespace Aardvark.Base
         /// optionally with a computed mip chain (<see cref="DdsEncodeOptions.Mipmaps"/>).
         /// </summary>
         public static void SaveDds(PixImage image, Stream stream, DdsEncodeOptions? options = null)
-            => Dds.Encode(PixImageIOLoader.ToRawImage(image), stream, options);
+            => Dds.Encode(PixCodecLoader.ToRawImage(image), stream, options);
 
         /// <summary>Saves a mip map as DDS (every level half the size of the previous one, rounded down).</summary>
         public static void SaveDds(PixImageMipMap mipmap, Stream stream, DdsEncodeOptions? options = null)
-            => Dds.EncodeMipmaps(Array.ConvertAll(mipmap.ImageArray, PixImageIOLoader.ToRawImage), stream, options);
+            => Dds.EncodeMipmaps(Array.ConvertAll(mipmap.ImageArray, PixCodecLoader.ToRawImage), stream, options);
 
         /// <summary>Saves a PixCube as a DDS cube map, each side with its mip chain.</summary>
         public static void SaveDds(PixCube cube, Stream stream, DdsEncodeOptions? options = null)
-            => Dds.EncodeCube(Array.ConvertAll(cube.MipMapArray, m => (IReadOnlyList<RawImage>)Array.ConvertAll(m.ImageArray, PixImageIOLoader.ToRawImage)), stream, options);
+            => Dds.EncodeCube(Array.ConvertAll(cube.MipMapArray, m => (IReadOnlyList<RawImage>)Array.ConvertAll(m.ImageArray, PixCodecLoader.ToRawImage)), stream, options);
 
         /// <summary>
         /// Saves a PixVolume as a DDS volume texture (no mip levels); block compression, if chosen, applies to each slice.
@@ -534,8 +535,8 @@ namespace Aardvark.Base
             if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx)
             {
                 using var fs = File.Create(path);
-                if (codec == ImageFormat.Qoi) Qoi.Encode(PixImageIOLoader.ToRawImage(image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>()), fs);
-                else Ktx.Encode(PixImageIOLoader.ToRawImage(image), fs);
+                if (codec == ImageFormat.Qoi) Qoi.Encode(PixCodecLoader.ToRawImage(image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>()), fs);
+                else Ktx.Encode(PixCodecLoader.ToRawImage(image), fs);
                 return;
             }
             var p = saveParams ?? new PixSaveParams(FileFormat(path));
@@ -565,7 +566,7 @@ namespace Aardvark.Base
             _ => throw new ArgumentException($"cannot infer the image format from '{path}'"),
         };
 
-        static PixImage Convert(RawImage img) => PixImageIOLoader.ToPixImage(img);
+        static PixImage Convert(RawImage img) => PixCodecLoader.ToPixImage(img);
 
         static PixImage[] ConvertAll(RawImage[] imgs) => Array.ConvertAll(imgs, Convert);
 
@@ -575,15 +576,15 @@ namespace Aardvark.Base
     }
 
     /// <summary>Conversions between Aardvark.PixImage.IO's RawImage and PixImage.</summary>
-    public static class PixImageIORawImageExtensions
+    public static class PixCodecRawImageExtensions
     {
         /// <summary>
         /// Wraps the decoded samples in a PixImage without copying (half floats are widened to float). The volume always has the
         /// canonical dense image layout: channel fastest, then x, then y (DZ = 1, DX = channels, DY = width * channels, first index 0).
         /// </summary>
-        public static PixImage ToPixImage(this RawImage image) => PixImageIOLoader.ToPixImage(image);
+        public static PixImage ToPixImage(this RawImage image) => PixCodecLoader.ToPixImage(image);
 
         /// <summary>Views a PixImage as a RawImage (no copy when it already has RGB(A)/gray image layout; BGR(A) is reordered).</summary>
-        public static RawImage ToRawImage(this PixImage image) => PixImageIOLoader.ToRawImage(image);
+        public static RawImage ToRawImage(this PixImage image) => PixCodecLoader.ToRawImage(image);
     }
 }

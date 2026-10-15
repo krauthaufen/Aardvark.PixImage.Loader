@@ -8,7 +8,8 @@ Two packages:
 - **Aardvark.PixImage.IO.Codecs**: the codecs, metadata, colour management and image operations on a plain `RawImage`, with
   no dependencies (namespace `Aardvark.ImageCodecs`).
 - **Aardvark.PixImage.IO**: loads and saves Aardvark `PixImage`s, mip maps, cube maps and volumes through the codecs
-  (`PixImageIO`, `PixImageIOLoader`, `PixImageIOProcessor` in `Aardvark.Base`).
+  (`PixCodec`, `PixCodecLoader`, `PixCodecProcessor` in `Aardvark.Data`, next to the other loaders such as
+  `PixImageSharp`).
 
 The code namespace is deliberately not `Aardvark.PixImage.*`: a namespace of that name would hide the `PixImage` class in
 code living in any `Aardvark.*` namespace.
@@ -207,37 +208,38 @@ DDS or KTX texture (every slice of a KTX volume) and every image of an icon.
 ## Aardvark
 
 `Aardvark.PixImage.IO` provides an `IPixLoader`. It registers itself on `Aardvark.Init()`,
-or call `PixImageIO.Init()`.
+or call `PixCodec.Init()`.
 
 ```csharp
-PixImageIO.Init();
+using Aardvark.Data;
+PixCodec.Init();
 var pi = PixImage.Load("dem.tif");                  // PixImage<float>, wraps the decoded array without copying
 pi.Save("dem.exr");
 ```
 
-Without registering anything, `PixImageIO` loads straight into PixImages. Like the registered loader it always returns
+Without registering anything, `PixCodec` loads straight into PixImages. Like the registered loader it always returns
 upright images (orientation applied) whose volume has the dense image layout: channels innermost, then x, then y, top row first,
 starting at index 0 (no y-flip; the same convention as the other Aardvark loaders).
 
 ```csharp
-PixImage img       = PixImageIO.Load("photo.jpg");                         // PixImage<byte>, upright
-PixImage<float> f  = PixImageIO.Load<float>("scan.tif");                    // converted if the file is not float
-PixImage[] pages   = PixImageIO.LoadAll("stack.tif");                       // pages or animation frames
-ImageInfo info     = PixImageIO.GetInfo("dem.tif");
-PixImageIO.Save(img, "out.webp");
+PixImage img       = PixCodec.Load("photo.jpg");                         // PixImage<byte>, upright
+PixImage<float> f  = PixCodec.Load<float>("scan.tif");                    // converted if the file is not float
+PixImage[] pages   = PixCodec.LoadAll("stack.tif");                       // pages or animation frames
+ImageInfo info     = PixCodec.GetInfo("dem.tif");
+PixCodec.Save(img, "out.webp");
 PixImage p = rawImage.ToPixImage();   RawImage r = pixImage.ToRawImage();
-PixImageMipMap mm  = PixImageIO.LoadMipmap("tex.dds");                     // also PixImageMipMap.Load (IPixMipmapLoader)
-PixCube cube       = PixImageIO.LoadCube("sky.dds");                        // DDS cube map, every side with its mip chain
-PixImageIO.SaveDds(cube, stream);
-PixImageIO.SaveDds(volume, stream, new DdsEncodeOptions { Compression = DdsCompression.BC1 });   // PixVolume
-PixImageIO.SaveKtx(cube, stream, new KtxEncodeOptions { Compression = TextureCompression.BC7 });
-PixVolume vol      = PixImageIO.LoadVolume("ct.ktx2");                      // DDS or KTX volume texture
-PixImageIO.WriteMetadata("a.jpg", "a.jpg", new MetadataEdit { Gps = new GpsEdit { Latitude = 47.07, Longitude = 15.44 } });
-PixImage srgb      = PixImageIO.LoadSrgb("adobe-rgb.jpg");                 // converted through the embedded ICC profile
-PixImageIO.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .qoi .ktx2 too
+PixImageMipMap mm  = PixCodec.LoadMipmap("tex.dds");                     // also PixImageMipMap.Load (IPixMipmapLoader)
+PixCube cube       = PixCodec.LoadCube("sky.dds");                        // DDS cube map, every side with its mip chain
+PixCodec.SaveDds(cube, stream);
+PixCodec.SaveDds(volume, stream, new DdsEncodeOptions { Compression = DdsCompression.BC1 });   // PixVolume
+PixCodec.SaveKtx(cube, stream, new KtxEncodeOptions { Compression = TextureCompression.BC7 });
+PixVolume vol      = PixCodec.LoadVolume("ct.ktx2");                      // DDS or KTX volume texture
+PixCodec.WriteMetadata("a.jpg", "a.jpg", new MetadataEdit { Gps = new GpsEdit { Latitude = 47.07, Longitude = 15.44 } });
+PixImage srgb      = PixCodec.LoadSrgb("adobe-rgb.jpg");                 // converted through the embedded ICC profile
+PixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .qoi .ktx2 too
 ```
 
-`Init()` also registers `PixImageIOProcessor`, so `PixImage.Scaled`, `Resized`, `Rotated`, `Remapped` and `PixImageMipMap.Create`
+`Init()` also registers `PixCodecProcessor`, so `PixImage.Scaled`, `Resized`, `Rotated`, `Remapped` and `PixImageMipMap.Create`
 use Aardvark.PixImage.IO for every sample type (ImageInterpolation `Near`, `Linear`, `Cubic`, `Lanczos`, `SuperSample` map to nearest,
 bilinear, bicubic, Lanczos3 and box). Extension methods add the other filters and options:
 `pi.Resized(w, h, ResampleFilter.Mitchell)`, `pi.Resized(w, h, new ResizeOptions { LinearLight = true })`,

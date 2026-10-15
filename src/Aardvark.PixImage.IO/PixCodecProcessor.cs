@@ -1,18 +1,20 @@
+using Aardvark.Base;
+using Half = Aardvark.Base.Half;
 using System;
 using System.Runtime.InteropServices;
 using Aardvark.ImageCodecs;
 
-namespace Aardvark.Base
+namespace Aardvark.Data
 {
     /// <summary>
     /// PixImage processor backed by Aardvark.PixImage.IO's <see cref="ImageOps"/>: scaling (antialiased when downscaling), rotation and
     /// remapping for every sample type and channel count, alpha premultiplied while filtering. Registered by
-    /// <see cref="PixImageIO.Init"/>. ImageInterpolation maps to: Near = nearest, Linear = bilinear,
+    /// <see cref="PixCodec.Init"/>. ImageInterpolation maps to: Near = nearest, Linear = bilinear,
     /// Cubic = bicubic (Catmull-Rom), Lanczos = Lanczos3, SuperSample = box (area average).
     /// </summary>
-    public sealed class PixImageIOProcessor : IPixProcessor
+    public sealed class PixCodecProcessor : IPixProcessor
     {
-        public string Name => "Aardvark.PixImage.IO";
+        public string Name => "PixCodec";
         public PixProcessorCaps Capabilities => PixProcessorCaps.All;
 
         public PixImage<T>? Scale<T>(PixImage<T> image, V2d scaleFactor, ImageInterpolation interpolation)
@@ -142,7 +144,7 @@ namespace Aardvark.Base
     /// Resampling with Aardvark.PixImage.IO filters on PixImages beyond the Aardvark ImageInterpolation modes (Mitchell, B-spline, Lanczos2,
     /// Hermite, Gaussian, custom), plus orientation handling.
     /// </summary>
-    public static class PixImageIOPixImageExtensions
+    public static class PixCodecPixImageExtensions
     {
         /// <summary>Resizes to width x height with the given filter (antialiased when downscaling, alpha premultiplied).</summary>
         public static PixImage<T> Resized<T>(this PixImage<T> image, int width, int height, ResampleFilter filter)
@@ -151,7 +153,7 @@ namespace Aardvark.Base
         /// <summary>Resizes to width x height with the given options. The alpha channel is taken from the PixImage format.</summary>
         public static PixImage<T> Resized<T>(this PixImage<T> image, int width, int height, ResizeOptions options)
         {
-            var raw = PixImageIOProcessor.View(image, out int alpha, out bool premultiplied) ?? throw Unsupported<T>();
+            var raw = PixCodecProcessor.View(image, out int alpha, out bool premultiplied) ?? throw Unsupported<T>();
             var o = new ResizeOptions
             {
                 Filter = options.Filter,
@@ -160,7 +162,7 @@ namespace Aardvark.Base
                 LinearLight = options.LinearLight,
                 MaxDegreeOfParallelism = options.MaxDegreeOfParallelism,
             };
-            return PixImageIOProcessor.Back(image, ImageOps.Resize(raw, width, height, o));
+            return PixCodecProcessor.Back(image, ImageOps.Resize(raw, width, height, o));
         }
 
         /// <summary>Scales by a factor with the given filter (size rounded to the nearest integer).</summary>
@@ -172,9 +174,9 @@ namespace Aardvark.Base
         /// </summary>
         public static PixImage<T> Rotated<T>(this PixImage<T> image, double angleInRadians, bool resize, WarpOptions options)
         {
-            var raw = PixImageIOProcessor.View(image, out int alpha, out bool premultiplied) ?? throw Unsupported<T>();
+            var raw = PixCodecProcessor.View(image, out int alpha, out bool premultiplied) ?? throw Unsupported<T>();
             var o = Adjust(options, alpha, premultiplied);
-            return PixImageIOProcessor.Back(image, ImageOps.Rotate(raw, angleInRadians * 180 / Math.PI, resize, o));
+            return PixCodecProcessor.Back(image, ImageOps.Rotate(raw, angleInRadians * 180 / Math.PI, resize, o));
         }
 
         /// <summary>
@@ -183,23 +185,23 @@ namespace Aardvark.Base
         /// </summary>
         public static PixImage<T> WarpedAffine<T>(this PixImage<T> image, int width, int height, double[] dstToSrc, WarpOptions? options = null)
         {
-            var raw = PixImageIOProcessor.View(image, out int alpha, out bool premultiplied) ?? throw Unsupported<T>();
-            return PixImageIOProcessor.Back(image, ImageOps.WarpAffine(raw, width, height, dstToSrc, Adjust(options, alpha, premultiplied)));
+            var raw = PixCodecProcessor.View(image, out int alpha, out bool premultiplied) ?? throw Unsupported<T>();
+            return PixCodecProcessor.Back(image, ImageOps.WarpAffine(raw, width, height, dstToSrc, Adjust(options, alpha, premultiplied)));
         }
 
         /// <summary>Perspective warp with a row-major 3x3 homography from destination to source pixel coordinates.</summary>
         public static PixImage<T> WarpedPerspective<T>(this PixImage<T> image, int width, int height, double[] dstToSrc, WarpOptions? options = null)
         {
-            var raw = PixImageIOProcessor.View(image, out int alpha, out bool premultiplied) ?? throw Unsupported<T>();
-            return PixImageIOProcessor.Back(image, ImageOps.WarpPerspective(raw, width, height, dstToSrc, Adjust(options, alpha, premultiplied)));
+            var raw = PixCodecProcessor.View(image, out int alpha, out bool premultiplied) ?? throw Unsupported<T>();
+            return PixCodecProcessor.Back(image, ImageOps.WarpPerspective(raw, width, height, dstToSrc, Adjust(options, alpha, premultiplied)));
         }
 
         /// <summary>Turns an image with EXIF/TIFF orientation 1..8 upright (lossless; 0 or 1 returns the image itself).</summary>
         public static PixImage<T> Oriented<T>(this PixImage<T> image, int orientation)
         {
             if (orientation <= 1) return image;
-            var raw = PixImageIOProcessor.View(image, out _, out _) ?? throw Unsupported<T>();
-            return PixImageIOProcessor.Back(image, ImageOps.ApplyOrientation(raw, orientation));
+            var raw = PixCodecProcessor.View(image, out _, out _) ?? throw Unsupported<T>();
+            return PixCodecProcessor.Back(image, ImageOps.ApplyOrientation(raw, orientation));
         }
 
         static WarpOptions Adjust(WarpOptions? options, int alpha, bool premultiplied)

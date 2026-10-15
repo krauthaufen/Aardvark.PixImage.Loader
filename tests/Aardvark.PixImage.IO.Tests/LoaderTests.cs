@@ -1,13 +1,14 @@
+using Aardvark.Data;
 using Aardvark.Base;
 using Xunit;
 
-namespace PixImageIOTests;
+namespace PixCodecTests;
 
 using PixImage = Aardvark.Base.PixImage;
 
 public class LoaderTests
 {
-    static readonly PixImageIOLoader Loader = PixImageIO.Loader;
+    static readonly PixCodecLoader Loader = PixCodec.Loader;
 
     static PixImage<T> Make<T>(Col.Format format, int w, int h, Func<int, T> value)
     {
@@ -141,8 +142,8 @@ public class LoaderTests
         var path = Path.Combine(Path.GetTempPath(), $"pixcodec-{Guid.NewGuid():N}.tga");
         try
         {
-            PixImageIO.Save(img, path);
-            AssertSame(img, PixImageIO.Load<byte>(path));
+            PixCodec.Save(img, path);
+            AssertSame(img, PixCodec.Load<byte>(path));
         }
         finally { File.Delete(path); }
     }
@@ -173,8 +174,8 @@ public class LoaderTests
     [Fact]
     public void RegisteredLoaderIsUsedByPixImage()
     {
-        PixImageIO.Init();
-        Assert.Contains(PixImage.GetLoaders(), l => l is PixImageIOLoader);
+        PixCodec.Init();
+        Assert.Contains(PixImage.GetLoaders(), l => l is PixCodecLoader);
         var img = Make(Col.Format.RGBA, 12, 10, i => (byte)(i * 3));
         var path = Path.Combine(Path.GetTempPath(), $"pixcodec-{Guid.NewGuid():N}.png");
         try

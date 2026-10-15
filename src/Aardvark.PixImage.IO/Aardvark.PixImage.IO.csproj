@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <ImplicitUsings>disable</ImplicitUsings>
-    <RootNamespace>Aardvark.Base</RootNamespace>
+    <RootNamespace>Aardvark.Data</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Description>Loads and saves Aardvark PixImages, mip maps, cube maps and volumes with the pure managed Aardvark.PixImage.IO.Codecs.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
