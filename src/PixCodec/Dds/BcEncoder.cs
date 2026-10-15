@@ -194,6 +194,8 @@ namespace PixCodec.DdsImpl
         /// <summary>Mean and dominant direction (power iteration on the covariance) of n points of dim channels.</summary>
         internal static void PrincipalAxis(ReadOnlySpan<float> pts, int n, int dim, Span<float> mean, Span<float> axis)
         {
+            if (dim == 3) { PrincipalAxis3(pts, n, mean, axis); return; }
+            if (dim == 4) { PrincipalAxis4(pts, n, mean, axis); return; }
             mean.Clear();
             for (int i = 0; i < n; i++)
                 for (int c = 0; c < dim; c++) mean[c] += pts[i * dim + c];
@@ -235,6 +237,94 @@ namespace PixCodec.DdsImpl
             for (int c = 0; c < dim; c++) len += v[c] * v[c];
             len = len > 0 ? 1 / MathF.Sqrt(len) : 0;
             for (int c = 0; c < dim; c++) axis[c] = v[c] * len;
+        }
+
+        // PrincipalAxis for 3 and 4 channels with the arithmetic in the same order (identical results), on locals
+        static void PrincipalAxis3(ReadOnlySpan<float> pts, int n, Span<float> mean, Span<float> axis)
+        {
+            pts = pts.Slice(0, n * 3);
+            float m0 = 0, m1 = 0, m2 = 0;
+            for (int i = 0; i < pts.Length; i += 3) { m0 += pts[i]; m1 += pts[i + 1]; m2 += pts[i + 2]; }
+            float inv = Math.Max(1, n);
+            m0 /= inv; m1 /= inv; m2 /= inv;
+            mean.Clear();
+            mean[0] = m0; mean[1] = m1; mean[2] = m2;
+            float c00 = 0, c01 = 0, c02 = 0, c11 = 0, c12 = 0, c22 = 0;
+            for (int i = 0; i < pts.Length; i += 3)
+            {
+                float d0 = pts[i] - m0, d1 = pts[i + 1] - m1, d2 = pts[i + 2] - m2;
+                c00 += d0 * d0; c01 += d0 * d1; c02 += d0 * d2;
+                c11 += d1 * d1; c12 += d1 * d2;
+                c22 += d2 * d2;
+            }
+            int start = 0;
+            float diag = c00;
+            if (c11 > diag) { start = 1; diag = c11; }
+            if (c22 > diag) start = 2;
+            float v0, v1, v2;
+            if (start == 0) { v0 = c00; v1 = c01; v2 = c02; }
+            else if (start == 1) { v0 = c01; v1 = c11; v2 = c12; }
+            else { v0 = c02; v1 = c12; v2 = c22; }
+            float len = 0f + v0 * v0 + v1 * v1 + v2 * v2;
+            if (len == 0) { axis.Clear(); axis[0] = 1; return; }
+            for (int it = 0; it < 8; it++)
+            {
+                float w0 = 0f + c00 * v0 + c01 * v1 + c02 * v2;
+                float w1 = 0f + c01 * v0 + c11 * v1 + c12 * v2;
+                float w2 = 0f + c02 * v0 + c12 * v1 + c22 * v2;
+                len = 0f + w0 * w0 + w1 * w1 + w2 * w2;
+                if (len == 0) break;
+                len = 1 / MathF.Sqrt(len);
+                v0 = w0 * len; v1 = w1 * len; v2 = w2 * len;
+            }
+            len = 0f + v0 * v0 + v1 * v1 + v2 * v2;
+            len = len > 0 ? 1 / MathF.Sqrt(len) : 0;
+            axis[0] = v0 * len; axis[1] = v1 * len; axis[2] = v2 * len;
+        }
+
+        static void PrincipalAxis4(ReadOnlySpan<float> pts, int n, Span<float> mean, Span<float> axis)
+        {
+            pts = pts.Slice(0, n * 4);
+            float m0 = 0, m1 = 0, m2 = 0, m3 = 0;
+            for (int i = 0; i < pts.Length; i += 4) { m0 += pts[i]; m1 += pts[i + 1]; m2 += pts[i + 2]; m3 += pts[i + 3]; }
+            float inv = Math.Max(1, n);
+            m0 /= inv; m1 /= inv; m2 /= inv; m3 /= inv;
+            mean[0] = m0; mean[1] = m1; mean[2] = m2; mean[3] = m3;
+            float c00 = 0, c01 = 0, c02 = 0, c03 = 0, c11 = 0, c12 = 0, c13 = 0, c22 = 0, c23 = 0, c33 = 0;
+            for (int i = 0; i < pts.Length; i += 4)
+            {
+                float d0 = pts[i] - m0, d1 = pts[i + 1] - m1, d2 = pts[i + 2] - m2, d3 = pts[i + 3] - m3;
+                c00 += d0 * d0; c01 += d0 * d1; c02 += d0 * d2; c03 += d0 * d3;
+                c11 += d1 * d1; c12 += d1 * d2; c13 += d1 * d3;
+                c22 += d2 * d2; c23 += d2 * d3;
+                c33 += d3 * d3;
+            }
+            int start = 0;
+            float diag = c00;
+            if (c11 > diag) { start = 1; diag = c11; }
+            if (c22 > diag) { start = 2; diag = c22; }
+            if (c33 > diag) start = 3;
+            float v0, v1, v2, v3;
+            if (start == 0) { v0 = c00; v1 = c01; v2 = c02; v3 = c03; }
+            else if (start == 1) { v0 = c01; v1 = c11; v2 = c12; v3 = c13; }
+            else if (start == 2) { v0 = c02; v1 = c12; v2 = c22; v3 = c23; }
+            else { v0 = c03; v1 = c13; v2 = c23; v3 = c33; }
+            float len = 0f + v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3;
+            if (len == 0) { axis.Clear(); axis[0] = 1; return; }
+            for (int it = 0; it < 8; it++)
+            {
+                float w0 = 0f + c00 * v0 + c01 * v1 + c02 * v2 + c03 * v3;
+                float w1 = 0f + c01 * v0 + c11 * v1 + c12 * v2 + c13 * v3;
+                float w2 = 0f + c02 * v0 + c12 * v1 + c22 * v2 + c23 * v3;
+                float w3 = 0f + c03 * v0 + c13 * v1 + c23 * v2 + c33 * v3;
+                len = 0f + w0 * w0 + w1 * w1 + w2 * w2 + w3 * w3;
+                if (len == 0) break;
+                len = 1 / MathF.Sqrt(len);
+                v0 = w0 * len; v1 = w1 * len; v2 = w2 * len; v3 = w3 * len;
+            }
+            len = 0f + v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3;
+            len = len > 0 ? 1 / MathF.Sqrt(len) : 0;
+            axis[0] = v0 * len; axis[1] = v1 * len; axis[2] = v2 * len; axis[3] = v3 * len;
         }
 
         static void Extremes(ReadOnlySpan<float> pts, int n, ReadOnlySpan<float> mean, ReadOnlySpan<float> axis, out (float, float, float) lo, out (float, float, float) hi)
@@ -285,6 +375,7 @@ namespace PixCodec.DdsImpl
         /// </summary>
         internal static bool LeastSquares(ReadOnlySpan<float> pts, ReadOnlySpan<float> w, int n, int dim, Span<float> a, Span<float> b)
         {
+            if (dim == 3) return LeastSquares3(pts, w, n, a, b);
             double aa = 0, bb = 0, ab = 0;
             Span<double> ax = stackalloc double[4], bx = stackalloc double[4];
             ax.Clear(); bx.Clear();
@@ -301,6 +392,29 @@ namespace PixCodec.DdsImpl
                 a[c] = (float)((ax[c] * bb - bx[c] * ab) / det);
                 b[c] = (float)((bx[c] * aa - ax[c] * ab) / det);
             }
+            return true;
+        }
+
+        // LeastSquares for 3 channels, same arithmetic order on locals
+        static bool LeastSquares3(ReadOnlySpan<float> pts, ReadOnlySpan<float> w, int n, Span<float> a, Span<float> b)
+        {
+            double aa = 0, bb = 0, ab = 0, ax0 = 0, ax1 = 0, ax2 = 0, bx0 = 0, bx1 = 0, bx2 = 0;
+            pts = pts.Slice(0, n * 3);
+            w = w.Slice(0, n);
+            for (int i = 0; i < w.Length; i++)
+            {
+                double beta = w[i], alpha = 1 - beta;
+                aa += alpha * alpha; bb += beta * beta; ab += alpha * beta;
+                double p0 = pts[i * 3], p1 = pts[i * 3 + 1], p2 = pts[i * 3 + 2];
+                ax0 += alpha * p0; bx0 += beta * p0;
+                ax1 += alpha * p1; bx1 += beta * p1;
+                ax2 += alpha * p2; bx2 += beta * p2;
+            }
+            double det = aa * bb - ab * ab;
+            if (Math.Abs(det) < 1e-9) return false;
+            a[0] = (float)((ax0 * bb - bx0 * ab) / det); b[0] = (float)((bx0 * aa - ax0 * ab) / det);
+            a[1] = (float)((ax1 * bb - bx1 * ab) / det); b[1] = (float)((bx1 * aa - ax1 * ab) / det);
+            a[2] = (float)((ax2 * bb - bx2 * ab) / det); b[2] = (float)((bx2 * aa - ax2 * ab) / det);
             return true;
         }
 
