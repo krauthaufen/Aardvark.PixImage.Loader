@@ -262,7 +262,7 @@ public class KtxTests
     // ------------------------------------------------------------------ helpers
 
     /// <summary>Runs `ktx validate` (KTX-Software, $PIXCODEC_KTX or on the PATH) when it is available.</summary>
-    static void Validate(byte[] ktx2)
+    internal static void Validate(byte[] ktx2)
     {
         var tool = Environment.GetEnvironmentVariable("PIXCODEC_KTX") ?? (MiscFormatTests.ToolAvailable("ktx") ? "ktx" : null);
         if (tool == null) return;

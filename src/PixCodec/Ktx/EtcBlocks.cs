@@ -27,7 +27,7 @@ namespace PixCodec
         static readonly int[] Distance = { 3, 6, 11, 16, 23, 32, 41, 64 };
 
         // Table 133: intensity modifier sets for the EAC alpha / R11 component, 8 per table index
-        static readonly sbyte[] EacMod =
+        internal static readonly sbyte[] EacMod =
         {
             -3, -6, -9, -15, 2, 5, 8, 14,
             -3, -7, -10, -13, 2, 6, 9, 12,

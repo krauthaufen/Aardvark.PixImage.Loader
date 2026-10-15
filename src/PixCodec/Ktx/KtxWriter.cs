@@ -44,7 +44,11 @@ namespace PixCodec.KtxImpl
             public bool Signed;
             public bool Srgb;
             public string? Swizzle;
-            public KtxFormat Format = null!;
+            public bool Alpha;                 // Basis Universal: RGBA (UASTC) / an alpha slice (ETC1S)
+            public KtxFormat? Format;          // null for the Basis Universal formats
+
+            public bool IsBasis => Bc is TextureCompression.Etc1s or TextureCompression.Uastc;
+            public int BlockBytes => Format?.BlockBytes ?? (Bc == TextureCompression.Etc1s ? 8 : 16);
         }
 
         static Target Choose(RawImage img, KtxEncodeOptions opt)
@@ -53,6 +57,13 @@ namespace PixCodec.KtxImpl
             bool srgb = ResolveSrgb(img, opt);
             var t = new Target { Bc = opt.Compression };
             bool signedInt = img.SampleType is SampleType.Int8 or SampleType.Int16 or SampleType.Int32 or SampleType.Int64;
+            if (t.IsBasis)
+            {
+                // vkFormat UNDEFINED; the data format descriptor tells ETC1S / UASTC, colour space and alpha
+                t.Srgb = srgb;
+                t.Alpha = img.HasAlpha;
+                return t;
+            }
             if (opt.Compression != TextureCompression.None)
             {
                 bool colour = opt.Compression is TextureCompression.BC1 or TextureCompression.BC2 or TextureCompression.BC3 or TextureCompression.BC7;
@@ -114,6 +125,8 @@ namespace PixCodec.KtxImpl
         /// <summary>The stored bytes of one image.</summary>
         static byte[] Image(RawImage img, Target t, KtxEncodeOptions opt)
         {
+            if (t.Bc == TextureCompression.Uastc)
+                return UastcEncoder.EncodeImage(ToRgba8(img), img.Width, img.Height, Effort(opt.Quality), opt.MaxDegreeOfParallelism);
             if (t.Bc != TextureCompression.None)
                 return DdsWriter.CompressSurface(img, ToDds(t.Bc), t.Signed, new DdsEncodeOptions { Quality = opt.Quality, MaxDegreeOfParallelism = opt.MaxDegreeOfParallelism });
             if (t.Channels == img.Channels) return img.GetBytes().ToArray();
@@ -123,6 +136,38 @@ namespace PixCodec.KtxImpl
             var o = new byte[n * 4];
             for (int i = 0; i < n; i++) { o[i * 4] = o[i * 4 + 1] = o[i * 4 + 2] = s[i * 2]; o[i * 4 + 3] = s[i * 2 + 1]; }
             return o;
+        }
+
+        static int Effort(BcQuality q) => q switch { BcQuality.Fast => 0, BcQuality.Normal => 1, _ => 2 };
+
+        /// <summary>Any image as tightly packed RGBA8 (gray replicated, integers and floats scaled to 8 bits, opaque without alpha).</summary>
+        internal static byte[] ToRgba8(RawImage img)
+        {
+            if (img.SampleType == SampleType.UInt8 && img.Color == ColorModel.Rgba && img.Channels == 4) return (byte[])((byte[])img.Data).Clone();
+            int n = img.Width * img.Height, ch = img.Channels;
+            bool gray = img.Color is ColorModel.Gray or ColorModel.GrayAlpha, alpha = img.HasAlpha;
+            var o = new byte[(long)n * 4];
+            for (int i = 0; i < n; i++)
+            {
+                long p = (long)i * ch;
+                for (int c = 0; c < 3; c++) o[i * 4 + c] = DdsWriter.ToUnorm8(img, p + (gray ? 0 : Math.Min(c, ch - 1)));
+                o[i * 4 + 3] = alpha ? DdsWriter.ToUnorm8(img, p + ch - 1) : (byte)255;
+            }
+            return o;
+        }
+
+        /// <summary>ETC1S: every image (descriptor order: level, layer, face, slice) encoded together with one BasisLZ codebook.</summary>
+        static (byte[] sgd, byte[][] levels) Etc1s(List<RawImage> images, List<int> levelOf, int levelCount, Target t, KtxEncodeOptions opt)
+        {
+            var src = new Etc1sEncoder.Image[images.Count];
+            for (int i = 0; i < src.Length; i++)
+                src[i] = new Etc1sEncoder.Image(ToRgba8(images[i]), images[i].Width, images[i].Height, levelOf[i]);
+            var p = new Etc1sEncoder.Params
+            {
+                Quality = Math.Clamp(opt.Etc1sQuality, 1, 255), MaxEndpoints = opt.Etc1sMaxEndpoints, MaxSelectors = opt.Etc1sMaxSelectors,
+                Effort = Effort(opt.Quality), MaxDegreeOfParallelism = opt.MaxDegreeOfParallelism,
+            };
+            return Etc1sEncoder.Encode(src, levelCount, t.Alpha, p);
         }
 
         public static void Write(Stream output, IReadOnlyList<IReadOnlyList<IReadOnlyList<RawImage>>> layers, KtxTextureKind kind, bool isArray, KtxEncodeOptions opt)
@@ -149,6 +194,17 @@ namespace PixCodec.KtxImpl
                 }
             }
             var t = Choose(first, opt);
+            if (t.Bc == TextureCompression.Etc1s)
+            {
+                var all = new List<RawImage>();
+                var lof = new List<int>();
+                for (int m = 0; m < mips; m++)
+                    foreach (var layer in layers)
+                        foreach (var chain in layer) { all.Add(chain[m]); lof.Add(m); }
+                var (sgd, lv) = Etc1s(all, lof, mips, t, opt);
+                Emit(output, t, w, h, 0, isArray ? layers.Count : 0, faces, lv, kind, opt, sgd);
+                return;
+            }
             var levels = new byte[mips][];
             for (int m = 0; m < mips; m++)
             {
@@ -187,6 +243,15 @@ namespace PixCodec.KtxImpl
                 }
             }
             var t = Choose(first, opt);
+            if (t.Bc == TextureCompression.Etc1s)
+            {
+                var all = new List<RawImage>();
+                var lof = new List<int>();
+                for (int m = 0; m < chain.Count; m++) foreach (var s in chain[m]) { all.Add(s); lof.Add(m); }
+                var (sgd, lv) = Etc1s(all, lof, chain.Count, t, opt);
+                Emit(output, t, first.Width, first.Height, slices.Count, 0, 1, lv, KtxTextureKind.Texture3D, opt, sgd);
+                return;
+            }
             var levels = new byte[chain.Count][];
             for (int m = 0; m < chain.Count; m++)
             {
@@ -226,21 +291,23 @@ namespace PixCodec.KtxImpl
             return r;
         }
 
-        static void Emit(Stream output, Target t, int w, int h, int depth, int layers, int faces, byte[][] levels, KtxTextureKind kind, KtxEncodeOptions opt)
+        static void Emit(Stream output, Target t, int w, int h, int depth, int layers, int faces, byte[][] levels, KtxTextureKind kind, KtxEncodeOptions opt, byte[]? sgd = null)
         {
             int levelCount = levels.Length;
             var scheme = opt.Supercompression;
-            if (scheme is not (KtxSupercompression.None or KtxSupercompression.Zstd or KtxSupercompression.Zlib))
-                throw new ArgumentException("KTX: only Zstd, Zlib or no supercompression can be written");
+            if (t.Bc == TextureCompression.Etc1s) scheme = KtxSupercompression.BasisLZ;
+            else if (scheme is not (KtxSupercompression.None or KtxSupercompression.Zstd or KtxSupercompression.Zlib))
+                throw new ArgumentException("KTX: only Zstd, Zlib or no supercompression can be written (BasisLZ goes with ETC1S)");
             var stored = new byte[levelCount][];
             for (int m = 0; m < levelCount; m++)
                 stored[m] = scheme switch
                 {
                     KtxSupercompression.Zstd => Zstd.Compress(levels[m], Math.Clamp(opt.ZstdLevel, 1, 22)),
                     KtxSupercompression.Zlib => Zlib.Compress(levels[m], 9),
+                    KtxSupercompression.BasisLZ => levels[m],
                     _ => levels[m],
                 };
-            var dfd = Dfd(t);
+            var dfd = t.IsBasis ? BasisDfd(t) : Dfd(t);
             var kv = new SortedDictionary<string, byte[]>(StringComparer.Ordinal);
             if (opt.KeyValues != null) foreach (var p in opt.KeyValues) kv[p.Key] = p.Value;
             kv["KTXwriter"] = Str("PixCodec");
@@ -261,8 +328,10 @@ namespace PixCodec.KtxImpl
             int indexEnd = 80 + 24 * levelCount;
             int dfdOff = indexEnd, kvdOff = dfdOff + dfd.Length;
             long pos = kvdOff + kvBytes.Length;
+            long sgdOff = 0;
+            if (sgd != null) { sgdOff = (pos + 7) & ~7L; pos = sgdOff + sgd.Length; }
             // level data: smallest level first, aligned to lcm(texel block size, 4) unless supercompressed
-            int align = scheme != KtxSupercompression.None ? 1 : Lcm(t.Format.BlockBytes, 4);
+            int align = scheme != KtxSupercompression.None ? 1 : Lcm(t.BlockBytes, 4);
             var offsets = new long[levelCount];
             for (int m = levelCount - 1; m >= 0; m--)
             {
@@ -274,7 +343,7 @@ namespace PixCodec.KtxImpl
             var s = head.AsSpan();
             new byte[] { 0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A }.CopyTo(s);
             BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(12), (uint)t.Vk);
-            BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(16), (uint)(t.Format.IsBlockCompressed ? 1 : TypeSize(t.Format)));
+            BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(16), (uint)(t.Format == null || t.Format.IsBlockCompressed ? 1 : TypeSize(t.Format)));
             BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(20), (uint)w);
             BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(24), (uint)(kind == KtxTextureKind.Texture1D ? 0 : h));
             BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(28), (uint)depth);
@@ -286,16 +355,27 @@ namespace PixCodec.KtxImpl
             BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(52), (uint)dfd.Length);
             BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(56), (uint)kvdOff);
             BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(60), (uint)kvBytes.Length);
+            if (sgd != null)
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(s.Slice(64), (ulong)sgdOff);
+                BinaryPrimitives.WriteUInt64LittleEndian(s.Slice(72), (ulong)sgd.Length);
+            }
             for (int m = 0; m < levelCount; m++)
             {
                 BinaryPrimitives.WriteUInt64LittleEndian(s.Slice(80 + 24 * m), (ulong)offsets[m]);
                 BinaryPrimitives.WriteUInt64LittleEndian(s.Slice(88 + 24 * m), (ulong)stored[m].Length);
-                BinaryPrimitives.WriteUInt64LittleEndian(s.Slice(96 + 24 * m), (ulong)levels[m].Length);
+                BinaryPrimitives.WriteUInt64LittleEndian(s.Slice(96 + 24 * m), scheme == KtxSupercompression.BasisLZ ? 0UL : (ulong)levels[m].Length);
             }
             output.Write(head);
             output.Write(dfd);
             output.Write(kvBytes);
             long written = kvdOff + kvBytes.Length;
+            if (sgd != null)
+            {
+                while (written < sgdOff) { output.WriteByte(0); written++; }
+                output.Write(sgd);
+                written += sgd.Length;
+            }
             for (int m = levelCount - 1; m >= 0; m--)
             {
                 while (written < offsets[m]) { output.WriteByte(0); written++; }
@@ -322,7 +402,7 @@ namespace PixCodec.KtxImpl
 
         static byte[] Dfd(Target t)
         {
-            var f = t.Format;
+            var f = t.Format!;
             var samples = new List<Sample>();
             byte model;
             byte[] dims = { 0, 0, 0, 0 };
@@ -425,6 +505,42 @@ namespace PixCodec.KtxImpl
                 BinaryPrimitives.WriteUInt32LittleEndian(o, (uint)(smp.Offset | (smp.Length - 1) << 16 | (smp.Channel | smp.Qualifiers) << 24));
                 // sample position 0, 0, 0, 0
                 BinaryPrimitives.WriteUInt32LittleEndian(o.Slice(8), smp.Lower);
+                BinaryPrimitives.WriteUInt32LittleEndian(o.Slice(12), smp.Upper);
+            }
+            return d;
+        }
+
+        /// <summary>
+        /// The descriptor of the Basis Universal formats (KTX 2.0 DFD rules for ETC1S / UASTC): ETC1S, model 163, an RGB
+        /// sample at bits 0..63 and, with alpha, an AAA sample at 64..127 (bytesPlane0 / 1 = 8); UASTC, model 166, one
+        /// 128 bit RGB or RGBA sample. 4x4 blocks.
+        /// </summary>
+        static byte[] BasisDfd(Target t)
+        {
+            bool etc1s = t.Bc == TextureCompression.Etc1s;
+            var samples = new List<Sample>();
+            if (etc1s)
+            {
+                samples.Add(new Sample { Offset = 0, Length = 64, Channel = 0, Upper = uint.MaxValue });
+                if (t.Alpha) samples.Add(new Sample { Offset = 64, Length = 64, Channel = 15, Upper = uint.MaxValue });
+            }
+            else samples.Add(new Sample { Offset = 0, Length = 128, Channel = t.Alpha ? 3 : 0, Upper = uint.MaxValue });
+            int blockSize = 24 + 16 * samples.Count;
+            var d = new byte[4 + blockSize];
+            var s = d.AsSpan();
+            BinaryPrimitives.WriteUInt32LittleEndian(s, (uint)d.Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(8), 2u | (uint)blockSize << 16);
+            d[12] = (byte)(etc1s ? 163 : 166);
+            d[13] = 1;
+            d[14] = (byte)(t.Srgb ? 2 : 1);
+            d[16] = 3; d[17] = 3;
+            if (etc1s) { d[20] = 8; d[21] = (byte)(t.Alpha ? 8 : 0); }
+            else d[20] = 16;
+            for (int i = 0; i < samples.Count; i++)
+            {
+                var o = s.Slice(28 + 16 * i);
+                var smp = samples[i];
+                BinaryPrimitives.WriteUInt32LittleEndian(o, (uint)(smp.Offset | (smp.Length - 1) << 16 | smp.Channel << 24));
                 BinaryPrimitives.WriteUInt32LittleEndian(o.Slice(12), smp.Upper);
             }
             return d;
