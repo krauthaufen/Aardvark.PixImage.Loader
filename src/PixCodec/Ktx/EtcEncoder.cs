@@ -62,7 +62,8 @@ namespace PixCodec
             -3, -5, -7, -9, 2, 4, 6, 8,
         };
 
-        static int Clamp255(int v) => v < 0 ? 0 : v > 255 ? 255 : v;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int Clamp255(int v) => (uint)v <= 255 ? v : v < 0 ? 0 : 255;
         static int Ext4(int v) => v * 17;
         static int Ext5(int v) => v << 3 | v >> 2;
         static int Ext6(int v) => v << 2 | v >> 4;

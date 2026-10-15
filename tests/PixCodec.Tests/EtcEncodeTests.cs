@@ -541,7 +541,7 @@ public class EtcEncodeTests
             var blk = new byte[64]; var u = new ushort[32]; var s = new short[32];
             long blocks = 0;
             var cpu0 = Process.GetCurrentProcess().TotalProcessorTime;
-            for (int rep = 0; rep < 20; rep++)
+            for (int rep = 0; rep < 200; rep++)
                 for (int k = 0; k < nb; k++, blocks++)
                 {
                     var b = data.AsSpan(k * bpb, bpb);
