@@ -63,12 +63,12 @@ namespace PixCodec
 
         // All ranges used by ASTC, ascending: maximum value, trits / quints, and the number of plain bits.
         // Indices 0..11 are the weight ranges in the order of Table 146 ((rho - 2) + 6 * P); 4..20 the colour ranges.
-        static readonly byte[] QMax = { 1, 2, 3, 4, 5, 7, 9, 11, 15, 19, 23, 31, 39, 47, 63, 79, 95, 127, 159, 191, 255 };
-        static readonly byte[] QKind = { 0, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0 };   // 1 trit, 2 quint
-        static readonly byte[] QBits = { 1, 0, 2, 0, 1, 3, 1, 2, 4, 2, 3, 5, 3, 4, 6, 4, 5, 7, 5, 6, 8 };
+        internal static readonly byte[] QMax = { 1, 2, 3, 4, 5, 7, 9, 11, 15, 19, 23, 31, 39, 47, 63, 79, 95, 127, 159, 191, 255 };
+        internal static readonly byte[] QKind = { 0, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0 };   // 1 trit, 2 quint
+        internal static readonly byte[] QBits = { 1, 0, 2, 0, 1, 3, 1, 2, 4, 2, 3, 5, 3, 4, 6, 4, 5, 7, 5, 6, 8 };
 
         /// <summary>Bits taken by an integer sequence of <paramref name="count"/> values in range <paramref name="q"/>.</summary>
-        static int IseBits(int q, int count)
+        internal static int IseBits(int q, int count)
         {
             int n = QBits[q] * count;
             return QKind[q] switch { 1 => n + (8 * count + 4) / 5, 2 => n + (7 * count + 2) / 3, _ => n };
@@ -85,7 +85,7 @@ namespace PixCodec
             return (int)(v & ((1UL << k) - 1));
         }
 
-        static ulong Reverse(ulong v)
+        internal static ulong Reverse(ulong v)
         {
             v = (v >> 1) & 0x5555555555555555UL | (v & 0x5555555555555555UL) << 1;
             v = (v >> 2) & 0x3333333333333333UL | (v & 0x3333333333333333UL) << 2;
@@ -142,7 +142,7 @@ namespace PixCodec
 
         static int Bit(int v, int i) => v >> i & 1;
 
-        static void Trits(int T, Span<int> t)
+        internal static void Trits(int T, Span<int> t)
         {
             int C;
             if ((T >> 2 & 7) == 7)
@@ -161,7 +161,7 @@ namespace PixCodec
             else { t[2] = Bit(C, 4); t[1] = C >> 2 & 3; t[0] = Bit(C, 1) << 1 | Bit(C, 0) & ~Bit(C, 1) & 1; }
         }
 
-        static void Quints(int Q, Span<int> q)
+        internal static void Quints(int Q, Span<int> q)
         {
             if ((Q >> 1 & 3) == 3 && (Q >> 5 & 3) == 0)
             {
@@ -190,7 +190,7 @@ namespace PixCodec
             return r;
         }
 
-        static int UnquantColor(int q, int v)
+        internal static int UnquantColor(int q, int v)
         {
             int n = QBits[q];
             if (QKind[q] == 0) return Replicate(v, n, 8);
@@ -216,7 +216,7 @@ namespace PixCodec
             return (A & 0x80) | (u >> 2);
         }
 
-        static int UnquantWeight(int q, int v)
+        internal static int UnquantWeight(int q, int v)
         {
             int n = QBits[q], u;
             if (QKind[q] == 0) u = Replicate(v, n, 6);
@@ -243,7 +243,7 @@ namespace PixCodec
         // ------------------------------------------------------------------ block mode (23.10)
 
         /// <summary>Weight grid size, weight range index and dual plane flag; false for reserved modes.</summary>
-        static bool BlockMode(int m, bool is3D, out int gw, out int gh, out int gd, out int wq, out bool dual)
+        internal static bool BlockMode(int m, bool is3D, out int gw, out int gh, out int gd, out int wq, out bool dual)
         {
             gw = gh = gd = 1; wq = 0; dual = false;
             int rho, p = Bit(m, 9);
@@ -325,7 +325,7 @@ namespace PixCodec
             return p;
         }
 
-        static int SelectPartition(int seed, int x, int y, int z, int count, bool small)
+        internal static int SelectPartition(int seed, int x, int y, int z, int count, bool small)
         {
             if (small) { x <<= 1; y <<= 1; z <<= 1; }
             seed += (count - 1) * 1024;
@@ -357,7 +357,7 @@ namespace PixCodec
         // ------------------------------------------------------------------ endpoints (23.14, 23.15)
 
         // per partition: e0 (r, g, b, a), e1 (r, g, b, a); flags bit 0: RGB is HDR (12 bit), bit 1: alpha is HDR
-        const int HdrRgb = 1, HdrA = 2;
+        internal const int HdrRgb = 1, HdrA = 2;
 
         static void BitTransferSigned(ref int a, ref int b)
         {
@@ -376,7 +376,7 @@ namespace PixCodec
 
         /// <summary>Decodes the endpoint pair of colour endpoint mode <paramref name="cem"/> from values v into e (8 ints);
         /// returns the HDR flags.</summary>
-        static int Endpoints(int cem, ReadOnlySpan<int> v, Span<int> e)
+        internal static int Endpoints(int cem, ReadOnlySpan<int> v, Span<int> e)
         {
             Span<int> e0 = e.Slice(0, 4), e1 = e.Slice(4, 4);
             switch (cem)
@@ -571,7 +571,7 @@ namespace PixCodec
         // ------------------------------------------------------------------ output conversions (23.19)
 
         /// <summary>A UNORM16 interpolation result to half float, rounding toward zero (65535 is exactly 1.0).</summary>
-        static ushort Unorm16ToHalf(int c)
+        internal static ushort Unorm16ToHalf(int c)
         {
             if (c == 65535) return HalfOne;
             if (c < 4) return (ushort)(c << 8);   // subnormal: c / 65536 = (c * 256) * 2^-24
@@ -581,10 +581,10 @@ namespace PixCodec
         }
 
         /// <summary>Half float in 0..1 to 8 bits, rounded to nearest (255 x is never halfway for a binary16 x).</summary>
-        static byte HalfToUnorm8(ushort h) => (byte)Math.Round((double)BitConverter.UInt16BitsToHalf(h) * 255);
+        internal static byte HalfToUnorm8(ushort h) => (byte)Math.Round((double)BitConverter.UInt16BitsToHalf(h) * 255);
 
         /// <summary>An interpolated HDR value (16 bit, from 12 bit endpoints shifted up by 4) to half float.</summary>
-        static ushort HdrToHalf(int c)
+        internal static ushort HdrToHalf(int c)
         {
             int e = c >> 11, m = c & 0x7FF;
             int mt = m < 512 ? 3 * m : m >= 1536 ? 5 * m - 2048 : 4 * m - 512;
