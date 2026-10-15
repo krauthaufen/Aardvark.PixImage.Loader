@@ -363,7 +363,7 @@ public class MiscFormatTests
         if (stdin != null) { p.StandardInput.BaseStream.Write(stdin); p.StandardInput.Close(); }
         copy.Wait();
         p.WaitForExit();
-        if (p.ExitCode != 0) throw new InvalidOperationException($"{exe} failed: {err.Result}");
+        if (p.ExitCode != 0) throw new InvalidOperationException($"{exe} failed: {err.Result} {System.Text.Encoding.UTF8.GetString(ms.ToArray())}");
         return ms.ToArray();
     }
 }

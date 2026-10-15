@@ -64,6 +64,38 @@ namespace PixCodec.KtxImpl
                 t.Alpha = img.HasAlpha;
                 return t;
             }
+            if (opt.Compression == TextureCompression.Astc)
+            {
+                int bw = opt.AstcBlockWidth, bh = opt.AstcBlockHeight;
+                int idx = Array.IndexOf(AstcFootprints, (bw, bh));
+                if (idx < 0) throw new ArgumentException($"KTX: {bw}x{bh} is not an ASTC footprint");
+                bool hdr = img.SampleType is SampleType.Float16 or SampleType.Float32 or SampleType.Float64;
+                t.Srgb = srgb && !hdr;
+                t.Vk = hdr ? 1000066000 + idx : 157 + 2 * idx + (t.Srgb ? 1 : 0);
+                if (img.Color == ColorModel.Gray) t.Swizzle = "rrr1";
+                else if (img.Color == ColorModel.GrayAlpha) t.Swizzle = "rrrg";
+                t.Format = KtxFormats.FromVk(t.Vk)!;
+                return t;
+            }
+            if (opt.Compression == TextureCompression.Etc2)
+            {
+                t.Srgb = srgb;
+                bool punch = img.HasAlpha && OnlyBinaryAlpha(img);
+                t.Vk = !img.HasAlpha ? (t.Srgb ? 148 : 147) : punch ? (t.Srgb ? 150 : 149) : (t.Srgb ? 152 : 151);
+                if (img.Color == ColorModel.Gray) t.Swizzle = "rrr1";
+                t.Format = KtxFormats.FromVk(t.Vk)!;
+                return t;
+            }
+            if (opt.Compression == TextureCompression.Eac)
+            {
+                t.Signed = signedInt;
+                bool two = img.Channels >= 2 && img.Color is not (ColorModel.Rgb or ColorModel.Rgba);
+                t.Vk = two ? (signedInt ? 156 : 155) : (signedInt ? 154 : 153);
+                if (img.Color == ColorModel.Gray) t.Swizzle = "rrr1";
+                else if (img.Color == ColorModel.GrayAlpha) t.Swizzle = "rrrg";
+                t.Format = KtxFormats.FromVk(t.Vk)!;
+                return t;
+            }
             if (opt.Compression != TextureCompression.None)
             {
                 bool colour = opt.Compression is TextureCompression.BC1 or TextureCompression.BC2 or TextureCompression.BC3 or TextureCompression.BC7;
@@ -110,6 +142,112 @@ namespace PixCodec.KtxImpl
             return t;
         }
 
+        static readonly (int, int)[] AstcFootprints =
+        {
+            (4, 4), (5, 4), (5, 5), (6, 5), (6, 6), (8, 5), (8, 6), (8, 8), (10, 5), (10, 6), (10, 8), (10, 10), (12, 10), (12, 12),
+        };
+
+        static bool OnlyBinaryAlpha(RawImage img)
+        {
+            int ch = img.Channels;
+            long n = (long)img.Width * img.Height;
+            for (long i = 0; i < n; i++)
+            {
+                var a = DdsWriter.ToUnorm8(img, i * ch + ch - 1);
+                if (a != 0 && a != 255) return false;
+            }
+            return true;
+        }
+
+        /// <summary>ASTC: the whole image in blocks, LDR from 8 bit RGBA or HDR from half floats.</summary>
+        static byte[] Astc(RawImage img, Target t, KtxEncodeOptions opt)
+        {
+            var f = t.Format!;
+            if (f.Hdr)
+            {
+                int n = img.Width * img.Height, ch = img.Channels;
+                bool gray = img.Color is ColorModel.Gray or ColorModel.GrayAlpha, alpha = img.HasAlpha;
+                var h = new ushort[(long)n * 4];
+                for (int i = 0; i < n; i++)
+                {
+                    long p = (long)i * ch;
+                    for (int c = 0; c < 3; c++) h[i * 4 + c] = BitConverter.HalfToUInt16Bits((Half)SampleValue(img, p + (gray ? 0 : Math.Min(c, ch - 1))));
+                    h[i * 4 + 3] = BitConverter.HalfToUInt16Bits(alpha ? (Half)SampleValue(img, p + ch - 1) : (Half)1);
+                }
+                return AstcEncoder.EncodeImageFloat16(h, img.Width, img.Height, f.BlockW, f.BlockH, opt.Quality);
+            }
+            return AstcEncoder.EncodeImageUnorm8(ToRgba8(img), img.Width, img.Height, f.BlockW, f.BlockH, t.Srgb, opt.Quality);
+        }
+
+        /// <summary>ETC2 colour from 8 bit RGBA, EAC from samples normalised to [0, 1] ([-1, 1] signed).</summary>
+        static byte[] Etc(RawImage img, Target t, KtxEncodeOptions opt)
+        {
+            var f = t.Format!;
+            int w = img.Width, h = img.Height, bw = (w + 3) / 4, bh = (h + 3) / 4, bb = f.BlockBytes, ch = img.Channels;
+            var o = new byte[(long)bw * bh * bb];
+            byte[]? rgba = t.Bc == TextureCompression.Etc2 ? ToRgba8(img) : null;
+            int kind = f.Name switch
+            {
+                _ when f.Name.StartsWith("ETC2_R8G8B8_") => 0,
+                _ when f.Name.StartsWith("ETC2_R8G8B8A1_") => 1,
+                _ when f.Name.StartsWith("ETC2_R8G8B8A8_") => 2,
+                _ when f.Name.StartsWith("EAC_R11G11_") => 4,
+                _ => 3,
+            };
+            var q = opt.Quality;
+            bool perceptual = t.Srgb;
+            var par = new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = opt.MaxDegreeOfParallelism > 0 ? opt.MaxDegreeOfParallelism : -1 };
+            System.Threading.Tasks.Parallel.For(0, bh, par, by =>
+            {
+                Span<byte> block = stackalloc byte[64];
+                Span<float> v = stackalloc float[32];
+                for (int bx = 0; bx < bw; bx++)
+                {
+                    var dst = o.AsSpan((by * bw + bx) * bb, bb);
+                    for (int k = 0; k < 16; k++)
+                    {
+                        // texel k, edge pixels repeated beyond the image
+                        long px = (long)Math.Min(by * 4 + k / 4, h - 1) * w + Math.Min(bx * 4 + k % 4, w - 1);
+                        if (rgba != null) rgba.AsSpan((int)(px * 4), 4).CopyTo(block.Slice(k * 4));
+                        else
+                        {
+                            v[k * 2] = Norm(img, px * ch, t.Signed);
+                            if (kind == 4) v[k * 2 + 1] = Norm(img, px * ch + Math.Min(1, ch - 1), t.Signed);
+                        }
+                    }
+                    switch (kind)
+                    {
+                        case 0: EtcEncoder.Etc2Rgb(block, dst, q, perceptual); break;
+                        case 1: EtcEncoder.Etc2PunchThrough(block, dst, q, perceptual); break;
+                        case 2: EtcEncoder.Etc2Rgba(block, dst, q, perceptual); break;
+                        case 3: EtcEncoder.EacR11(v, 2, t.Signed, dst, q); break;
+                        default: EtcEncoder.EacRg11(v, t.Signed, dst, q); break;
+                    }
+                }
+            });
+            return o;
+        }
+
+        /// <summary>Sample i as [0, 1] (or [-1, 1] for signed integers and <paramref name="signed"/> output), floats as they are.</summary>
+        static float Norm(RawImage img, long i, bool signed) => img.SampleType switch
+        {
+            SampleType.UInt8 => ((byte[])img.Data)[i] / 255f,
+            SampleType.UInt16 => ((ushort[])img.Data)[i] / 65535f,
+            SampleType.UInt32 => (float)(((uint[])img.Data)[i] / (double)uint.MaxValue),
+            SampleType.Int8 => Math.Max(-1f, ((sbyte[])img.Data)[i] / 127f),
+            SampleType.Int16 => Math.Max(-1f, ((short[])img.Data)[i] / 32767f),
+            SampleType.Int32 => (float)Math.Max(-1, ((int[])img.Data)[i] / (double)int.MaxValue),
+            _ => SampleValue(img, i),
+        };
+
+        static float SampleValue(RawImage img, long i) => img.SampleType switch
+        {
+            SampleType.Float16 => (float)((Half[])img.Data)[i],
+            SampleType.Float32 => ((float[])img.Data)[i],
+            SampleType.Float64 => (float)((double[])img.Data)[i],
+            _ => DdsWriter.ToUnorm8(img, i) / 255f,
+        };
+
         static DdsCompression ToDds(TextureCompression c) => c switch
         {
             TextureCompression.BC1 => DdsCompression.BC1,
@@ -127,6 +265,8 @@ namespace PixCodec.KtxImpl
         {
             if (t.Bc == TextureCompression.Uastc)
                 return UastcEncoder.EncodeImage(ToRgba8(img), img.Width, img.Height, Effort(opt.Quality), opt.MaxDegreeOfParallelism);
+            if (t.Bc == TextureCompression.Astc) return Astc(img, t, opt);
+            if (t.Bc is TextureCompression.Etc2 or TextureCompression.Eac) return Etc(img, t, opt);
             if (t.Bc != TextureCompression.None)
                 return DdsWriter.CompressSurface(img, ToDds(t.Bc), t.Signed, new DdsEncodeOptions { Quality = opt.Quality, MaxDegreeOfParallelism = opt.MaxDegreeOfParallelism });
             if (t.Channels == img.Channels) return img.GetBytes().ToArray();
@@ -409,10 +549,35 @@ namespace PixCodec.KtxImpl
             int bytesPlane0;
             if (f.IsBlockCompressed)
             {
-                dims[0] = 3; dims[1] = 3;
+                dims[0] = (byte)(f.BlockW - 1); dims[1] = (byte)(f.BlockH - 1);
                 bytesPlane0 = f.BlockBytes;
                 switch (t.Bc)
                 {
+                    case TextureCompression.Astc:
+                        model = 162;
+                        samples.Add(f.Hdr
+                            ? new Sample { Length = 128, Channel = 0, Qualifiers = QFloat | QSigned, Lower = 0xBF800000, Upper = 0x3F800000 }
+                            : new Sample { Length = 128, Channel = 0, Upper = uint.MaxValue });
+                        break;
+                    case TextureCompression.Etc2:
+                        model = 161;
+                        if (f.Name.StartsWith("ETC2_R8G8B8A8_"))
+                        {
+                            samples.Add(new Sample { Offset = 0, Length = 64, Channel = 15, Qualifiers = t.Srgb ? QLinear : (byte)0, Upper = uint.MaxValue });
+                            samples.Add(new Sample { Offset = 64, Length = 64, Channel = 2, Upper = uint.MaxValue });
+                        }
+                        else
+                        {
+                            samples.Add(new Sample { Offset = 0, Length = 64, Channel = 2, Upper = uint.MaxValue });
+                            if (f.Name.StartsWith("ETC2_R8G8B8A1_"))
+                                samples.Add(new Sample { Offset = 0, Length = 64, Channel = 15, Qualifiers = t.Srgb ? QLinear : (byte)0, Upper = uint.MaxValue });
+                        }
+                        break;
+                    case TextureCompression.Eac:
+                        model = 161;
+                        samples.Add(EacSample(0, 0, t.Signed));
+                        if (f.Channels == 2) samples.Add(EacSample(64, 1, t.Signed));
+                        break;
                     case TextureCompression.BC1:
                         model = 128;
                         samples.Add(new Sample { Offset = 0, Length = 64, Channel = f.Color == ColorModel.Rgba ? 1 : 0, Upper = uint.MaxValue });
@@ -545,6 +710,10 @@ namespace PixCodec.KtxImpl
             }
             return d;
         }
+
+        static Sample EacSample(int offset, int channel, bool signed)
+            => signed ? new Sample { Offset = offset, Length = 64, Channel = channel, Qualifiers = QSigned, Lower = 0x80000000, Upper = 0x7FFFFFFF }
+                      : new Sample { Offset = offset, Length = 64, Channel = channel, Upper = uint.MaxValue };
 
         static Sample Bc45Sample(int channel, bool signed)
             => signed ? new Sample { Length = 64, Channel = channel, Qualifiers = QSigned, Lower = 0x80000000, Upper = 0x7FFFFFFF }

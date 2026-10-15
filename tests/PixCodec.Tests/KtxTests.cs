@@ -277,6 +277,73 @@ public class KtxTests
         return head.Concat(dfd).Concat(blocks).ToArray();
     }
 
+    public static IEnumerable<object[]> MobileCases()
+    {
+        yield return new object[] { TextureCompression.Etc2, ColorModel.Rgb, SampleType.UInt8, 4, 4 };
+        yield return new object[] { TextureCompression.Etc2, ColorModel.Rgba, SampleType.UInt8, 4, 4 };
+        yield return new object[] { TextureCompression.Etc2, ColorModel.Gray, SampleType.UInt8, 4, 4 };
+        yield return new object[] { TextureCompression.Eac, ColorModel.Gray, SampleType.UInt16, 4, 4 };
+        yield return new object[] { TextureCompression.Eac, ColorModel.GrayAlpha, SampleType.UInt8, 4, 4 };
+        yield return new object[] { TextureCompression.Eac, ColorModel.Gray, SampleType.Int16, 4, 4 };
+        yield return new object[] { TextureCompression.Astc, ColorModel.Rgba, SampleType.UInt8, 4, 4 };
+        yield return new object[] { TextureCompression.Astc, ColorModel.Rgb, SampleType.UInt8, 6, 6 };
+        yield return new object[] { TextureCompression.Astc, ColorModel.Rgb, SampleType.UInt8, 12, 10 };
+        yield return new object[] { TextureCompression.Astc, ColorModel.Rgb, SampleType.Float32, 4, 4 };
+        yield return new object[] { TextureCompression.Astc, ColorModel.Rgba, SampleType.Float16, 8, 8 };
+    }
+
+    /// <summary>ETC2 / EAC / ASTC writing: valid files (`ktx validate`), sensible quality, mip chains, the expected formats.</summary>
+    [Theory, MemberData(nameof(MobileCases))]
+    public void MobileFormatsRoundTrip(TextureCompression c, ColorModel color, SampleType type, int bw, int bh)
+    {
+        var src = Pattern(37, 21, color, type, 7, noise: 0.02);
+        var enc = Ktx.Encode(src, new KtxEncodeOptions { Compression = c, GenerateMipmaps = true, AstcBlockWidth = bw, AstcBlockHeight = bh });
+        Validate(enc);
+        var info = Ktx.GetTextureInfo(enc);
+        Assert.Equal(6, info.MipLevels);
+        Assert.True(info.IsBlockCompressed);
+        string expect = c switch
+        {
+            TextureCompression.Etc2 => color == ColorModel.Rgba ? "ETC2_R8G8B8A8_SRGB_BLOCK" : "ETC2_R8G8B8_SRGB_BLOCK",
+            TextureCompression.Eac => (color == ColorModel.GrayAlpha ? "EAC_R11G11_" : "EAC_R11_") + (type == SampleType.Int16 ? "SNORM" : "UNORM") + "_BLOCK",
+            _ => $"ASTC_{bw}x{bh}_" + (type is SampleType.Float16 or SampleType.Float32 ? "SFLOAT" : "SRGB") + "_BLOCK",
+        };
+        Assert.Equal(expect, info.Format);
+        var dec = Ktx.Decode(enc);
+        Assert.Equal((37, 21), (dec.Width, dec.Height));
+        // quality: compare the shared channels in [0, 1]
+        var a = ToDoubles(src);
+        var b = ToDoubles(dec);
+        int sc = src.Channels, dc = dec.Channels, n = 37 * 21;
+        double se = 0;
+        int cnt = 0;
+        bool hdr = type is SampleType.Float16 or SampleType.Float32;
+        double scaleA = type switch { SampleType.UInt8 => 255, SampleType.UInt16 => 65535, SampleType.Int16 => 32767, _ => 3 };
+        double scaleB = dec.SampleType switch { SampleType.UInt8 => 255, SampleType.UInt16 => 65535, SampleType.Int16 => 32767, _ => 3 };
+        bool gray = color is ColorModel.Gray or ColorModel.GrayAlpha;
+        for (int i = 0; i < n; i++)
+            for (int k = 0; k < Math.Min(hdr ? 3 : sc, gray && c != TextureCompression.Eac ? 1 : sc); k++)
+            {
+                double x = a[i * sc + k];
+                if (hdr) x = Math.Max(x, 0);   // ASTC HDR stores no negative values
+                double d = x / scaleA - b[i * dc + k] / scaleB;
+                se += d * d; cnt++;
+            }
+        double psnr = 10 * Math.Log10(1 / (se / cnt));
+        // a sanity floor for this chroma-rich pattern (BC1 reaches 26 dB on it, BC7 35); the encoders' own tests gate quality
+        // against the reference encoders
+        double floor = c switch
+        {
+            TextureCompression.Etc2 => 27,
+            TextureCompression.Eac => 30,
+            _ when hdr => 20,   // linear error of log-domain HDR blocks; alpha above 1 is clamped (LDR alpha)
+            _ when bw * bh > 36 => 20,
+            _ when bw * bh > 16 => 24,
+            _ => 28,
+        };
+        Assert.True(psnr > floor, $"PSNR {psnr:F1}");
+    }
+
     [Fact]
     public void SupercompressionVariants()
     {
@@ -344,7 +411,7 @@ public class KtxTests
         return new RawImage(ga.Width, ga.Height, ColorModel.Rgba, o, 4);
     }
 
-    internal static RawImage Pattern(int w, int h, ColorModel c, SampleType t, int seed)
+    internal static RawImage Pattern(int w, int h, ColorModel c, SampleType t, int seed, double noise = 0.1)
     {
         var r = new Random(seed);
         var img = RawImage.Create(w, h, c, t);
@@ -353,7 +420,7 @@ public class KtxTests
             for (int x = 0; x < w; x++)
                 for (int k = 0; k < ch; k++)
                 {
-                    double v = 0.5 + 0.4 * Math.Sin(x * 0.4 + k) * Math.Cos(y * 0.3 + seed) + 0.1 * r.NextDouble();
+                    double v = 0.5 + 0.4 * Math.Sin(x * 0.4 + k) * Math.Cos(y * 0.3 + seed) + noise * r.NextDouble();
                     long i = ((long)y * w + x) * ch + k;
                     switch (img.Data)
                     {

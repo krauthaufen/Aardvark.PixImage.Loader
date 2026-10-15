@@ -36,6 +36,15 @@ namespace PixCodec
         Etc1s,
         /// <summary>Basis Universal UASTC LDR 4x4 (KTX 2 only): RGB(A), 8 bits per pixel before the optional Zstandard supercompression.</summary>
         Uastc,
+        /// <summary>
+        /// ASTC with the footprint of <see cref="KtxEncodeOptions.AstcBlockWidth"/> x <see cref="KtxEncodeOptions.AstcBlockHeight"/>
+        /// (8 bits per pixel at 4x4 down to 0.89 at 12x12): LDR (UNORM / SRGB) from integer images, HDR (SFLOAT) from float images.
+        /// </summary>
+        Astc,
+        /// <summary>ETC2: RGB (4 bits per pixel), RGB with 1 bit alpha (images whose alpha is only 0 or 255) or RGBA (8 bits per pixel).</summary>
+        Etc2,
+        /// <summary>EAC R11 (one channel, 4 bits per pixel) or RG11 (two channels, 8 bits per pixel); signed for signed integer images.</summary>
+        Eac,
     }
 
     public sealed class KtxDecodeOptions
@@ -59,6 +68,12 @@ namespace PixCodec
     {
         /// <summary>Block compression (<see cref="TextureCompression.None"/> by default). See <see cref="DdsEncodeOptions.Compression"/> for the conversions.</summary>
         public TextureCompression Compression { get; set; } = TextureCompression.None;
+
+        /// <summary>ASTC footprint (4x4 by default): widths 4, 5, 6, 8, 10, 12 and the heights the format pairs with them.</summary>
+        public int AstcBlockWidth { get; set; } = 4;
+
+        /// <inheritdoc cref="AstcBlockWidth"/>
+        public int AstcBlockHeight { get; set; } = 4;
 
         /// <summary>
         /// Speed versus quality of the block compression: for UASTC the modes and partitions tried, for ETC1S the codebook
