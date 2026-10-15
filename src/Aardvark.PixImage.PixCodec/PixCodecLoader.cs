@@ -506,6 +506,21 @@ namespace Aardvark.Base
         /// <inheritdoc cref="ReadMetadata(string)"/>
         public static PhotoMetadata ReadMetadata(Stream stream) => ImageCodec.ReadMetadata(stream);
 
+        /// <summary>
+        /// Sets, changes or removes metadata (GPS, dates, camera, description, any EXIF tag / XMP property / IPTC dataset) of an
+        /// image file without re-encoding its pixels (JPEG, PNG, TIFF, WebP, JPEG 2000). <paramref name="outputPath"/> may be
+        /// the input path.
+        /// </summary>
+        public static void WriteMetadata(string inputPath, string outputPath, MetadataEdit edit) => ImageCodec.WriteMetadata(inputPath, outputPath, edit);
+
+        /// <summary>
+        /// Loads an image converted to sRGB through its embedded ICC profile (Adobe RGB, Display P3, ProPhoto, CMYK, ...); images
+        /// without a profile are returned as they are. 8 and 16 bit images keep their sample type.
+        /// </summary>
+        public static PixImage LoadSrgb(string path) => Convert(ImageOps.ToSrgb(ImageCodec.Decode(path)));
+        /// <inheritdoc cref="LoadSrgb(string)"/>
+        public static PixImage LoadSrgb(Stream stream) => Convert(ImageOps.ToSrgb(ImageCodec.Decode(stream)));
+
         /// <summary>Reads only the headers: format, size, channels, sample type, orientation, dpi, ... (see <see cref="ImageInfo"/>).</summary>
         public static ImageInfo GetInfo(string path) => ImageCodec.GetInfo(path);
         /// <inheritdoc cref="GetInfo(string)"/>

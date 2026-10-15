@@ -217,4 +217,25 @@ public class MipmapTests
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    [Fact]
+    public void MetadataWritingAndSrgbLoading()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var path = Path.Combine(dir, "a.jpg");
+            File.Copy(Fixture("jpeg/photo_444.jpg"), path);
+            PixImagePixCodec.WriteMetadata(path, path, new MetadataEdit { Gps = new GpsEdit { Latitude = 47.07, Longitude = 15.44 }, Title = "pier" });
+            var m = PixImagePixCodec.ReadMetadata(path);
+            Assert.Equal(47.07, m.Gps!.Latitude!.Value, 6);
+            Assert.Equal("pier", m.Title);
+            // no embedded profile: the pixels as they are
+            var plain = (PixImage<byte>)PixImagePixCodec.Load(path);
+            var srgb = (PixImage<byte>)PixImagePixCodec.LoadSrgb(path);
+            Assert.Equal(Bytes(plain), Bytes(srgb));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
 }

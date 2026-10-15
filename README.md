@@ -222,6 +222,8 @@ PixImagePixCodec.SaveDds(cube, stream);
 PixImagePixCodec.SaveDds(volume, stream, new DdsEncodeOptions { Compression = DdsCompression.BC1 });   // PixVolume
 PixImagePixCodec.SaveKtx(cube, stream, new KtxEncodeOptions { Compression = TextureCompression.BC7 });
 PixVolume vol      = PixImagePixCodec.LoadVolume("ct.ktx2");                      // DDS or KTX volume texture
+PixImagePixCodec.WriteMetadata("a.jpg", "a.jpg", new MetadataEdit { Gps = new GpsEdit { Latitude = 47.07, Longitude = 15.44 } });
+PixImage srgb      = PixImagePixCodec.LoadSrgb("adobe-rgb.jpg");                 // converted through the embedded ICC profile
 PixImagePixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .qoi .ktx2 too
 ```
 
