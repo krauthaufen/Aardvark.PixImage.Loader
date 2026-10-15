@@ -27,6 +27,7 @@ namespace PixCodec
 
         /// <summary>Writes the visible part of the frame as interleaved RGB with <paramref name="step"/> bytes per pixel
         /// (the fourth byte, if any, is set to 255).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void ToRgb(Vp8Frame f, byte[] dst, int step, bool threaded = false)
         {
             int h = f.Height;
@@ -35,6 +36,7 @@ namespace PixCodec
             else System.Threading.Tasks.Parallel.For(0, bands, i => ToRgb(f, dst, step, (int)((long)h * i / bands), (int)((long)h * (i + 1) / bands)));
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void ToRgb(Vp8Frame f, byte[] dst, int step, int y0, int y1)
         {
             int w = f.Width, uvH = (f.Height + 1) >> 1;
@@ -58,6 +60,7 @@ namespace PixCodec
         /// Chroma of one output row: every sample is 9/16 of the nearest stored one, 3/16 of its two neighbors and 1/16
         /// of the diagonal one, rounded in two steps the way libwebp does.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void UpsampleLine(byte* near, byte* far, byte* dst, int w)
         {
             dst[0] = (byte)((3 * near[0] + far[0] + 2) >> 2);
@@ -109,6 +112,7 @@ namespace PixCodec
             b = Vector128.Min(Vector128.ShiftRightLogical(bu, Fix2), max.AsUInt16());
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void ConvertLine(byte* y, byte* u, byte* v, byte* dst, int w, int step)
         {
             int x = 0;

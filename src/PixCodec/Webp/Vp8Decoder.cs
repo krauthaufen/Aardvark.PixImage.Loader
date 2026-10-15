@@ -453,6 +453,7 @@ namespace PixCodec
         }
 
         /// <summary>Reads the prediction records (first partition) and the tokens of one macroblock row.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void ParseRow(MbRow row, int mby)
         {
             int mbW = _mbW;
@@ -533,6 +534,7 @@ namespace PixCodec
         }
 
         /// <summary>Predicts and adds the residuals of one macroblock row; with filterToo the loop filter follows at once.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void ReconstructRow(MbRow row, int mby, Vp8Frame frame, bool filterToo)
         {
             int mbW = _mbW;
@@ -630,6 +632,7 @@ namespace PixCodec
 
         /// <summary>The loop filter over one macroblock row. It only touches this row and the three lines above it,
         /// and prediction never reads the frame, so it may trail the reconstruction.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void FilterRow(MbRow row, int mby, Vp8Frame frame)
         {
             if (_filterLevel == 0) return;
@@ -640,6 +643,7 @@ namespace PixCodec
 
         // ------------------------------------------------------------------ tokens
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void ParseResiduals(ref Vp8BoolReader br, byte* probs, ref Quant q, bool i4, byte* top, byte* left, short* coeffs, short* dc, out uint nzY, out uint nzUv)
         {
             int first = 0;
@@ -687,6 +691,7 @@ namespace PixCodec
         /// The return value is the position after the last token of the last block.
         /// One loop for a whole plane of a macroblock keeps the reader state in registers across its blocks.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static int GetBlocks(ref Vp8BoolReader br, byte* probs, int first, int dqDc, int dqAc, short* dst, byte* top, byte* left, byte* order, int count, out uint kinds)
         {
             // probs: [position][context][11] of one block type
@@ -756,6 +761,7 @@ namespace PixCodec
         // ------------------------------------------------------------------ inverse transforms
 
         /// <summary>Inverse Walsh-Hadamard transform of the Y2 block; the results become the DC of the 16 luma blocks.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         internal static void InverseWht(short* src, short* dst)
         {
             int* tmp = stackalloc int[16];
@@ -788,6 +794,7 @@ namespace PixCodec
         static int Mul2(int a) => (a * 35468) >> 16;            // a * sqrt(2) * sin(pi / 8)
 
         /// <summary>Adds the inverse DCT of a block to the 4x4 pixels at dst and clears the coefficients.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void AddResidual(short* c, byte* dst, int kind)
         {
             if (kind == 0) return;
@@ -806,6 +813,7 @@ namespace PixCodec
             Unsafe.InitBlockUnaligned(c, 0, 32);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         internal static void InverseDctAdd(short* c, byte* dst, int stride)
         {
             if (Vector128.IsHardwareAccelerated)
@@ -851,6 +859,7 @@ namespace PixCodec
         }
 
         /// <summary>The same arithmetic as the scalar version, four lanes at a time.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void InverseDctAddSimd(short* c, byte* dst, int stride)
         {
             // vertical pass: the rows of the coefficient block are the lanes' sources
@@ -871,6 +880,7 @@ namespace PixCodec
         // ------------------------------------------------------------------ intra prediction
         // All predictors read the row above and the column left of dst inside the work area.
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         internal static void Predict16(byte* dst, int mode, bool hasLeft, bool hasTop)
         {
             switch (mode)
@@ -898,6 +908,7 @@ namespace PixCodec
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         internal static void Predict8(byte* dst, int mode, bool hasLeft, bool hasTop)
         {
             switch (mode)
@@ -928,6 +939,7 @@ namespace PixCodec
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void TrueMotion(byte* dst, int size)
         {
             byte* top = dst - Bps;
@@ -945,6 +957,7 @@ namespace PixCodec
         static byte Avg2(int a, int b) => (byte)((a + b + 1) >> 1);
 
         /// <summary>Sub-block prediction (RFC 6386 section 12.3): A = row above (8 pixels), L = left column, P = corner.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         internal static void Predict4(byte* dst, int mode)
         {
             byte* a = dst - Bps;
@@ -1034,6 +1047,7 @@ namespace PixCodec
 
         // ------------------------------------------------------------------ loop filter (RFC 6386 section 15)
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void FilterMacroblock(Vp8Frame f, byte* fy, byte* fu, byte* fv, int mbx, int mby, int info)
         {
             int limit = info & 0xff;

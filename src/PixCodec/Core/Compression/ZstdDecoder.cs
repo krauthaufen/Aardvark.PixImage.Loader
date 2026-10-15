@@ -123,11 +123,13 @@ namespace PixCodec.Compression
         bool llSet, mlSet, ofSet, hufSet;
         uint rep0, rep1, rep2;
 
+        
         static Exception Bad(string what) => new ImageFormatException("corrupt zstd data: " + what);
 
         // ------------------------------------------------------------------------------------------ FSE tables
 
         /// <summary>kind: 0 literal lengths, 1 match lengths, 2 offsets, 3 plain symbols (Huffman weights).</summary>
+        [SkipLocalsInit]
         static void BuildFse(short* norm, int symbols, int log, Entry* table, int kind)
         {
             int size = 1 << log, high = size - 1;
@@ -146,22 +148,27 @@ namespace PixCodec.Compression
                     do pos = (pos + step) & mask; while (pos > high);
                 }
             if (pos != 0) throw Bad("invalid FSE distribution");
+            // the value and extra bits per symbol, once
+            ulong* symbolPart = stackalloc ulong[symbols];
+            for (int s = 0; s < symbols; s++)
+            {
+                (uint value, int extra) = kind switch
+                {
+                    0 => (LlBase[s], LlBits[s]),
+                    1 => (MlBase[s], MlBits[s]),
+                    2 => (1u << s, s),
+                    _ => ((uint)s, 0),
+                };
+                symbolPart[s] = (ulong)value << 32 | (ulong)(uint)extra << 24;
+            }
+            // entries as one ulong each: NextBase | NextBits << 16 | ExtraBits << 24 | Value << 32 (the layout of Entry)
+            ulong* t = (ulong*)table;
             for (int i = 0; i < size; i++)
             {
                 int s = symbolAt[i];
                 uint x = next[s]++;
                 int bits = log - BitOperations.Log2(x);
-                Entry e;
-                e.NextBits = (byte)bits;
-                e.NextBase = (ushort)((x << bits) - (uint)size);
-                switch (kind)
-                {
-                    case 0: e.Value = LlBase[s]; e.ExtraBits = LlBits[s]; break;
-                    case 1: e.Value = MlBase[s]; e.ExtraBits = MlBits[s]; break;
-                    case 2: e.Value = 1u << s; e.ExtraBits = (byte)s; break;
-                    default: e.Value = (uint)s; e.ExtraBits = 0; break;
-                }
-                table[i] = e;
+                t[i] = symbolPart[s] | (uint)bits << 16 | (ushort)((x << bits) - (uint)size);
             }
         }
 
@@ -364,6 +371,39 @@ namespace PixCodec.Compression
             bit -= used;
         }
 
+        // Decode5 on four streams, interleaved: the four lookup chains overlap.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void Decode5x4(ushort* t, byte* s0, ref long b0, byte* d0, byte* s1, ref long b1, byte* d1, byte* s2, ref long b2, byte* d2,
+            byte* s3, ref long b3, byte* d3, int shift)
+        {
+            long i0 = ((b0 + 7) >> 3) - 8, i1 = ((b1 + 7) >> 3) - 8, i2 = ((b2 + 7) >> 3) - 8, i3 = ((b3 + 7) >> 3) - 8;
+            ulong c0 = Unsafe.ReadUnaligned<ulong>(s0 + i0) << (int)(64 - (b0 - i0 * 8));
+            ulong c1 = Unsafe.ReadUnaligned<ulong>(s1 + i1) << (int)(64 - (b1 - i1 * 8));
+            ulong c2 = Unsafe.ReadUnaligned<ulong>(s2 + i2) << (int)(64 - (b2 - i2 * 8));
+            ulong c3 = Unsafe.ReadUnaligned<ulong>(s3 + i3) << (int)(64 - (b3 - i3 * 8));
+            uint e0, e1, e2, e3; int u0 = 0, u1 = 0, u2 = 0, u3 = 0;
+            e0 = t[c0 >> shift]; e1 = t[c1 >> shift]; e2 = t[c2 >> shift]; e3 = t[c3 >> shift];
+            d0[0] = (byte)e0; d1[0] = (byte)e1; d2[0] = (byte)e2; d3[0] = (byte)e3;
+            c0 <<= (int)(e0 >> 8); c1 <<= (int)(e1 >> 8); c2 <<= (int)(e2 >> 8); c3 <<= (int)(e3 >> 8);
+            u0 += (int)(e0 >> 8); u1 += (int)(e1 >> 8); u2 += (int)(e2 >> 8); u3 += (int)(e3 >> 8);
+            e0 = t[c0 >> shift]; e1 = t[c1 >> shift]; e2 = t[c2 >> shift]; e3 = t[c3 >> shift];
+            d0[1] = (byte)e0; d1[1] = (byte)e1; d2[1] = (byte)e2; d3[1] = (byte)e3;
+            c0 <<= (int)(e0 >> 8); c1 <<= (int)(e1 >> 8); c2 <<= (int)(e2 >> 8); c3 <<= (int)(e3 >> 8);
+            u0 += (int)(e0 >> 8); u1 += (int)(e1 >> 8); u2 += (int)(e2 >> 8); u3 += (int)(e3 >> 8);
+            e0 = t[c0 >> shift]; e1 = t[c1 >> shift]; e2 = t[c2 >> shift]; e3 = t[c3 >> shift];
+            d0[2] = (byte)e0; d1[2] = (byte)e1; d2[2] = (byte)e2; d3[2] = (byte)e3;
+            c0 <<= (int)(e0 >> 8); c1 <<= (int)(e1 >> 8); c2 <<= (int)(e2 >> 8); c3 <<= (int)(e3 >> 8);
+            u0 += (int)(e0 >> 8); u1 += (int)(e1 >> 8); u2 += (int)(e2 >> 8); u3 += (int)(e3 >> 8);
+            e0 = t[c0 >> shift]; e1 = t[c1 >> shift]; e2 = t[c2 >> shift]; e3 = t[c3 >> shift];
+            d0[3] = (byte)e0; d1[3] = (byte)e1; d2[3] = (byte)e2; d3[3] = (byte)e3;
+            c0 <<= (int)(e0 >> 8); c1 <<= (int)(e1 >> 8); c2 <<= (int)(e2 >> 8); c3 <<= (int)(e3 >> 8);
+            u0 += (int)(e0 >> 8); u1 += (int)(e1 >> 8); u2 += (int)(e2 >> 8); u3 += (int)(e3 >> 8);
+            e0 = t[c0 >> shift]; e1 = t[c1 >> shift]; e2 = t[c2 >> shift]; e3 = t[c3 >> shift];
+            d0[4] = (byte)e0; d1[4] = (byte)e1; d2[4] = (byte)e2; d3[4] = (byte)e3;
+            u0 += (int)(e0 >> 8); u1 += (int)(e1 >> 8); u2 += (int)(e2 >> 8); u3 += (int)(e3 >> 8);
+            b0 -= u0; b1 -= u1; b2 -= u2; b3 -= u3;
+        }
+
         // The rest of a stream, symbol by symbol, with the end checks.
         void FinishHuffmanStream(ushort* t, byte* src, int length, long bit, byte* dst, byte* end)
         {
@@ -400,10 +440,7 @@ namespace PixCodec.Compression
                 // the first three streams have the same length, so one output check covers them
                 while (b0 >= 64 && b1 >= 64 && b2 >= 64 && b3 >= 64 && e0 - o0 >= 5 && e3 - o3 >= 5)
                 {
-                    Decode5(t, s0, ref b0, o0, shift);
-                    Decode5(t, s1, ref b1, o1, shift);
-                    Decode5(t, s2, ref b2, o2, shift);
-                    Decode5(t, s3, ref b3, o3, shift);
+                    Decode5x4(t, s0, ref b0, o0, s1, ref b1, o1, s2, ref b2, o2, s3, ref b3, o3, shift);
                     o0 += 5; o1 += 5; o2 += 5; o3 += 5;
                 }
                 FinishHuffmanStream(t, s0, n0, b0, o0, dst + per);
@@ -555,73 +592,8 @@ namespace PixCodec.Compression
                     int n = length - pos;
                     long bit = InitBack(s, n);
                     fixed (Entry* llT = llTable, ofT = ofTable, mlT = mlTable)
-                    {
-                        uint llState = (uint)ReadBack(s, n, ref bit, llLog);
-                        uint ofState = (uint)ReadBack(s, n, ref bit, ofLog);
-                        uint mlState = (uint)ReadBack(s, n, ref bit, mlLog);
-                        uint r0 = rep0, r1 = rep1, r2 = rep2;
-                        int blockEnd = (int)Math.Min((long)capacity, (long)blockStart + blockMax);
-                        for (int i = 0; i < nseq; i++)
-                        {
-                            Entry ll = llT[llState], of = ofT[ofState], ml = mlT[mlState];
-                            // one 57 bit window serves the three extra bit fields (two for huge offsets), a second one the states
-                            ulong c = LoadBack(s, n, bit);
-                            uint offValue = of.Value + Take(ref c, of.ExtraBits);
-                            bit -= of.ExtraBits;
-                            if (of.ExtraBits + ml.ExtraBits + ll.ExtraBits > 56) c = LoadBack(s, n, bit);
-                            uint matchLen = ml.Value + Take(ref c, ml.ExtraBits);
-                            uint litLen = ll.Value + Take(ref c, ll.ExtraBits);
-                            bit -= ml.ExtraBits + ll.ExtraBits;
-                            if (i != nseq - 1)
-                            {
-                                c = LoadBack(s, n, bit);
-                                llState = ll.NextBase + Take(ref c, ll.NextBits);
-                                mlState = ml.NextBase + Take(ref c, ml.NextBits);
-                                ofState = of.NextBase + Take(ref c, of.NextBits);
-                                bit -= ll.NextBits + ml.NextBits + of.NextBits;
-                            }
-                            if (bit < 0) throw Bad("sequence stream overrun");
-
-                            uint offset;
-                            if (offValue > 3) { offset = offValue - 3; r2 = r1; r1 = r0; r0 = offset; }
-                            else
-                            {
-                                uint idx = offValue - 1 + (litLen == 0 ? 1u : 0u);
-                                if (idx == 0) offset = r0;
-                                else
-                                {
-                                    offset = idx == 1 ? r1 : idx == 2 ? r2 : r0 - 1;
-                                    if (offset == 0) throw Bad("zero offset");
-                                    if (idx != 1) r2 = r1;
-                                    r1 = r0; r0 = offset;
-                                }
-                            }
-
-                            if (litLen > (uint)(litSize - litPos)) throw Bad("literals overrun");
-                            if ((ulong)litLen + matchLen > (ulong)(blockEnd - outPos))
-                                throw Bad(blockEnd == capacity ? "output does not fit the destination" : "block too large");
-                            byte* o = dst + outPos;
-                            // wild copies need room after the sequence; the literal buffer always has it
-                            bool wild = capacity - outPos - (long)litLen - matchLen >= Slack;
-                            if (wild && litLen <= 16) Unsafe.WriteUnaligned(o, Unsafe.ReadUnaligned<Vector128<byte>>(l + litPos));
-                            else Buffer.MemoryCopy(l + litPos, o, litLen, litLen);
-                            litPos += (int)litLen; outPos += (int)litLen; o += litLen;
-                            if (offset > (uint)(outPos - histStart))
-                            {
-                                // reaches in front of the frame: only a dictionary's content lives there
-                                long back = offset - (long)(outPos - histStart);
-                                if (back > dictLength) throw Bad("offset too far back");
-                                uint fromDict = (uint)Math.Min(back, matchLen);
-                                Buffer.MemoryCopy(dictContent + dictLength - back, o, fromDict, fromDict);
-                                if (matchLen > fromDict) LzCopy.Match(o + fromDict, offset, matchLen - fromDict);
-                            }
-                            else if (wild) LzCopy.MatchWild(o, offset, matchLen);
-                            else LzCopy.Match(o, offset, matchLen);
-                            outPos += (int)matchLen;
-                        }
-                        if (bit != 0) throw Bad("sequence stream not fully consumed");
-                        rep0 = r0; rep1 = r1; rep2 = r2;
-                    }
+                        outPos = Sequences(s, n, bit, nseq, (ulong*)llT, (ulong*)ofT, (ulong*)mlT, l, litSize, ref litPos, dst, outPos, capacity,
+                            histStart, (int)Math.Min((long)capacity, (long)blockStart + blockMax));
                 }
                 else if (pos != length) throw Bad("trailing bytes in block");
 
@@ -631,6 +603,95 @@ namespace PixCodec.Compression
                 Buffer.MemoryCopy(l + litPos, dst + outPos, rest, rest);
                 outPos += rest;
             }
+            return outPos;
+        }
+
+        /// <summary>
+        /// Decodes and executes the sequences of a block (a method of its own, so that its state gets the registers). The FSE
+        /// entries are read as one ulong each (see <see cref="Entry"/>, little endian: NextBase in bits 0..15, NextBits 16..23,
+        /// ExtraBits 24..31, Value 32..63). Returns the new output position.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        int Sequences(byte* s, int n, long bit, int nseq, ulong* llT, ulong* ofT, ulong* mlT, byte* l, int litSize, ref int litPosRef,
+            byte* dst, int outPos, int capacity, int histStart, int blockEnd)
+        {
+            uint llState = (uint)ReadBack(s, n, ref bit, llLog);
+            uint ofState = (uint)ReadBack(s, n, ref bit, ofLog);
+            uint mlState = (uint)ReadBack(s, n, ref bit, mlLog);
+            uint r0 = rep0, r1 = rep1, r2 = rep2;
+            int litPos = litPosRef;
+            for (int i = 0; i < nseq; i++)
+            {
+                ulong ll = llT[llState], of = ofT[ofState], ml = mlT[mlState];
+                int ofExtra = (int)(of >> 24) & 255, mlExtra = (int)(ml >> 24) & 255, llExtra = (int)(ll >> 24) & 255;
+                // one 57 bit window serves the three extra bit fields (two for huge offsets), a second one the states
+                ulong c = LoadBack(s, n, bit);
+                uint offValue = (uint)(of >> 32) + Take(ref c, ofExtra);
+                bit -= ofExtra;
+                if (ofExtra + mlExtra + llExtra > 56) c = LoadBack(s, n, bit);
+                uint matchLen = (uint)(ml >> 32) + Take(ref c, mlExtra);
+                uint litLen = (uint)(ll >> 32) + Take(ref c, llExtra);
+                bit -= mlExtra + llExtra;
+                if (i != nseq - 1)
+                {
+                    c = LoadBack(s, n, bit);
+                    int llNext = (int)(ll >> 16) & 255, mlNext = (int)(ml >> 16) & 255, ofNext = (int)(of >> 16) & 255;
+                    llState = (uint)(ushort)ll + Take(ref c, llNext);
+                    mlState = (uint)(ushort)ml + Take(ref c, mlNext);
+                    ofState = (uint)(ushort)of + Take(ref c, ofNext);
+                    bit -= llNext + mlNext + ofNext;
+                }
+                if (bit < 0) throw Bad("sequence stream overrun");
+
+                uint offset;
+                if (offValue > 3) { offset = offValue - 3; r2 = r1; r1 = r0; r0 = offset; }
+                else
+                {
+                    uint idx = offValue - 1 + (litLen == 0 ? 1u : 0u);
+                    if (idx == 0) offset = r0;
+                    else
+                    {
+                        offset = idx == 1 ? r1 : idx == 2 ? r2 : r0 - 1;
+                        if (offset == 0) throw Bad("zero offset");
+                        if (idx != 1) r2 = r1;
+                        r1 = r0; r0 = offset;
+                    }
+                }
+
+                if (litLen > (uint)(litSize - litPos)) throw Bad("literals overrun");
+                if ((ulong)litLen + matchLen > (ulong)(blockEnd - outPos))
+                    throw Bad(blockEnd == capacity ? "output does not fit the destination" : "block too large");
+                byte* o = dst + outPos;
+                // wild copies need room after the sequence; the literal buffer always has it
+                bool wild = capacity - outPos - (long)litLen - matchLen >= Slack;
+                byte* lp = l + litPos;
+                if (wild)
+                {
+                    Unsafe.WriteUnaligned(o, Unsafe.ReadUnaligned<Vector128<byte>>(lp));
+                    if (litLen > 16)
+                    {
+                        Unsafe.WriteUnaligned(o + 16, Unsafe.ReadUnaligned<Vector128<byte>>(lp + 16));
+                        for (uint k = 32; k < litLen; k += 16) Unsafe.WriteUnaligned(o + k, Unsafe.ReadUnaligned<Vector128<byte>>(lp + k));
+                    }
+                }
+                else Buffer.MemoryCopy(lp, o, litLen, litLen);
+                litPos += (int)litLen; outPos += (int)litLen; o += litLen;
+                if (offset > (uint)(outPos - histStart))
+                {
+                    // reaches in front of the frame: only a dictionary's content lives there
+                    long back = offset - (long)(outPos - histStart);
+                    if (back > dictLength) throw Bad("offset too far back");
+                    uint fromDict = (uint)Math.Min(back, matchLen);
+                    Buffer.MemoryCopy(dictContent + dictLength - back, o, fromDict, fromDict);
+                    if (matchLen > fromDict) LzCopy.Match(o + fromDict, offset, matchLen - fromDict);
+                }
+                else if (wild) LzCopy.MatchWild(o, offset, matchLen);
+                else LzCopy.Match(o, offset, matchLen);
+                outPos += (int)matchLen;
+            }
+            if (bit != 0) throw Bad("sequence stream not fully consumed");
+            rep0 = r0; rep1 = r1; rep2 = r2;
+            litPosRef = litPos;
             return outPos;
         }
 
