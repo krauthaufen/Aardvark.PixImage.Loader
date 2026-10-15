@@ -31,7 +31,7 @@ namespace PixCodec.KtxImpl
             => h.Length < 12 ? 0 : h.Slice(0, 12).SequenceEqual(Id1) ? 1 : h.Slice(0, 12).SequenceEqual(Id2) ? 2 : 0;
 
         // data format descriptor colour models of the Basis Universal formats
-        const int ModelEtc1s = 163, ModelUastc = 166;
+        const int ModelAstc = 162, ModelEtc1s = 163, ModelUastc = 166;
 
         public static KtxParsed Parse(ReadOnlySpan<byte> d)
         {
@@ -84,17 +84,27 @@ namespace PixCodec.KtxImpl
             }
             // data format descriptor: transfer function, premultiplied alpha, Basis colour models
             int model = 0;
+            int[] blockDims = { 1, 1, 1 };
+            bool floatSamples = false;
             if (dfdLen >= 4 + 24 && (ulong)dfdOff + dfdLen <= (ulong)d.Length)
             {
                 var b = d.Slice((int)dfdOff + 4);
                 model = b[8];
+                blockDims = new[] { b[12] + 1, b[13] + 1, b[14] + 1 };
+                if (dfdLen >= 4 + 24 + 16) floatSamples = (b[24 + 3] & 0x80) != 0;
                 int transfer = b[10], flags = b[11];
                 p.Info.Transfer = transfer switch { 1 => TransferFunction.Linear, 2 => TransferFunction.Srgb, 13 => TransferFunction.Pq, 15 => TransferFunction.Hlg, _ => TransferFunction.Unknown };
                 p.Info.IsPremultiplied = (flags & 1) != 0;
             }
             if (kvdLen > 0 && (ulong)kvdOff + kvdLen <= (ulong)d.Length) p.Info.KeyValues = KeyValues(d.Slice((int)kvdOff, (int)kvdLen), false);
             p.FlipY = Orientation(p.Info, 2);
-            if (vk == 0)
+            if (vk == 0 && model == ModelAstc && scheme != 1)
+            {
+                // ASTC described by the data format descriptor alone (3D footprints have no Vulkan format)
+                p.Format = KtxFormats.Astc(blockDims[0], blockDims[1], blockDims[2], p.Info.Transfer == TransferFunction.Srgb, floatSamples);
+                SetFormat(p);
+            }
+            else if (vk == 0)
             {
                 if (scheme == 1 || model == ModelEtc1s) p.BasisKind = KtxLayout.Etc1s;
                 else if (model == ModelUastc) p.BasisKind = KtxLayout.Uastc;
@@ -153,7 +163,7 @@ namespace PixCodec.KtxImpl
                 BigEndian = be, TypeSize = (int)Math.Max(1, glTypeSize),
             };
             if (kvLen > 0) p.Info.KeyValues = KeyValues(d.Slice(64, (int)kvLen), be);
-            p.Format = KtxFormats.FromVk(vk) ?? throw new ImageNotSupportedException($"KTX: OpenGL format 0x{glInternal:X4} is not supported");
+            p.Format = KtxFormats.FromVk(vk) ?? KtxFormats.FromGl3D(glInternal) ?? throw new ImageNotSupportedException($"KTX: OpenGL format 0x{glInternal:X4} is not supported");
             SetFormat(p);
             p.FlipY = Orientation(p.Info, 1);
             // walk the levels: imageSize, images (rows padded to 4 bytes for uncompressed data), padding to 4 bytes
@@ -173,7 +183,8 @@ namespace PixCodec.KtxImpl
         {
             var i = p.Info;
             int w = Math.Max(1, i.Width >> m), h = Math.Max(1, i.Height >> m), dep = Math.Max(1, i.Depth >> m);
-            long face = Image1Bytes(p, w, h) * dep;
+            var f = p.Format!;
+            long face = f.BlockD > 1 ? f.ImageBytes(w, h) * ((dep + f.BlockD - 1) / f.BlockD) : Image1Bytes(p, w, h) * dep;
             face = (face + 3) & ~3L;   // cube padding
             long level = face * i.Faces * i.Layers;
             return (level + 3) & ~3L;  // mip padding
@@ -262,10 +273,19 @@ namespace PixCodec.KtxImpl
                     for (int f = 0; f < i.Faces; f++)
                     {
                         lv[l][f] = new RawImage[dep];
+                        RawImage[]? volume = null;
+                        if (p.Format is { BlockD: > 1 } vf)
+                        {
+                            // 3D blocks span several slices: the image is a stack of block slices
+                            long bytes = vf.ImageBytes(w, h) * ((dep + vf.BlockD - 1) / vf.BlockD);
+                            volume = KtxBlocks.Astc3D(vf, Slice(level, pos, bytes), w, h, dep);
+                            pos += bytes;
+                        }
                         for (int z = 0; z < dep; z++)
                         {
                             RawImage img;
-                            if (p.Format == null)
+                            if (volume != null) img = volume[z];
+                            else if (p.Format == null)
                             {
                                 int imageIndex = ((m == 0 ? 0 : ImagesBefore(i, m)) + (l * i.Faces + f) * dep + z);
                                 if (p.BasisKind == KtxLayout.Etc1s)

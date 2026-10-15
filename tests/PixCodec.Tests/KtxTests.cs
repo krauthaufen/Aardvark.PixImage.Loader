@@ -218,6 +218,65 @@ public class KtxTests
         for (int i = 0; i < avg.Length; i++) Assert.Equal((s0[i] + s1[i]) * 0.5f, avg[i], 5);
     }
 
+    /// <summary>
+    /// 3D ASTC: KTX 1 with the OES enums and KTX 2 described by the data format descriptor alone (vkFormat 0, model ASTC):
+    /// blocks span several slices, edges are cropped in x, y and z.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Astc3DVolumes(bool ktx2)
+    {
+        var blocks = File.ReadAllBytes(Fixture("etc_astc/astc_ldr_4x4x4_ldr.bin"));
+        int n = blocks.Length / 16;                 // one row of blocks along x
+        int w = n * 4 - 1, h = 3, d = 3;            // partial blocks everywhere
+        byte[] file = ktx2 ? Ktx2Astc3D(blocks, w, h, d) : Ktx1Astc3D(blocks, w, h, d);
+        var t = Ktx.DecodeTexture(file);
+        Assert.Equal((KtxTextureKind.Texture3D, d, "ASTC_4x4x4_UNORM_BLOCK"), (t.Kind, t.Depth, t.Format));
+        var texels = new byte[4 * 4 * 4 * 4];
+        for (int b = 0; b < n; b++)
+        {
+            AstcBlocks.DecodeUnorm8(blocks.AsSpan(b * 16, 16), 4, 4, 4, false, texels);
+            for (int z = 0; z < d; z++)
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < 4 && b * 4 + x < w; x++)
+                        for (int c = 0; c < 4; c++)
+                            Assert.Equal(texels[((z * 4 + y) * 4 + x) * 4 + c], t.GetImage(slice: z).GetData<byte>()[(y * w + b * 4 + x) * 4 + c]);
+        }
+    }
+
+    static byte[] Ktx1Astc3D(byte[] blocks, int w, int h, int d)
+    {
+        var o = new MemoryStream();
+        o.Write(new byte[] { 0xAB, 0x4B, 0x54, 0x58, 0x20, 0x31, 0x31, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A });
+        foreach (uint v in new uint[] { 0x04030201, 0, 1, 0, 0x93C3, 0x1908, (uint)w, (uint)h, (uint)d, 0, 1, 1, 0, (uint)blocks.Length })
+            o.Write(BitConverter.GetBytes(v));
+        o.Write(blocks);
+        return o.ToArray();
+    }
+
+    static byte[] Ktx2Astc3D(byte[] blocks, int w, int h, int d)
+    {
+        // basic data format descriptor: model ASTC (162), 4x4x4 texels, one 128 bit sample
+        var dfd = new byte[4 + 24 + 16];
+        BitConverter.GetBytes((uint)dfd.Length).CopyTo(dfd, 0);
+        BitConverter.GetBytes(2u | 40u << 16).CopyTo(dfd, 8);
+        dfd[12] = 162; dfd[13] = 1; dfd[14] = 1;
+        dfd[16] = 3; dfd[17] = 3; dfd[18] = 3;
+        dfd[20] = 16;
+        BitConverter.GetBytes((uint)(0 | 127 << 16)).CopyTo(dfd, 28);
+        BitConverter.GetBytes(uint.MaxValue).CopyTo(dfd, 40);
+        var head = new byte[80 + 24];
+        new byte[] { 0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A }.CopyTo(head, 0);
+        uint[] f = { 0, 1, (uint)w, (uint)h, (uint)d, 0, 1, 1, 0, 104, (uint)dfd.Length, 0, 0 };
+        for (int i = 0; i < f.Length; i++) BitConverter.GetBytes(f[i]).CopyTo(head, 12 + 4 * i);
+        long dataOff = 104 + dfd.Length;
+        BitConverter.GetBytes((ulong)dataOff).CopyTo(head, 80);
+        BitConverter.GetBytes((ulong)blocks.Length).CopyTo(head, 88);
+        BitConverter.GetBytes((ulong)blocks.Length).CopyTo(head, 96);
+        return head.Concat(dfd).Concat(blocks).ToArray();
+    }
+
     [Fact]
     public void SupercompressionVariants()
     {

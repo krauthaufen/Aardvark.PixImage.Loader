@@ -63,6 +63,40 @@ namespace PixCodec.KtxImpl
             return img;
         }
 
+        /// <summary>3D ASTC: <paramref name="d"/> slices from block slices of BlockD texels each.</summary>
+        public static RawImage[] Astc3D(KtxFormat f, ReadOnlySpan<byte> src, int w, int h, int d)
+        {
+            int tw = f.BlockW, th = f.BlockH, td = f.BlockD;
+            int bw = (w + tw - 1) / tw, bh = (h + th - 1) / th, bz = (d + td - 1) / td;
+            var slices = new RawImage[d];
+            for (int z = 0; z < d; z++) slices[z] = RawImage.Create(w, h, ColorModel.Rgba, f.Hdr ? SampleType.Float16 : SampleType.UInt8, 4);
+            var data = src.ToArray();
+            Parallel.For(0, bz * bh, row =>
+            {
+                int zb = row / bh, by = row % bh;
+                int n = tw * th * td * 4;
+                Span<byte> rgba = stackalloc byte[n];
+                Span<ushort> half = stackalloc ushort[n];
+                for (int bx = 0; bx < bw; bx++)
+                {
+                    var b = data.AsSpan(((zb * bh + by) * bw + bx) * 16, 16);
+                    if (f.Hdr) AstcBlocks.DecodeFloat16(b, tw, th, td, half);
+                    else AstcBlocks.DecodeUnorm8(b, tw, th, td, f.Srgb, rgba);
+                    int cw = Math.Min(tw, w - bx * tw), chh = Math.Min(th, h - by * th), cd = Math.Min(td, d - zb * td);
+                    for (int z = 0; z < cd; z++)
+                        for (int y = 0; y < chh; y++)
+                        {
+                            int src0 = ((z * th + y) * tw) * 4;
+                            long o = ((long)(by * th + y) * w + bx * tw) * 4;
+                            var dst = slices[zb * td + z].Data;
+                            if (f.Hdr) System.Runtime.InteropServices.MemoryMarshal.Cast<ushort, Half>(half.Slice(src0, cw * 4)).CopyTo(((Half[])dst).AsSpan((int)o));
+                            else rgba.Slice(src0, cw * 4).CopyTo(((byte[])dst).AsSpan((int)o));
+                        }
+                }
+            });
+            return slices;
+        }
+
         public static RawImage Astc(KtxFormat f, ReadOnlySpan<byte> src, int w, int h)
         {
             var img = RawImage.Create(w, h, ColorModel.Rgba, f.Hdr ? SampleType.Float16 : SampleType.UInt8, 4);

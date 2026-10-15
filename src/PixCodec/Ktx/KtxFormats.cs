@@ -26,14 +26,14 @@ namespace PixCodec.KtxImpl
         public int PackBits;             // Packed: word size
         public int Dxgi;
         public bool Srgb;
-        public int BlockW = 1, BlockH = 1, BlockBytes;   // block formats; Plain / Packed: BlockBytes = bytes per pixel
+        public int BlockW = 1, BlockH = 1, BlockD = 1, BlockBytes;   // block formats; Plain / Packed: BlockBytes = bytes per pixel
         public bool Hdr;                 // ASTC SFLOAT
         public bool Signed;              // EAC / BC signed variants
         public ColorModel Color;
         public int Channels;
         public SampleType Type;
 
-        public bool IsBlockCompressed => BlockW > 1 || BlockH > 1;
+        public bool IsBlockCompressed => BlockW > 1 || BlockH > 1 || BlockD > 1;
 
         public long ImageBytes(int w, int h)
             => (long)((w + BlockW - 1) / BlockW) * ((h + BlockH - 1) / BlockH) * BlockBytes;
@@ -254,6 +254,32 @@ namespace PixCodec.KtxImpl
         {
             foreach (var kv in VkNames) if (kv.Value == name) return kv.Key;
             throw new ArgumentException(name);
+        }
+
+        // 3D ASTC has no core Vulkan format: KTX 1 names it with OES enums, KTX 2 through the data format descriptor
+        static readonly int[][] Astc3D =
+        {
+            new[] { 3, 3, 3 }, new[] { 4, 3, 3 }, new[] { 4, 4, 3 }, new[] { 4, 4, 4 }, new[] { 5, 4, 4 },
+            new[] { 5, 5, 4 }, new[] { 5, 5, 5 }, new[] { 6, 5, 5 }, new[] { 6, 6, 5 }, new[] { 6, 6, 6 },
+        };
+
+        /// <summary>An ASTC format of any footprint (2D or 3D), as a data format descriptor describes it.</summary>
+        public static KtxFormat Astc(int bw, int bh, int bd, bool srgb, bool hdr)
+            => new()
+            {
+                Name = $"ASTC_{bw}x{bh}{(bd > 1 ? "x" + bd : "")}_{(hdr ? "SFLOAT" : srgb ? "SRGB" : "UNORM")}_BLOCK",
+                Layout = KtxLayout.Astc, BlockW = bw, BlockH = bh, BlockD = bd, BlockBytes = 16, Srgb = srgb, Hdr = hdr,
+                Color = ColorModel.Rgba, Channels = 4, Type = hdr ? SampleType.Float16 : SampleType.UInt8,
+            };
+
+        /// <summary>KTX 1: the 3D ASTC formats of OES_texture_compression_astc (0x93C0.. RGBA, 0x93E0.. sRGB).</summary>
+        public static KtxFormat? FromGl3D(uint internalFormat)
+        {
+            int i = internalFormat >= 0x93C0 && internalFormat <= 0x93C9 ? (int)(internalFormat - 0x93C0)
+                  : internalFormat >= 0x93E0 && internalFormat <= 0x93E9 ? (int)(internalFormat - 0x93E0) : -1;
+            if (i < 0) return null;
+            var d = Astc3D[i];
+            return Astc(d[0], d[1], d[2], internalFormat >= 0x93E0, false);
         }
 
         public static KtxFormat? FromVk(int vk)
