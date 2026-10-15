@@ -12,7 +12,9 @@ blocks reach, decoded and measured exactly as the C# tests measure ours:
 Oracles (only run, never read or ported):
   * etcpak (pip package, ~/.venvs/bcref): ETC1, ETC2 RGB, ETC2 RGBA, EAC R11 / RG11 (no punch-through, no signed EAC)
   * etc2comp (Apache-2.0, https://github.com/google/etc2comp), built locally; $ETC2COMP points at EtcTool. Run with
-    -errormetric numeric (plain squared error, what PSNR measures) at -effort 100 (its best) and 40.
+    -errormetric numeric (plain squared error, what PSNR measures) at -effort 100 (its best) and 40. Its RGBA8 colour
+    is chosen with the error weighted by alpha even then (colour PSNR around 17 dB on these inputs), so only its alpha
+    PSNR is a reference for RGBA8.
 Decoding: texture2ddecoder (pip) for the colour formats, the EAC formula of the specification (section 22) below.
 
 usage: ETC2COMP=/path/to/EtcTool python3 gen_etc_encode.py            fixtures + oracle.txt
