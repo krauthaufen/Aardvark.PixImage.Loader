@@ -1,0 +1,64 @@
+# image format oracle colour-PSNR [alpha-PSNR]; written by tests/oracle/gen_etc_encode.py
+kodim23_crop Etc1 etcpak 37.917
+kodim23_crop Etc1 etc2comp40 39.303
+kodim23_crop Etc1 etc2comp100 39.493
+kodim23_crop Etc2Rgb etcpak 38.593
+kodim23_crop Etc2Rgb etc2comp40 39.951
+kodim23_crop Etc2Rgb etc2comp100 40.230
+kodim23_crop Etc2A1 etc2comp40 37.569
+kodim23_crop Etc2A1 etc2comp100 38.957
+kodim23_crop Etc2Rgba etcpak 38.593 49.249
+kodim23_crop Etc2Rgba etc2comp40 16.531 52.903
+kodim23_crop Etc2Rgba etc2comp100 16.534 53.053
+kodim23_crop R11 etcpak 47.575
+kodim23_crop R11 etc2comp40 50.263
+kodim23_crop R11 etc2comp100 50.426
+kodim23_crop Rg11 etcpak 47.971
+kodim23_crop Rg11 etc2comp40 50.234
+kodim23_crop Rg11 etc2comp100 50.451
+kodim23_crop R11s etc2comp40 50.016
+kodim23_crop R11s etc2comp100 50.183
+kodim23_crop Rg11s etc2comp40 50.017
+kodim23_crop Rg11s etc2comp100 50.242
+kodim13_crop Etc1 etcpak 31.636
+kodim13_crop Etc1 etc2comp40 33.024
+kodim13_crop Etc1 etc2comp100 33.562
+kodim13_crop Etc2Rgb etcpak 31.119
+kodim13_crop Etc2Rgb etc2comp40 33.211
+kodim13_crop Etc2Rgb etc2comp100 33.562
+kodim13_crop Etc2A1 etc2comp40 32.634
+kodim13_crop Etc2A1 etc2comp100 33.878
+kodim13_crop Etc2Rgba etcpak 31.119 49.249
+kodim13_crop Etc2Rgba etc2comp40 19.042 52.903
+kodim13_crop Etc2Rgba etc2comp100 19.064 53.053
+kodim13_crop R11 etcpak 37.862
+kodim13_crop R11 etc2comp40 39.518
+kodim13_crop R11 etc2comp100 39.858
+kodim13_crop Rg11 etcpak 37.775
+kodim13_crop Rg11 etc2comp40 39.422
+kodim13_crop Rg11 etc2comp100 39.782
+kodim13_crop R11s etc2comp40 39.473
+kodim13_crop R11s etc2comp100 39.816
+kodim13_crop Rg11s etc2comp40 39.379
+kodim13_crop Rg11s etc2comp100 39.742
+synthetic Etc1 etcpak 18.577
+synthetic Etc1 etc2comp40 19.073
+synthetic Etc1 etc2comp100 19.103
+synthetic Etc2Rgb etcpak 18.833
+synthetic Etc2Rgb etc2comp40 19.752
+synthetic Etc2Rgb etc2comp100 19.772
+synthetic Etc2A1 etc2comp40 20.823
+synthetic Etc2A1 etc2comp100 21.217
+synthetic Etc2Rgba etcpak 18.836 47.395
+synthetic Etc2Rgba etc2comp40 15.430 50.368
+synthetic Etc2Rgba etc2comp100 15.468 50.460
+synthetic R11 etcpak 38.979
+synthetic R11 etc2comp40 42.610
+synthetic R11 etc2comp100 43.042
+synthetic Rg11 etcpak 38.550
+synthetic Rg11 etc2comp40 42.477
+synthetic Rg11 etc2comp100 42.796
+synthetic R11s etc2comp40 42.394
+synthetic R11s etc2comp100 42.771
+synthetic Rg11s etc2comp40 42.350
+synthetic Rg11s etc2comp100 42.615
