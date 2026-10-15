@@ -250,7 +250,7 @@ classes (JPEG quality, PNG level, TIFF / EXR compression, WebP quality / lossles
 ## Building and releasing
 
 Dependencies are managed with Paket: `./build.sh` (or `build.cmd`) restores the tools and packages and builds. A release
-is a new section on top of `RELEASE_NOTES.md` pushed to master: the Publish workflow tests, packs with aardpack and
+is a new section on top of `RELEASE_NOTES.md` pushed to main: the Publish workflow tests, packs with aardpack and
 pushes the package to nuget.org.
 
 ## Tests
