@@ -1,7 +1,17 @@
 # Aardvark.PixImage.PixCodec
 
-Pure managed image loading and saving for .NET 8 and .NET 10. No native binaries, no dependencies besides Aardvark.Base, MIT licensed.
-Little-endian hosts only (x64 and arm64 are tested).
+[![NuGet](https://img.shields.io/nuget/vpre/Aardvark.PixImage.PixCodec)](https://www.nuget.org/packages/Aardvark.PixImage.PixCodec)
+[![Build](https://github.com/krauthaufen/Aardvark.PixImage.PixCodec/actions/workflows/build.yml/badge.svg)](https://github.com/krauthaufen/Aardvark.PixImage.PixCodec/actions/workflows/build.yml)
+
+Pure managed image loading and saving for .NET 8 and .NET 10. No native binaries, no dependencies besides
+Aardvark.Base.Tensors, MIT licensed. Little-endian hosts only; every change is tested on Linux and Windows (x64) and
+macOS (ARM64).
+
+```
+dotnet add package Aardvark.PixImage.PixCodec --prerelease
+```
+
+or with Paket: `nuget Aardvark.PixImage.PixCodec prerelease`.
 
 One package, **Aardvark.PixImage.PixCodec**, with two namespaces:
 
@@ -67,8 +77,9 @@ Dds.EncodeVolume(slices, stream, new DdsEncodeOptions { Compression = DdsCompres
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
 in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF orientation (JPEG, PNG, WebP, TIFF, JPEG 2000)
 is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
-turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`, `Dds`, `Ktx`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Lerc`, `Jbig`)
-with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
+turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the
+stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`,
+`Dds`, `Ktx`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Lerc`, `Jbig`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data.
 
 Malformed files throw `ImageFormatException`, valid files using an unimplemented feature throw `ImageNotSupportedException`.
@@ -173,8 +184,8 @@ every structural and GeoTIFF tag.
 ## Compression
 
 `Aardvark.ImageCodecs.Compression` holds fully managed deflate/inflate (zlib, levels 0..9, streaming `Inflater`), Zstandard
-(decode and encode, both with dictionaries), XZ / LZMA (decode incl. BCJ filters, encode up to an optimal parser, multi-threaded) and vectorised CRC-32 / Adler-32.
-The managed deflate is the default; `Zlib.Backend = ZlibBackend.Bcl` (or `PIXCODEC_ZLIB=bcl`) switches to
+(decode and encode, both with dictionaries), XZ / LZMA (decode incl. BCJ filters, encode up to an optimal parser,
+multi-threaded) and vectorised CRC-32 / Adler-32. The managed deflate is the default; `Zlib.Backend = ZlibBackend.Bcl` (or `PIXCODEC_ZLIB=bcl`) switches to
 `System.IO.Compression`.
 
 ## Image operations
@@ -195,10 +206,12 @@ var w     = ImageOps.WarpPerspective(img, 800, 600, homography, new WarpOptions 
 - Resizing is separable and widens the filter when downscaling (no aliasing), with pixel areas aligned
   (the same conventions as Pillow, whose float results it reproduces). Alpha is premultiplied while filtering;
   `LinearLight` filters 8 and 16 bit sRGB in linear light. Integer results are rounded and clamped, float results are not.
-- Lossless: `Crop`, `FlipHorizontal`, `FlipVertical`, `Rotate90`, `Rotate180`, `Rotate270`, `Transpose`, `Transverse`, `ApplyOrientation`.
+- Lossless: `Crop`, `FlipHorizontal`, `FlipVertical`, `Rotate90`, `Rotate180`, `Rotate270`, `Transpose`, `Transverse`,
+  `ApplyOrientation`.
 - Warps (`Rotate`, `WarpAffine`, `WarpPerspective`, `Remap`) interpolate with any filter and border mode
   (`Constant`, `Clamp`, `Wrap`, `Mirror`, `MirrorRepeat`).
-- Multi-threaded and vectorised: 4000x3000 RGB to 1000x750 with Lanczos3 takes about 30 ms on 8 cores (Pillow: 125 ms, one thread).
+- Multi-threaded and vectorised: 4000x3000 RGB to 1000x750 with Lanczos3 takes about 30 ms on 8 cores (Pillow: 125 ms,
+  one thread).
 
 `ImageCodec.DecodeAll` returns every page of a TIFF, every frame of an animated GIF, PNG or WebP, every layer / face of a
 DDS or KTX texture (every slice of a KTX volume) and every image of an icon.
@@ -216,8 +229,8 @@ pi.Save("dem.exr");
 ```
 
 Without registering anything, `PixCodec` loads straight into PixImages. Like the registered loader it always returns
-upright images (orientation applied) whose volume has the dense image layout: channels innermost, then x, then y, top row first,
-starting at index 0 (no y-flip; the same convention as the other Aardvark loaders).
+upright images (orientation applied) whose volume has the dense image layout: channels innermost, then x, then y, top
+row first, starting at index 0 (no y-flip; the same convention as the other Aardvark loaders).
 
 ```csharp
 PixImage img       = PixCodec.Load("photo.jpg");                         // PixImage<byte>, upright
@@ -237,33 +250,40 @@ PixImage srgb      = PixCodec.LoadSrgb("adobe-rgb.jpg");                 // conv
 PixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .qoi .ktx2 too
 ```
 
-`Init()` also registers `PixCodecProcessor`, so `PixImage.Scaled`, `Resized`, `Rotated`, `Remapped` and `PixImageMipMap.Create`
-use Aardvark.PixImage.PixCodec for every sample type (ImageInterpolation `Near`, `Linear`, `Cubic`, `Lanczos`, `SuperSample` map to nearest,
-bilinear, bicubic, Lanczos3 and box). Extension methods add the other filters and options:
+`PixImage.Save` of Aardvark.Base only accepts the file extensions Aardvark.Base knows; `PixCodec.Save` takes every format
+above.
+
+`Init()` also registers `PixCodecProcessor`, so `PixImage.Scaled`, `Resized`, `Rotated`, `Remapped` and
+`PixImageMipMap.Create` use PixCodec for every sample type (ImageInterpolation `Near`, `Linear`, `Cubic`, `Lanczos`,
+`SuperSample` map to nearest, bilinear, bicubic, Lanczos3 and box). Extension methods add the other filters and options:
 `pi.Resized(w, h, ResampleFilter.Mitchell)`, `pi.Resized(w, h, new ResizeOptions { LinearLight = true })`,
-`pi.Rotated(angle, true, new WarpOptions { ... })`, `pi.WarpedAffine(...)`, `pi.WarpedPerspective(...)`, `pi.Oriented(orientation)`.
-The alpha channel is taken from the PixImage format (BGRA works as is, premultiplied RGBP/BGRP are not premultiplied again). Two channel images without colour meaning (BC5 and RG textures, two band rasters) load as `Col.Format.RG`.
+`pi.Rotated(angle, true, new WarpOptions { ... })`, `pi.WarpedAffine(...)`, `pi.WarpedPerspective(...)`,
+`pi.Oriented(orientation)`. The alpha channel is taken from the PixImage format (BGRA works as is, premultiplied
+RGBP/BGRP are not premultiplied again). Two channel images without colour meaning (BC5 and RG textures, two band
+rasters) load as `Col.Format.RG`.
 
 Half float EXR channels load as `PixImage<float>`. BGR(A) images are saved as RGB(A). The existing `PixSaveParams`
 classes (JPEG quality, PNG level, TIFF / EXR compression, WebP quality / lossless, JPEG 2000) are honoured.
 
 ## Building and releasing
 
-Dependencies are managed with Paket: `./build.sh` (or `build.cmd`) restores the tools and packages and builds. A release
-is a new section on top of `RELEASE_NOTES.md` pushed to main: the Publish workflow tests, packs with aardpack and
-pushes the package to nuget.org.
+Dependencies are managed with Paket: `./build.sh` (or `build.cmd`) restores the tools and packages and builds; it needs
+the .NET 10 SDK (and the .NET 8 runtime for the net8.0 tests). A release is a new section on top of
+`RELEASE_NOTES.md` pushed to `main`: the Publish workflow tests, packs with aardpack and pushes the package to nuget.org
+and GitHub Packages. Notes for coding agents are in `AGENTS.md`.
 
 ## Tests
 
-`./build.sh`, then `dotnet test`. Decoders are checked against reference decoders (libjpeg-turbo, libpng, libtiff, libwebp, the OpenEXR
-library, Chromium, ...) through `.ref` sidecars generated by `tests/oracle/gen_*.py`; encoders are checked by decoding
-their output with the same reference tools. Running the encoder cross-checks needs `python3` with Pillow, numpy,
-tifffile, imagecodecs, opencv and OpenEXR; without python they are skipped. Some extra checks use tools fetched by
-`tests/oracle/gen_png.py --fetch-tools`. Written KTX files are checked with KTX-Software's `ktx validate` when `ktx` is on the
-PATH or `PIXCODEC_KTX` points to it; ETC1S / UASTC files written by Aardvark.PixImage.PixCodec are also decoded by basisu
-(`PIXCODEC_BASISU` or `basisu` on the PATH) and compared with Aardvark.PixImage.PixCodec's decoders. ICC colour conversions are checked against LittleCMS 2 float transforms
-(`tests/oracle/gen_icc.py` runs liblcms2 through ctypes) on profiles LittleCMS made itself, on Aardvark.PixImage.PixCodec's own profiles read
-back by LittleCMS, and on the ICC's sRGB v4 and the CC0 Compact-ICC-Profiles of the test-data repository.
+`./build.sh`, then `dotnet test -c Release`. Decoders are checked against reference decoders (libjpeg-turbo, libpng,
+libtiff, libwebp, the OpenEXR library, Chromium, ...) through `.ref` sidecars generated by `tests/oracle/gen_*.py`;
+encoders are checked by decoding their output with the same reference tools. Running the encoder cross-checks needs
+`python3` with Pillow, numpy, tifffile, imagecodecs, opencv and OpenEXR; without python they are skipped. Some extra
+checks use tools fetched by `tests/oracle/gen_png.py --fetch-tools`. Written KTX files are checked with KTX-Software's
+`ktx validate` when `ktx` is on the PATH or `PIXCODEC_KTX` points to it; ETC1S / UASTC files written by PixCodec are also decoded by basisu
+(`PIXCODEC_BASISU` or `basisu` on the PATH) and compared with PixCodec's decoders. ICC colour conversions are checked
+against LittleCMS 2 float transforms (`tests/oracle/gen_icc.py` runs liblcms2 through ctypes) on profiles LittleCMS made
+itself, on PixCodec's own profiles read back by LittleCMS, and on the ICC's sRGB v4 and the CC0 Compact-ICC-Profiles of
+the test-data repository.
 
 Metadata is checked against ExifTool (run, never linked): `tests/oracle/gen_meta.py` writes the reading fixtures,
 `tests/oracle/gen_meta_write.py` stores golden `WriteMetadata` outputs with ExifTool's reading and validation of them
@@ -272,7 +292,12 @@ writing tests also run it live, including a tag by tag comparison of rewritten c
 
 Everything in `tests/fixtures` is generated by `tests/oracle/gen_*.py` from synthetic images. Third-party test files
 (the PngSuite, openexr-images samples, the lists of the libwebp vectors, the JPEG 2000 conformance suite, the
-libtiff / GDAL / OpenSlide samples and ICC profiles) are in a separate test-data repository, https://github.com/krauthaufen/Aardvark.PixImage.PixCodec.TestData, with their licences (clone it next to this one). The tests look for it in `PIXCODEC_TESTDATA` or next to this repository
-(`../Aardvark.PixImage.PixCodec.TestData`); without it the tests that need it are skipped.
+libtiff / GDAL / OpenSlide samples and ICC profiles) are in a separate test-data repository,
+https://github.com/krauthaufen/Aardvark.PixImage.PixCodec.TestData, with their licences (clone it next to this one).
+The tests look for it in `PIXCODEC_TESTDATA` or next to this repository (`../Aardvark.PixImage.PixCodec.TestData`);
+without it the tests that need it are skipped. CI checks it out and runs the whole suite on Linux, Windows and macOS.
 
-Third-party data in the library: see `THIRD-PARTY-NOTICES.md`.
+## Licence
+
+MIT, see `LICENSE`. The codecs are written from the format specifications; no code of other implementations is used.
+Third-party data tables in the library are listed in `THIRD-PARTY-NOTICES.md`.
