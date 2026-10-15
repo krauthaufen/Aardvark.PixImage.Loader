@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
@@ -71,6 +72,16 @@ namespace PixCodec
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Fill()
             {
+                // four bytes at once while none of them can be a stuffed one (low seven bits all ones)
+                while (Bits <= 32 && Pos - 3 >= Min)
+                {
+                    uint x = Unsafe.ReadUnaligned<uint>(D + Pos - 3), y = x | 0x80808080u;
+                    if (((~y - 0x01010101u) & y & 0x80808080u) != 0) break;
+                    Buf |= (ulong)BinaryPrimitives.ReverseEndianness(x) << Bits;
+                    Bits += 32;
+                    Pos -= 4;
+                    Last = x & 0xFF;
+                }
                 while (Bits <= 56)
                 {
                     uint t = Pos >= Min ? D[Pos] : 0u;
@@ -106,6 +117,16 @@ namespace PixCodec
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Fill()
             {
+                // four bytes at once while neither they nor the byte before them is 0xFF
+                while (Bits <= 32 && Last != 0xFF && Pos + 4 <= End)
+                {
+                    uint x = Unsafe.ReadUnaligned<uint>(D + Pos);
+                    if (((~x - 0x01010101u) & x & 0x80808080u) != 0) break;
+                    Buf |= (ulong)x << Bits;
+                    Bits += 32;
+                    Pos += 4;
+                    Last = x >> 24;
+                }
                 while (Bits <= 56)
                 {
                     uint t = Pos < End ? D[Pos] : Pad;
@@ -120,33 +141,62 @@ namespace PixCodec
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public ulong Take(int n)
             {
-                if (n > 32)
-                {
-                    ulong lo = Take(32);
-                    return lo | Take(n - 32) << 32;
-                }
+                if (n > 32) return TakeLong(n);
                 if (Bits < n) Fill();
                 ulong v = Buf & ((1UL << n) - 1);
                 Buf >>= n; Bits -= n;
                 return v;
             }
+
+            // more than 32 bits (not part of Take: a recursive call would keep it from being inlined)
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            ulong TakeLong(int n)
+            {
+                ulong lo = Take(32);
+                return lo | Take(n - 32) << 32;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int Max(int a, int b) => a - ((a - b) & ((a - b) >> 31));
+
+        /// <summary>The MagSgn value of sample j of a quad (0 bits and 0 if it is not significant); sets bad on an impossible value.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static ulong Sample(ref Forward ms, int U, int k, int i1, int r, int j, int maxBits, ref bool bad)
+        {
+            int sig = r >> j & 1;
+            int m = (U - (k >> j & 1)) & -sig;
+            ulong v = ms.Take(m) | (ulong)(i1 >> j & sig) << m;
+            ulong mu = (v >> 1) + 1;
+            bad |= (64 - BitOperations.LeadingZeroCount(v | 1) > maxBits + 1 || mu >> maxBits != 0) & sig != 0;
+            return v;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int Exp(ulong v, int sig) => (64 - BitOperations.LeadingZeroCount(v | 1)) & -sig;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static T Value<T>(ulong v, int sig, int p, T half, T signBit) where T : unmanaged, IBinaryInteger<T>
+        {
+            T val = T.CreateTruncating(((v >> 1) + 1) << (p + 1)) | half | (signBit & T.CreateTruncating(0 - (v & 1)));
+            return val & T.CreateTruncating(0 - (ulong)sig);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int UPrefix(ref Reverse vlc)
         {
-            uint b = (uint)vlc.Buf;
-            if ((b & 1) != 0) { vlc.Skip(1); return 1; }
-            if ((b & 2) != 0) { vlc.Skip(2); return 2; }
-            vlc.Skip(3);
-            return (b & 4) != 0 ? 3 : 5;
+            // by table on the next three bits (prefix | length << 4): 1 "1", 2 "01", 3 "001", 5 "000"
+            int e = (int)(0x1122_1133_1122_1135UL >> (int)(((uint)vlc.Buf & 7) << 3)) & 0xFF;
+            vlc.Skip(e >> 4);
+            return e & 15;
         }
 
+        // suffix bits per prefix: 0 for 1 and 2, 1 for 3, 5 for 5 (no branches: the prefixes are irregular)
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int USuffix(ref Reverse vlc, int pfx) => pfx < 3 ? 0 : vlc.Take(pfx == 3 ? 1 : 5);
+        static int USuffix(ref Reverse vlc, int pfx) => vlc.Take((0x501000 >> (4 * pfx)) & 15);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int UExt(ref Reverse vlc, int sfx) => sfx < 28 ? 0 : vlc.Take(4);
+        static int UExt(ref Reverse vlc, int sfx) => vlc.Take((27 - sfx) >> 31 & 4);
 
         /// <summary>
         /// Decodes an HT set into data (w * h, row-major; representation as in <see cref="J2kBlockCoder"/>).
@@ -289,29 +339,33 @@ namespace PixCodec
                             oldExpLeft = eNe;
                             prevAboveRho = rhoAbove[q];
                             rhoAbove[q] = (byte)r;
+                            // (maxima without branches: the operands are small, the outcomes irregular)
                             int kappa = 1;
                             if (!firstRow && (r & (r - 1)) != 0)
-                                kappa = Math.Max(1, Math.Max(Math.Max(eNw, eN), Math.Max(eNe, eNf)) - 1);
+                                kappa = Max(1, Max(Max(eNw, eN), Max(eNe, eNf)) - 1);
                             int U = kappa + u[i];
                             int eb0 = 0, eb1 = 0;    // exponents of the two bottom samples
                             if (r != 0)
                             {
                                 if (U > maxBits + 1) return false;
                                 int k = ek[i], i1 = e1[i];
-                                for (int j = 0; j < 4; j++)
+                                // the four samples unrolled; an insignificant one takes 0 bits and writes nothing
+                                bool bad = false;
+                                ulong v0 = Sample(ref ms, U, k, i1, r, 0, maxBits, ref bad);
+                                ulong v1 = Sample(ref ms, U, k, i1, r, 1, maxBits, ref bad);
+                                ulong v2 = Sample(ref ms, U, k, i1, r, 2, maxBits, ref bad);
+                                ulong v3 = Sample(ref ms, U, k, i1, r, 3, maxBits, ref bad);
+                                // padded samples are never significant
+                                if (bad || (x + 1 >= w && (r & 12) != 0) || (!hasRow1 && (r & 10) != 0)) return false;
+                                eb0 = Exp(v1, r >> 1 & 1);
+                                eb1 = Exp(v3, r >> 3 & 1);
+                                // (the block was cleared: insignificant samples write 0, no branch on the pattern)
+                                row0[x] = Value<T>(v0, r & 1, p, half, signBit);
+                                if (x + 1 < w) row0[x + 1] = Value<T>(v2, r >> 2 & 1, p, half, signBit);
+                                if (hasRow1)
                                 {
-                                    if ((r >> j & 1) == 0) continue;
-                                    int m = U - (k >> j & 1);
-                                    ulong v = ms.Take(m) | (ulong)(i1 >> j & 1) << m;
-                                    ulong mu = (v >> 1) + 1;
-                                    int exp = 64 - BitOperations.LeadingZeroCount(v | 1);
-                                    if (exp > maxBits + 1 || mu >> maxBits != 0) return false;
-                                    int sx = x + (j >> 1);
-                                    if ((j & 1) != 0) { if ((j & 2) == 0) eb0 = exp; else eb1 = exp; }
-                                    if (sx >= w || ((j & 1) != 0 && !hasRow1)) return false;   // padded samples are never significant
-                                    T val = T.CreateTruncating(mu << (p + 1)) | half;
-                                    if ((v & 1) != 0) val |= signBit;
-                                    if ((j & 1) == 0) row0[sx] = val; else row1[sx] = val;
+                                    row1[x] = Value<T>(v1, r >> 1 & 1, p, half, signBit);
+                                    if (x + 1 < w) row1[x + 1] = Value<T>(v3, r >> 3 & 1, p, half, signBit);
                                 }
                             }
                             expAbove[x] = (byte)eb0;
