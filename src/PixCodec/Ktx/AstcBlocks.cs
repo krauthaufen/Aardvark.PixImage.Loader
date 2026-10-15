@@ -1,6 +1,9 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 namespace PixCodec
 {
@@ -63,12 +66,12 @@ namespace PixCodec
 
         // All ranges used by ASTC, ascending: maximum value, trits / quints, and the number of plain bits.
         // Indices 0..11 are the weight ranges in the order of Table 146 ((rho - 2) + 6 * P); 4..20 the colour ranges.
-        static readonly byte[] QMax = { 1, 2, 3, 4, 5, 7, 9, 11, 15, 19, 23, 31, 39, 47, 63, 79, 95, 127, 159, 191, 255 };
-        static readonly byte[] QKind = { 0, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0 };   // 1 trit, 2 quint
-        static readonly byte[] QBits = { 1, 0, 2, 0, 1, 3, 1, 2, 4, 2, 3, 5, 3, 4, 6, 4, 5, 7, 5, 6, 8 };
+        internal static readonly byte[] QMax = { 1, 2, 3, 4, 5, 7, 9, 11, 15, 19, 23, 31, 39, 47, 63, 79, 95, 127, 159, 191, 255 };
+        internal static readonly byte[] QKind = { 0, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0 };   // 1 trit, 2 quint
+        internal static readonly byte[] QBits = { 1, 0, 2, 0, 1, 3, 1, 2, 4, 2, 3, 5, 3, 4, 6, 4, 5, 7, 5, 6, 8 };
 
         /// <summary>Bits taken by an integer sequence of <paramref name="count"/> values in range <paramref name="q"/>.</summary>
-        static int IseBits(int q, int count)
+        internal static int IseBits(int q, int count)
         {
             int n = QBits[q] * count;
             return QKind[q] switch { 1 => n + (8 * count + 4) / 5, 2 => n + (7 * count + 2) / 3, _ => n };
@@ -85,7 +88,7 @@ namespace PixCodec
             return (int)(v & ((1UL << k) - 1));
         }
 
-        static ulong Reverse(ulong v)
+        internal static ulong Reverse(ulong v)
         {
             v = (v >> 1) & 0x5555555555555555UL | (v & 0x5555555555555555UL) << 1;
             v = (v >> 2) & 0x3333333333333333UL | (v & 0x3333333333333333UL) << 2;
@@ -97,52 +100,98 @@ namespace PixCodec
 
         static void DecodeIse(ulong lo, ulong hi, int start, int q, int count, Span<int> o)
         {
-            int n = QBits[q], limit = start + IseBits(q, count), pos = start;
+            // the bits from start to the end of the sequence, as a 128 bit window shifted down as it is consumed (bits
+            // past the end read as 0)
+            int n = QBits[q], limit = start + IseBits(q, count);
+            if (limit < 64) { lo &= (1UL << limit) - 1; hi = 0; }
+            else if (limit < 128) hi &= (1UL << (limit - 64)) - 1;
+            if (start >= 64) { lo = hi >> (start - 64); hi = 0; }
+            else if (start > 0) { lo = lo >> start | hi << (64 - start); hi >>= start; }
+            ulong mask = (1UL << n) - 1;
             switch (QKind[q])
             {
                 case 0:
-                    for (int i = 0; i < count; i++, pos += n) o[i] = Read(lo, hi, pos, n, limit);
+                    for (int i = 0; i < count; i++) o[i] = (int)Take(ref lo, ref hi, n, mask);
                     break;
                 case 1:
-                    Span<int> m = stackalloc int[5];
-                    Span<int> t = stackalloc int[5];
                     for (int i = 0; i < count; i += 5)
                     {
-                        m[0] = Read(lo, hi, pos, n, limit); pos += n;
-                        int T = Read(lo, hi, pos, 2, limit); pos += 2;
-                        m[1] = Read(lo, hi, pos, n, limit); pos += n;
-                        T |= Read(lo, hi, pos, 2, limit) << 2; pos += 2;
-                        m[2] = Read(lo, hi, pos, n, limit); pos += n;
-                        T |= Read(lo, hi, pos, 1, limit) << 4; pos += 1;
-                        m[3] = Read(lo, hi, pos, n, limit); pos += n;
-                        T |= Read(lo, hi, pos, 2, limit) << 5; pos += 2;
-                        m[4] = Read(lo, hi, pos, n, limit); pos += n;
-                        T |= Read(lo, hi, pos, 1, limit) << 7; pos += 1;
-                        Trits(T, t);
-                        for (int j = 0; j < 5 && i + j < count; j++) o[i + j] = t[j] << n | m[j];
+                        int m0 = (int)Take(ref lo, ref hi, n, mask);
+                        int T = (int)Take(ref lo, ref hi, 2, 3);
+                        int m1 = (int)Take(ref lo, ref hi, n, mask);
+                        T |= (int)Take(ref lo, ref hi, 2, 3) << 2;
+                        int m2 = (int)Take(ref lo, ref hi, n, mask);
+                        T |= (int)Take(ref lo, ref hi, 1, 1) << 4;
+                        int m3 = (int)Take(ref lo, ref hi, n, mask);
+                        T |= (int)Take(ref lo, ref hi, 2, 3) << 5;
+                        int m4 = (int)Take(ref lo, ref hi, n, mask);
+                        T |= (int)Take(ref lo, ref hi, 1, 1) << 7;
+                        int tr = TritTable[T];
+                        int r = Math.Min(5, count - i);
+                        o[i] = (tr & 3) << n | m0;
+                        if (r > 1) o[i + 1] = (tr >> 2 & 3) << n | m1;
+                        if (r > 2) o[i + 2] = (tr >> 4 & 3) << n | m2;
+                        if (r > 3) o[i + 3] = (tr >> 6 & 3) << n | m3;
+                        if (r > 4) o[i + 4] = (tr >> 8 & 3) << n | m4;
                     }
                     break;
                 default:
-                    Span<int> mq = stackalloc int[3];
-                    Span<int> qv = stackalloc int[3];
                     for (int i = 0; i < count; i += 3)
                     {
-                        mq[0] = Read(lo, hi, pos, n, limit); pos += n;
-                        int Q = Read(lo, hi, pos, 3, limit); pos += 3;
-                        mq[1] = Read(lo, hi, pos, n, limit); pos += n;
-                        Q |= Read(lo, hi, pos, 2, limit) << 3; pos += 2;
-                        mq[2] = Read(lo, hi, pos, n, limit); pos += n;
-                        Q |= Read(lo, hi, pos, 2, limit) << 5; pos += 2;
-                        Quints(Q, qv);
-                        for (int j = 0; j < 3 && i + j < count; j++) o[i + j] = qv[j] << n | mq[j];
+                        int m0 = (int)Take(ref lo, ref hi, n, mask);
+                        int Q = (int)Take(ref lo, ref hi, 3, 7);
+                        int m1 = (int)Take(ref lo, ref hi, n, mask);
+                        Q |= (int)Take(ref lo, ref hi, 2, 3) << 3;
+                        int m2 = (int)Take(ref lo, ref hi, n, mask);
+                        Q |= (int)Take(ref lo, ref hi, 2, 3) << 5;
+                        int qu = QuintTable[Q];
+                        int r = Math.Min(3, count - i);
+                        o[i] = (qu & 7) << n | m0;
+                        if (r > 1) o[i + 1] = (qu >> 3 & 7) << n | m1;
+                        if (r > 2) o[i + 2] = (qu >> 6 & 7) << n | m2;
                     }
                     break;
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static ulong Take(ref ulong lo, ref ulong hi, int n, ulong mask)
+        {
+            ulong v = lo & mask;
+            if (n != 0) { lo = lo >> n | hi << (64 - n); hi >>= n; }
+            return v;
+        }
+
+        // the 5 trits of a packed byte, 2 bits each; the 3 quints of a packed 7 bit value, 3 bits each
+        static readonly int[] TritTable = BuildTrits(), QuintTable = BuildQuints();
+
+        static int[] BuildTrits()
+        {
+            var r = new int[256];
+            Span<int> t = stackalloc int[5];
+            for (int T = 0; T < 256; T++)
+            {
+                Trits(T, t);
+                r[T] = t[0] | t[1] << 2 | t[2] << 4 | t[3] << 6 | t[4] << 8;
+            }
+            return r;
+        }
+
+        static int[] BuildQuints()
+        {
+            var r = new int[128];
+            Span<int> q = stackalloc int[3];
+            for (int Q = 0; Q < 128; Q++)
+            {
+                Quints(Q, q);
+                r[Q] = q[0] | q[1] << 3 | q[2] << 6;
+            }
+            return r;
+        }
+
         static int Bit(int v, int i) => v >> i & 1;
 
-        static void Trits(int T, Span<int> t)
+        internal static void Trits(int T, Span<int> t)
         {
             int C;
             if ((T >> 2 & 7) == 7)
@@ -161,7 +210,7 @@ namespace PixCodec
             else { t[2] = Bit(C, 4); t[1] = C >> 2 & 3; t[0] = Bit(C, 1) << 1 | Bit(C, 0) & ~Bit(C, 1) & 1; }
         }
 
-        static void Quints(int Q, Span<int> q)
+        internal static void Quints(int Q, Span<int> q)
         {
             if ((Q >> 1 & 3) == 3 && (Q >> 5 & 3) == 0)
             {
@@ -190,7 +239,7 @@ namespace PixCodec
             return r;
         }
 
-        static int UnquantColor(int q, int v)
+        internal static int UnquantColor(int q, int v)
         {
             int n = QBits[q];
             if (QKind[q] == 0) return Replicate(v, n, 8);
@@ -216,7 +265,7 @@ namespace PixCodec
             return (A & 0x80) | (u >> 2);
         }
 
-        static int UnquantWeight(int q, int v)
+        internal static int UnquantWeight(int q, int v)
         {
             int n = QBits[q], u;
             if (QKind[q] == 0) u = Replicate(v, n, 6);
@@ -243,7 +292,7 @@ namespace PixCodec
         // ------------------------------------------------------------------ block mode (23.10)
 
         /// <summary>Weight grid size, weight range index and dual plane flag; false for reserved modes.</summary>
-        static bool BlockMode(int m, bool is3D, out int gw, out int gh, out int gd, out int wq, out bool dual)
+        internal static bool BlockMode(int m, bool is3D, out int gw, out int gh, out int gd, out int wq, out bool dual)
         {
             gw = gh = gd = 1; wq = 0; dual = false;
             int rho, p = Bit(m, 9);
@@ -325,7 +374,7 @@ namespace PixCodec
             return p;
         }
 
-        static int SelectPartition(int seed, int x, int y, int z, int count, bool small)
+        internal static int SelectPartition(int seed, int x, int y, int z, int count, bool small)
         {
             if (small) { x <<= 1; y <<= 1; z <<= 1; }
             seed += (count - 1) * 1024;
@@ -357,7 +406,7 @@ namespace PixCodec
         // ------------------------------------------------------------------ endpoints (23.14, 23.15)
 
         // per partition: e0 (r, g, b, a), e1 (r, g, b, a); flags bit 0: RGB is HDR (12 bit), bit 1: alpha is HDR
-        const int HdrRgb = 1, HdrA = 2;
+        internal const int HdrRgb = 1, HdrA = 2;
 
         static void BitTransferSigned(ref int a, ref int b)
         {
@@ -376,7 +425,7 @@ namespace PixCodec
 
         /// <summary>Decodes the endpoint pair of colour endpoint mode <paramref name="cem"/> from values v into e (8 ints);
         /// returns the HDR flags.</summary>
-        static int Endpoints(int cem, ReadOnlySpan<int> v, Span<int> e)
+        internal static int Endpoints(int cem, ReadOnlySpan<int> v, Span<int> e)
         {
             Span<int> e0 = e.Slice(0, 4), e1 = e.Slice(4, 4);
             switch (cem)
@@ -571,7 +620,7 @@ namespace PixCodec
         // ------------------------------------------------------------------ output conversions (23.19)
 
         /// <summary>A UNORM16 interpolation result to half float, rounding toward zero (65535 is exactly 1.0).</summary>
-        static ushort Unorm16ToHalf(int c)
+        internal static ushort Unorm16ToHalf(int c)
         {
             if (c == 65535) return HalfOne;
             if (c < 4) return (ushort)(c << 8);   // subnormal: c / 65536 = (c * 256) * 2^-24
@@ -581,10 +630,10 @@ namespace PixCodec
         }
 
         /// <summary>Half float in 0..1 to 8 bits, rounded to nearest (255 x is never halfway for a binary16 x).</summary>
-        static byte HalfToUnorm8(ushort h) => (byte)Math.Round((double)BitConverter.UInt16BitsToHalf(h) * 255);
+        internal static byte HalfToUnorm8(ushort h) => (byte)Math.Round((double)BitConverter.UInt16BitsToHalf(h) * 255);
 
         /// <summary>An interpolated HDR value (16 bit, from 12 bit endpoints shifted up by 4) to half float.</summary>
-        static ushort HdrToHalf(int c)
+        internal static ushort HdrToHalf(int c)
         {
             int e = c >> 11, m = c & 0x7FF;
             int mt = m < 512 ? 3 * m : m >= 1536 ? 5 * m - 2048 : 4 * m - 512;
@@ -601,6 +650,7 @@ namespace PixCodec
 
         // ------------------------------------------------------------------ block decoding
 
+        [System.Runtime.CompilerServices.SkipLocalsInit]
         static void Decode(ReadOnlySpan<byte> block, int bw, int bh, int bd, Mode mode, Span<byte> o8, Span<ushort> o16)
         {
             int texels = bw * bh * bd;
@@ -613,7 +663,10 @@ namespace PixCodec
                 VoidExtent(lo, hi, is3D, texels, mode, o8, o16);
                 return;
             }
-            if (!BlockMode(bm, is3D, out int gw, out int gh, out int gd, out int wq, out bool dual) || gw > bw || gh > bh || gd > bd)
+            int mi = (is3D ? Modes3D : Modes2D)[bm];
+            int gw = mi & 15, gh = mi >> 4 & 15, gd = mi >> 8 & 15, wq = mi >> 12 & 15;
+            bool dual = (mi >> 16 & 1) != 0;
+            if (mi < 0 || gw > bw || gh > bh || gd > bd)
             {
                 Error(texels, mode, o8, o16);
                 return;
@@ -678,9 +731,10 @@ namespace PixCodec
             // endpoint values and endpoints
             Span<int> values = stackalloc int[18];
             DecodeIse(lo, hi, parts == 1 ? 17 : 29, cq, colorCount, values);
-            for (int i = 0; i < colorCount; i++) values[i] = UnquantColor(cq, values[i]);
+            for (int i = 0; i < colorCount; i++) values[i] = ColorUnq[cq * 256 + values[i]];
             Span<int> ep = stackalloc int[32];
             Span<int> flags = stackalloc int[4];
+            flags.Clear();
             for (int i = 0, k = 0; i < parts; i++)
             {
                 flags[i] = Endpoints(cem[i], values.Slice(k), ep.Slice(i * 8, 8));
@@ -690,36 +744,49 @@ namespace PixCodec
             // weights, stored bit-reversed from the top of the block; padded so the infill may read past the grid edge
             Span<int> raw = stackalloc int[64];
             DecodeIse(Reverse(hi), Reverse(lo), 0, wq, weightCount, raw);
+            // the infill may read past the grid (with weight 0): the arrays are padded with zeros
             Span<int> w0 = stackalloc int[160];
             Span<int> w1 = stackalloc int[160];
-            w0.Clear(); w1.Clear();
+            int pad = Math.Min(160, gridCount + gw * gh + gw + 2) - gridCount;
+            w0.Slice(gridCount, pad).Clear();
+            if (dual) w1.Slice(gridCount, pad).Clear();
+            int ub = wq * 64;
             for (int i = 0; i < gridCount; i++)
             {
                 if (dual)
                 {
-                    w0[i] = UnquantWeight(wq, raw[2 * i]);
-                    w1[i] = UnquantWeight(wq, raw[2 * i + 1]);
+                    w0[i] = WeightUnq[ub + raw[2 * i]];
+                    w1[i] = WeightUnq[ub + raw[2 * i + 1]];
                 }
-                else w0[i] = UnquantWeight(wq, raw[i]);
+                else w0[i] = WeightUnq[ub + raw[i]];
             }
 
-            // infill scale factors (23.18)
-            int ds = (1024 + bw / 2) / (bw - 1), dt = (1024 + bh / 2) / (bh - 1), dr = is3D ? (1024 + bd / 2) / (bd - 1) : 0;
-            bool small = texels < 31;
-            for (int z = 0; z < bd; z++)
-                for (int y = 0; y < bh; y++)
-                    for (int x = 0; x < bw; x++)
+            var fp = GetFootprint(bw, bh, bd);
+            int[] tab = InfillTable(fp, gw, gh, gd);
+            byte[]? pmap = parts == 1 ? null : PartitionTable(fp, parts, seed);
+
+            if (mode == Mode.Unorm8 && (flags[0] | flags[1] | flags[2] | flags[3]) == 0 && o8.Length >= texels * 4)
+            {
+                DecodeLdr8(ep, parts, w0, w1, dual, ccs, tab, pmap, texels, o8);
+                return;
+            }
+            if (mode == Mode.Float16 && o16.Length >= texels * 4)
+            {
+                DecodeF16(ep, flags, parts, w0, w1, dual, ccs, tab, pmap, texels, o16);
+                return;
+            }
+
+            for (int t = 0, ti = 0; t < texels; t++, ti += 8)
                     {
-                        int t = (z * bh + y) * bw + x;
-                        int part = parts == 1 ? 0 : SelectPartition(seed, x, y, z, parts, small);
+                        int part = pmap == null ? 0 : pmap[t];
                         int f = flags[part];
                         if (f != 0 && mode != Mode.Float16)
                         {
                             Error(1, mode, o8.Slice(t * 4), o16);
                             continue;
                         }
-                        int gs = (ds * x * (gw - 1) + 32) >> 6, gt = (dt * y * (gh - 1) + 32) >> 6, gr = (dr * z * (gd - 1) + 32) >> 6;
-                        int i0 = Infill(w0, gs, gt, gr, gw, gh, is3D), i1 = dual ? Infill(w1, gs, gt, gr, gw, gh, is3D) : 0;
+                        int i0 = (w0[tab[ti]] * tab[ti + 4] + w0[tab[ti + 1]] * tab[ti + 5] + w0[tab[ti + 2]] * tab[ti + 6] + w0[tab[ti + 3]] * tab[ti + 7] + 8) >> 4;
+                        int i1 = dual ? (w1[tab[ti]] * tab[ti + 4] + w1[tab[ti + 1]] * tab[ti + 5] + w1[tab[ti + 2]] * tab[ti + 6] + w1[tab[ti + 3]] * tab[ti + 7] + 8) >> 4 : 0;
                         Span<int> e = ep.Slice(part * 8, 8);
                         for (int c = 0; c < 4; c++)
                         {
@@ -742,27 +809,205 @@ namespace PixCodec
                     }
         }
 
-        /// <summary>The effective weight at weight grid position (gs, gt, gr) in 4.4 fixed point: bilinear (2D) or
-        /// simplex (3D) interpolation of the stored weights.</summary>
-        static int Infill(ReadOnlySpan<int> w, int gs, int gt, int gr, int gw, int gh, bool is3D)
+        /// <summary>The LDR, 8 bit output texel loop: all channels of a texel at once.</summary>
+        static unsafe void DecodeLdr8(ReadOnlySpan<int> ep, int parts, ReadOnlySpan<int> w0, ReadOnlySpan<int> w1, bool dual, int ccs,
+            int[] tab, byte[]? pmap, int texels, Span<byte> o8)
         {
-            int js = gs >> 4, fs = gs & 15, jt = gt >> 4, ft = gt & 15;
-            if (!is3D)
+            Span<Vector128<int>> e0 = stackalloc Vector128<int>[4], e1 = stackalloc Vector128<int>[4];
+            for (int p = 0; p < parts; p++)
             {
-                int v0 = js + jt * gw;
-                int w11 = (fs * ft + 8) >> 4, w10 = ft - w11, w01 = fs - w11, w00 = 16 - fs - ft + w11;
-                return (w[v0] * w00 + w[v0 + 1] * w01 + w[v0 + gw] * w10 + w[v0 + gw + 1] * w11 + 8) >> 4;
+                Vector128<int> a = Vector128.Create(ep[p * 8], ep[p * 8 + 1], ep[p * 8 + 2], ep[p * 8 + 3]);
+                Vector128<int> b = Vector128.Create(ep[p * 8 + 4], ep[p * 8 + 5], ep[p * 8 + 6], ep[p * 8 + 7]);
+                e0[p] = (a << 8) | a;
+                e1[p] = (b << 8) | b;
             }
-            int jr = gr >> 4, fr = gr & 15, plane = gw * gh;
-            int s1, s2, a0, a1, a2, a3;
-            if (fs > ft && ft > fr) { s1 = 1; s2 = gw; a0 = 16 - fs; a1 = fs - ft; a2 = ft - fr; a3 = fr; }
-            else if (fs > ft && fs > fr) { s1 = 1; s2 = plane; a0 = 16 - fs; a1 = fs - fr; a2 = fr - ft; a3 = ft; }
-            else if (fs > ft) { s1 = plane; s2 = 1; a0 = 16 - fr; a1 = fr - fs; a2 = fs - ft; a3 = ft; }
-            else if (ft > fr && fs > fr) { s1 = gw; s2 = 1; a0 = 16 - ft; a1 = ft - fs; a2 = fs - fr; a3 = fr; }
-            else if (ft > fr) { s1 = gw; s2 = plane; a0 = 16 - ft; a1 = ft - fr; a2 = fr - fs; a3 = fs; }
-            else { s1 = plane; s2 = gw; a0 = 16 - fr; a1 = fr - ft; a2 = ft - fs; a3 = fs; }
-            int b0 = js + jt * gw + jr * plane;
-            return (w[b0] * a0 + w[b0 + s1] * a1 + w[b0 + s1 + s2] * a2 + w[b0 + plane + gw + 1] * a3 + 8) >> 4;
+            // lanes of the second plane's channel
+            Vector128<int> sel = dual ? Vector128.Equals(Vector128.Create(0, 1, 2, 3), Vector128.Create(ccs)) : Vector128<int>.Zero;
+            Vector128<int> v64 = Vector128.Create(64), v32 = Vector128.Create(32);
+            fixed (int* tp = tab, pw0 = w0, pw1 = w1)
+            fixed (byte* op = o8)
+            {
+                int* tt = tp;
+                for (int t = 0; t < texels; t++, tt += 8)
+                {
+                    int i0 = (pw0[tt[0]] * tt[4] + pw0[tt[1]] * tt[5] + pw0[tt[2]] * tt[6] + pw0[tt[3]] * tt[7] + 8) >> 4;
+                    Vector128<int> w = Vector128.Create(i0);
+                    if (dual)
+                    {
+                        int i1 = (pw1[tt[0]] * tt[4] + pw1[tt[1]] * tt[5] + pw1[tt[2]] * tt[6] + pw1[tt[3]] * tt[7] + 8) >> 4;
+                        w = Vector128.ConditionalSelect(sel, Vector128.Create(i1), w);
+                    }
+                    int p = pmap == null ? 0 : pmap[t];
+                    Vector128<int> u = (e0[p] * (v64 - w) + e1[p] * w + v32) >> 14;
+                    Vector128<byte> b8 = Vector128.Narrow(Vector128.Narrow(u.AsUInt32(), u.AsUInt32()), Vector128<ushort>.Zero);
+                    Unsafe.WriteUnaligned(op + t * 4, b8.AsUInt32().ToScalar());
+                }
+            }
+        }
+
+        // UNORM16 interpolation result to half (round toward zero), HDR interpolation result to half
+        static readonly ushort[] UnormHalf = BuildHalfTable(false), HdrHalf = BuildHalfTable(true);
+
+        static ushort[] BuildHalfTable(bool hdr)
+        {
+            var t = new ushort[65536];
+            for (int i = 0; i < 65536; i++) t[i] = hdr ? HdrToHalf(i) : Unorm16ToHalf(i);
+            return t;
+        }
+
+        /// <summary>The half float output texel loop (LDR and HDR endpoints).</summary>
+        static unsafe void DecodeF16(ReadOnlySpan<int> ep, ReadOnlySpan<int> flags, int parts, ReadOnlySpan<int> w0, ReadOnlySpan<int> w1,
+            bool dual, int ccs, int[] tab, byte[]? pmap, int texels, Span<ushort> o16)
+        {
+            Span<Vector128<int>> e0 = stackalloc Vector128<int>[4], e1 = stackalloc Vector128<int>[4];
+            Span<int> hdrMask = stackalloc int[4];   // per partition: bit c set when channel c is HDR
+            Span<int> a = stackalloc int[4], b = stackalloc int[4];
+            for (int p = 0; p < parts; p++)
+            {
+                int m = 0;
+                for (int c = 0; c < 4; c++)
+                {
+                    bool h = (flags[p] & (c == 3 ? HdrA : HdrRgb)) != 0;
+                    int x = ep[p * 8 + c], y = ep[p * 8 + 4 + c];
+                    if (h) { a[c] = x << 4; b[c] = y << 4; m |= 1 << c; }
+                    else { a[c] = x << 8 | x; b[c] = y << 8 | y; }
+                }
+                e0[p] = Vector128.Create(a[0], a[1], a[2], a[3]);
+                e1[p] = Vector128.Create(b[0], b[1], b[2], b[3]);
+                hdrMask[p] = m;
+            }
+            Vector128<int> sel = dual ? Vector128.Equals(Vector128.Create(0, 1, 2, 3), Vector128.Create(ccs)) : Vector128<int>.Zero;
+            Vector128<int> v64 = Vector128.Create(64), v32 = Vector128.Create(32);
+            fixed (int* tp = tab, pw0 = w0, pw1 = w1)
+            fixed (ushort* op = o16, hh = HdrHalf, uh = UnormHalf)
+            {
+                int* tt = tp;
+                for (int t = 0; t < texels; t++, tt += 8)
+                {
+                    int i0 = (pw0[tt[0]] * tt[4] + pw0[tt[1]] * tt[5] + pw0[tt[2]] * tt[6] + pw0[tt[3]] * tt[7] + 8) >> 4;
+                    Vector128<int> w = Vector128.Create(i0);
+                    if (dual)
+                    {
+                        int i1 = (pw1[tt[0]] * tt[4] + pw1[tt[1]] * tt[5] + pw1[tt[2]] * tt[6] + pw1[tt[3]] * tt[7] + 8) >> 4;
+                        w = Vector128.ConditionalSelect(sel, Vector128.Create(i1), w);
+                    }
+                    int p = pmap == null ? 0 : pmap[t], m = hdrMask[p];
+                    Vector128<int> u = (e0[p] * (v64 - w) + e1[p] * w + v32) >> 6;
+                    ushort* o = op + t * 4;
+                    o[0] = ((m & 1) != 0 ? hh : uh)[u.GetElement(0)];
+                    o[1] = ((m & 2) != 0 ? hh : uh)[u.GetElement(1)];
+                    o[2] = ((m & 4) != 0 ? hh : uh)[u.GetElement(2)];
+                    o[3] = ((m & 8) != 0 ? hh : uh)[u.GetElement(3)];
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------ cached tables
+
+        // block mode (2D / 3D) -> gw | gh << 4 | gd << 8 | wq << 12 | dual << 16, or -1 for reserved modes
+        static readonly int[] Modes2D = BuildModes(false), Modes3D = BuildModes(true);
+        static readonly int[] WeightUnq = BuildWeightUnq(), ColorUnq = BuildColorUnq();   // [range * 64 + v], [range * 256 + v]
+
+        static int[] BuildModes(bool is3D)
+        {
+            var m = new int[2048];
+            for (int i = 0; i < 2048; i++)
+                m[i] = BlockMode(i, is3D, out int gw, out int gh, out int gd, out int wq, out bool dual)
+                    ? gw | gh << 4 | gd << 8 | wq << 12 | (dual ? 1 << 16 : 0) : -1;
+            return m;
+        }
+
+        static int[] BuildWeightUnq()
+        {
+            var t = new int[12 * 64];
+            for (int q = 0; q < 12; q++) for (int v = 0; v <= QMax[q]; v++) t[q * 64 + v] = UnquantWeight(q, v);
+            return t;
+        }
+
+        static int[] BuildColorUnq()
+        {
+            var t = new int[21 * 256];
+            for (int q = 0; q < 21; q++) for (int v = 0; v <= QMax[q]; v++) t[q * 256 + v] = UnquantColor(q, v);
+            return t;
+        }
+
+        /// <summary>Per footprint: the infill taps of every weight grid and the partition of every texel per seed, built on
+        /// first use.</summary>
+        sealed class Footprint
+        {
+            public int Bw, Bh, Bd;
+            public readonly int[]?[] Infill = new int[]?[13 * 13 * 7];
+            public readonly byte[]?[] Parts = new byte[]?[3 * 1024];
+        }
+
+        static readonly ConcurrentDictionary<int, Footprint> Footprints = new();
+        [ThreadStatic] static Footprint? lastFootprint;
+
+        static Footprint GetFootprint(int bw, int bh, int bd)
+        {
+            var f = lastFootprint;
+            if (f != null && f.Bw == bw && f.Bh == bh && f.Bd == bd) return f;
+            f = Footprints.GetOrAdd(bw << 16 | bh << 8 | bd, _ => new Footprint { Bw = bw, Bh = bh, Bd = bd });
+            lastFootprint = f;
+            return f;
+        }
+
+        /// <summary>Per texel: the 4 grid indices and their weights (sum 16) of the infill (23.18), as the decoder
+        /// computes them; indices of weight 0 may point past the grid.</summary>
+        static int[] InfillTable(Footprint f, int gw, int gh, int gd)
+        {
+            int key = (gw * 13 + gh) * 7 + gd;
+            var tab = f.Infill[key];
+            if (tab != null) return tab;
+            int bw = f.Bw, bh = f.Bh, bd = f.Bd;
+            bool is3D = bd > 1;
+            tab = new int[bw * bh * bd * 8];
+            int ds = (1024 + bw / 2) / (bw - 1), dt = (1024 + bh / 2) / (bh - 1), dr = is3D ? (1024 + bd / 2) / (bd - 1) : 0;
+            for (int z = 0, t = 0; z < bd; z++)
+                for (int y = 0; y < bh; y++)
+                    for (int x = 0; x < bw; x++, t++)
+                    {
+                        int gs = (ds * x * (gw - 1) + 32) >> 6, gt = (dt * y * (gh - 1) + 32) >> 6, gr = (dr * z * (gd - 1) + 32) >> 6;
+                        int js = gs >> 4, fs = gs & 15, jt = gt >> 4, ft = gt & 15;
+                        Span<int> e = tab.AsSpan(t * 8, 8);
+                        if (!is3D)
+                        {
+                            int v0 = js + jt * gw;
+                            int w11 = (fs * ft + 8) >> 4, w10 = ft - w11, w01 = fs - w11, w00 = 16 - fs - ft + w11;
+                            e[0] = v0; e[1] = v0 + 1; e[2] = v0 + gw; e[3] = v0 + gw + 1;
+                            e[4] = w00; e[5] = w01; e[6] = w10; e[7] = w11;
+                            continue;
+                        }
+                        int jr = gr >> 4, fr = gr & 15, plane = gw * gh;
+                        int s1, s2, a0, a1, a2, a3;
+                        if (fs > ft && ft > fr) { s1 = 1; s2 = gw; a0 = 16 - fs; a1 = fs - ft; a2 = ft - fr; a3 = fr; }
+                        else if (fs > ft && fs > fr) { s1 = 1; s2 = plane; a0 = 16 - fs; a1 = fs - fr; a2 = fr - ft; a3 = ft; }
+                        else if (fs > ft) { s1 = plane; s2 = 1; a0 = 16 - fr; a1 = fr - fs; a2 = fs - ft; a3 = ft; }
+                        else if (ft > fr && fs > fr) { s1 = gw; s2 = 1; a0 = 16 - ft; a1 = ft - fs; a2 = fs - fr; a3 = fr; }
+                        else if (ft > fr) { s1 = gw; s2 = plane; a0 = 16 - ft; a1 = ft - fr; a2 = fr - fs; a3 = fs; }
+                        else { s1 = plane; s2 = gw; a0 = 16 - fr; a1 = fr - ft; a2 = ft - fs; a3 = fs; }
+                        int b0 = js + jt * gw + jr * plane;
+                        e[0] = b0; e[1] = b0 + s1; e[2] = b0 + s1 + s2; e[3] = b0 + plane + gw + 1;
+                        e[4] = a0; e[5] = a1; e[6] = a2; e[7] = a3;
+                    }
+            f.Infill[key] = tab;
+            return tab;
+        }
+
+        /// <summary>The partition of every texel for a partition count and seed (23.21).</summary>
+        static byte[] PartitionTable(Footprint f, int parts, int seed)
+        {
+            int key = (parts - 2) * 1024 + seed;
+            var tab = f.Parts[key];
+            if (tab != null) return tab;
+            int bw = f.Bw, bh = f.Bh, bd = f.Bd;
+            tab = new byte[bw * bh * bd];
+            bool small = tab.Length < 31;
+            for (int z = 0, t = 0; z < bd; z++)
+                for (int y = 0; y < bh; y++)
+                    for (int x = 0; x < bw; x++, t++) tab[t] = (byte)SelectPartition(seed, x, y, z, parts, small);
+            f.Parts[key] = tab;
+            return tab;
         }
 
         static void VoidExtent(ulong lo, ulong hi, bool is3D, int texels, Mode mode, Span<byte> o8, Span<ushort> o16)
