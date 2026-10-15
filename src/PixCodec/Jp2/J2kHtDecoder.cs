@@ -292,21 +292,20 @@ namespace PixCodec
             // the bit buffer in locals; the structure is only touched by refills
             ulong buf = ms.Buf;
             int bits = ms.Bits;
-            int oldExpLeft = 0;          // expAbove[2q - 1] of the row above
+            // the largest exponent of the row above around each quad (columns x - 1 .. x + 2), before expAbove is overwritten
+            byte* above = stackalloc byte[qw + 16];
+            if (!firstRow) AboveMaxima(expAbove, qw, above);
             for (int q = 0; q < qw; q++)
             {
                 int r = rhoCur[q];
                 int x = 2 * q;
-                // exponents of the row above around this quad; expAbove is being overwritten as we go
-                int eNw = oldExpLeft, eN = expAbove[x], eNe = expAbove[x + 1], eNf = expAbove[x + 2];
-                oldExpLeft = eNe;
                 int eb0 = 0, eb1 = 0;    // exponents of the two bottom samples
                 if (r != 0)
                 {
                     // (maxima without branches: the operands are small, the outcomes irregular)
                     int kappa = 1;
                     if (!firstRow && (r & (r - 1)) != 0)
-                        kappa = Max(1, Max(Max(eNw, eN), Max(eNe, eNf)) - 1);
+                        kappa = Max(1, above[q] - 1);
                     int U = kappa + quadU[q];
                     if (U > maxBits + 1) return false;
                     int e = quadE[q];
@@ -364,6 +363,27 @@ namespace PixCodec
             ms.Buf = buf; ms.Bits = bits;
             msRef = ms;
             return true;
+        }
+
+        /// <summary>max(e[2q - 1], e[2q], e[2q + 1], e[2q + 2]) for every quad q of a row, sixteen at a time.</summary>
+        static void AboveMaxima(byte* e, int qw, byte* dst)
+        {
+            int q = 0;
+            if (Vector128.IsHardwareAccelerated)
+            {
+                var low = Vector128.Create((ushort)0xFF);
+                for (; q + 8 <= qw; q += 8)
+                {
+                    var a = Vector128.Load((ushort*)(e + 2 * q - 1)); var b = Vector128.Load((ushort*)(e + 2 * q + 1));
+                    var m = Vector128.Max(Vector128.Max(a & low, Vector128.ShiftRightLogical(a, 8)), Vector128.Max(b & low, Vector128.ShiftRightLogical(b, 8)));
+                    *(ulong*)(dst + q) = Vector128.Narrow(m, m).AsUInt64().ToScalar();
+                }
+            }
+            for (; q < qw; q++)
+            {
+                int x = 2 * q;
+                dst[q] = (byte)Math.Max(Math.Max(e[x - 1], e[x]), Math.Max(e[x + 1], e[x + 2]));
+            }
         }
 
         // per lane variable shifts are what the quad at once needs
