@@ -14,7 +14,7 @@ decoder) and Pillow (its own PNG decoder, where it can represent the result). At
 bit for bit, otherwise generation fails.
 
 The official PngSuite (http://www.schaik.com/pngsuite/) is in the test-data repository (fixtures/png/pngsuite of
-Aardvark.PixImage.IO.TestData, see pxref.testdata_dir); this script only (re)creates the refs there when it finds it.
+Aardvark.PixImage.PixCodec.TestData, see pxref.testdata_dir); this script only (re)creates the refs there when it finds it.
 The x*.png files in it are intentionally corrupt and get no ref.
 """
 import glob
@@ -215,7 +215,7 @@ def make_apng(w, h, ctype, depth, frames, default=None, plays=0, interlace=False
 # ---------------------------------------------------------------------------------------------- reference decoders
 
 def png_layout(path):
-    """(width, height, expected channels, expected dtype) of what a PNG decodes to under the Aardvark.PixImage.IO mapping."""
+    """(width, height, expected channels, expected dtype) of what a PNG decodes to under the Aardvark.PixImage.PixCodec mapping."""
     b = open(path, 'rb').read()
     w, h, depth, ctype = struct.unpack('>IIBB', b[16:26])
     pos, trns = 33, False

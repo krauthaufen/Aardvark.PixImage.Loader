@@ -38,12 +38,12 @@ def read_ref(path):
 
 
 def testdata_dir(*rel):
-    """A path in the test-data repository with the third-party files ($PIXIMAGEIO_TESTDATA or Aardvark.PixImage.IO.TestData next to
+    """A path in the test-data repository with the third-party files ($PIXCODEC_TESTDATA or Aardvark.PixImage.PixCodec.TestData next to
     this repository, as the C# tests find it), or None when there is none."""
-    d = os.environ.get('PIXIMAGEIO_TESTDATA') or os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'Aardvark.PixImage.IO.TestData')
+    d = os.environ.get('PIXCODEC_TESTDATA') or os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'Aardvark.PixImage.PixCodec.TestData')
     d = os.path.normpath(d)
     if not os.path.isdir(os.path.join(d, 'fixtures')):
-        print(f'no test-data repository at {d} (set PIXIMAGEIO_TESTDATA): third-party files left out', file=sys.stderr)
+        print(f'no test-data repository at {d} (set PIXCODEC_TESTDATA): third-party files left out', file=sys.stderr)
         return None
     return os.path.join(d, *rel)
 

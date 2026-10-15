@@ -1,7 +1,7 @@
 """Generates the JBIG1 fixtures: tests/fixtures/jbig/<name>.jbg + <name>.jbg.ref.
 
 The streams are written, and the references decoded, by jbigkit 2.1 (Markus Kuhn, GPL), which is NOT part of this
-repository: build it yourself (https://www.cl.cam.ac.uk/~mgk25/jbigkit/) and point PIXIMAGEIO_JBIGKIT at the directory
+repository: build it yourself (https://www.cl.cam.ac.uk/~mgk25/jbigkit/) and point PIXCODEC_JBIGKIT at the directory
 holding pbmtojbg / jbgtopbm (default: <repo>/.tmp/jbigkit-2.1/pbmtools). Without the tools the existing fixtures are
 kept. All pictures are synthetic and generated here; nothing shipped with jbigkit is used.
 
@@ -17,7 +17,7 @@ import numpy as np
 from pxref import write_ref
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fixtures', 'jbig')
-TOOLS = os.environ.get('PIXIMAGEIO_JBIGKIT', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.tmp', 'jbigkit-2.1', 'pbmtools'))
+TOOLS = os.environ.get('PIXCODEC_JBIGKIT', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.tmp', 'jbigkit-2.1', 'pbmtools'))
 
 
 def text_page(w, h, seed=1):
@@ -152,7 +152,7 @@ def main():
     emit('seq_black', encode(np.ones((60, 70), np.uint8), ['-q', '-s', '9']))
     emit('seq_noise', encode(noise(150, 120), ['-q']))
     emit('seq_t85', encode(text_page(200, 260, seed=9), ['-f']))
-    emit('seq_comment', encode(small, ['-q', '-C', 'made for the Aardvark.PixImage.IO tests']))
+    emit('seq_comment', encode(small, ['-q', '-C', 'made for the PixCodec tests']))
 
     # adaptive template moves (periodic content makes the encoder move the pixel)
     for period in [3, 4, 6, 9]:

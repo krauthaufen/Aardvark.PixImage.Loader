@@ -22,7 +22,7 @@
  "Jpeg2000:MajorBrand": "jp2 ",
  "Jpeg2000:MinorVersion": "0.0.0",
  "Jpeg2000:NumberOfComponents": 3,
- "System:FileSize": 2976,
+ "System:FileSize": 2964,
  "XMP-dc:Rights": "only this",
- "XMP-x:XMPToolkit": "Aardvark.PixImage.IO"
+ "XMP-x:XMPToolkit": "PixCodec"
 }

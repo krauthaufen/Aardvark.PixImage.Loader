@@ -71,7 +71,7 @@ def decode_jbig(path):
 
 
 def decode_png(im):
-    """Default image of a PNG in the Aardvark.PixImage.IO mapping. A file named *.anim.png yields all composited animation
+    """Default image of a PNG in the Aardvark.PixImage.PixCodec mapping. A file named *.anim.png yields all composited animation
     frames (RGBA) stacked vertically instead."""
     import struct
     import subprocess
@@ -175,7 +175,7 @@ def decode_gif(path, im):
 
 def decode_tiff(path):
     """Samples of one page as (H,W,C), decoded by tifffile + imagecodecs (which reads every sample type, layout and
-    compression Aardvark.PixImage.IO writes except CCITT and JBIG). No photometric interpretation is applied, with two exceptions:
+    compression Aardvark.PixImage.PixCodec writes except CCITT and JBIG). No photometric interpretation is applied, with two exceptions:
     bilevel (1-bit) pages come from libtiff through ImageMagick as 0 / 255 "as displayed", and JPEG pages come out as
     RGB. The page is the first one unless the file name ends in `.p<N>.tif`. Exits with status 77 when a decoder
     this needs (tifffile, imagecodecs, ImageMagick) is not installed: the file cannot be verified here."""
@@ -236,7 +236,7 @@ def decode_webp(path):
 def decode_jp2(path):
     """JPEG 2000 / HTJ2K: the components as stored, one channel each (no palette, channel definition or colour space
     is applied), by OpenJPEG through imagecodecs. HT codestreams OpenJPEG rejects (more than 31 bit) go to OpenJPH.
-    As Aardvark.PixImage.IO does, unsigned samples of less than 8 bit are scaled to 8 bit. Exits with status 77 when no decoder
+    As Aardvark.PixImage.PixCodec does, unsigned samples of less than 8 bit are scaled to 8 bit. Exits with status 77 when no decoder
     here can read the file (imagecodecs missing, subsampled components, 32 bit Part 1 streams)."""
     import struct
     try:

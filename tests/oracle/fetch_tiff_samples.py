@@ -21,7 +21,7 @@ gcore/data into downloads/gdal-samples of the test-data repository, for TiffTest
 itself writes (LERC with all its variants and masks, ZSTD, LZMA, WebP, JPEG, sparse and cloud optimized layouts, complex
 and odd sample types) and its collection of broken files. References: the installed GDAL (rasterio),
 stored samples band by band.
-Files where GDAL interprets the samples differently from Aardvark.PixImage.IO's raw decoding get no reference (see GDAL_SKIP).
+Files where GDAL interprets the samples differently from Aardvark.PixImage.PixCodec's raw decoding get no reference (see GDAL_SKIP).
 """
 import hashlib
 import io
@@ -49,20 +49,20 @@ SVS_SHA256 = '6205ccf75a8fa6c32df7c5c04b7377398971a490fb6b320d50d91f7ba6a0e6fd'
 SVS_REGION = (1024, 768, 700, 500)   # x, y, width, height in directory 2
 GDAL_URL = 'https://download.osgeo.org/gdal/3.11.0/gdalautotest-3.11.0.tar.gz'
 GDAL_SHA256 = '121cc8c0e4b1223f511b0e0ed0fd9706d55656e5b15e75cdf5d5d36913f26c45'
-# files GDAL reads, but not as the samples Aardvark.PixImage.IO returns with ConvertToRgb = false and BitScaling = None
+# files GDAL reads, but not as the samples Aardvark.PixImage.PixCodec returns with ConvertToRgb = false and BitScaling = None
 GDAL_SKIP = {
-    'bug4468.tif': 'associated alpha: Aardvark.PixImage.IO un-premultiplies',
+    'bug4468.tif': 'associated alpha: Aardvark.PixImage.PixCodec un-premultiplies',
     'cielab.tif': 'GDAL converts Lab to RGBA',
     'rgbsmall_cmyk.tif': 'GDAL converts CMYK to RGBA',
     'slim_g4.tif': 'palette: GDAL returns indices',
     'test_average_palette.tif': 'palette: GDAL returns indices',
     'vrtmisc16_tile1.tif': 'palette: GDAL returns indices',
     'vrtmisc16_tile2.tif': 'palette: GDAL returns indices',
-    'uint16_sgilog.tif': 'GDAL returns the 16-bit log values, Aardvark.PixImage.IO linear floats',
+    'uint16_sgilog.tif': 'GDAL returns the 16-bit log values, Aardvark.PixImage.PixCodec linear floats',
     'int24.tif': 'signed 24-bit samples: GDAL returns them as UInt32 without sign extension',
     'zackthecat.tif': 'old-style JPEG: libtiff upsamples the chroma differently (see the libtiff samples)',
-    'size_of_stripbytecount_at_1_and_lower_than_stripcount.tif': 'too few StripByteCounts: GDAL reads the strips without one as empty, Aardvark.PixImage.IO recovers them',
-    'size_of_stripbytecount_lower_than_stripcount.tif': 'too few StripByteCounts: GDAL reads the strips without one as empty, Aardvark.PixImage.IO recovers them',
+    'size_of_stripbytecount_at_1_and_lower_than_stripcount.tif': 'too few StripByteCounts: GDAL reads the strips without one as empty, Aardvark.PixImage.PixCodec recovers them',
+    'size_of_stripbytecount_lower_than_stripcount.tif': 'too few StripByteCounts: GDAL reads the strips without one as empty, Aardvark.PixImage.PixCodec recovers them',
 }
 OUT = testdata_dir('downloads', 'tiff-samples')
 
@@ -138,7 +138,7 @@ def gdal():
         if a.size == 0 or a.size > 50_000_000:
             continue
         if pm == 0 and a.dtype.kind == 'u':
-            # MinIsWhite: Aardvark.PixImage.IO inverts the colour sample of unsigned data, GDAL returns it as stored
+            # MinIsWhite: Aardvark.PixImage.PixCodec inverts the colour sample of unsigned data, GDAL returns it as stored
             a = a.copy()
             a[..., 0] = ((1 << bits) - 1) - a[..., 0]
         write_ref(path + '.ref', np.ascontiguousarray(a))
@@ -185,7 +185,7 @@ def main():
     ref('cramps-tile.tif', magick(p('cramps-tile.tif'), 'gray', (607, 800, 1)), 'libtiff (ImageMagick)')
     ref('dscf0013.tif', g.ref_cv2(p('dscf0013.tif')), 'libtiff RGBA (OpenCV)', tol=2)
     ref('strike.tif', pillow(p('strike.tif'), 'RGBA'), 'libtiff (Pillow), associated alpha undone', tol=2)
-    # old-style JPEG: libtiff box-upsamples the chroma, Aardvark.PixImage.IO uses libjpeg's smooth upsampling
+    # old-style JPEG: libtiff box-upsamples the chroma, Aardvark.PixImage.PixCodec uses libjpeg's smooth upsampling
     ref('smallliz.tif', magick(p('smallliz.tif'), 'rgb', (160, 160, 3)), 'libtiff (ImageMagick), chroma upsampling differs', tol=48, mean=2.5)
     ref('zackthecat.tif', magick(p('zackthecat.tif'), 'rgb', (213, 234, 3)), 'libtiff (ImageMagick), chroma upsampling differs', tol=48, mean=2.5)
     # log encodings as floats
@@ -194,7 +194,7 @@ def main():
     for n in ('off_luv24.tif', 'off_luv32.tif'):
         ref(n, cv2.cvtColor(lib.read(p(n), np.float32, (225, 333, 3), pseudo=fmt), cv2.COLOR_XYZ2RGB), 'libtiff float XYZ + cv2 XYZ2RGB', tol=2e-3)
     # ThunderScan: the last strip of this file holds 36 of its 39 rows and libtiff 4.7 gives up on it; the first
-    # five strips (320 rows) are its reading, the rest of the reference is the white Aardvark.PixImage.IO fills in
+    # five strips (320 rows) are its reading, the rest of the reference is the white Aardvark.PixImage.PixCodec fills in
     t = lib.lt.TIFFOpen(p('text.tif').encode(), b'r')
     raw = np.zeros((320, 756), np.uint8)
     for i in range(5):

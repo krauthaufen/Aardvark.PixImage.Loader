@@ -21,7 +21,7 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, '..', 'fixtures', 'metadata')
-TESTDATA = os.path.join(HERE, '..', '..', '..', 'Aardvark.PixImage.IO.TestData', 'fixtures', 'metadata', 'exiftool')
+TESTDATA = os.path.join(HERE, '..', '..', '..', 'Aardvark.PixImage.PixCodec.TestData', 'fixtures', 'metadata', 'exiftool')
 
 TAGS = [
     '-Make=DJI', '-Model=FC6310R', '-Software=v01.20.5021', '-SerialNumber=0K8TF7R0012345', '-LensMake=DJI',

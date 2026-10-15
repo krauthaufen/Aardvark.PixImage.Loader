@@ -2,7 +2,7 @@
 
 usage: gen_meta_write.py [--exiftool PATH] [--no-build]
 
-1. Runs the MetadataWriteTests.Golden cases with PIXIMAGEIO_WRITE_GOLDEN=1: they store their plain inputs (made by our
+1. Runs the MetadataWriteTests.Golden cases with PIXCODEC_WRITE_GOLDEN=1: they store their plain inputs (made by our
    encoders, once) in tests/fixtures/metadata-write/in and every output in tests/fixtures/metadata-write. The other
    inputs are the ExifTool-written fixtures of tests/fixtures/metadata (gen_meta.py).
 2. Records ExifTool's reading of each output as <file>.exiftool.json (-j -n -G1 -a -struct) and ExifTool's validation of
@@ -35,8 +35,8 @@ def exiftool_path(arg):
 
 
 def run_golden(build):
-    env = dict(os.environ, PIXIMAGEIO_WRITE_GOLDEN='1')
-    cmd = ['dotnet', 'test', os.path.join(ROOT, 'tests', 'Aardvark.PixImage.IO.Codecs.Tests'), '-c', 'Release',
+    env = dict(os.environ, PIXCODEC_WRITE_GOLDEN='1')
+    cmd = ['dotnet', 'test', os.path.join(ROOT, 'tests', 'Aardvark.PixImage.PixCodec.Codecs.Tests'), '-c', 'Release',
            '--filter', 'FullyQualifiedName~MetadataWriteTests.Golden']
     if not build:
         cmd.append('--no-build')

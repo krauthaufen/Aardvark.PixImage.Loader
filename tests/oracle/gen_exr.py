@@ -15,7 +15,7 @@ interface output as float16 RGBA), levels/ (mip/rip maps; name.exr.l<lx>_<ly>.re
 deep/ (name.exr.partN.deep raw samples, .fileorder.ref the reference library's flattening, .flat.ref depth sorted
 "tidy" flattening computed here), encref/ (an RGBA image and the luminance/chroma file the reference encoder makes of it).
 A few files of the openexr-images collection, with SHA-256 of reference decodes, are in the test-data repository
-(fixtures/exr/official of Aardvark.PixImage.IO.TestData, see pxref.testdata_dir).
+(fixtures/exr/official of Aardvark.PixImage.PixCodec.TestData, see pxref.testdata_dir).
 
 Sidecars:  name.exr.ref        what Exr.Decode returns with default options (float16 when all channels are HALF)
            name.exr.all.ref    all channels in file order via Exr.DecodeChannels (optional)
@@ -522,7 +522,7 @@ def gen_attributes():
 
 
 def gen_selfcheck():
-    """References for files written by OUR encoder (tests/Aardvark.PixImage.IO.Codecs.Tests/ExrSelfCheckTests.cs with
+    """References for files written by OUR encoder (tests/Aardvark.PixImage.PixCodec.Codecs.Tests/ExrSelfCheckTests.cs with
     EXR_WRITE_SELFCHECK=1 writes them): every level and every deep sample as the reference library reads it."""
     d = os.path.join(OUT, 'selfcheck')
     if not os.path.isdir(d):

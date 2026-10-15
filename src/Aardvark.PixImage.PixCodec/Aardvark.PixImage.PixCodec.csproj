@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Aardvark.ImageCodecs</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Description>Pure managed image loading and saving for Aardvark PixImages and plain images: PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA, DDS, KTX, Radiance HDR, PNM, QOI, ICO, with metadata, ICC colour management and image operations. No native code.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/krauthaufen/Aardvark.PixImage.PixCodec</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/krauthaufen/Aardvark.PixImage.PixCodec</PackageProjectUrl>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Aardvark.Base.Tensors" Version="5.3.26" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Aardvark.PixImage.PixCodec.Codecs.Tests" />
+  </ItemGroup>
+</Project>

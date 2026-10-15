@@ -235,7 +235,7 @@ def round2(cmyk):
             write_ref(path + '.ref', np.asarray(ImageOps.exif_transpose(Image.open(io.BytesIO(data)))))
 
 
-ISO_TOOL = os.environ.get('PIXIMAGEIO_ISO_JPEG', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.tmp', 'jpeg170'))
+ISO_TOOL = os.environ.get('PIXCODEC_ISO_JPEG', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.tmp', 'jpeg170'))
 
 
 def iso_decode(src, ref):

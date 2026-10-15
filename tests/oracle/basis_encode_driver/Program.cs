@@ -1,4 +1,4 @@
-// Encodes images to KTX2 ETC1S / UASTC with Aardvark.PixImage.IO (for tests/oracle/gen_basis_encode.py).
+// Encodes images to KTX2 ETC1S / UASTC with Aardvark.PixImage.PixCodec (for tests/oracle/gen_basis_encode.py).
 //
 //   basis_encode_driver out.ktx2 etc1s|uastc [options] image.png [image.png ...]
 //     --q N          ETC1S quality 1..255 (default 128)

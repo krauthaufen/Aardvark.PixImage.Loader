@@ -7,6 +7,6 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\..\src\Aardvark.PixImage.IO\Aardvark.PixImage.IO.csproj" />
+    <ProjectReference Include="..\..\..\src\Aardvark.PixImage.PixCodec\Aardvark.PixImage.PixCodec.csproj" />
   </ItemGroup>
 </Project>

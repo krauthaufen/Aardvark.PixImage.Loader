@@ -12,7 +12,7 @@ Provenance rule: every .ref is what a THIRD-PARTY decoder returned for the file 
 stored samples (OpenJPEG for JPEG 2000), libtiff (OpenCV / Pillow / ImageMagick) where it interprets the data (YCbCr,
 CCITT, JPEG, LogLuv, JBIG), GDAL for LERC and its masks, FFmpeg for the CCITT uncompressed mode, LittleCMS for Lab -
 and all decoders that can read a file have to agree with the pixels it was built from. On top
-of the decoded samples only the conversions Aardvark.PixImage.IO documents are applied (MinIsWhite inversion, 1/2/4-bit
+of the decoded samples only the conversions Aardvark.PixImage.PixCodec documents are applied (MinIsWhite inversion, 1/2/4-bit
 scaling, palette expansion, naive CMYK, un-premultiplied alpha), each cross-checked against Pillow / ImageMagick
 where those implement the same thing. A `.tol` sidecar gives the allowed difference where bit exactness is not
 defined (float colour maths, lossy WebP).
@@ -444,7 +444,7 @@ BASE_SAMPLES = {0: 1, 1: 1, 3: 1, 4: 1, 2: 3, 5: 4, 6: 3, 8: 3, 9: 3, 10: 3, 328
 
 
 def expected(p, raw, scaling='default', convert=True):
-    """What Aardvark.PixImage.IO has to return, computed from the samples `raw` a third-party decoder returned for the page.
+    """What Aardvark.PixImage.PixCodec has to return, computed from the samples `raw` a third-party decoder returned for the page.
     scaling: TiffBitScaling (default / none / full); convert: TiffDecodeOptions.ConvertToRgb."""
     a = raw if raw.ndim == 3 else raw[:, :, None]
     a = a.copy()
@@ -554,7 +554,7 @@ def third_party(name, path, p, page=0):
                 t = t & t.dtype.type((1 << widths[0]) - 1)
                 who = 'tifffile (masked to the sample depth)'
             note(who, t)
-    # libtiff ignores the Predictor tag for PackBits (tifffile honours it, as does Aardvark.PixImage.IO), so skip that combination.
+    # libtiff ignores the Predictor tag for PackBits (tifffile honours it, as does Aardvark.PixImage.PixCodec), so skip that combination.
     libtiff_ok = not (p.get('compression') == PACKBITS and p.get('predictor', 1) != 1) and p.get('compression', 1) < 33003
     simple = page == 0 and whole and pm in (1, 2) and src.shape[2] in (1, 3) and 'extrasamples' not in p
     if libtiff_ok and simple and src.dtype in (np.uint8, np.uint16):
@@ -958,7 +958,7 @@ def gen_ycbcr():
         src = int(np.abs(ref.astype(int) - rgb[:h, :w].astype(int)).max())
         assert src < 40, (name, src)
         write_ref(path + '.ref', ref)
-        write_tol(path, 2)   # libtiff converts with fixed point tables, Aardvark.PixImage.IO with floats
+        write_tol(path, 2)   # libtiff converts with fixed point tables, Aardvark.PixImage.PixCodec with floats
         SUMMARY.append(('ycbcr/' + name, ['cv2 (libtiff RGBA)', f'max error vs. the RGB source {src}']))
 
     def build_planar(name, w, h, sh, sv, comp, rps, tile=None):
@@ -1030,7 +1030,7 @@ def gen_ycbcr():
 def gen_jpeg():
     """JPEG-in-TIFF (compression 7). Written by libtiff (through Pillow and ImageMagick), plus complete baseline
     4:2:0 JPEG streams wrapped into strips/tiles by hand (no JPEGTables). References from libtiff/libjpeg via
-    Pillow. Kept in their own folder: Aardvark.PixImage.IO decodes them through the Tiff.JpegDecoder hook only."""
+    Pillow. Kept in their own folder: Aardvark.PixImage.PixCodec decodes them through the Tiff.JpegDecoder hook only."""
     d = os.path.join(OUT, 'jpeg')
     os.makedirs(d, exist_ok=True)
     rgb = test_pattern(70, 52, 3, np.uint8, 31)
@@ -1188,7 +1188,7 @@ def gen_depths():
 
     # Signed samples of odd depths and the float predictor on 24-bit floats: tifffile and the libtiff front ends refuse
     # them, GDAL (rasterio) reads them. GDAL unpacks the bits without looking at the sign (it reports unsigned data),
-    # so the sign extension Aardvark.PixImage.IO documents is applied to what it returns.
+    # so the sign extension Aardvark.PixImage.PixCodec documents is applied to what it returns.
     def gdal(bits=None):
         def read(path):
             import rasterio
@@ -1684,7 +1684,7 @@ def gen_structures():
 
 
 def gen_lab():
-    """CIELab / ICCLab / ITULab. Aardvark.PixImage.IO converts to sRGB with the textbook D50 Lab -> XYZ -> (Bradford) sRGB maths;
+    """CIELab / ICCLab / ITULab. Aardvark.PixImage.PixCodec converts to sRGB with the textbook D50 Lab -> XYZ -> (Bradford) sRGB maths;
     the reference is LittleCMS (through Pillow's ImageCms: Lab D50 profile -> sRGB profile) applied to the samples
     tifffile read from the file. LittleCMS works on 8-bit Lab here, so 16-bit and ITULab samples are first rounded
     to 8-bit Lab - hence the tolerances (8-bit CIELab/ICCLab: 2 levels; ITULab and 16-bit data: the rounding to 8-bit Lab
@@ -1702,7 +1702,7 @@ def gen_lab():
     L, A, B = pil[:, :, 0].astype(np.int32), pil[:, :, 1].astype(np.int8).astype(np.int32), pil[:, :, 2].astype(np.int8).astype(np.int32)
 
     def to_float(raw, pm):
-        """Stored samples -> L*, a*, b* (the encodings Aardvark.PixImage.IO documents)."""
+        """Stored samples -> L*, a*, b* (the encodings Aardvark.PixImage.PixCodec documents)."""
         r = raw[:, :, :3].astype(np.float64)
         if raw.dtype == np.uint8:
             l = r[:, :, 0] * 100 / 255
@@ -2190,7 +2190,7 @@ def gen_ojpeg():
         raw_file(name, page, exp, 'libjpeg-turbo on the per-tile streams')
 
     # 5. PlanarConfiguration 2: one single-component frame per plane (Y, Cb, Cr), each with the tables of its index.
-    #    Reference: Pillow decodes the three plane streams and converts YCbCr to RGB (Aardvark.PixImage.IO uses the TIFF
+    #    Reference: Pillow decodes the three plane streams and converts YCbCr to RGB (Aardvark.PixImage.PixCodec uses the TIFF
     #    coefficient maths in floats, hence the tolerance).
     ycc = np.asarray(Image.fromarray(rgb).convert('YCbCr'))
     for name, per in [('ojpeg_planar_444', False), ('ojpeg_planar_444_restart_strips', True)]:

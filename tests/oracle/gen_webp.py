@@ -14,7 +14,7 @@ Kinds of fixtures:
 
 References are libwebp's decode (the animation decoder as exposed by Pillow, which is also what Image.open uses); for
 stills it is cross checked against the plain libwebp decoder of `imagecodecs`. Pillow reports RGB whenever the VP8X
-alpha flag is unset; Aardvark.PixImage.IO also returns alpha for a lossless image with the alpha hint (see output_has_alpha), so
+alpha flag is unset; Aardvark.PixImage.PixCodec also returns alpha for a lossless image with the alpha hint (see output_has_alpha), so
 the alpha plane is always taken from the decoder's RGBA output and the channel count from the rule in Webp.cs.
 
 A selection of the libwebp conformance vectors is checked through fixtures/webp/vectors of the test-data repository
@@ -87,7 +87,7 @@ def anmf(x, y, w, h, duration, blend, dispose, frame_chunks):
 def output_has_alpha(data):
     """The rule of Webp.Decode: the VP8X alpha flag or the lossless alpha hint; for an animation also an ALPH chunk
     in the first frame or a first frame that does not cover the canvas. (libwebp ignores an ALPH chunk next to a
-    still image when the VP8X alpha flag is unset, and so does Aardvark.PixImage.IO.)"""
+    still image when the VP8X alpha flag is unset, and so does Aardvark.PixImage.PixCodec.)"""
     cs = chunks_of(data)
     flags = 0
     canvas = None
@@ -133,7 +133,7 @@ def libwebp_frames(data):
 def emit(name, data, anim=False, check=True, expect=None, like=None):
     """Writes the file and its references. expect: (H, W, 3 or 4) pixels the decoder must deliver (cross check).
     like: a well formed file with the same content, used for the references when libwebp refuses the file itself
-    (Aardvark.PixImage.IO is more lenient in a few documented places)."""
+    (Aardvark.PixImage.PixCodec is more lenient in a few documented places)."""
     path = os.path.join(OUT, name)
     try:
         frames, stamps, loop, bg = libwebp_frames(data)

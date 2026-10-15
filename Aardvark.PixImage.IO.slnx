@@ -1,9 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/Aardvark.PixImage.IO/Aardvark.PixImage.IO.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/Aardvark.PixImage.IO.Tests/Aardvark.PixImage.IO.Tests.csproj" />
-    <Project Path="tests/Aardvark.PixImage.IO.Codecs.Tests/Aardvark.PixImage.IO.Codecs.Tests.csproj" />
-  </Folder>
-</Solution>

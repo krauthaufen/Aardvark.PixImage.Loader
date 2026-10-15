@@ -17,7 +17,7 @@
  "IFD0:SamplesPerPixel": 3,
  "IFD0:StripByteCounts": 1809,
  "IFD0:StripOffsets": 5864,
- "System:FileSize": 10340,
+ "System:FileSize": 10328,
  "XMP-dc:Rights": "only this",
- "XMP-x:XMPToolkit": "Aardvark.PixImage.IO"
+ "XMP-x:XMPToolkit": "PixCodec"
 }

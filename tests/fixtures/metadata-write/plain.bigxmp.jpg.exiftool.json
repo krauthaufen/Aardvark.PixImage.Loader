@@ -19,10 +19,10 @@
  "JFIF:ResolutionUnit": 0,
  "JFIF:XResolution": 1,
  "JFIF:YResolution": 1,
- "System:FileSize": 82676,
+ "System:FileSize": 82664,
  "XMP-dc:Title": "big XMP",
  "XMP-pcx:Notes": "(Binary data 81000 bytes, use -b option to extract)",
  "XMP-pcx:Small": "kept in the standard part",
- "XMP-x:XMPToolkit": "Aardvark.PixImage.IO",
+ "XMP-x:XMPToolkit": "PixCodec",
  "XMP-xmpNote:HasExtendedXMP": "E7FB37E9F0258F2BDCF30FAD7B6A114C"
 }

@@ -72,11 +72,11 @@
  "IFD0:Artist": "Jane Doe",
  "IFD0:BitsPerSample": "8 8 8",
  "IFD0:Compression": 8,
- "IFD0:Copyright": "© 2025 Aardvark.PixImage.IO",
+ "IFD0:Copyright": "© 2025 PixCodec",
  "IFD0:ImageDescription": "Facade survey – north side",
  "IFD0:ImageHeight": 30,
  "IFD0:ImageWidth": 40,
- "IFD0:Make": "Aardvark.PixImage.IO Cam",
+ "IFD0:Make": "PixCodec Cam",
  "IFD0:Model": "Model X 1",
  "IFD0:ModifyDate": "2025:03:05 12:00:00",
  "IFD0:Orientation": 1,
@@ -86,7 +86,7 @@
  "IFD0:RowsPerStrip": 30,
  "IFD0:SampleFormat": "1 1 1",
  "IFD0:SamplesPerPixel": 3,
- "IFD0:Software": "Aardvark.PixImage.IO writer",
+ "IFD0:Software": "PixCodec writer",
  "IFD0:StripByteCounts": 194,
  "IFD0:StripOffsets": 170,
  "IFD1:BitsPerSample": "8 8 8",
@@ -101,12 +101,12 @@
  "IFD1:SamplesPerPixel": 3,
  "IFD1:StripByteCounts": 59,
  "IFD1:StripOffsets": 526,
- "System:FileSize": 5388,
+ "System:FileSize": 5328,
  "XMP-dc:Creator": [
   "Jane Doe"
  ],
  "XMP-dc:Description": "Facade survey – north side",
- "XMP-dc:Rights": "© 2025 Aardvark.PixImage.IO",
+ "XMP-dc:Rights": "© 2025 PixCodec",
  "XMP-dc:Subject": [
   "alpha",
   "beta",
@@ -117,6 +117,6 @@
  "XMP-photoshop:City": "Wien",
  "XMP-photoshop:Country": "Austria",
  "XMP-photoshop:State": "Wien",
- "XMP-x:XMPToolkit": "Aardvark.PixImage.IO",
+ "XMP-x:XMPToolkit": "PixCodec",
  "XMP-xmp:Rating": 3
 }
