@@ -817,14 +817,19 @@ namespace PixCodec.JpegImpl
                 Bytes(exif);
             }
 
-            // XMP in one APP1 segment (packets too large for one segment are left out: extended XMP is not written)
+            // XMP: one APP1 segment, or a standard and an extended part (XMP part 3) for packets beyond 64 KB
             byte[]? xmp = ExifTags.XmpForWriting(meta);
-            var xmpId = "http://ns.adobe.com/xap/1.0/\0"u8;
-            if (xmp != null && xmp.Length <= 65533 - xmpId.Length)
+            if (xmp is { Length: > 0 })
             {
-                Marker(0xE1); U16(xmp.Length + xmpId.Length + 2);
-                Bytes(xmpId);
-                Bytes(xmp);
+                System.Collections.Generic.List<byte[]>? segments = null;
+                try { segments = XmpEditor.JpegSegments(xmp); }
+                catch (ImageNotSupportedException) { }   // (an oversized packet that is not XML is left out)
+                if (segments != null)
+                    foreach (var seg in segments)
+                    {
+                        Marker(0xE1); U16(seg.Length + 2);
+                        Bytes(seg);
+                    }
             }
 
             byte[]? icc = meta?.IccProfile;

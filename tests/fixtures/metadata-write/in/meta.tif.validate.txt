@@ -1,0 +1,7 @@
+6 Warnings (2 minor)
+[minor] ExifIFD tag 0x9101 ComponentsConfiguration is not allowed in TIFF
+[minor] Missing required TIFF ExifIFD tag 0xa000 FlashpixVersion
+Missing required TIFF GPS tag 0x001b GPSProcessingMethod
+Invalid value for IFD0 tag 0x0103 Compression
+Missing required TIFF IFD0 tag 0x011a XResolution
+Missing required TIFF IFD0 tag 0x011b YResolution

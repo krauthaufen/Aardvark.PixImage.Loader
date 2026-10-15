@@ -1,0 +1,2 @@
+1 Warning (minor)
+[minor] Unknown value for GPSInfo:InteropIndex
