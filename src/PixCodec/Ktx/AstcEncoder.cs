@@ -639,15 +639,17 @@ namespace PixCodec
             public bool Offset, Refine;
             public float GoodEnough;   // mean squared error per channel at which the search stops
             public float EstFactor;    // a candidate is skipped when its estimated error times this exceeds the best error
+            public int PartPre = 1;    // partition patterns matched per try, re-ranked by their line residual
             public int Spare = 2;      // extra candidates ranked before the decimation proper corrects the estimates
             public float Gate;         // dual plane and partitions are only tried when the 1 partition line residual is this part of the error
+            public float GateLarge;    // the same for footprints of 64 texels and more
         }
 
         internal static readonly Prm[] Params =
         {
-            new Prm { Candidates = 1, Iters = 1, DecIters = 1, RankSweeps = 1, Dual = 1, KMeansIters = 0, PartTries = new[] { 0, 0, 1, 0, 0 }, Offset = false, Refine = false, GoodEnough = 3.0f, EstFactor = 0.8f, Gate = 0.5f },
+            new Prm { Candidates = 1, Iters = 1, DecIters = 1, RankSweeps = 1, Dual = 1, KMeansIters = 0, PartTries = new[] { 0, 0, 1, 0, 0 }, Offset = false, Refine = false, GoodEnough = 3.0f, EstFactor = 0.8f, Gate = 0.5f, GateLarge = 0.8f },
             new Prm { Candidates = 2, Iters = 1, DecIters = 2, RankSweeps = 1, Dual = 1, KMeansIters = 3, PartTries = new[] { 0, 0, 2, 1, 0 }, Offset = true, Refine = false, GoodEnough = 1.0f, EstFactor = 0.65f },
-            new Prm { Candidates = 3, Iters = 2, DecIters = 3, RankSweeps = 1, Dual = 2, KMeansIters = 4, PartTries = new[] { 0, 0, 6, 3, 1 }, Offset = true, Refine = true, GoodEnough = 0.3f, EstFactor = 0.5f },
+            new Prm { Candidates = 3, Iters = 2, DecIters = 3, RankSweeps = 1, Dual = 2, KMeansIters = 4, PartTries = new[] { 0, 0, 6, 3, 1 }, PartPre = 4, Offset = true, Refine = true, GoodEnough = 0.3f, EstFactor = 0.5f },
         };
 
         // ------------------------------------------------------------------ per thread state
@@ -720,11 +722,15 @@ namespace PixCodec
 
             // result
             public long BestErr;
+            public int BestMode = -1, BestCem, BestCq, BestP, BestSeed, BestCcs;   // how the best block was made
+            public bool BestDual, RefineNow;
+            public readonly byte[] BestPart = new byte[MaxN];
             public readonly byte[] Best = new byte[16];
 
             // partition ranking
             public readonly byte[] Label = new byte[MaxN];
             public readonly int[] TopIdx = new int[32];
+            public readonly float[] PartRes = new float[32];
             public readonly int[] TopScore = new int[32];
         }
 
@@ -736,6 +742,7 @@ namespace PixCodec
             int n = c.N;
             for (int t = 0; t < n; t++) c.XV[t] = new Vector4(c.X[t * 4], c.X[t * 4 + 1], c.X[t * 4 + 2], c.X[t * 4 + 3]);
             c.BestErr = long.MaxValue;
+            c.BestMode = -1;
             float scale = c.Hdr ? 16 : 1;
             long good = (long)(n * c.Ch * prm.GoodEnough * scale);
 
@@ -745,7 +752,7 @@ namespace PixCodec
             Trial(c, false, -1);
             // more planes or partitions only lower the line residual, at the cost of coarser quantization: when the
             // residual is a small part of the error, they do not pay
-            if (c.Residual * scale < prm.Gate * c.BestErr) good = long.MaxValue;
+            if (c.Residual * scale < (n >= 64 ? prm.GateLarge : prm.Gate) * c.BestErr) good = long.MaxValue;
 
             // one partition, two planes
             Span<int> order = stackalloc int[4];
@@ -768,7 +775,30 @@ namespace PixCodec
                     if (cq >= 0) lb = Math.Min(lb, colUnit / (QMax[cq] * QMax[cq]));
                 }
                 if (lb * scale * prm.EstFactor >= c.BestErr) break;
-                int found = RankPartitions(c, p, tries);
+                int found = RankPartitions(c, p, tries * prm.PartPre);
+                if (prm.PartPre > 1 && found > tries)
+                {
+                    // re-rank the k-means matches by the line residual of their partitions
+                    var ps0 = c.F.Parts[p];
+                    var rr = c.PartRes;
+                    for (int i = 0; i < found; i++)
+                    {
+                        c.P = p;
+                        Array.Copy(ps0.Map, c.TopIdx[i] * n, c.Part, 0, n);
+                        BuildMembers(c);
+                        SetPlanes(c, false, -1);
+                        float r = 0;
+                        for (int q = 0; q < p; q++) r += FitPartition(c, q, false);
+                        rr[i] = r;
+                    }
+                    for (int i = 1; i < found; i++)
+                        for (int j = i; j > 0 && rr[j] < rr[j - 1]; j--)
+                        {
+                            (rr[j], rr[j - 1]) = (rr[j - 1], rr[j]);
+                            (c.TopIdx[j], c.TopIdx[j - 1]) = (c.TopIdx[j - 1], c.TopIdx[j]);
+                        }
+                    found = tries;
+                }
                 for (int i = 0; i < found && c.BestErr > good; i++)
                 {
                     var ps = c.F.Parts[p];
@@ -784,6 +814,17 @@ namespace PixCodec
                     }
                 }
             }
+            if (prm.Refine && c.BestMode >= 0 && c.BestErr > 0)
+            {
+                // greedy weight steps, on the best encoding only: rebuild its state and encode it again refining
+                c.P = c.BestP; c.Seed = c.BestSeed;
+                Array.Copy(c.BestPart, c.Part, n);
+                bool dual = c.BestDual;
+                SetupTrial(c, dual, c.BestCcs);
+                c.RefineNow = true;
+                FullEncode(c, c.BestMode, c.BestCem, c.BestCq);
+                c.RefineNow = false;
+            }
             c.Best.CopyTo(block);
             LastErr = c.BestErr;
         }
@@ -791,9 +832,10 @@ namespace PixCodec
         [ThreadStatic] internal static long LastErr;
 
         /// <summary>Channels for the second weight plane, best first: by the line residual of the remaining channels.</summary>
-        static int RankDualChannels(Ctx c, Span<int> order)
+        static int RankDualChannels(Ctx c, Span<int> order) => RankDualChannels(c, order, stackalloc float[4]);
+
+        static int RankDualChannels(Ctx c, Span<int> order, Span<float> res)
         {
-            Span<float> res = stackalloc float[4];
             int cnt = 0;
             // from the covariances of the last single plane fit: the residual of the line through the other channels
             for (int k = 0; k < c.Ch; k++)
@@ -876,9 +918,9 @@ namespace PixCodec
             TrialCore(c, dual, ccs);
         }
 
-        static void TrialCore(Ctx c, bool dual, int ccs)
+        /// <summary>Members, planes, line fits and quadratic sums of the current partitioning; returns the line residual.</summary>
+        static float SetupTrial(Ctx c, bool dual, int ccs)
         {
-            var prm = c.Prm;
             BuildMembers(c);
             SetPlanes(c, dual, ccs);
             if (c.Hdr)
@@ -894,6 +936,13 @@ namespace PixCodec
             c.Residual = res;
             ComputeSums(c, false);
             c.SW.CopyTo(c.SWInit, 0); c.ST0.CopyTo(c.ST0Init, 0); c.ST1.CopyTo(c.ST1Init, 0);
+            return res;
+        }
+
+        static void TrialCore(Ctx c, bool dual, int ccs)
+        {
+            var prm = c.Prm;
+            float res = SetupTrial(c, dual, ccs);
             float scale = c.Hdr ? 16 : 1;
             if (c.BestErr != long.MaxValue && res * scale >= c.BestErr) return;   // no encoding beats its line residual
 
@@ -925,7 +974,8 @@ namespace PixCodec
             // decimation is only computed when its estimate without it can still enter the list.
             // ranked with the unclamped least squares decimation error; the decimation proper of the best few
             // candidates' grids then corrects their estimates
-            int K = Math.Min(8, prm.Candidates + prm.Spare + (c.Hdr ? HdrSpare : 0)), Kfinal = prm.Candidates;
+            int spare = c.P == 1 && !dual || c.Q == BcQuality.High ? prm.Spare : 0;   // the corrections matter most for the first trial
+            int K = Math.Min(8, prm.Candidates + spare + (c.Hdr ? HdrSpare : 0)), Kfinal = prm.Candidates;
             Span<float> topEst = stackalloc float[8], topDec = stackalloc float[8];
             Span<int> topMode = stackalloc int[8], topCem = stackalloc int[8], topCq = stackalloc int[8];
             int found = 0;
@@ -1040,7 +1090,7 @@ namespace PixCodec
             for (int i = 0; i < found; i++)
             {
                 if (c.BestErr != long.MaxValue && topEst[i] * scale * prm.EstFactor >= c.BestErr) break;
-                FullEncode(c, modes[topMode[i]], topCem[i], topCq[i]);
+                FullEncode(c, topMode[i], topCem[i], topCq[i]);
             }
         }
 
@@ -1520,8 +1570,9 @@ namespace PixCodec
         // ------------------------------------------------------------------ candidate encoding
 
 
-        static long FullEncode(Ctx c, in BlockMode m, int cem, int cq)
+        static long FullEncode(Ctx c, int mi, int cem, int cq)
         {
+            ref readonly var m = ref c.F.Modes[mi];
             long bestHere = long.MaxValue;
             var prm = c.Prm;
             var g = c.F.Grids[m.Grid];
@@ -1547,12 +1598,15 @@ namespace PixCodec
                     for (int t = 0; t < n; t++) c.TW[pl * MaxN + t] = Infill(c, g, pl, t);
                 }
                 long err = Error(c);
-                if (prm.Refine && err > 0 && (c.BestErr == long.MaxValue || err < c.BestErr + (c.BestErr >> 2))) err = RefineWeights(c, g, m.Wq, planes, err);
+                if (c.RefineNow && err > 0) err = RefineWeights(c, g, m.Wq, planes, err);
                 bestHere = Math.Min(bestHere, err);
                 if (err < c.BestErr)
                 {
                     c.BestErr = err;
                     Pack(c, m, cemUsed, cq, c.Best);
+                    c.BestMode = mi; c.BestCem = cem; c.BestCq = cq; c.BestP = c.P; c.BestSeed = c.Seed;
+                    c.BestDual = c.Dual; c.BestCcs = c.Ccs;
+                    Array.Copy(c.Part, c.BestPart, c.N);
                 }
                 // refit only candidates that are about as good as the best so far
                 if (it >= prm.Iters || err == 0 || c.Q != BcQuality.High && err > c.BestErr + (c.BestErr >> 3)) break;
@@ -1760,6 +1814,9 @@ namespace PixCodec
             var down = WDown[wq];
             var unq = WUnq[wq];
             bool any = false;
+            const float slack = 1.5f;
+            Span<int> cand = stackalloc int[2];
+            Span<float> cd = stackalloc float[2];
             fixed (int* ts = g.TStart, tt = g.TTex, idx = g.Idx, wt = g.Wt, wi = c.WI, tw = c.TW, wc = c.WC)
                 for (int pass = 0; pass < 2; pass++)
                 {
@@ -1771,8 +1828,9 @@ namespace PixCodec
                         for (int k = 0; k < g.Count; k++)
                         {
                             int s0 = ts[k], s1 = ts[k + 1];
-                            int orig = wc[pl * 64 + k], bestCode = orig;
-                            float bestD = 0;
+                            int orig = wc[pl * 64 + k];
+                            // the model ignores the decoder's rounding: moves it does not rule out are measured exactly
+                            int nc = 0;
                             for (int dir = 0; dir < 2; dir++)
                             {
                                 int code = dir == 0 ? up[orig] : down[orig];
@@ -1786,30 +1844,34 @@ namespace PixCodec
                                     int w0 = twp[t];
                                     d += A[t] * (w1 * w1 - w0 * w0) + 2 * B[t] * (w1 - w0);
                                 }
-                                if (d < bestD) { bestD = d; bestCode = code; }
+                                if (d < slack || s1 - s0 <= 4) { cand[nc] = code; cd[nc++] = d; }
                             }
-                            if (bestCode != orig)
+                            wip[k] = unq[orig];
+                            if (nc == 0) continue;
+                            if (nc == 2 && cd[1] < cd[0]) { (cand[0], cand[1]) = (cand[1], cand[0]); }
+                            int before = 0, bestE = int.MaxValue, bestCode = orig;
+                            for (int i = s0; i < s1; i++) before += TexelError(c, tt[i], planes == 1 ? -1 : pl);
+                            bestE = before;
+                            for (int ci2 = 0; ci2 < nc; ci2++)
                             {
-                                // the model ignores the decoder's rounding: confirm with the exact error
-                                int before = 0, after = 0;
-                                for (int i = s0; i < s1; i++) before += TexelError(c, tt[i], planes == 1 ? -1 : pl);
-                                wip[k] = unq[bestCode];
+                                wip[k] = unq[cand[ci2]];
+                                int after = 0;
                                 for (int i = s0; i < s1; i++)
                                 {
                                     int t = tt[i], j = t * 4;
                                     twp[t] = (wip[idx[j]] * wt[j] + wip[idx[j + 1]] * wt[j + 1] + wip[idx[j + 2]] * wt[j + 2] + wip[idx[j + 3]] * wt[j + 3] + 8) >> 4;
                                     after += TexelError(c, t, planes == 1 ? -1 : pl);
                                 }
-                                if (after < before) { wc[pl * 64 + k] = bestCode; improved = any = true; continue; }
-                                bestCode = orig;
-                                wip[k] = unq[orig];
-                                for (int i = s0; i < s1; i++)
-                                {
-                                    int t = tt[i], j = t * 4;
-                                    twp[t] = (wip[idx[j]] * wt[j] + wip[idx[j + 1]] * wt[j + 1] + wip[idx[j + 2]] * wt[j + 2] + wip[idx[j + 3]] * wt[j + 3] + 8) >> 4;
-                                }
+                                if (after < bestE) { bestE = after; bestCode = cand[ci2]; }
                             }
-                            else wip[k] = unq[orig];
+                            wc[pl * 64 + k] = bestCode;
+                            wip[k] = unq[bestCode];
+                            for (int i = s0; i < s1; i++)
+                            {
+                                int t = tt[i], j = t * 4;
+                                twp[t] = (wip[idx[j]] * wt[j] + wip[idx[j + 1]] * wt[j + 1] + wip[idx[j + 2]] * wt[j + 2] + wip[idx[j + 3]] * wt[j + 3] + 8) >> 4;
+                            }
+                            if (bestCode != orig) improved = any = true;
                         }
                     }
                     if (!improved) break;
