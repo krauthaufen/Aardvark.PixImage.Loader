@@ -38,6 +38,7 @@ namespace PixCodec
     internal static class AstcEncoder
     {
         const int MaxN = 144;
+        const float HdrOvershoot = 2048 / 16f;   // HDR: endpoints at most one stop above the partition's brightest value   // HDR: values more than 12 stops below the block's brightest count as that
 
         // ------------------------------------------------------------------ public entry points
 
@@ -101,6 +102,16 @@ namespace PixCodec
                 LastErr = 0;
                 return;
             }
+            // the error is logarithmic: values below the smallest normal half are all treated alike, so that zeros and
+            // subnormals do not dominate the fit
+            float floorL = 2048 / 16f;
+            for (int t = 0; t < n; t++)
+                for (int k = 0; k < 3; k++)
+                    if (c.X[t * 4 + k] < floorL)
+                    {
+                        c.X[t * 4 + k] = floorL;
+                        c.Tgt[t * 4 + k] = (int)MathF.Round(floorL * 16);
+                    }
             c.Opaque = opaque; c.Grey = grey; c.Ch = opaque ? 3 : 4;
             Encode(c, block);
         }
@@ -178,6 +189,7 @@ namespace PixCodec
         static readonly byte[][] TritEnc = new byte[5][], QuintEnc = new byte[3][];   // [values in group - 1][packed digits]
         static readonly byte[] SrgbAlpha = new byte[65536];
         static readonly float[] InvQ2 = new float[21];      // 1 / QMax^2
+        static readonly float[][] WErr = new float[12][];   // weights: [range][i] squared error of quantizing i / 256
 
         static AstcEncoder()
         {
@@ -292,6 +304,11 @@ namespace PixCodec
                 QuintEnc[r - 1] = tab;
             }
             for (int q = 0; q < 21; q++) InvQ2[q] = 1f / (QMax[q] * QMax[q]);
+            for (int q = 0; q < 12; q++)
+            {
+                WErr[q] = new float[257];
+                for (int i = 0; i <= 256; i++) { float d = WUnq[q][WNear[q][i]] / 64f - i / 256f; WErr[q][i] = d * d; }
+            }
             for (int u = 0; u < 65536; u++) SrgbAlpha[u] = AstcBlocks.HalfToUnorm8(AstcBlocks.Unorm16ToHalf(u));
         }
 
@@ -307,6 +324,9 @@ namespace PixCodec
             public int[] TStart = null!, TTex = null!, TWt = null!;   // per grid point: the texels it contributes to
             public float[] WtF = null!, TWtF = null!;                // Wt / 16, TWt / 16
             public float NoiseGain;   // mean over texels of the sum of squared infill weights: how much grid noise survives
+            public int Stride;   // n rounded up to the vector width
+            public float[]? Pinv;      // ((F^T F)^-1 F^T)^T: per texel a row of GStride: the unweighted least squares grid weights
+            public int GStride;        // Count rounded up to the vector width
             public float[] MinWTerm = new float[2];   // the smallest weight quantization term of the grid's single / dual plane modes
             public float[][] WTerms = new float[2][];  // per single / dual plane mode of the grid: its weight quantization term
             public sbyte[][] Cqs = new sbyte[2][];     // and its colour ranges [mode * 16 + slot]
@@ -335,8 +355,10 @@ namespace PixCodec
             public BlockMode[] Modes = null!;
             public int[][] GridModes = null!, GridModesDual = null!;   // per grid: its single / dual plane modes
             public int[] GridOrder = null!;   // grid indices by weight count, largest first
+            public uint[]? P2Best;            // 16 texels: see P2Best (filled on demand)
             public byte[][] JX = new byte[13][], FX = new byte[13][], JY = new byte[13][], FY = new byte[13][];   // 1D infill per grid size
             public float[][] PX = new float[13][], PY = new float[13][];   // per grid size: projection onto the 1D infill space (len x len)
+            public float[][] QX = new float[13][], QY = new float[13][];   // per grid size: orthonormal basis of the 1D infill space (len x size)
             public readonly int[] BestCq = new int[16];   // the finest colour range of any single plane mode per [(P - 1) * 4 + values / 2 - 1]
             public readonly PartSet[] Parts = new PartSet[5];
         }
@@ -390,8 +412,8 @@ namespace PixCodec
             }
             for (int gs = 2; gs <= 12; gs++)
             {
-                if (gs < bw) f.PX[gs] = Projection(bw, gs, f.JX[gs], f.FX[gs]);
-                if (gs < bh) f.PY[gs] = Projection(bh, gs, f.JY[gs], f.FY[gs]);
+                if (gs < bw) { f.PX[gs] = Projection(bw, gs, f.JX[gs], f.FX[gs]); f.QX[gs] = Basis1D(bw, gs, f.JX[gs], f.FX[gs]); }
+                if (gs < bh) { f.PY[gs] = Projection(bh, gs, f.JY[gs], f.FY[gs]); f.QY[gs] = Basis1D(bh, gs, f.JY[gs], f.FY[gs]); }
             }
             f.GridOrder = new int[grids.Count];
             for (int gi = 0; gi < grids.Count; gi++) f.GridOrder[gi] = gi;
@@ -457,6 +479,35 @@ namespace PixCodec
             return f;
         }
 
+        /// <summary>Orthonormal basis (len x gs, row major) of the columns of a grid dimension's interpolation matrix.</summary>
+        static float[] Basis1D(int len, int gs, byte[] J, byte[] Fr)
+        {
+            var cols = new double[gs][];
+            for (int k = 0; k < gs; k++) cols[k] = new double[len];
+            for (int i = 0; i < len; i++)
+            {
+                double b = Fr[i] / 16.0;
+                cols[J[i]][i] += 1 - b;
+                if (b > 0) cols[J[i] + 1][i] += b;
+            }
+            var Q = new float[len * gs];
+            for (int k = 0; k < gs; k++)
+            {
+                var v = cols[k];
+                for (int j = 0; j < k; j++)
+                {
+                    double d = 0;
+                    for (int i = 0; i < len; i++) d += Q[i * gs + j] * v[i];
+                    for (int i = 0; i < len; i++) v[i] -= d * Q[i * gs + j];
+                }
+                double l = 0;
+                for (int i = 0; i < len; i++) l += v[i] * v[i];
+                l = l > 1e-12 ? 1 / Math.Sqrt(l) : 0;
+                for (int i = 0; i < len; i++) Q[i * gs + k] = (float)(v[i] * l);
+            }
+            return Q;
+        }
+
         /// <summary>F (F^T F)^-1 F^T for the len x gs linear interpolation matrix F of a grid dimension.</summary>
         static float[] Projection(int len, int gs, byte[] J, byte[] Fr)
         {
@@ -501,6 +552,43 @@ namespace PixCodec
             return P;
         }
 
+        static float[]? PseudoInverse(int n, int gc, Grid g, int stride)
+        {
+            var F = new double[n, gc];
+            for (int t = 0; t < n; t++) for (int j = 0; j < 4; j++) F[t, g.Idx[t * 4 + j]] += g.Wt[t * 4 + j] / 16.0;
+            var A = new double[gc, 2 * gc];
+            for (int a = 0; a < gc; a++)
+            {
+                for (int b = 0; b < gc; b++) for (int t = 0; t < n; t++) A[a, b] += F[t, a] * F[t, b];
+                A[a, gc + a] = 1;
+            }
+            for (int col = 0; col < gc; col++)
+            {
+                int piv = col;
+                for (int r = col + 1; r < gc; r++) if (Math.Abs(A[r, col]) > Math.Abs(A[piv, col])) piv = r;
+                for (int k = 0; k < 2 * gc; k++) (A[col, k], A[piv, k]) = (A[piv, k], A[col, k]);
+                double d = A[col, col];
+                if (Math.Abs(d) < 1e-12) return null;
+                for (int k = 0; k < 2 * gc; k++) A[col, k] /= d;
+                for (int r = 0; r < gc; r++)
+                    if (r != col && A[r, col] != 0)
+                    {
+                        double m = A[r, col];
+                        for (int k = 0; k < 2 * gc; k++) A[r, k] -= m * A[col, k];
+                    }
+            }
+            int gs8 = (gc + System.Numerics.Vector<float>.Count - 1) / System.Numerics.Vector<float>.Count * System.Numerics.Vector<float>.Count;
+            var P = new float[n * gs8];
+            for (int a = 0; a < gc; a++)
+                for (int t = 0; t < n; t++)
+                {
+                    double v = 0;
+                    for (int b = 0; b < gc; b++) v += A[a, gc + b] * F[t, b];
+                    P[t * gs8 + a] = (float)v;
+                }
+            return P;
+        }
+
         static Grid BuildGrid(int bw, int bh, int gw, int gh)
         {
             int n = bw * bh, gc = gw * gh;
@@ -534,6 +622,11 @@ namespace PixCodec
                 foreach (var (t, w) in lists[k]) { g.TTex[i] = t; g.TWt[i] = w; g.TWtF[i] = w / 16f; i++; }
             g.WtF = new float[n * 4];
             for (int i = 0; i < n * 4; i++) { g.WtF[i] = g.Wt[i] / 16f; g.NoiseGain += g.WtF[i] * g.WtF[i] / n; }
+            int vl = System.Numerics.Vector<float>.Count;
+            g.Stride = (n + vl - 1) / vl * vl;
+            g.GStride = (gc + vl - 1) / vl * vl;
+            if (!g.Identity) g.Pinv = PseudoInverse(n, gc, g, g.Stride);
+
             return g;
         }
 
@@ -546,11 +639,13 @@ namespace PixCodec
             public bool Offset, Refine;
             public float GoodEnough;   // mean squared error per channel at which the search stops
             public float EstFactor;    // a candidate is skipped when its estimated error times this exceeds the best error
+            public int Spare = 2;      // extra candidates ranked before the decimation proper corrects the estimates
+            public float Gate;         // dual plane and partitions are only tried when the 1 partition line residual is this part of the error
         }
 
         internal static readonly Prm[] Params =
         {
-            new Prm { Candidates = 1, Iters = 1, DecIters = 1, RankSweeps = 1, Dual = 1, KMeansIters = 2, PartTries = new[] { 0, 0, 1, 0, 0 }, Offset = false, Refine = false, GoodEnough = 2.0f, EstFactor = 0.8f },
+            new Prm { Candidates = 1, Iters = 1, DecIters = 1, RankSweeps = 1, Dual = 1, KMeansIters = 0, PartTries = new[] { 0, 0, 1, 0, 0 }, Offset = false, Refine = false, GoodEnough = 3.0f, EstFactor = 0.8f, Gate = 0.5f },
             new Prm { Candidates = 2, Iters = 1, DecIters = 2, RankSweeps = 1, Dual = 1, KMeansIters = 3, PartTries = new[] { 0, 0, 2, 1, 0 }, Offset = true, Refine = false, GoodEnough = 1.0f, EstFactor = 0.65f },
             new Prm { Candidates = 3, Iters = 2, DecIters = 3, RankSweeps = 1, Dual = 2, KMeansIters = 4, PartTries = new[] { 0, 0, 6, 3, 1 }, Offset = true, Refine = true, GoodEnough = 0.3f, EstFactor = 0.5f },
         };
@@ -579,6 +674,8 @@ namespace PixCodec
             public readonly int[] Tgt = new int[MaxN * 4];     // texels in the error domain (LDR: 8 bit, HDR: 16 bit)
             public readonly Vector4[] XV = new Vector4[MaxN];  // X as vectors
             public Vector4 Mask0;                              // 1 for the channels of weight plane 0
+            public readonly Vector4[] Cov = new Vector4[16];   // per partition: covariance rows of the last single plane fit
+            public Vector4 Axis1, Mean1;                       // principal axis and mean of the 1 partition, 1 plane fit
 
             // trial: partitioning and planes
             public int P, Seed;
@@ -597,7 +694,13 @@ namespace PixCodec
             public readonly float[] DX = new float[2 * 13], DY = new float[2 * 13];   // per plane: 1D decimation errors per grid width / height
             public long LineDone;   // which of DX / DY are computed in this trial: bit plane * 26 + dir * 13 + size; Gram matrices bits 52..55
             public readonly float[] GramX = new float[2 * 144], GramY = new float[2 * 144];
-            public readonly float[] ColErr = new float[4 * 21];  // per trial: estimated endpoint quantization error [cem index * 21 + range]
+            public readonly float[] ColErr = new float[4 * 21];
+            public readonly int[] ERnd = new int[32];
+            public readonly float[] PMax = new float[16];   // HDR: per partition and channel the largest value (fitting domain)   // per trial: the ideal endpoints rounded to 8 bits [p * 8 + e * 4 + c]
+            public readonly float[] VP = new float[2 * ProjStride], VV = new float[2];   // projection inputs per plane
+            public readonly short[] QI = new short[2 * MaxN];   // ideal weights in 1/256 steps
+            public readonly float[] VQ = new float[2 * 13 * 144];   // V QX per plane and grid width
+            public long VQDone;  // per trial: estimated endpoint quantization error [cem index * 21 + range]
 
             // candidate
             public readonly int[] Codes = new int[18];
@@ -640,6 +743,9 @@ namespace PixCodec
             c.P = 1;
             Array.Clear(c.Part, 0, n);
             Trial(c, false, -1);
+            // more planes or partitions only lower the line residual, at the cost of coarser quantization: when the
+            // residual is a small part of the error, they do not pay
+            if (c.Residual * scale < prm.Gate * c.BestErr) good = long.MaxValue;
 
             // one partition, two planes
             Span<int> order = stackalloc int[4];
@@ -689,13 +795,12 @@ namespace PixCodec
         {
             Span<float> res = stackalloc float[4];
             int cnt = 0;
+            // from the covariances of the last single plane fit: the residual of the line through the other channels
             for (int k = 0; k < c.Ch; k++)
             {
                 if (c.Grey && k < 3) continue;
-                BuildMembers(c);
-                SetPlanes(c, true, k);
                 float r = 0;
-                for (int p = 0; p < c.P; p++) r += FitPartition(c, p, false);
+                for (int p = 0; p < c.P; p++) r += SubResidual(c.Cov.AsSpan(p * 4, 4), k);
                 res[cnt] = r; order[cnt++] = k;
             }
             for (int i = 1; i < cnt; i++)
@@ -705,6 +810,32 @@ namespace PixCodec
                     (order[j], order[j - 1]) = (order[j - 1], order[j]);
                 }
             return cnt;
+        }
+
+        /// <summary>Residual of the principal line of a covariance (rows r) without channel k: trace minus the largest
+        /// eigenvalue.</summary>
+        static float SubResidual(ReadOnlySpan<Vector4> r, int k)
+        {
+            Vector4 m = Vector4.One;
+            m[k] = 0;
+            Vector4 r0 = r[0] * m * m.X, r1 = r[1] * m * m.Y, r2 = r[2] * m * m.Z, r3 = r[3] * m * m.W;
+            float tr = r0.X + r1.Y + r2.Z + r3.W;
+            Vector4 a = r0;
+            float big = r0.X;
+            if (r1.Y > big) { big = r1.Y; a = r1; }
+            if (r2.Z > big) { big = r2.Z; a = r2; }
+            if (r3.W > big) { big = r3.W; a = r3; }
+            if (big <= 1e-12f) return 0;
+            float lambda = 0;
+            for (int it = 0; it < 8; it++)
+            {
+                Vector4 nx = r0 * a.X + r1 * a.Y + r2 * a.Z + r3 * a.W;
+                float len = nx.Length();
+                if (len < 1e-20f) break;
+                lambda = Vector4.Dot(a, nx) / a.LengthSquared();
+                a = nx / len;
+            }
+            return Math.Max(0, tr - lambda);
         }
 
         static void BuildMembers(Ctx c)
@@ -750,6 +881,14 @@ namespace PixCodec
             var prm = c.Prm;
             BuildMembers(c);
             SetPlanes(c, dual, ccs);
+            if (c.Hdr)
+                for (int p = 0; p < c.P; p++)
+                    for (int k = 0; k < 3; k++)
+                    {
+                        float m = 0;
+                        for (int i = 0; i < c.MemN[p]; i++) m = Math.Max(m, c.X[c.Mem[p * MaxN + i] * 4 + k]);
+                        c.PMax[p * 4 + k] = m;
+                    }
             float res = 0;
             for (int p = 0; p < c.P; p++) res += FitPartition(c, p, true);
             c.Residual = res;
@@ -762,7 +901,9 @@ namespace PixCodec
             int n = c.N, planes = dual ? 2 : 1;
             float impSum = 0;
             for (int t = 0; t < n; t++) impSum += c.Imp[t] + (dual ? c.Imp[MaxN + t] : 0);
-            Array.Fill(c.ColErr, -1f);
+            c.ColErr.AsSpan(0, 21 * cems.Length).Fill(-1f);
+            for (int p = 0; p < c.P; p++)
+                for (int k = 0; k < 4; k++) { c.ERnd[p * 8 + k] = R8(c.E0[p * 4 + k]); c.ERnd[p * 8 + 4 + k] = R8(c.E1[p * 4 + k]); }
 
             // CEM 6 / 10 (RGB scale) cost: the dark endpoint is forced onto the line through the bright one and the origin
             float scalePenalty = 0;
@@ -781,8 +922,10 @@ namespace PixCodec
 
             // rank (block mode, endpoint mode) pairs by the estimated error. Grids from the largest down; a grid's
             // decimation is only computed when its estimate without it can still enter the list.
-            int K = prm.Candidates;
-            Span<float> topEst = stackalloc float[8];
+            // ranked with the unclamped least squares decimation error; the decimation proper of the best few
+            // candidates' grids then corrects their estimates
+            int K = Math.Min(8, prm.Candidates + prm.Spare), Kfinal = prm.Candidates;
+            Span<float> topEst = stackalloc float[8], topDec = stackalloc float[8];
             Span<int> topMode = stackalloc int[8], topCem = stackalloc int[8], topCq = stackalloc int[8];
             int found = 0;
             var modes = c.F.Modes;
@@ -801,7 +944,7 @@ namespace PixCodec
             }
             if (c.BestErr != long.MaxValue && (res + lbCol) * scale * prm.EstFactor >= c.BestErr) return;
             float limit = c.BestErr == long.MaxValue ? float.MaxValue : c.BestErr / (scale * prm.EstFactor);
-            c.LineDone = 0;
+            PrepareProjections(c, planes);
             Span<float> cemFloor = stackalloc float[4];
             float minFloor = float.MaxValue;
             for (int ci = 0; ci < ncem; ci++)
@@ -816,44 +959,14 @@ namespace PixCodec
                 var g = c.F.Grids[gi];
                 float gain = impSum * g.NoiseGain;
                 float bound = found == K ? Math.Min(limit, topEst[K - 1]) : limit;
+                float dec = 0;
                 if (!g.Identity)
                 {
-                    // lower bound without the decimation: one dimensional decimation errors, weight and colour terms
-                    float dlb = 0;
-                    for (int pl = 0; pl < planes; pl++)
-                    {
-                        float dx = g.W < c.F.W ? LineError(c, pl, 0, g.W) : 0, dy = g.H < c.F.H ? LineError(c, pl, 1, g.H) : 0;
-                        dlb += Math.Max(dx, dy) + 0.5f * Math.Min(dx, dy);
-                    }
-                    if (dlb + gain * g.MinWTerm[planes - 1] + minFloor >= bound) continue;
-                    float lb = float.MaxValue;
-                    var wts = g.WTerms[planes - 1];
-                    var cqs = g.Cqs[planes - 1];
-                    for (int i = 0; i < wts.Length; i++)
-                    {
-                        float w = dlb + gain * wts[i];
-                        for (int ci = 0; ci < ncem; ci++)
-                        {
-                            int cq = cqs[i * 16 + cemSlot[ci]];
-                            if (cq < 0 || w + cemFloor[ci] >= lb || w + cemFloor[ci] >= bound) continue;
-                            float col = colErr[ci * 21 + cq];
-                            if (col < 0) col = ColourError(c, ci, cems[ci], cq, colUnit);
-                            if (w + col + res < lb) lb = w + col + res;
-                        }
-                    }
-                    if (lb >= bound) continue;
-                }
-                float dec = 0;
-                for (int pl = 0; pl < planes; pl++)
-                {
-                    Decimate(c, g, pl, prm.RankSweeps);
-                    if (!g.Identity)
-                    {
-                        var iw = c.IW;
-                        var imp = c.Imp;
-                        var inf = c.Inf;
-                        for (int t = 0, b = pl * MaxN; t < n; t++) { float d = inf[t] - iw[b + t]; dec += d * d * imp[b + t]; }
-                    }
+                    // the least squares decimation error: the ideal weights (scaled by the square root of their
+                    // importance) minus their projection onto the grid's infill space
+                    if (gain * g.MinWTerm[planes - 1] + minFloor >= bound) continue;
+                    for (int pl = 0; pl < planes; pl++) dec += ProjectionError(c, g, pl);
+                    if (dec + gain * g.MinWTerm[planes - 1] + minFloor >= bound) continue;
                 }
                 foreach (int mi in gm)
                 {
@@ -876,13 +989,46 @@ namespace PixCodec
                             while (j > 0 && topEst[j - 1] > est)
                             {
                                 topEst[j] = topEst[j - 1]; topMode[j] = topMode[j - 1]; topCem[j] = topCem[j - 1]; topCq[j] = topCq[j - 1];
+                                topDec[j] = topDec[j - 1];
                                 j--;
                             }
                             topEst[j] = est; topMode[j] = mi; topCem[j] = cems[ci]; topCq[j] = cq;
+                            topDec[j] = g.Identity ? -1 : dec;
                         }
                     }
                 }
             }
+            // the decimation proper (clamped weights, actual infill) for the candidates' grids
+            Span<int> dGrid = stackalloc int[8];
+            Span<float> dVal = stackalloc float[8];
+            int nd = 0;
+            for (int i = 0; i < found; i++)
+            {
+                if (topDec[i] < 0) continue;
+                int gi = modes[topMode[i]].Grid, k = 0;
+                while (k < nd && dGrid[k] != gi) k++;
+                if (k == nd)
+                {
+                    var g = c.F.Grids[gi];
+                    float dec = 0;
+                    for (int pl = 0; pl < planes; pl++)
+                    {
+                        Decimate(c, g, pl, prm.RankSweeps);
+                        for (int t = 0, bb = pl * MaxN; t < n; t++) { float d = c.Inf[t] - c.IW[bb + t]; dec += d * d * c.Imp[bb + t]; }
+                    }
+                    dGrid[nd] = gi; dVal[nd++] = dec;
+                }
+                topEst[i] += dVal[k] - topDec[i];
+            }
+            for (int i = 1; i < found; i++)
+                for (int j = i; j > 0 && topEst[j] < topEst[j - 1]; j--)
+                {
+                    (topEst[j], topEst[j - 1]) = (topEst[j - 1], topEst[j]);
+                    (topMode[j], topMode[j - 1]) = (topMode[j - 1], topMode[j]);
+                    (topCem[j], topCem[j - 1]) = (topCem[j - 1], topCem[j]);
+                    (topCq[j], topCq[j - 1]) = (topCq[j - 1], topCq[j]);
+                }
+            found = Math.Min(found, Kfinal);
             for (int i = 0; i < found; i++)
             {
                 if (c.BestErr != long.MaxValue && topEst[i] * scale * prm.EstFactor >= c.BestErr) break;
@@ -925,6 +1071,8 @@ namespace PixCodec
                 r0 += d * d.X; r1 += d * d.Y; r2 += d * d.Z; r3 += d * d.W;
             }
             float total = r0.X + r1.Y + r2.Z + r3.W;
+            if (!c.Dual) { c.Cov[p * 4] = r0; c.Cov[p * 4 + 1] = r1; c.Cov[p * 4 + 2] = r2; c.Cov[p * 4 + 3] = r3; }
+            bool keep = c.P == 1 && !c.Dual;
             // power iteration from the row of the largest variance
             Vector4 axis = r0;
             float big = r0.X;
@@ -933,7 +1081,7 @@ namespace PixCodec
             if (r3.W > big) { big = r3.W; axis = r3; }
             bool ok = big > 1e-12f;
             if (ok)
-                for (int it = 0; it < 6; it++)
+                for (int it = 0; it < 4; it++)
                 {
                     Vector4 nx = r0 * axis.X + r1 * axis.Y + r2 * axis.Z + r3 * axis.W;
                     float len = nx.LengthSquared();
@@ -941,6 +1089,7 @@ namespace PixCodec
                     axis = nx / MathF.Sqrt(len);
                 }
             if (!ok) axis = mask / MathF.Sqrt(Math.Max(1, c.NCh0));
+            if (keep) { c.Axis1 = axis; c.Mean1 = mean; }
             float tmin = float.MaxValue, tmax = float.MinValue, proj2 = 0;
             var IW = c.IW;
             foreach (int t in mem)
@@ -1089,6 +1238,93 @@ namespace PixCodec
             return Math.Max(0, vv - gr);
         }
 
+        /// <summary>The ideal weights of each plane scaled by the square root of their importance (zero padded), and their
+        /// squared norms, for <see cref="ProjectionError"/>.</summary>
+        static void PrepareProjections(Ctx c, int planes)
+        {
+            int n = c.N, stride = (n + System.Numerics.Vector<float>.Count - 1) / System.Numerics.Vector<float>.Count * System.Numerics.Vector<float>.Count;
+            for (int pl = 0; pl < planes; pl++)
+            {
+                float vv = 0;
+                int b = pl * MaxN, o = pl * ProjStride;
+                float sq0 = MathF.Sqrt(c.Imp[b]);
+                for (int t = 0; t < n; t++)
+                {
+                    float w = c.IW[b + t], v = w * (c.P == 1 ? sq0 : MathF.Sqrt(c.Imp[b + t]));
+                    c.VP[o + t] = v;
+                    vv += v * v;
+                    c.QI[b + t] = (short)Math.Clamp((int)(w * 256 + 0.5f), 0, 256);
+                }
+                for (int t = n; t < stride; t++) c.VP[o + t] = 0;
+                c.VV[pl] = vv;
+            }
+            c.VQDone = 0;
+        }
+
+        const int ProjStride = 152;
+
+        /// <summary>
+        /// Least squares decimation error of a plane on a grid, through the (nearly exact) separable form of the infill:
+        /// |V|^2 - &lt;PY, G&gt; for the ideal weight matrix V (bh x bw), G = (V QX)(V QX)^T with the orthonormal 1D
+        /// basis QX of the grid width (cached per width) and PY the projection of the grid height.
+        /// </summary>
+        static unsafe float ProjectionError(Ctx c, Grid g, int plane)
+        {
+            var f = c.F;
+            int bw = f.W, bh = f.H, gw = g.W, gh = g.H, hh = bh * bh;
+            int go = (plane * 13 + gw) * 144;
+            long bit = 1L << (plane * 13 + gw);
+            fixed (float* v = &c.VP[plane * ProjStride], G = &c.VQ[go])
+            {
+                if ((c.VQDone & bit) == 0)
+                {
+                    float* B = stackalloc float[144];
+                    int bs;
+                    if (gw == bw) { B = v; bs = bw; }
+                    else
+                    {
+                        bs = gw;
+                        fixed (float* qx = f.QX[gw])
+                            for (int y = 0; y < bh; y++)
+                                for (int k = 0; k < gw; k++)
+                                {
+                                    float sum = 0;
+                                    float* vr = v + y * bw;
+                                    for (int x = 0; x < bw; x++) sum += vr[x] * qx[x * gw + k];
+                                    B[y * gw + k] = sum;
+                                }
+                    }
+                    for (int a = 0; a < bh; a++)
+                        for (int b = a; b < bh; b++)
+                        {
+                            float sum = 0;
+                            float* ra = B + a * bs, rb = B + b * bs;
+                            for (int k = 0; k < gw; k++) sum += ra[k] * rb[k];
+                            G[a * bh + b] = sum; G[b * bh + a] = sum;
+                        }
+                    c.VQDone |= bit;
+                }
+                float r = 0;
+                if (gh == bh) for (int a = 0; a < bh; a++) r += G[a * bh + a];
+                else
+                    fixed (float* py = f.PY[gh])
+                    {
+                        int i = 0;
+                        if (System.Numerics.Vector.IsHardwareAccelerated)
+                        {
+                            int vl = System.Numerics.Vector<float>.Count;
+                            var acc = System.Numerics.Vector<float>.Zero;
+                            for (; i + vl <= hh; i += vl)
+                                acc += System.Runtime.CompilerServices.Unsafe.ReadUnaligned<System.Numerics.Vector<float>>(py + i)
+                                     * System.Runtime.CompilerServices.Unsafe.ReadUnaligned<System.Numerics.Vector<float>>(G + i);
+                            r = System.Numerics.Vector.Sum(acc);
+                        }
+                        for (; i < hh; i++) r += py[i] * G[i];
+                    }
+                return Math.Max(0, c.VV[plane] - r);
+            }
+        }
+
         /// <summary>
         /// The error from representing the ideal weights of a plane on the grid (decimated into GW by
         /// <see cref="Decimate"/>) quantized to weight range wq: sum of importance * (infilled - ideal)^2.
@@ -1103,11 +1339,16 @@ namespace PixCodec
             {
                 if (g.Identity)
                 {
-                    for (int t = 0; t < n; t++)
+                    // the squared error of quantizing each texel's weight, from a table over the weight in 1/256 steps
+                    var tab = WErr[wq];
+                    var qi = c.QI;
+                    int b = plane * MaxN;
+                    if (c.P == 1)
                     {
-                        float d = unq[near[Math.Clamp((int)(gw[t] * 256 + 0.5f), 0, 256)]] * (1f / 64) - iw[t];
-                        e += d * d * imp[t];
+                        for (int t = 0; t < n; t++) e += tab[qi[b + t]];
+                        return e * imp[0];
                     }
+                    for (int t = 0; t < n; t++) e += tab[qi[b + t]] * imp[t];
                     return e;
                 }
                 float* q = stackalloc float[64];
@@ -1175,9 +1416,7 @@ namespace PixCodec
                     else
                         for (int k = 0; k < 4; k++)
                         {
-                            // the better of floor / ceiling per endpoint is chosen by the quantizer: about a quarter of
-                            // the nearest-value error
-                            q0[k] = unq[near[R8(a[k])]]; q1[k] = unq[near[R8(b[k])]];
+                            q0[k] = unq[near[c.ERnd[p * 8 + k]]]; q1[k] = unq[near[c.ERnd[p * 8 + 4 + k]]];
                         }
                     for (int k = 0; k < c.Ch; k++)
                     {
@@ -1208,6 +1447,32 @@ namespace PixCodec
                 fixed (int* ts = g.TStart, tt = g.TTex, idx = g.Idx)
                 fixed (float* tw = g.TWtF, wt = g.WtF)
                 {
+                    if (g.Pinv != null)
+                    {
+                        // the unweighted least squares weights (exact for one partition, whose importance is uniform);
+                        // the sweeps below are only needed where the weights were clamped or the importance varies
+                        bool clamped = false;
+                        int gs = g.GStride, vl = System.Numerics.Vector<float>.Count, nv = gs / vl;
+                        var accs = stackalloc System.Numerics.Vector<float>[8];
+                        for (int j = 0; j < nv; j++) accs[j] = System.Numerics.Vector<float>.Zero;
+                        fixed (float* pv = g.Pinv)
+                            for (int t = 0; t < n; t++)
+                            {
+                                var x = new System.Numerics.Vector<float>(iw[t]);
+                                float* row = pv + t * gs;
+                                for (int j = 0; j < nv; j++)
+                                    accs[j] += System.Runtime.CompilerServices.Unsafe.ReadUnaligned<System.Numerics.Vector<float>>(row + j * vl) * x;
+                            }
+                        float* sums = (float*)accs;
+                        for (int k = 0; k < gc; k++)
+                        {
+                            float v = sums[k];
+                            if (v < 0) { v = 0; clamped = true; } else if (v > 1) { v = 1; clamped = true; }
+                            gw[k] = v;
+                        }
+                        if (c.P == 1 && !clamped) sweeps = 0;
+                    }
+                    else
                     for (int k = 0; k < gc; k++)
                     {
                         float num = 0, den = 0;
@@ -1284,7 +1549,8 @@ namespace PixCodec
                     c.BestErr = err;
                     Pack(c, m, cemUsed, cq, c.Best);
                 }
-                if (it >= prm.Iters || err == 0) break;
+                // refit only candidates that are about as good as the best so far
+                if (it >= prm.Iters || err == 0 || c.Q != BcQuality.High && err > c.BestErr + (c.BestErr >> 3)) break;
                 ComputeSums(c, true);
                 SolveEndpoints(c, we0, we1);
             }
@@ -1379,12 +1645,25 @@ namespace PixCodec
             for (int p = 0; p < c.P; p++)
                 for (int k = 0; k < c.Ch; k++)
                 {
+                    float lo = 0, hi = hiVal;
+                    if (c.Hdr)
+                    {
+                        // HDR: endpoints beyond the data's range interpolate in the logarithmic domain and can land
+                        // far from it in linear terms; keep them within
+                        lo = float.MaxValue; hi = float.MinValue;
+                        for (int i = 0; i < c.MemN[p]; i++)
+                        {
+                            float x = c.X[c.Mem[p * MaxN + i] * 4 + k];
+                            lo = Math.Min(lo, x); hi = Math.Max(hi, x);
+                        }
+                        if (lo > hi) { lo = 0; hi = hiVal; }
+                    }
                     int pl = c.Dual && k == c.Ccs ? 1 : 0, o = (p * 2 + pl) * 3;
                     float a = c.SW[o], b = c.SW[o + 1], d = c.SW[o + 2], det = a * d - b * b;
                     if (det <= 1e-4f * (a + d) * (a + d)) continue;
                     float id = 1 / det, x0 = c.ST0[p * 4 + k], x1 = c.ST1[p * 4 + k];
-                    we0[p * 4 + k] = Math.Clamp((d * x0 - b * x1) * id, 0, hiVal);
-                    we1[p * 4 + k] = Math.Clamp((a * x1 - b * x0) * id, 0, hiVal);
+                    we0[p * 4 + k] = Math.Clamp((d * x0 - b * x1) * id, lo, hi);
+                    we1[p * 4 + k] = Math.Clamp((a * x1 - b * x0) * id, lo, hi);
                 }
         }
 
@@ -1451,45 +1730,86 @@ namespace PixCodec
         }
 
         /// <summary>Greedy single steps on the stored weights (High).</summary>
-        static long RefineWeights(Ctx c, Grid g, int wq, int planes, long err)
+        static unsafe long RefineWeights(Ctx c, Grid g, int wq, int planes, long err)
         {
+            // per texel and plane the error as a quadratic in the infilled weight w (0..64): A w^2 + 2 B w + C
+            int n = c.N;
+            float* qa = stackalloc float[2 * MaxN], qb = stackalloc float[2 * MaxN];
+            float scale = c.Hdr ? 0.25f : 1f / 256;
+            for (int pl = 0; pl < planes; pl++)
+                for (int t = 0; t < n; t++)
+                {
+                    int p = c.Part[t];
+                    float A = 0, B = 0;
+                    for (int k = 0; k < c.Ch; k++)
+                    {
+                        if (planes == 2 && (k == c.Ccs) != (pl == 1)) continue;
+                        float e0 = c.C16[p * 8 + k] * scale, e1 = c.C16[p * 8 + 4 + k] * scale;
+                        float x = c.Hdr ? c.Tgt[t * 4 + k] * scale : c.Tgt[t * 4 + k];
+                        float a = (e1 - e0) * (1f / 64), b = e0 - x;
+                        A += a * a; B += a * b;
+                    }
+                    qa[pl * MaxN + t] = A; qb[pl * MaxN + t] = B;
+                }
             var up = WUp[wq];
             var down = WDown[wq];
             var unq = WUnq[wq];
-            for (int pass = 0; pass < 2; pass++)
-            {
-                bool improved = false;
-                for (int pl = 0; pl < planes; pl++)
-                    for (int k = 0; k < g.Count; k++)
+            bool any = false;
+            fixed (int* ts = g.TStart, tt = g.TTex, idx = g.Idx, wt = g.Wt, wi = c.WI, tw = c.TW, wc = c.WC)
+                for (int pass = 0; pass < 2; pass++)
+                {
+                    bool improved = false;
+                    for (int pl = 0; pl < planes; pl++)
                     {
-                        int s0 = g.TStart[k], s1 = g.TStart[k + 1];
-                        int before = 0;
-                        for (int i = s0; i < s1; i++) before += TexelError(c, g.TTex[i], planes == 1 ? -1 : pl);
-                        if (before == 0) continue;
-                        int orig = c.WC[pl * 64 + k];
-                        int bestCode = orig, bestE = before;
-                        for (int dir = 0; dir < 2; dir++)
+                        int* wip = wi + pl * 64, twp = tw + pl * MaxN;
+                        float* A = qa + pl * MaxN, B = qb + pl * MaxN;
+                        for (int k = 0; k < g.Count; k++)
                         {
-                            int code = dir == 0 ? up[orig] : down[orig];
-                            if (code == orig) continue;
-                            c.WI[pl * 64 + k] = unq[code];
-                            int after = 0;
-                            for (int i = s0; i < s1; i++)
+                            int s0 = ts[k], s1 = ts[k + 1];
+                            int orig = wc[pl * 64 + k], bestCode = orig;
+                            float bestD = 0;
+                            for (int dir = 0; dir < 2; dir++)
                             {
-                                int t = g.TTex[i];
-                                c.TW[pl * MaxN + t] = Infill(c, g, pl, t);
-                                after += TexelError(c, t, planes == 1 ? -1 : pl);
+                                int code = dir == 0 ? up[orig] : down[orig];
+                                if (code == orig) continue;
+                                wip[k] = unq[code];
+                                float d = 0;
+                                for (int i = s0; i < s1; i++)
+                                {
+                                    int t = tt[i], j = t * 4;
+                                    int w1 = (wip[idx[j]] * wt[j] + wip[idx[j + 1]] * wt[j + 1] + wip[idx[j + 2]] * wt[j + 2] + wip[idx[j + 3]] * wt[j + 3] + 8) >> 4;
+                                    int w0 = twp[t];
+                                    d += A[t] * (w1 * w1 - w0 * w0) + 2 * B[t] * (w1 - w0);
+                                }
+                                if (d < bestD) { bestD = d; bestCode = code; }
                             }
-                            if (after < bestE) { bestE = after; bestCode = code; }
+                            if (bestCode != orig)
+                            {
+                                // the model ignores the decoder's rounding: confirm with the exact error
+                                int before = 0, after = 0;
+                                for (int i = s0; i < s1; i++) before += TexelError(c, tt[i], planes == 1 ? -1 : pl);
+                                wip[k] = unq[bestCode];
+                                for (int i = s0; i < s1; i++)
+                                {
+                                    int t = tt[i], j = t * 4;
+                                    twp[t] = (wip[idx[j]] * wt[j] + wip[idx[j + 1]] * wt[j + 1] + wip[idx[j + 2]] * wt[j + 2] + wip[idx[j + 3]] * wt[j + 3] + 8) >> 4;
+                                    after += TexelError(c, t, planes == 1 ? -1 : pl);
+                                }
+                                if (after < before) { wc[pl * 64 + k] = bestCode; improved = any = true; continue; }
+                                bestCode = orig;
+                                wip[k] = unq[orig];
+                                for (int i = s0; i < s1; i++)
+                                {
+                                    int t = tt[i], j = t * 4;
+                                    twp[t] = (wip[idx[j]] * wt[j] + wip[idx[j + 1]] * wt[j + 1] + wip[idx[j + 2]] * wt[j + 2] + wip[idx[j + 3]] * wt[j + 3] + 8) >> 4;
+                                }
+                            }
+                            else wip[k] = unq[orig];
                         }
-                        c.WC[pl * 64 + k] = bestCode;
-                        c.WI[pl * 64 + k] = unq[bestCode];
-                        for (int i = s0; i < s1; i++) c.TW[pl * MaxN + g.TTex[i]] = Infill(c, g, pl, g.TTex[i]);
-                        if (bestCode != orig) { err -= before - bestE; improved = true; }
                     }
-                if (!improved) break;
-            }
-            return err;
+                    if (!improved) break;
+                }
+            return any ? Error(c) : err;
         }
 
         // ------------------------------------------------------------------ endpoint quantization
@@ -1588,6 +1908,13 @@ namespace PixCodec
                 float q = 2 * s01 * d0 * d1;
                 s += s00 * d0 * d0 + q + s11 * d1 * d1 - 2 * (x0 * d0 + x1 * d1);
                 r += s00 * d1 * d1 + q + s11 * d0 * d0 - 2 * (x0 * d1 + x1 * d0);
+                if (c.Hdr && k < 3)
+                {
+                    // HDR: an endpoint well above the partition's brightest value interpolates (logarithmically) into
+                    // values far too bright: never preferred, whatever the fit elsewhere
+                    float over = Math.Max(d0, d1) - (c.PMax[p * 4 + k] + HdrOvershoot);
+                    if (over > 0) { s += 1e9f * (1 + over); r += 1e9f * (1 + over); }
+                }
             }
             return Math.Min(s, r);
         }
@@ -1763,12 +2090,16 @@ namespace PixCodec
             int b0 = fl[Math.Clamp((int)MathF.Floor(hi), 0, 255)], b1 = ce[Math.Clamp((int)MathF.Ceiling(hi), 0, 255)];
             float best = float.MaxValue;
             v0 = a0; v1 = b0;
+            int p = c.CurP, o = (p * 2 + (c.Dual && k == c.Ccs ? 1 : 0)) * 3;
+            float s00 = c.SW[o], s01 = c.SW[o + 1], s11 = c.SW[o + 2], t0 = c.ST0[p * 4 + k], t1 = c.ST1[p * 4 + k];
+            if (swapped) { (s00, s11) = (s11, s00); (t0, t1) = (t1, t0); }
+            bool plain = !c.Hdr && !c.Srgb;
             for (int i = 0; i < 4; i++)
             {
                 int x = (i & 1) == 0 ? a0 : a1, y = (i & 2) == 0 ? b0 : b1;
                 if (i > 0 && (x == a0 && (i & 1) != 0 || y == b0 && (i & 2) != 0)) continue;
-                float dx = Fit(c, cem, k, x), dy = Fit(c, cem, k, y);
-                float err = swapped ? ChannelError(c, k, dy, dx) : ChannelError(c, k, dx, dy);
+                float dx = plain ? x : Fit(c, cem, k, x), dy = plain ? y : Fit(c, cem, k, y);
+                float err = s00 * dx * dx + 2 * s01 * dx * dy + s11 * dy * dy - 2 * (t0 * dx + t1 * dy);
                 if (err < best) { best = err; v0 = x; v1 = y; }
             }
         }
@@ -2019,11 +2350,26 @@ namespace PixCodec
             Vector4 mean = Vector4.Zero;
             for (int t = 0; t < n; t++) mean += XV[t];
             mean /= n;
-            // seeding: farthest point from the mean, then farthest from the nearest centre
+            // seeding: 2 clusters split by the principal axis of the 1 partition fit; else the farthest point from the
+            // mean, then farthest from the nearest centre
             Span<float> dist = stackalloc float[MaxN];
             Span<Vector4> cen = stackalloc Vector4[4];
+            var label = c.Label;
+            Span<Vector4> sum = stackalloc Vector4[4];
+            Span<int> cnt = stackalloc int[4];
+            if (P == 2 && c.Prm.KMeansIters == 0)
+            {
+                sum.Clear(); cnt.Clear();
+                for (int t = 0; t < n; t++)
+                {
+                    int j = Vector4.Dot(XV[t] - c.Mean1, c.Axis1) > 0 ? 1 : 0;
+                    cnt[j]++; sum[j] += XV[t];
+                }
+                for (int j = 0; j < 2; j++) cen[j] = cnt[j] > 0 ? sum[j] / cnt[j] : mean;
+            }
+            else
             for (int t = 0; t < n; t++) dist[t] = Vector4.DistanceSquared(XV[t], mean);
-            for (int j = 0; j < P; j++)
+            for (int j = 0; j < P && !(P == 2 && c.Prm.KMeansIters == 0); j++)
             {
                 int far = 0;
                 for (int t = 1; t < n; t++) if (dist[t] > dist[far]) far = t;
@@ -2035,9 +2381,6 @@ namespace PixCodec
                     dist[t] = j == 0 ? d : Math.Min(dist[t], d);
                 }
             }
-            var label = c.Label;
-            Span<Vector4> sum = stackalloc Vector4[4];
-            Span<int> cnt = stackalloc int[4];
             for (int it = 0; ; it++)
             {
                 for (int t = 0; t < n; t++)
@@ -2065,6 +2408,15 @@ namespace PixCodec
             for (int t = 0; t < n; t++) km[label[t] * words + (t >> 6)] |= 1UL << (t & 63);
             int found = 0;
             tries = Math.Min(tries, c.TopIdx.Length);
+            if (P == 2 && n == 16 && tries <= 2)
+            {
+                // 16 texels: the best two patterns of every 2 cluster labelling are tabulated
+                uint r = P2Best(c.F, (int)km[0] & 0xFFFF);
+                c.TopIdx[0] = (int)(r & 0xFFFF);
+                if (tries == 1 || (r >> 16) == (r & 0xFFFF)) return 1;
+                c.TopIdx[1] = (int)(r >> 16);
+                return 2;
+            }
             int floor = -1;   // the score a pattern must beat to enter the list once it is full
             fixed (ulong* masks = ps.Masks)
             {
@@ -2140,6 +2492,32 @@ namespace PixCodec
                 }
             }
             return found;
+        }
+
+        /// <summary>For 16 texel footprints: per 2 cluster labelling (bit mask), the indices of the two best matching 2
+        /// partition patterns (computed on first use).</summary>
+        static uint P2Best(Footprint f, int m)
+        {
+            var t = f.P2Best;
+            if (t == null)
+            {
+                t = new uint[65536];
+                Array.Fill(t, uint.MaxValue);
+                f.P2Best = t;
+            }
+            uint r = t[m];
+            if (r != uint.MaxValue) return r;
+            var ps = f.Parts[2];
+            int b0 = -1, b1 = -1, i0 = 0, i1 = 0;
+            for (int i = 0; i < ps.Count; i++)
+            {
+                int x = BitOperations.PopCount(((uint)ps.Masks[i * 2] ^ (uint)m) & 0xFFFF), sc = Math.Max(x, 16 - x);
+                if (sc > b0) { b1 = b0; i1 = i0; b0 = sc; i0 = i; }
+                else if (sc > b1) { b1 = sc; i1 = i; }
+            }
+            r = (uint)i0 | (uint)(b1 < 0 ? i0 : i1) << 16;
+            t[m] = r;
+            return r;
         }
 
         static void Insert(Ctx c, ref int found, int tries, ref int floor, int score, int idx)
