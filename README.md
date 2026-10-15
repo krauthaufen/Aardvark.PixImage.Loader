@@ -1,7 +1,17 @@
-# PixCodec
+# Aardvark.PixImage.IO
 
-Pure managed image loading and saving for .NET 8. No native binaries, no third-party packages, MIT licensed.
+Pure managed image loading and saving for .NET 8 and .NET 10. No native binaries, no third-party packages, MIT licensed.
 Little-endian hosts only (x64 and arm64 are tested).
+
+Two packages:
+
+- **Aardvark.PixImage.IO.Codecs**: the codecs, metadata, colour management and image operations on a plain `RawImage`, with
+  no dependencies (namespace `Aardvark.ImageCodecs`).
+- **Aardvark.PixImage.IO**: loads and saves Aardvark `PixImage`s, mip maps, cube maps and volumes through the codecs
+  (`PixImageIO`, `PixImageIOLoader`, `PixImageIOProcessor` in `Aardvark.Base`).
+
+The code namespace is deliberately not `Aardvark.PixImage.*`: a namespace of that name would hide the `PixImage` class in
+code living in any `Aardvark.*` namespace.
 
 | Format | Decode | Encode |
 |---|---|---|
@@ -29,7 +39,7 @@ LERC encoding is not offered because Esri holds patents on LERC compression.
 ## Core library
 
 ```csharp
-using PixCodec;
+using Aardvark.ImageCodecs;
 
 RawImage img = ImageCodec.Decode("photo.jpg");      // format is sniffed from the content
 ImageCodec.Encode(img, "out.png");                  // format from the extension
@@ -163,9 +173,9 @@ every structural and GeoTIFF tag.
 
 ## Compression
 
-`PixCodec.Compression` holds fully managed deflate/inflate (zlib, levels 0..9, streaming `Inflater`), Zstandard
+`Aardvark.ImageCodecs.Compression` holds fully managed deflate/inflate (zlib, levels 0..9, streaming `Inflater`), Zstandard
 (decode and encode, both with dictionaries), XZ / LZMA (decode incl. BCJ filters, encode up to an optimal parser, multi-threaded) and vectorised CRC-32 / Adler-32.
-The managed deflate is the default; `Zlib.Backend = ZlibBackend.Bcl` (or `PIXCODEC_ZLIB=bcl`) switches to
+The managed deflate is the default; `Zlib.Backend = ZlibBackend.Bcl` (or `PIXIMAGEIO_ZLIB=bcl`) switches to
 `System.IO.Compression`.
 
 ## Image operations
@@ -196,39 +206,39 @@ DDS or KTX texture (every slice of a KTX volume) and every image of an icon.
 
 ## Aardvark
 
-`Aardvark.PixImage.PixCodec` provides an `IPixLoader`. It registers itself on `Aardvark.Init()`,
-or call `PixImagePixCodec.Init()`.
+`Aardvark.PixImage.IO` provides an `IPixLoader`. It registers itself on `Aardvark.Init()`,
+or call `PixImageIO.Init()`.
 
 ```csharp
-PixImagePixCodec.Init();
+PixImageIO.Init();
 var pi = PixImage.Load("dem.tif");                  // PixImage<float>, wraps the decoded array without copying
 pi.Save("dem.exr");
 ```
 
-Without registering anything, `PixImagePixCodec` loads straight into PixImages. Like the registered loader it always returns
+Without registering anything, `PixImageIO` loads straight into PixImages. Like the registered loader it always returns
 upright images (orientation applied) whose volume has the dense image layout: channels innermost, then x, then y, top row first,
 starting at index 0 (no y-flip; the same convention as the other Aardvark loaders).
 
 ```csharp
-PixImage img       = PixImagePixCodec.Load("photo.jpg");                         // PixImage<byte>, upright
-PixImage<float> f  = PixImagePixCodec.Load<float>("scan.tif");                    // converted if the file is not float
-PixImage[] pages   = PixImagePixCodec.LoadAll("stack.tif");                       // pages or animation frames
-ImageInfo info     = PixImagePixCodec.GetInfo("dem.tif");
-PixImagePixCodec.Save(img, "out.webp");
+PixImage img       = PixImageIO.Load("photo.jpg");                         // PixImage<byte>, upright
+PixImage<float> f  = PixImageIO.Load<float>("scan.tif");                    // converted if the file is not float
+PixImage[] pages   = PixImageIO.LoadAll("stack.tif");                       // pages or animation frames
+ImageInfo info     = PixImageIO.GetInfo("dem.tif");
+PixImageIO.Save(img, "out.webp");
 PixImage p = rawImage.ToPixImage();   RawImage r = pixImage.ToRawImage();
-PixImageMipMap mm  = PixImagePixCodec.LoadMipmap("tex.dds");                     // also PixImageMipMap.Load (IPixMipmapLoader)
-PixCube cube       = PixImagePixCodec.LoadCube("sky.dds");                        // DDS cube map, every side with its mip chain
-PixImagePixCodec.SaveDds(cube, stream);
-PixImagePixCodec.SaveDds(volume, stream, new DdsEncodeOptions { Compression = DdsCompression.BC1 });   // PixVolume
-PixImagePixCodec.SaveKtx(cube, stream, new KtxEncodeOptions { Compression = TextureCompression.BC7 });
-PixVolume vol      = PixImagePixCodec.LoadVolume("ct.ktx2");                      // DDS or KTX volume texture
-PixImagePixCodec.WriteMetadata("a.jpg", "a.jpg", new MetadataEdit { Gps = new GpsEdit { Latitude = 47.07, Longitude = 15.44 } });
-PixImage srgb      = PixImagePixCodec.LoadSrgb("adobe-rgb.jpg");                 // converted through the embedded ICC profile
-PixImagePixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .qoi .ktx2 too
+PixImageMipMap mm  = PixImageIO.LoadMipmap("tex.dds");                     // also PixImageMipMap.Load (IPixMipmapLoader)
+PixCube cube       = PixImageIO.LoadCube("sky.dds");                        // DDS cube map, every side with its mip chain
+PixImageIO.SaveDds(cube, stream);
+PixImageIO.SaveDds(volume, stream, new DdsEncodeOptions { Compression = DdsCompression.BC1 });   // PixVolume
+PixImageIO.SaveKtx(cube, stream, new KtxEncodeOptions { Compression = TextureCompression.BC7 });
+PixVolume vol      = PixImageIO.LoadVolume("ct.ktx2");                      // DDS or KTX volume texture
+PixImageIO.WriteMetadata("a.jpg", "a.jpg", new MetadataEdit { Gps = new GpsEdit { Latitude = 47.07, Longitude = 15.44 } });
+PixImage srgb      = PixImageIO.LoadSrgb("adobe-rgb.jpg");                 // converted through the embedded ICC profile
+PixImageIO.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .qoi .ktx2 too
 ```
 
-`Init()` also registers `PixCodecProcessor`, so `PixImage.Scaled`, `Resized`, `Rotated`, `Remapped` and `PixImageMipMap.Create`
-use PixCodec for every sample type (ImageInterpolation `Near`, `Linear`, `Cubic`, `Lanczos`, `SuperSample` map to nearest,
+`Init()` also registers `PixImageIOProcessor`, so `PixImage.Scaled`, `Resized`, `Rotated`, `Remapped` and `PixImageMipMap.Create`
+use Aardvark.PixImage.IO for every sample type (ImageInterpolation `Near`, `Linear`, `Cubic`, `Lanczos`, `SuperSample` map to nearest,
 bilinear, bicubic, Lanczos3 and box). Extension methods add the other filters and options:
 `pi.Resized(w, h, ResampleFilter.Mitchell)`, `pi.Resized(w, h, new ResizeOptions { LinearLight = true })`,
 `pi.Rotated(angle, true, new WarpOptions { ... })`, `pi.WarpedAffine(...)`, `pi.WarpedPerspective(...)`, `pi.Oriented(orientation)`.
@@ -244,9 +254,9 @@ library, Chromium, ...) through `.ref` sidecars generated by `tests/oracle/gen_*
 their output with the same reference tools. Running the encoder cross-checks needs `python3` with Pillow, numpy,
 tifffile, imagecodecs, opencv and OpenEXR; without python they are skipped. Some extra checks use tools fetched by
 `tests/oracle/gen_png.py --fetch-tools`. Written KTX files are checked with KTX-Software's `ktx validate` when `ktx` is on the
-PATH or `PIXCODEC_KTX` points to it; ETC1S / UASTC files written by PixCodec are also decoded by basisu
-(`PIXCODEC_BASISU` or `basisu` on the PATH) and compared with PixCodec's decoders. ICC colour conversions are checked against LittleCMS 2 float transforms
-(`tests/oracle/gen_icc.py` runs liblcms2 through ctypes) on profiles LittleCMS made itself, on PixCodec's own profiles read
+PATH or `PIXIMAGEIO_KTX` points to it; ETC1S / UASTC files written by Aardvark.PixImage.IO are also decoded by basisu
+(`PIXIMAGEIO_BASISU` or `basisu` on the PATH) and compared with Aardvark.PixImage.IO's decoders. ICC colour conversions are checked against LittleCMS 2 float transforms
+(`tests/oracle/gen_icc.py` runs liblcms2 through ctypes) on profiles LittleCMS made itself, on Aardvark.PixImage.IO's own profiles read
 back by LittleCMS, and on the ICC's sRGB v4 and the CC0 Compact-ICC-Profiles of the test-data repository.
 
 Metadata is checked against ExifTool (run, never linked): `tests/oracle/gen_meta.py` writes the reading fixtures,
@@ -256,7 +266,7 @@ writing tests also run it live, including a tag by tag comparison of rewritten c
 
 Everything in `tests/fixtures` is generated by `tests/oracle/gen_*.py` from synthetic images. Third-party test files
 (the PngSuite, openexr-images samples, the lists of the libwebp vectors, the JPEG 2000 conformance suite, the
-libtiff / GDAL / OpenSlide samples and ICC profiles) are in a separate test-data repository (`pixcodec-testdata`) with their licences. The tests look for it in `PIXCODEC_TESTDATA` or next to this repository
-(`../pixcodec-testdata`); without it the tests that need it are skipped.
+libtiff / GDAL / OpenSlide samples and ICC profiles) are in a separate test-data repository (`Aardvark.PixImage.IO.TestData`) with their licences. The tests look for it in `PIXIMAGEIO_TESTDATA` or next to this repository
+(`../Aardvark.PixImage.IO.TestData`); without it the tests that need it are skipped.
 
 Third-party data in the library: see `THIRD-PARTY-NOTICES.md`.

@@ -9,7 +9,7 @@ are assembled here around codestreams of those encoders.
 References: OpenJPEG. Plain files (no palette, no colour space conversion, no subsampling) are decoded with
 imagecodecs.jpeg2k_decode; where a second decoder exists the result is cross-checked against it (OpenJPH for
 reversible HT streams, Pillow for 8 bit files). Files that need colour handling are decoded by `opj_decompress`.
-The .ref holds that result in PixCodec's conventions (see Jp2DecodeOptions): the image has the size of the reference
+The .ref holds that result in Aardvark.PixImage.IO's conventions (see Jp2DecodeOptions): the image has the size of the reference
 grid and unsigned samples below 8 bit are scaled to 8 bit.
 
 The OpenJPEG / OpenJPH command line tools are not installed system-wide; point OPJ_BIN / OJPH_BIN at directories
@@ -84,7 +84,7 @@ def out_dtype(depth, signed):
 
 
 def to_convention(a, depth, signed):
-    """Sample type and scaling PixCodec returns for components of this depth."""
+    """Sample type and scaling Aardvark.PixImage.IO returns for components of this depth."""
     a = np.asarray(a)
     if not signed and depth < 8:
         m = (1 << depth) - 1
@@ -181,7 +181,7 @@ def ffmpeg_planes(path, comps, x0, y0, x1, y1):
 
 
 def upsample(planes, x0, y0, x1, y1, comps):
-    """Component planes on the reference grid by sample replication (what PixCodec and OpenJPEG's tools do)."""
+    """Component planes on the reference grid by sample replication (what Aardvark.PixImage.IO and OpenJPEG's tools do)."""
     w, h = x1 - x0, y1 - y0
     out = []
     for (a, depth, signed), (_, _, dx, dy) in zip(planes, comps):
@@ -560,7 +560,7 @@ def generate():
          ['-dims', f'{{{w},{h}}}', '-num_comps', '3', '-signed', 'false', '-bit_depth', '10,8,4', '-downsamp', '{1,1}']))
 
     # float samples as OpenJPH (and OpenEXR's HTJ2K compression) stores them: the bit pattern as a 32 bit signed
-    # integer, negative values as -(magnitude) - 1, announced by an NLT marker segment of type 3. PixCodec returns the
+    # integer, negative values as -(magnitude) - 1, announced by an NLT marker segment of type 3. Aardvark.PixImage.IO returns the
     # coded integers; the reference is computed from the floats, which OpenJPH has to give back bit for bit.
     f = ((pattern(24, 20, 1).astype(np.float32) - 100) * np.float32(0.37)).copy()
     f[0, :6] = [0.0, -0.0, np.inf, -np.inf, 1e-30, -1e30]
@@ -650,7 +650,7 @@ def generate():
     container('colr_twice.jp2', jp2(cs_rgb, 3, 8, wr, hr, colr=(1, 16), extra_header=box(b'colr', struct.pack('>BBBI', 1, 0, 0, 17))), ref=rgb8)
     # bits per component box: 8 bit colour (declared 8) - the box repeats what SIZ says
     container('bpcc.jp2', jp2(cs_rgba, 4, 8, 31, 29, bpc=[7, 7, 7, 7], extra_header=cdef([(0, 0, 1), (1, 0, 2), (2, 0, 3), (3, 1, 0)])), ref=rgba8)
-    # sub byte depths (scaled to 8 bit by PixCodec)
+    # sub byte depths (scaled to 8 bit by Aardvark.PixImage.IO)
     for bits in (1, 2, 4, 7):
         src = (pattern(36, 28, 1, seed=bits) >> (8 - bits)).astype(np.uint8)
         d = imagecodecs.jpeg2k_encode(src, codecformat='j2k', reversible=True, level=0, bitspersample=bits)

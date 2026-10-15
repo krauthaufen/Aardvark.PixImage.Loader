@@ -1,4 +1,4 @@
-"""Reference results for PixCodec.ImageOps (resize and remap).
+"""Reference results for Aardvark.ImageCodecs.ImageOps (resize and remap).
 
 Resize: Pillow's Image.resize on float32 ('F', computed in double, no rounding) and on 8 bit RGB / RGBA images.
 Remap: scipy.ndimage.map_coordinates (order 1 = bilinear, exact in double) with every border mode.

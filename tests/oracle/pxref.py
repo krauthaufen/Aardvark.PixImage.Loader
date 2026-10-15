@@ -2,7 +2,7 @@
 
   magic 'PXRF' | int32 width | int32 height | int32 channels | int32 sampleType | raw little-endian samples
 
-sampleType matches PixCodec.SampleType: 0 u8, 1 u16, 2 u32, 3 i8, 4 i16, 5 i32, 6 f16, 7 f32, 8 f64, 9 u64, 10 i64.
+sampleType matches Aardvark.ImageCodecs.SampleType: 0 u8, 1 u16, 2 u32, 3 i8, 4 i16, 5 i32, 6 f16, 7 f32, 8 f64, 9 u64, 10 i64.
 Samples are row-major, top row first, channel-interleaved (R,G,B,A order).
 """
 import os
@@ -38,12 +38,12 @@ def read_ref(path):
 
 
 def testdata_dir(*rel):
-    """A path in the test-data repository with the third-party files ($PIXCODEC_TESTDATA or pixcodec-testdata next to
+    """A path in the test-data repository with the third-party files ($PIXIMAGEIO_TESTDATA or Aardvark.PixImage.IO.TestData next to
     this repository, as the C# tests find it), or None when there is none."""
-    d = os.environ.get('PIXCODEC_TESTDATA') or os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'pixcodec-testdata')
+    d = os.environ.get('PIXIMAGEIO_TESTDATA') or os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'Aardvark.PixImage.IO.TestData')
     d = os.path.normpath(d)
     if not os.path.isdir(os.path.join(d, 'fixtures')):
-        print(f'no test-data repository at {d} (set PIXCODEC_TESTDATA): third-party files left out', file=sys.stderr)
+        print(f'no test-data repository at {d} (set PIXIMAGEIO_TESTDATA): third-party files left out', file=sys.stderr)
         return None
     return os.path.join(d, *rel)
 

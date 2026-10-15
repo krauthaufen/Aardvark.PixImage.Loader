@@ -1,0 +1,181 @@
+using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
+
+namespace Aardvark.ImageCodecs.JpegImpl
+{
+    /// <summary>Constant tables from ITU-T T.81 (zigzag order, Annex K quantization and Huffman tables).</summary>
+    internal static unsafe class JpegTables
+    {
+        /// <summary>Zigzag index -> natural (row major) index, padded with 16 extra entries so a corrupt run cannot index out of the block.</summary>
+        public static readonly byte* ZigZag;
+
+        /// <summary>Zigzag index -> index into a transposed (column major) block.</summary>
+        public static readonly byte* ZigZagTransposed;
+
+        static readonly byte[] s_zigzag = GC.AllocateArray<byte>(80 + 64, pinned: true);
+
+        static JpegTables()
+        {
+            ReadOnlySpan<byte> zz =
+            [
+                0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+                35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+            ];
+            zz.CopyTo(s_zigzag);
+            s_zigzag.AsSpan(64, 16).Fill(63);
+            for (int i = 0; i < 64; i++) s_zigzag[80 + i] = (byte)((zz[i] & 7) * 8 + (zz[i] >> 3));
+            fixed (byte* p = s_zigzag) ZigZag = p; // pinned object heap: the address is stable
+            ZigZagTransposed = ZigZag + 80;
+            for (int i = 0; i < 64; i++) s_identity[i] = (byte)i;
+            fixed (byte* p = s_identity) Identity = p;
+        }
+
+        /// <summary>Bit i is set when coefficient i of the block is nonzero.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong NonZeroMask(short* blk)
+        {
+            if (Avx2.IsSupported)
+            {
+                // compare 32 coefficients, narrow the results to bytes (which interleaves the 128 bit halves), put them back in order
+                var z = Vector256<short>.Zero;
+                var lo = Avx2.PackSignedSaturate(Avx2.CompareEqual(Avx.LoadVector256(blk), z), Avx2.CompareEqual(Avx.LoadVector256(blk + 16), z));
+                var hi = Avx2.PackSignedSaturate(Avx2.CompareEqual(Avx.LoadVector256(blk + 32), z), Avx2.CompareEqual(Avx.LoadVector256(blk + 48), z));
+                uint a = (uint)Avx2.MoveMask(Avx2.Permute4x64(lo.AsInt64(), 0b11011000).AsByte());
+                uint b = (uint)Avx2.MoveMask(Avx2.Permute4x64(hi.AsInt64(), 0b11011000).AsByte());
+                return ~(a | (ulong)b << 32);
+            }
+            if (Sse2.IsSupported)
+            {
+                var z = Vector128<short>.Zero;
+                ulong zero = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    var packed = Sse2.PackSignedSaturate(Sse2.CompareEqual(Sse2.LoadVector128(blk + i * 16), z), Sse2.CompareEqual(Sse2.LoadVector128(blk + i * 16 + 8), z));
+                    zero |= (ulong)(uint)Sse2.MoveMask(packed) << (i * 16);
+                }
+                return ~zero;
+            }
+            if (Vector128.IsHardwareAccelerated)
+            {
+                ulong zero = 0;
+                for (int i = 0; i < 8; i++)
+                    zero |= (ulong)Vector128.Equals(Vector128.Load(blk + i * 8), Vector128<short>.Zero).ExtractMostSignificantBits() << (i * 8);
+                return ~zero;
+            }
+            ulong m = 0;
+            for (int i = 0; i < 64; i++) if (blk[i] != 0) m |= 1UL << i;
+            return m;
+        }
+
+        // byte b of a mask in transposed natural order -> its bits in zigzag order
+        static readonly ulong[] s_toZigZag = BuildMaskPermutation();
+        public static readonly byte* Identity;
+        static readonly byte[] s_identity = GC.AllocateArray<byte>(64, pinned: true);
+
+        static ulong[] BuildMaskPermutation()
+        {
+            // zigzag position of every element of a transposed block
+            Span<int> position = stackalloc int[64];
+            ReadOnlySpan<byte> zz =
+            [
+                0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+                35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+            ];
+            for (int k = 0; k < 64; k++) position[(zz[k] & 7) * 8 + (zz[k] >> 3)] = k;
+            var t = GC.AllocateArray<ulong>(8 * 256, pinned: true);
+            for (int b = 0; b < 8; b++)
+                for (int v = 0; v < 256; v++)
+                {
+                    ulong m = 0;
+                    for (int bit = 0; bit < 8; bit++) if ((v >> bit & 1) != 0) m |= 1UL << position[b * 8 + bit];
+                    t[b * 256 + v] = m;
+                }
+            return t;
+        }
+
+        /// <summary>Reorders a nonzero mask of a transposed (column major) block into zigzag order.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong TransposedMaskToZigZag(ulong m)
+        {
+            fixed (ulong* t = s_toZigZag)
+                return t[(byte)m] | t[256 + (byte)(m >> 8)] | t[512 + (byte)(m >> 16)] | t[768 + (byte)(m >> 24)]
+                    | t[1024 + (byte)(m >> 32)] | t[1280 + (byte)(m >> 40)] | t[1536 + (byte)(m >> 48)] | t[1792 + (m >> 56)];
+        }
+
+        /// <summary>Bits ss..se set.</summary>
+        public static ulong BandMask(int ss, int se) => (se == 63 ? ~0UL : (1UL << (se + 1)) - 1) & ~((1UL << ss) - 1);
+
+        // Annex K.1, natural order.
+        public static ReadOnlySpan<byte> LumaQuant =>
+        [
+            16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
+            18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
+        ];
+
+        public static ReadOnlySpan<byte> ChromaQuant =>
+        [
+            17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99, 24, 26, 56, 99, 99, 99, 99, 99, 47, 66, 99, 99, 99, 99, 99, 99,
+            99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+        ];
+
+        // Tables tuned for this encoder (natural order, in tenths of a step at quality 50). Own design: the step size
+        // at horizontal / vertical frequency (u, v) follows 1 + a r^c with r = (u^p + v^p)^(1/p), the DC step is set
+        // separately, and each table is scaled to a fixed geometric mean (that of the Annex K table for luma, 0.61 of
+        // it for chroma). The parameters (luma a = 0.1, c = 1.925, p = 1.25, DC 0.71; chroma a = 0.83, c = 1.35,
+        // p = 1.5, DC 1.58) were found by a coordinate search minimizing the SSIMULACRA2 BD-rate on the Kodak images.
+        public static ReadOnlySpan<short> TunedLumaQuant =>
+        [
+            77, 120, 150, 199, 266, 350, 451, 569,
+            120, 140, 180, 236, 310, 401, 509, 633,
+            150, 180, 229, 295, 378, 478, 593, 726,
+            199, 236, 295, 371, 463, 572, 697, 837,
+            266, 310, 378, 463, 565, 683, 816, 966,
+            350, 401, 478, 572, 683, 810, 952, 1111,
+            451, 509, 593, 697, 816, 952, 1104, 1272,
+            569, 633, 726, 837, 966, 1111, 1272, 1448,
+        ];
+
+        public static ReadOnlySpan<short> TunedChromaQuant =>
+        [
+            84, 97, 165, 247, 339, 440, 548, 662,
+            97, 135, 201, 281, 371, 471, 578, 692,
+            165, 201, 263, 340, 429, 527, 633, 746,
+            247, 281, 340, 415, 502, 599, 703, 814,
+            339, 371, 429, 502, 587, 682, 785, 895,
+            440, 471, 527, 599, 682, 775, 877, 985,
+            548, 578, 633, 703, 785, 877, 977, 1084,
+            662, 692, 746, 814, 895, 985, 1084, 1190,
+        ];
+
+        // Annex K.3 typical Huffman tables: 16 code length counts followed by the symbols.
+        public static ReadOnlySpan<byte> DcLumaCounts => [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+        public static ReadOnlySpan<byte> DcChromaCounts => [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0];
+        public static ReadOnlySpan<byte> DcValues => [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        public static ReadOnlySpan<byte> AcLumaCounts => [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125];
+        public static ReadOnlySpan<byte> AcChromaCounts => [0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119];
+
+        public static ReadOnlySpan<byte> AcLumaValues =>
+        [
+            0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08,
+            0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28,
+            0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
+            0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+            0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6,
+            0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2,
+            0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa,
+        ];
+
+        public static ReadOnlySpan<byte> AcChromaValues =>
+        [
+            0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71, 0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91,
+            0xa1, 0xb1, 0xc1, 0x09, 0x23, 0x33, 0x52, 0xf0, 0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34, 0xe1, 0x25, 0xf1, 0x17, 0x18, 0x19, 0x1a, 0x26,
+            0x27, 0x28, 0x29, 0x2a, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+            0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+            0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4,
+            0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda,
+            0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa,
+        ];
+    }
+}

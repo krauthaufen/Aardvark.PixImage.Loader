@@ -1,4 +1,4 @@
-// Encodes images to KTX2 ETC1S / UASTC with PixCodec (for tests/oracle/gen_basis_encode.py).
+// Encodes images to KTX2 ETC1S / UASTC with Aardvark.PixImage.IO (for tests/oracle/gen_basis_encode.py).
 //
 //   basis_encode_driver out.ktx2 etc1s|uastc [options] image.png [image.png ...]
 //     --q N          ETC1S quality 1..255 (default 128)
@@ -8,7 +8,7 @@
 //     --cube         the six images are cube faces (+X, -X, +Y, -Y, +Z, -Z)
 //     --nozstd       UASTC without supercompression
 //     --linear       linear transfer function (default sRGB)
-using PixCodec;
+using Aardvark.ImageCodecs;
 
 if (args.Length < 3)
 {

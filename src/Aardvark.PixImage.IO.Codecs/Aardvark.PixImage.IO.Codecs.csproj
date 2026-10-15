@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Aardvark.ImageCodecs</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Description>Pure managed image codecs (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA, DDS, KTX, Radiance HDR, PNM, QOI, ICO), metadata, ICC colour management and image operations. No native code, no dependencies.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/krauthaufen/Aardvark.PixImage.IO</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/krauthaufen/Aardvark.PixImage.IO</PackageProjectUrl>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Aardvark.PixImage.IO.Codecs.Tests" />
+  </ItemGroup>
+</Project>

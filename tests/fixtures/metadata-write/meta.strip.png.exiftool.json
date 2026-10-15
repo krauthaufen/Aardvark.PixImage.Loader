@@ -15,7 +15,7 @@
  "PNG:ImageHeight": 24,
  "PNG:ImageWidth": 32,
  "PNG:Interlace": 0,
- "System:FileSize": 2687,
+ "System:FileSize": 2699,
  "XMP-dc:Rights": "only this",
- "XMP-x:XMPToolkit": "PixCodec"
+ "XMP-x:XMPToolkit": "Aardvark.PixImage.IO"
 }

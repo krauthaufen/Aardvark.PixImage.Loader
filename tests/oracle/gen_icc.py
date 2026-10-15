@@ -6,7 +6,7 @@ Writes tests/fixtures/icc:
   profiles/lcms_*.icc   profiles made by LittleCMS itself: matrix / TRC (v2 and v4, every parametric curve type,
                         tables), gray, CMYK with lut16 (v2), lut8 (v2) and lutAToB / lutBToA (v4) tables for three
                         intents with Lab and XYZ PCS, an RGB lutAToB with A curves, CLUT, M curves, matrix and B curves
-  ours/*.icc            PixCodec's own profiles (written by IccTests with PIXCODEC_ICC_DUMP set): checked to open in
+  ours/*.icc            Aardvark.PixImage.IO's own profiles (written by IccTests with PIXIMAGEIO_ICC_DUMP set): checked to open in
                         LittleCMS, their profile ID is recomputed by LittleCMS, and they serve as conversion endpoints
   in_<pattern>.ref      input colours (grid + random + ramps) per channel count and sample type
   <case>.ref            LittleCMS float conversion (cmsFLAGS_NOOPTIMIZE) of the input, float32 normalised 0..1
@@ -487,7 +487,7 @@ def own_profiles():
     d = os.path.join(OUT, 'ours')
     r = {}
     if not os.path.isdir(d):
-        print('no tests/fixtures/icc/ours: run the IccTests with PIXCODEC_ICC_DUMP=1 first', file=sys.stderr)
+        print('no tests/fixtures/icc/ours: run the IccTests with PIXIMAGEIO_ICC_DUMP=1 first', file=sys.stderr)
         return r
     for f in sorted(os.listdir(d)):
         if f.endswith('.icc'):
@@ -610,8 +610,8 @@ The file here is unchanged (SHA-256 83174717332326ddc198d9df188a4daec27b8979ba15
 
 TESTDATA_README = """# ICC profiles
 
-Third-party ICC profiles for PixCodec's colour management tests (`IccTests.ThirdPartyMatchesLittleCms`), copied here
-unchanged by PixCodec's `tests/oracle/gen_icc.py`, with LittleCMS 2 reference conversions of a test pattern through them
+Third-party ICC profiles for Aardvark.PixImage.IO's colour management tests (`IccTests.ThirdPartyMatchesLittleCms`), copied here
+unchanged by Aardvark.PixImage.IO's `tests/oracle/gen_icc.py`, with LittleCMS 2 reference conversions of a test pattern through them
 (`in_*.ref` inputs, `<case>.ref` outputs, `cases.json`).
 
 | Files | Source | Licence |

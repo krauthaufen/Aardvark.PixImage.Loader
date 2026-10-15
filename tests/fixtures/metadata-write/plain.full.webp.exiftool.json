@@ -68,23 +68,23 @@
  "GPS:GPSTrackRef": "T",
  "GPS:GPSVersionID": "2 3 0 0",
  "IFD0:Artist": "Jane Doe",
- "IFD0:Copyright": "© 2025 PixCodec",
+ "IFD0:Copyright": "© 2025 Aardvark.PixImage.IO",
  "IFD0:ImageDescription": "Facade survey – north side",
- "IFD0:Make": "PixCodec Cam",
+ "IFD0:Make": "Aardvark.PixImage.IO Cam",
  "IFD0:Model": "Model X 1",
  "IFD0:ModifyDate": "2025:03:05 12:00:00",
  "IFD0:Orientation": 1,
- "IFD0:Software": "PixCodec writer",
+ "IFD0:Software": "Aardvark.PixImage.IO writer",
  "RIFF:AlphaIsUsed": 0,
  "RIFF:ImageHeight": 30,
  "RIFF:ImageWidth": 40,
  "RIFF:WebP_Flags": 0,
- "System:FileSize": 4660,
+ "System:FileSize": 4720,
  "XMP-dc:Creator": [
   "Jane Doe"
  ],
  "XMP-dc:Description": "Facade survey – north side",
- "XMP-dc:Rights": "© 2025 PixCodec",
+ "XMP-dc:Rights": "© 2025 Aardvark.PixImage.IO",
  "XMP-dc:Subject": [
   "alpha",
   "beta",
@@ -95,6 +95,6 @@
  "XMP-photoshop:City": "Wien",
  "XMP-photoshop:Country": "Austria",
  "XMP-photoshop:State": "Wien",
- "XMP-x:XMPToolkit": "PixCodec",
+ "XMP-x:XMPToolkit": "Aardvark.PixImage.IO",
  "XMP-xmp:Rating": 3
 }

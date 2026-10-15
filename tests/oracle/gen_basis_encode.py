@@ -1,8 +1,8 @@
-"""Generates tests/fixtures/basis_enc: KTX2 files written by PixCodec's own ETC1S / UASTC encoders, decoded by basisu.
+"""Generates tests/fixtures/basis_enc: KTX2 files written by Aardvark.PixImage.IO's own ETC1S / UASTC encoders, decoded by basisu.
 
-1. Every name.ktx2 is encoded by PixCodec (tests/oracle/basis_encode_driver) and gets name.ktx2.<level>.<layer>.<face>.ref
+1. Every name.ktx2 is encoded by Aardvark.PixImage.IO (tests/oracle/basis_encode_driver) and gets name.ktx2.<level>.<layer>.<face>.ref
    for each of its images: the RGBA32 output of basisu -unpack (the reference transcoder). The tests decode the same
-   files with PixCodec and require bit exact agreement, so whatever our encoder writes (Huffman tables, run lengths,
+   files with Aardvark.PixImage.IO and require bit exact agreement, so whatever our encoder writes (Huffman tables, run lengths,
    selector history, prediction symbols, UASTC modes and hints, DFDs) is read the same way by basisu.
 2. quality/: synthetic photo-like sources and oracle.txt with basisu's own PSNR (RGB, dB) and bits per pixel for them
    (-uastc at its default level 2, -etc1s -q 128, linear metrics). BasisEncodeTests gates our encoders against these
