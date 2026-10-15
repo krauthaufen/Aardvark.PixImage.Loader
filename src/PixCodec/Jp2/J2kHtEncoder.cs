@@ -228,23 +228,61 @@ namespace PixCodec
         }
 
         /// <summary>
-        /// The exponents of a quad's four samples (j = 0: column x row 0, 1: x row 1, 2: x + 1 row 0, 3: x + 1 row 1) give its
-        /// significance pattern (returned), U, u and the EMB pattern.
+        /// For every quad of a row from the exponents of its four samples (j = 0: column x row 0, 1: x row 1, 2: x + 1 row 0,
+        /// 3: x + 1 row 1) and those of the row above: the significance pattern, the largest exponent, the samples that have
+        /// it and the largest of the four exponents above (columns x - 1 .. x + 2), packed as described at qinfo. Eight quads
+        /// at a time: a quad's two columns are one 16-bit lane.
         /// </summary>
-        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-        static int QuadInfo(byte* ex0, byte* ex1, int x, bool firstRow, ref int oldExpLeft, byte* expAbove, out int U, out int u, out int m)
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
+        static void QuadRow(byte* ex0, byte* ex1, byte* expAbove, int qw, uint* qinfo)
         {
-            int ea = ex0[x], eb = ex1[x], ec = ex0[x + 1], ed = ex1[x + 1];
-            int r = (ea != 0 ? 1 : 0) | (eb != 0 ? 2 : 0) | (ec != 0 ? 4 : 0) | (ed != 0 ? 8 : 0);
-            int emax = Math.Max(Math.Max(ea, eb), Math.Max(ec, ed));
-            int eNw = oldExpLeft, eN = expAbove[x], eNe = expAbove[x + 1], eNf = expAbove[x + 2];
-            oldExpLeft = eNe;
+            int q = 0;
+            if (Vector128.IsHardwareAccelerated)
+            {
+                var low = Vector128.Create((ushort)0xFF);
+                var zero = Vector128<ushort>.Zero;
+                for (; q + 8 <= qw; q += 8)
+                {
+                    var v0 = Vector128.Load((ushort*)(ex0 + 2 * q)); var v1 = Vector128.Load((ushort*)(ex1 + 2 * q));
+                    var ea = v0 & low; var ec = Vector128.ShiftRightLogical(v0, 8);
+                    var eb = v1 & low; var ed = Vector128.ShiftRightLogical(v1, 8);
+                    var r = (~Vector128.Equals(ea, zero) & Vector128.Create((ushort)1)) | (~Vector128.Equals(eb, zero) & Vector128.Create((ushort)2))
+                          | (~Vector128.Equals(ec, zero) & Vector128.Create((ushort)4)) | (~Vector128.Equals(ed, zero) & Vector128.Create((ushort)8));
+                    var emax = Vector128.Max(Vector128.Max(ea, eb), Vector128.Max(ec, ed));
+                    var em = (Vector128.Equals(ea, emax) & Vector128.Create((ushort)1)) | (Vector128.Equals(eb, emax) & Vector128.Create((ushort)2))
+                           | (Vector128.Equals(ec, emax) & Vector128.Create((ushort)4)) | (Vector128.Equals(ed, emax) & Vector128.Create((ushort)8));
+                    var a = Vector128.Load((ushort*)(expAbove + 2 * q - 1)); var b = Vector128.Load((ushort*)(expAbove + 2 * q + 1));
+                    var kmax = Vector128.Max(Vector128.Max(a & low, Vector128.ShiftRightLogical(a, 8)), Vector128.Max(b & low, Vector128.ShiftRightLogical(b, 8)));
+                    var lo16 = r | Vector128.ShiftLeft(emax, 4) | Vector128.ShiftLeft(em, 12);
+                    var (l0, l1) = Vector128.Widen(lo16);
+                    var (k0, k1) = Vector128.Widen(kmax);
+                    (l0 | Vector128.ShiftLeft(k0, 16)).Store(qinfo + q);
+                    (l1 | Vector128.ShiftLeft(k1, 16)).Store(qinfo + q + 4);
+                }
+            }
+            for (; q < qw; q++)
+            {
+                int x = 2 * q;
+                int ea = ex0[x], eb = ex1[x], ec = ex0[x + 1], ed = ex1[x + 1];
+                int r = (ea != 0 ? 1 : 0) | (eb != 0 ? 2 : 0) | (ec != 0 ? 4 : 0) | (ed != 0 ? 8 : 0);
+                int emax = Math.Max(Math.Max(ea, eb), Math.Max(ec, ed));
+                int em = (ea == emax ? 1 : 0) | (eb == emax ? 2 : 0) | (ec == emax ? 4 : 0) | (ed == emax ? 8 : 0);
+                int kmax = Math.Max(Math.Max(expAbove[x - 1], expAbove[x]), Math.Max(expAbove[x + 1], expAbove[x + 2]));
+                qinfo[q] = (uint)(r | emax << 4 | em << 12 | kmax << 16);
+            }
+        }
+
+        /// <summary>A quad's significance pattern (returned), U, u and EMB pattern from its <see cref="QuadRow"/> entry.</summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        static int QuadInfo(uint* qinfo, int q, bool firstRow, out int U, out int u, out int m)
+        {
+            uint e = qinfo[q];
+            int r = (int)(e & 15), emax = (int)(e >> 4 & 255), kmax = (int)(e >> 16);
             int kappa = 1;
-            if (!firstRow && (r & (r - 1)) != 0)
-                kappa = Math.Max(1, Math.Max(Math.Max(eNw, eN), Math.Max(eNe, eNf)) - 1);
+            if (!firstRow && (r & (r - 1)) != 0) kappa = Math.Max(1, kmax - 1);
             U = Math.Max(emax, kappa);
             u = U - kappa;
-            m = u > 0 ? (ea == emax ? 1 : 0) | (eb == emax ? 2 : 0) | (ec == emax ? 4 : 0) | (ed == emax ? 8 : 0) : 0;
+            m = u > 0 ? (int)(e >> 12 & 15) : 0;
             return r;
         }
 
@@ -381,6 +419,7 @@ namespace PixCodec
                 new Span<byte>(rhoRow, qw + 2).Clear();
                 new Span<byte>(expRow, 2 * qw + 3).Clear();
                 byte* rhoAbove = rhoRow + 1, expAbove = expRow + 1;
+                uint* qinfo = stackalloc uint[qw + 8];   // per quad: pattern | emax << 4 | EMB candidates << 12 | max above << 16
 
                 // the two sample rows of a quad row, prepared once: exponents and MagSgn values per column (zero past the edge)
                 int pw = 2 * qw + 2;
@@ -394,7 +433,7 @@ namespace PixCodec
                 {
                     bool firstRow = qy == 0;
                     ushort* enc = firstRow ? enc0 : enc1;
-                    int rhoLeft = 0, prevAboveRho = 0, oldExpLeft = 0;
+                    int rhoLeft = 0, prevAboveRho = 0;
                     T* row0 = data + 2 * qy * w;
                     T* row1 = 2 * qy + 1 < h ? row0 + w : null;
                     for (int k = 0; k < 2; k++)
@@ -406,13 +445,16 @@ namespace PixCodec
                     }
                     byte* ex0 = exps, ex1 = exps + pw;
                     ulong* vx0 = vals, vx1 = vals + pw;
+                    // what each quad needs from the exponents, for the whole row at once; then the row becomes the row above
+                    QuadRow(ex0, ex1, expAbove, qw, qinfo);
+                    new Span<byte>(ex1, 2 * qw).CopyTo(new Span<byte>(expAbove, 2 * qw));
                     for (int qx = 0; qx < qw; qx += 2)
                     {
                         // a pair of quads, A and B (B only if the row has it), all state in locals
                         bool two = qx + 1 < qw;
                         int aboveLeft = prevAboveRho;
                         int xA = 2 * qx;
-                        int rA = QuadInfo(ex0, ex1, xA, firstRow, ref oldExpLeft, expAbove, out int UA, out int uA, out int mA);
+                        int rA = QuadInfo(qinfo, qx, firstRow, out int UA, out int uA, out int mA);
                         int cA = Context(firstRow, rhoLeft, ref aboveLeft, rhoAbove, qx);
                         if (cA == 0) mel.Encode(rA != 0 ? 1 : 0);
                         int tA = enc[mA | rA << 4 | cA << 8];
@@ -420,7 +462,7 @@ namespace PixCodec
                         int rB = 0, UB = 0, uB = 0, tB = 0;
                         if (two)
                         {
-                            rB = QuadInfo(ex0, ex1, xA + 2, firstRow, ref oldExpLeft, expAbove, out UB, out uB, out int mB);
+                            rB = QuadInfo(qinfo, qx + 1, firstRow, out UB, out uB, out int mB);
                             int cB = Context(firstRow, rhoLeft, ref aboveLeft, rhoAbove, qx + 1);
                             if (cB == 0) mel.Encode(rB != 0 ? 1 : 0);
                             tB = enc[mB | rB << 4 | cB << 8];
@@ -429,12 +471,10 @@ namespace PixCodec
                         // the row above is only replaced once both quads of the pair have used it
                         prevAboveRho = rhoAbove[qx];
                         rhoAbove[qx] = (byte)rA;
-                        expAbove[xA] = ex1[xA]; expAbove[xA + 1] = ex1[xA + 1];
                         if (two)
                         {
                             prevAboveRho = rhoAbove[qx + 1];
                             rhoAbove[qx + 1] = (byte)rB;
-                            expAbove[xA + 2] = ex1[xA + 2]; expAbove[xA + 3] = ex1[xA + 3];
                         }
                         // VLC stream: both CxtVLC codewords, then the U-VLC parts interleaved
                         PutVlc(ref vlcAcc, ref vlcBits, ref vlc, (uint)(tA & 127), tA >> 7 & 7);
