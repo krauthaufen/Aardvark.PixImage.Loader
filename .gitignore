@@ -7,3 +7,6 @@ __pycache__/
 .tmp/
 tests/oracle/exr_oracle
 .claude/
+/.paket
+/paket-files
+/bin/pack

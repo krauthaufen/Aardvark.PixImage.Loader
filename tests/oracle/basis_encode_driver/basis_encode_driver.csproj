@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
   <!-- Small command line front end of the KTX2 Basis Universal encoders, for tests/oracle/gen_basis_encode.py. -->
   <PropertyGroup>
@@ -9,4 +10,5 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\src\Aardvark.PixImage.PixCodec\Aardvark.PixImage.PixCodec.csproj" />
   </ItemGroup>
+  <Import Project="..\..\..\.paket\Paket.Restore.targets" />
 </Project>

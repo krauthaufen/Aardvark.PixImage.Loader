@@ -1,0 +1,52 @@
+name: Build
+
+on:
+  push:
+    paths-ignore:
+    - 'README.md'
+    - 'RELEASE_NOTES.md'
+  pull_request:
+    paths-ignore:
+    - 'README.md'
+    - 'RELEASE_NOTES.md'
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      PIXCODEC_TESTDATA: ${{ github.workspace }}/testdata
+    steps:
+    - name: Keep line endings
+      run: git config --global core.autocrlf false
+
+    - uses: actions/checkout@v4
+
+    - name: Checkout test data
+      uses: actions/checkout@v4
+      with:
+        repository: krauthaufen/Aardvark.PixImage.PixCodec.TestData
+        path: testdata
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+        global-json-file: global.json
+
+    - name: Cache Paket
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-paket-${{ hashFiles('paket.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-paket-
+
+    - name: Build
+      run: bash ./build.sh
+
+    - name: Test
+      run: dotnet test Aardvark.PixImage.PixCodec.slnx -c Release --no-build --nologo
