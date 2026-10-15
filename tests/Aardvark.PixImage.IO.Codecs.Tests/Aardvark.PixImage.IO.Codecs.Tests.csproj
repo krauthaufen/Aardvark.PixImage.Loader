@@ -10,6 +10,6 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Aardvark.PixImage.IO.Codecs\Aardvark.PixImage.IO.Codecs.csproj" />
+    <ProjectReference Include="..\..\src\Aardvark.PixImage.IO\Aardvark.PixImage.IO.csproj" />
   </ItemGroup>
 </Project>

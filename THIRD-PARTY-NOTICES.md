@@ -9,7 +9,7 @@ with their licences.
 
 ## libtiff - 24-bit LogLuv chromaticity table
 
-`src/Aardvark.PixImage.IO.Codecs/Tiff/TiffLogLuvTable.cs` contains the `uv_row` table (163 rows describing the visible gamut in the
+`src/Aardvark.PixImage.IO/Tiff/TiffLogLuvTable.cs` contains the `uv_row` table (163 rows describing the visible gamut in the
 CIE (u', v') plane, used by the 24-bit LogLuv TIFF encoding) from `libtiff/uvcode.h` of libtiff
 (https://gitlab.com/libtiff/libtiff), "Version 1.0 generated April 7, 1997 by Greg Ward Larson, SGI".
 Only the table values were taken; no code.
@@ -38,7 +38,7 @@ OF THIS SOFTWARE.
 
 ## XZ Utils / LZMA SDK (BCJ filter definitions)
 
-`src/Aardvark.PixImage.IO.Codecs/Core/Compression/BcjFilters.cs`
+`src/Aardvark.PixImage.IO/Core/Compression/BcjFilters.cs`
 
 - The IA-64 table that tells which slots of a bundle template can hold a branch (`Ia64BranchSlots`) has the same
   content as the table in XZ Utils (`src/liblzma/simple/ia64.c`) and the LZMA SDK (`Bra.c`/`BraIA64.c`).
@@ -53,7 +53,7 @@ LZMA SDK: by Igor Pavlov, public domain.
 
 ## BPTC (BC6H / BC7) partition and anchor tables
 
-`src/Aardvark.PixImage.IO.Codecs/Dds/Bptc.cs` contains the BPTC partition tables (64 two-subset and 64 three-subset partitions of a 4x4
+`src/Aardvark.PixImage.IO/Dds/Bptc.cs` contains the BPTC partition tables (64 two-subset and 64 three-subset partitions of a 4x4
 block) and the anchor index tables, converted by script from the text of the Khronos Data Format Specification
 (https://github.com/KhronosGroup/DataFormat, `bptc.txt`), and the BC6H endpoint bit layouts, transcribed from
 Microsoft's "BC6H Format" documentation (https://learn.microsoft.com/windows/win32/direct3d11/bc6h-format, CC BY 4.0,
@@ -69,7 +69,7 @@ International licence (https://creativecommons.org/licenses/by/4.0/).
 
 ## Khronos Data Format Specification - ETC and ASTC tables
 
-`src/Aardvark.PixImage.IO.Codecs/Ktx/EtcBlocks.cs` and `src/Aardvark.PixImage.IO.Codecs/Ktx/AstcBlocks.cs` contain tables printed in the Khronos Data Format
+`src/Aardvark.PixImage.IO/Ktx/EtcBlocks.cs` and `src/Aardvark.PixImage.IO/Ktx/AstcBlocks.cs` contain tables printed in the Khronos Data Format
 Specification 1.3 (https://registry.khronos.org/DataFormat/specs/1.3/dataformat.1.3.html): the ETC1 / ETC2 intensity
 modifier and distance tables, the EAC modifier tables, and the ASTC weight / colour quantisation and unquantisation
 tables. Only the table values were taken; the decoders are written from the specification's text.
@@ -79,7 +79,7 @@ Copyright © 2014-2019 The Khronos Group Inc., licensed under the Creative Commo
 
 ## Basis Universal specifications - ETC1S and UASTC tables
 
-`src/Aardvark.PixImage.IO.Codecs/Ktx/BasisEtc1s.cs` and `src/Aardvark.PixImage.IO.Codecs/Ktx/BasisUastc.cs` contain tables printed in Binomial's
+`src/Aardvark.PixImage.IO/Ktx/BasisEtc1s.cs` and `src/Aardvark.PixImage.IO/Ktx/BasisUastc.cs` contain tables printed in Binomial's
 ".basis File Format and ETC1S Texture Video Specification" and "UASTC LDR 4x4 Texture Specification"
 (https://github.com/BinomialLLC/basis_universal/wiki) and in Appendix C / D of the KTX 2.0 specification. Only the table
 values were taken; no code of basis_universal was used.

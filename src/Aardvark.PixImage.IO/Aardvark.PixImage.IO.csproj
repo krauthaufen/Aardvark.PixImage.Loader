@@ -2,9 +2,9 @@
   <PropertyGroup>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <ImplicitUsings>disable</ImplicitUsings>
-    <RootNamespace>Aardvark.Data</RootNamespace>
+    <RootNamespace>Aardvark.ImageCodecs</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Description>Loads and saves Aardvark PixImages, mip maps, cube maps and volumes with the pure managed Aardvark.PixImage.IO.Codecs.</Description>
+    <Description>Pure managed image loading and saving for Aardvark PixImages and plain images: PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA, DDS, KTX, Radiance HDR, PNM, QOI, ICO, with metadata, ICC colour management and image operations. No native code.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/krauthaufen/Aardvark.PixImage.IO</RepositoryUrl>
     <PackageProjectUrl>https://github.com/krauthaufen/Aardvark.PixImage.IO</PackageProjectUrl>
@@ -14,6 +14,6 @@
     <PackageReference Include="Aardvark.Base.Tensors" Version="5.3.26" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Aardvark.PixImage.IO.Codecs\Aardvark.PixImage.IO.Codecs.csproj" />
+    <InternalsVisibleTo Include="Aardvark.PixImage.IO.Codecs.Tests" />
   </ItemGroup>
 </Project>

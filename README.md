@@ -1,15 +1,13 @@
 # Aardvark.PixImage.IO
 
-Pure managed image loading and saving for .NET 8 and .NET 10. No native binaries, no third-party packages, MIT licensed.
+Pure managed image loading and saving for .NET 8 and .NET 10. No native binaries, no dependencies besides Aardvark.Base, MIT licensed.
 Little-endian hosts only (x64 and arm64 are tested).
 
-Two packages:
+One package, **Aardvark.PixImage.IO**, with two namespaces:
 
-- **Aardvark.PixImage.IO.Codecs**: the codecs, metadata, colour management and image operations on a plain `RawImage`, with
-  no dependencies (namespace `Aardvark.ImageCodecs`).
-- **Aardvark.PixImage.IO**: loads and saves Aardvark `PixImage`s, mip maps, cube maps and volumes through the codecs
-  (`PixCodec`, `PixCodecLoader`, `PixCodecProcessor` in `Aardvark.Data`, next to the other loaders such as
-  `PixImageSharp`).
+- `Aardvark.ImageCodecs`: the codecs, metadata, colour management and image operations on a plain `RawImage`.
+- `Aardvark.Data`: `PixCodec`, `PixCodecLoader` and `PixCodecProcessor`, which load and save Aardvark `PixImage`s, mip
+  maps, cube maps and volumes, next to the other loaders such as `PixImageSharp`.
 
 The code namespace is deliberately not `Aardvark.PixImage.*`: a namespace of that name would hide the `PixImage` class in
 code living in any `Aardvark.*` namespace.

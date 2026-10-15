@@ -256,11 +256,11 @@ public class CompressionRobustnessTests
         Assert.Throws<ImageFormatException>(() => Zstd.Decompress(bomb, new byte[1_000_000]));
         Assert.True(sw.ElapsedMilliseconds < 2000);
         // a header that announces an enormous size must fail without allocating it
-        long before = GC.GetTotalAllocatedBytes(true);
+        long before = GC.GetAllocatedBytesForCurrentThread();
         Assert.Throws<ImageFormatException>(() => Zstd.Decompress(ZstdFrame(1UL << 31, RleBlock(10, 1, true))));
         Assert.Throws<ImageFormatException>(() => Zstd.Decompress(ZstdFrame(1UL << 50, RleBlock(10, 1, true))));
         Assert.Throws<ImageFormatException>(() => Zstd.Decompress(ZstdFrame(1UL << 30, RleBlock(10, 1, true)), new byte[100]));
-        Assert.True(GC.GetTotalAllocatedBytes(true) - before < 64 << 20, "a lying header caused a large allocation");
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 64 << 20, "a lying header caused a large allocation");
         // and a truthful small frame of the same construction decodes
         var ok = Zstd.Decompress(ZstdFrame(300, RleBlock(100, 1, false), RleBlock(200, 2, true)));
         Assert.Equal(300, ok.Length);
@@ -322,7 +322,7 @@ public class CompressionRobustnessTests
     public void LzmaHeaderSizesAreNotTrusted()
     {
         var z = Load("text__alone.lzma");
-        long before = GC.GetTotalAllocatedBytes(true);
+        long before = GC.GetAllocatedBytesForCurrentThread();
         foreach (ulong claim in new[] { 1UL << 31, 1UL << 40, (1UL << 31) - 100, 500_000_000UL })
         {
             var bad = (byte[])z.Clone();
@@ -330,7 +330,7 @@ public class CompressionRobustnessTests
             Assert.Throws<ImageFormatException>(() => Xz.DecompressLzma(bad));
             Assert.Throws<ImageFormatException>(() => Xz.DecompressLzma(bad, new byte[30_000]));
         }
-        Assert.True(GC.GetTotalAllocatedBytes(true) - before < 64 << 20, "a lying header caused a large allocation");
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 64 << 20, "a lying header caused a large allocation");
         // a declared size smaller than the data just stops there
         var shorter = (byte[])z.Clone();
         BinaryPrimitives.WriteUInt64LittleEndian(shorter.AsSpan(5), 1000);
