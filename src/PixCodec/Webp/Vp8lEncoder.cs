@@ -548,6 +548,9 @@ namespace PixCodec
                         int len, dist = 0;
                         // look the position up and enter it in one go: a single visit to its bucket
                         int candidate = -1;
+                        // the buckets of the positions a few steps ahead are cache misses: ask for them early
+                        if (System.Runtime.Intrinsics.X86.Sse.IsSupported && pos + 9 < n)
+                            System.Runtime.Intrinsics.X86.Sse.Prefetch0(ph + Hash2(p + pos + 8, pr + pos + 8, hashShift));
                         if (pos + 1 < n)
                         {
                             int h = Hash2(p + pos, pr + pos, hashShift);
@@ -745,6 +748,8 @@ namespace PixCodec
             if (best >= maxLen) return best;
             for (int j = candidate; j >= minPos && maxIter-- > 0; j = chain[j])
             {
+                // the next candidate's pixels are a cache miss: start it while this one is compared
+                if (System.Runtime.Intrinsics.X86.Sse.IsSupported) System.Runtime.Intrinsics.X86.Sse.Prefetch0(p + chain[j]);
                 if (p[j + best] != cur[best] || p[j] != cur[0]) continue;
                 int l = MatchLength(p + j, cur, maxLen);
                 if (l > best)
