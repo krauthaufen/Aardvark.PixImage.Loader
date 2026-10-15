@@ -427,8 +427,13 @@ namespace PixCodec
                     if (bitmap[i] != 0) { if (i < minNZ) minNZ = i; if (i > maxNZ) maxNZ = i; }
                 int k = 0;
                 plut[0] = (ushort)k++;
+                // (without a branch on the bitmap, whose bits follow the data)
                 for (int i = 1; i < 65536; i++)
-                    plut[i] = (bitmap[i >> 3] & (1 << (i & 7))) != 0 ? (ushort)k++ : (ushort)0;
+                {
+                    int bit = bitmap[i >> 3] >> (i & 7) & 1;
+                    plut[i] = (ushort)(k & -bit);
+                    k += bit;
+                }
                 int maxValue = k - 1;
                 for (int i = 0; i < total; i++) w[i] = plut[w[i]];
 
@@ -541,6 +546,7 @@ namespace PixCodec
                 if (cnt > 0) *o++ = (byte)(acc << (8 - cnt));
                 byte* dataStart = o;
                 acc = 0; cnt = 0;
+                // (the data is packed 32 bits at a time: see Put; cnt stays below 32 between symbols)
 
                 long rcode = codes[rlc];
                 int rlen = len[rlc];
@@ -569,6 +575,7 @@ namespace PixCodec
                         nBits += rlen + 8;
                     }
                 }
+                while (cnt >= 8) { cnt -= 8; *o++ = (byte)(acc >> cnt); }
                 if (cnt > 0) *o++ = (byte)(acc << (8 - cnt));
 
                 var hdr = new Span<byte>(ob + start, 20);
@@ -581,16 +588,32 @@ namespace PixCodec
             }
         }
 
+        /// <summary>
+        /// Appends a code, most significant bit first. Whole 32 bit words are written as they complete (cnt &lt; 32 before
+        /// and after); the bytes are those of a byte at a time packer.
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
         static void Put(ref ulong acc, ref int cnt, ref byte* o, long code, int len)
         {
             if (len > 32)
             {
-                Put(ref acc, ref cnt, ref o, code >> 32, len - 32);
+                Put32(ref acc, ref cnt, ref o, (ulong)code >> 32, len - 32);
                 code &= 0xffffffffL; len = 32;
             }
-            acc = (acc << len) | (ulong)code;
+            Put32(ref acc, ref cnt, ref o, (ulong)code, len);
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        static void Put32(ref ulong acc, ref int cnt, ref byte* o, ulong code, int len)
+        {
+            acc = (acc << len) | code;
             cnt += len;
-            while (cnt >= 8) { cnt -= 8; *o++ = (byte)(acc >> cnt); }
+            if (cnt >= 32)
+            {
+                cnt -= 32;
+                BinaryPrimitives.WriteUInt32BigEndian(new Span<byte>(o, 4), (uint)(acc >> cnt));
+                o += 4;
+            }
         }
     }
 }
