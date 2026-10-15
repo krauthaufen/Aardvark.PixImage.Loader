@@ -312,10 +312,10 @@ namespace PixCodec
                     int k = e >> 8 & 15, i1 = e >> 12;
                     // bits the quad's significant samples take
                     int quadBits = 4 * U - BitOperations.PopCount((uint)(k & r)) - (4 - BitOperations.PopCount((uint)r)) * U;
-                    if (typeof(T) == typeof(uint) && VectorQuads && quadBits <= 32)
+                    if (typeof(T) == typeof(uint) && VectorQuads && quadBits <= 56 && U <= 16)
                     {
-                        // the whole quad at once (its bits, at most 32, are in the buffer after one refill)
-                        if (bits < 32) { ms.Buf = buf; ms.Bits = bits; ms.Fill(); buf = ms.Buf; bits = ms.Bits; }
+                        // the whole quad at once (its bits, at most 56, are in the buffer after one refill)
+                        if (bits < quadBits) { ms.Buf = buf; ms.Bits = bits; ms.Fill(); buf = ms.Buf; bits = ms.Bits; }
                         if (!QuadVector(ref buf, ref bits, U, k, i1, r, maxBits, p, uint.CreateTruncating(half), out var vals, out uint q1, out uint q3))
                             return false;
                         if ((x + 1 >= w && (r & 12) != 0) || (!hasRow1 && (r & 10) != 0)) return false;
@@ -400,7 +400,7 @@ namespace PixCodec
                 : System.Runtime.Intrinsics.Arm.AdvSimd.ShiftLogical(a, n.AsInt32());
 
         /// <summary>
-        /// The MagSgn values of a whole quad whose samples take at most 32 bits (32-bit samples), one vector lane per sample in the order of
+        /// The MagSgn values of a whole quad whose samples take at most 56 bits, U &lt;= 16 (32-bit samples), one vector lane per sample in the order of
         /// <see cref="Sample"/>: each lane extracts its bits from the low 32 bits of the buffer at its offset (the sum of the
         /// lengths before it). Returns the decoded sample values (0 for insignificant ones) and the raw values of samples 1
         /// and 3; false for an impossible value.
@@ -415,7 +415,9 @@ namespace PixCodec
             var lanes = Vector128.Create(1u, 2, 4, 8);
             var sig = ~Vector128.Equals(Vector128.Create((uint)r) & lanes, Vector128<uint>.Zero);
             var m = Vector128.Create((uint)m0, (uint)m1, (uint)m2, (uint)m3);
-            var raw = ShiftRight(Vector128.Create((uint)buf), Vector128.Create(0u, (uint)m0, (uint)o2, (uint)o3))
+            // samples 0 and 1 from the low 32 bits of the buffer, 2 and 3 from the 32 bits from offset o2 (U <= 16: each pair
+            // fits its word)
+            var raw = ShiftRight(Vector128.Create((uint)buf, (uint)buf, (uint)(buf >> o2), (uint)(buf >> o2)), Vector128.Create(0u, (uint)m0, 0u, (uint)m2))
                 & (ShiftLeft(Vector128<uint>.One, m) - Vector128<uint>.One);
             var e1 = ~Vector128.Equals(Vector128.Create((uint)i1) & lanes, Vector128<uint>.Zero) & sig & Vector128<uint>.One;
             var v = raw | ShiftLeft(e1, m);
