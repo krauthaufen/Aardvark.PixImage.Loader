@@ -26,10 +26,12 @@ namespace PixCodec
     /// for LDR, the 16 bit logarithmic interpolation value for HDR, which is what the decoder converts to half floats).
     /// </para>
     /// <para>
-    /// Quality: Fast tries one candidate per trial and one 2 partition pattern; Normal two candidates, more patterns and
-    /// base + offset endpoints; High three candidates, up to 4 partitions, two second-plane channels and greedy weight
-    /// steps. Measured on the Kodak set (decoded by <see cref="AstcBlocks"/>) Fast is about as good as ARM astcenc
-    /// -fast, Normal within 0.35 dB of -medium, High within 0.3 dB of -thorough.
+    /// Quality: Fast tries one candidate per trial and one 2 partition pattern (looked up for 4x4), and a second plane or
+    /// partitions only when the line residual is a large part of the error; Normal two candidates, more patterns and
+    /// base + offset endpoints; High three candidates, up to 4 partitions (re-ranked by their line residual), two
+    /// second-plane channels and greedy weight steps on the best block. Measured on the Kodak set (decoded by
+    /// <see cref="AstcBlocks"/>) Fast is about as good as ARM astcenc -fast, Normal within 0.45 dB of -medium, High within
+    /// 0.3 dB of -thorough.
     /// </para>
     /// Every block produced is legal: it decodes without the error colour (HDR blocks only in the HDR profile). The block
     /// functions are thread safe (per thread scratch state).
@@ -642,13 +644,13 @@ namespace PixCodec
             public int PartPre = 1;    // partition patterns matched per try, re-ranked by their line residual
             public int Spare = 2;      // extra candidates ranked before the decimation proper corrects the estimates
             public float Gate;         // dual plane and partitions are only tried when the 1 partition line residual is this part of the error
-            public float GateLarge;    // the same for footprints of 64 texels and more
+            public float GateMid, GateLarge;   // the same for LDR footprints of 36 to 63 texels, and 64 and more
         }
 
         internal static readonly Prm[] Params =
         {
-            new Prm { Candidates = 1, Iters = 1, DecIters = 1, RankSweeps = 1, Dual = 1, KMeansIters = 0, PartTries = new[] { 0, 0, 1, 0, 0 }, Offset = false, Refine = false, GoodEnough = 3.0f, EstFactor = 0.8f, Gate = 0.5f, GateLarge = 0.8f },
-            new Prm { Candidates = 2, Iters = 1, DecIters = 2, RankSweeps = 1, Dual = 1, KMeansIters = 3, PartTries = new[] { 0, 0, 2, 1, 0 }, Offset = true, Refine = false, GoodEnough = 1.0f, EstFactor = 0.65f },
+            new Prm { Candidates = 1, Iters = 1, DecIters = 1, RankSweeps = 1, Dual = 1, KMeansIters = 0, PartTries = new[] { 0, 0, 1, 0, 0 }, Offset = false, Refine = false, GoodEnough = 2.5f, EstFactor = 0.8f, Gate = 0.5f, GateMid = 0.6f, GateLarge = 0.8f },
+            new Prm { Candidates = 2, Iters = 1, DecIters = 2, RankSweeps = 1, Dual = 1, KMeansIters = 3, PartTries = new[] { 0, 0, 2, 1, 0 }, Offset = true, Refine = false, GoodEnough = 1.0f, EstFactor = 0.65f, GateMid = 0.3f, GateLarge = 0.2f },
             new Prm { Candidates = 3, Iters = 2, DecIters = 3, RankSweeps = 1, Dual = 2, KMeansIters = 4, PartTries = new[] { 0, 0, 6, 3, 1 }, PartPre = 4, Offset = true, Refine = true, GoodEnough = 0.3f, EstFactor = 0.5f },
         };
 
@@ -752,7 +754,7 @@ namespace PixCodec
             Trial(c, false, -1);
             // more planes or partitions only lower the line residual, at the cost of coarser quantization: when the
             // residual is a small part of the error, they do not pay
-            if (c.Residual * scale < (n >= 64 ? prm.GateLarge : prm.Gate) * c.BestErr) good = long.MaxValue;
+            if (c.Residual * scale < (c.Hdr || n < 36 ? prm.Gate : n < 64 ? prm.GateMid : prm.GateLarge) * c.BestErr) good = long.MaxValue;
 
             // one partition, two planes
             Span<int> order = stackalloc int[4];
@@ -775,8 +777,9 @@ namespace PixCodec
                     if (cq >= 0) lb = Math.Min(lb, colUnit / (QMax[cq] * QMax[cq]));
                 }
                 if (lb * scale * prm.EstFactor >= c.BestErr) break;
-                int found = RankPartitions(c, p, tries * prm.PartPre);
-                if (prm.PartPre > 1 && found > tries)
+                int pre = n >= 36 ? prm.PartPre : 1;
+                int found = RankPartitions(c, p, tries * pre);
+                if (pre > 1 && found > tries)
                 {
                     // re-rank the k-means matches by the line residual of their partitions
                     var ps0 = c.F.Parts[p];
@@ -1580,9 +1583,14 @@ namespace PixCodec
             Span<float> we0 = stackalloc float[16], we1 = stackalloc float[16];
             c.E0.AsSpan().CopyTo(we0); c.E1.AsSpan().CopyTo(we1);
             c.SWInit.CopyTo(c.SW, 0); c.ST0Init.CopyTo(c.ST0, 0); c.ST1Init.CopyTo(c.ST1, 0);
+            Span<int> prevCodes = stackalloc int[18];
+            int prevCem = -1, nvals = c.P * CemValues(cem);
             for (int it = 0; ; it++)
             {
                 int cemUsed = QuantizeEndpoints(c, cem, cq, we0, we1);
+                if (it > 0 && cemUsed == prevCem && c.Codes.AsSpan(0, nvals).SequenceEqual(prevCodes.Slice(0, nvals))) break;   // nothing moved
+                prevCem = cemUsed;
+                c.Codes.AsSpan(0, nvals).CopyTo(prevCodes);
                 IdealWeights(c);
                 for (int pl = 0; pl < planes; pl++)
                 {
