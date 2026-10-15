@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using PixCodec.DdsImpl;
 
 namespace PixCodec
@@ -16,10 +17,11 @@ namespace PixCodec
     /// Input texels are row-major (texel (x, y) at index y * 4 + x), as the decoders write them: 64 bytes of RGBA8 for the
     /// colour formats, 16 values (with a stride) for EAC. <see cref="BcQuality"/> selects the search effort:
     /// <list type="bullet">
-    /// <item>Fast: sub-block mean colours with every table, the differential pair (individual mode only when it does not
-    /// fit), a least squares plane, T / H from one two-cluster split and only for blocks the other modes leave poor;
-    /// candidates are ranked by the offset model (see <c>BestTable</c>). EAC: per table the two multipliers around the
-    /// values' span, the centred base and its least squares refit.</item>
+    /// <item>Fast: one flip (the one whose sub-blocks are tighter around their means), the sub-blocks' mean colours as a
+    /// differential pair (individual colours when out of range) with every table ranked by the offset model (see
+    /// <c>BestTable</c>), the least squares plane unless its residual already loses, T / H from one two-cluster split
+    /// only for blocks the other modes leave poor. EAC: per table the two multipliers around the values' span, the
+    /// centred base and its least squares refit. Vectorized (AVX2 where available).</item>
     /// <item>Normal: least squares refits of the sub-block colours for every table, exact errors where tables clamp, the
     /// best three splits for T / H with refits, a local search of the plane; EAC adds a scan of nearby bases.</item>
     /// <item>High: neighbouring base colours of every candidate, every split, greedy single channel steps for T / H, wider
@@ -64,10 +66,15 @@ namespace PixCodec
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int Clamp255(int v) => (uint)v <= 255 ? v : v < 0 ? 0 : 255;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int Ext4(int v) => v * 17;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int Ext5(int v) => v << 3 | v >> 2;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int Ext6(int v) => v << 2 | v >> 4;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int Ext7(int v) => v << 1 | v >> 6;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int Ext(int v, int bits) => bits switch { 4 => Ext4(v), 5 => Ext5(v), 6 => Ext6(v), _ => Ext7(v) };
         static int Quant(float v, int bits)
         {
@@ -195,6 +202,8 @@ namespace PixCodec
             // sub-blocks are then 8 consecutive texels (left / right at 16 / 24, top / bottom at 0 / 8)
             public readonly int[] Rs = new int[32], Gs = new int[32], Bs = new int[32], Ms = new int[32];
             public bool Uniform;
+            public bool PxReady;
+            public int OpaqueK;                          // the opaque mask in index order (k = x * 4 + y)
             public bool Exact;                           // evaluate clamping candidates exactly (Normal, High)
             public bool Full;                            // ... all of them (High)
             public int Wr, Wg, Wb;
@@ -233,11 +242,13 @@ namespace PixCodec
             public int Refits;      // T / H least squares refits
             public int Rounds;      // T / H rounds of single channel steps
             public int ThSkip;      // skip T / H when the error so far is at most this much per texel (per unit weight)
+            public int PlanarSkip;  // the same for the planar mode
+            public bool FlipGuess;  // Fast: one flip, chosen by how tight the sub-blocks are
         }
 
         static readonly Effort[] Efforts =
         {
-            new Effort { Radius = 0, Splits = 1, Keep = 1, Refits = 1, Rounds = 0, ThSkip = 30 },
+            new Effort { Radius = 0, Splits = 1, Keep = 1, Refits = 1, Rounds = 0, ThSkip = 60, FlipGuess = true },
             new Effort { Radius = 0, Splits = 3, Keep = 2, Refits = 2, Rounds = 0, ThSkip = 0 },
             new Effort { Radius = 1, Splits = 15, Keep = 4, Refits = 4, Rounds = 8, ThSkip = 0 },
         };
@@ -248,23 +259,12 @@ namespace PixCodec
             var c = t_ctx ??= new Ctx();
             if (perceptual) { c.Wr = 14; c.Wg = 45; c.Wb = 5; }   // BT.709 luma weights, x 64
             else { c.Wr = c.Wg = c.Wb = 1; }
-            int opaque = 0;
-            for (int i = 0; i < 16; i++)
-            {
-                c.Px[i * 3] = rgba[i * 4]; c.Px[i * 3 + 1] = rgba[i * 4 + 1]; c.Px[i * 3 + 2] = rgba[i * 4 + 2];
-                if (fmt != ColorFormat.PunchThrough || rgba[i * 4 + 3] >= 128) opaque |= 1 << i;
-            }
+            int opaque = Load(c, rgba, fmt == ColorFormat.PunchThrough);
             c.Opaque = opaque;
             c.Transparent = opaque != 0xFFFF;
             c.Uniform = !perceptual;
             c.Exact = q != BcQuality.Fast;
             c.Full = q == BcQuality.High;
-            for (int i = 0; i < 16; i++)
-            {
-                int k = 16 + (i & 3) * 4 + (i >> 2);
-                c.Rs[i] = c.Rs[k] = c.Px[i * 3]; c.Gs[i] = c.Gs[k] = c.Px[i * 3 + 1]; c.Bs[i] = c.Bs[k] = c.Px[i * 3 + 2];
-                c.Ms[i] = c.Ms[k] = (opaque >> i & 1) != 0 ? -1 : 0;
-            }
             c.BestErr = int.MaxValue; c.BestWord = 0;
             if (opaque == 0)
             {
@@ -282,7 +282,7 @@ namespace PixCodec
                 SubBlockModes(c, q, fmt != ColorFormat.PunchThrough, bit33);
                 if (fmt != ColorFormat.Etc1 && c.BestErr > 0)
                 {
-                    if (!c.Transparent) Planar(c, q);
+                    if (!c.Transparent && c.BestErr > Efforts[(int)q].PlanarSkip * 16 * (c.Wr + c.Wg + c.Wb)) Planar(c, q);
                     if (c.BestErr > Efforts[(int)q].ThSkip * BitCount(c.Opaque) * (c.Wr + c.Wg + c.Wb)) TAndH(c, q, bit33);
                 }
             }
@@ -290,17 +290,58 @@ namespace PixCodec
             return c.BestErr;
         }
 
+        /// <summary>Fills the SoA arrays from 16 RGBA texels (4 per vector); returns the opaque texel mask. <c>Px</c> is
+        /// filled on demand (<see cref="EnsurePx"/>).</summary>
+        static int Load(Ctx c, ReadOnlySpan<byte> rgba, bool punch)
+        {
+            if (rgba.Length < 64) throw new ArgumentException("64 bytes needed", nameof(rgba));
+            ref byte src = ref MemoryMarshal.GetReference(rgba);
+            var ff = Vector128.Create(255u);
+            int opaque = 0;
+            for (int y = 0; y < 4; y++)
+            {
+                var v = Vector128.LoadUnsafe(ref src, (nuint)(y * 16)).AsUInt32();
+                if (!BitConverter.IsLittleEndian)
+                    v = Vector128.Create(BinaryPrimitives.ReverseEndianness(v[0]), BinaryPrimitives.ReverseEndianness(v[1]), BinaryPrimitives.ReverseEndianness(v[2]), BinaryPrimitives.ReverseEndianness(v[3]));
+                (v & ff).AsInt32().StoreUnsafe(ref c.Rs[0], (nuint)(y * 4));
+                ((v >> 8) & ff).AsInt32().StoreUnsafe(ref c.Gs[0], (nuint)(y * 4));
+                ((v >> 16) & ff).AsInt32().StoreUnsafe(ref c.Bs[0], (nuint)(y * 4));
+                var m = punch ? Vector128.GreaterThan(v >> 24, Vector128.Create(127u)).AsInt32() : Vector128<int>.AllBitsSet;
+                m.StoreUnsafe(ref c.Ms[0], (nuint)(y * 4));
+                opaque |= (int)m.ExtractMostSignificantBits() << (4 * y);
+            }
+            // column-major copies: k = x * 4 + y
+            int[] rs = c.Rs, gs = c.Gs, bs = c.Bs, ms = c.Ms;
+            for (int x = 0; x < 4; x++)
+            {
+                Vector128.Create(rs[x], rs[4 + x], rs[8 + x], rs[12 + x]).StoreUnsafe(ref rs[0], (nuint)(16 + 4 * x));
+                Vector128.Create(gs[x], gs[4 + x], gs[8 + x], gs[12 + x]).StoreUnsafe(ref gs[0], (nuint)(16 + 4 * x));
+                Vector128.Create(bs[x], bs[4 + x], bs[8 + x], bs[12 + x]).StoreUnsafe(ref bs[0], (nuint)(16 + 4 * x));
+                Vector128.Create(ms[x], ms[4 + x], ms[8 + x], ms[12 + x]).StoreUnsafe(ref ms[0], (nuint)(16 + 4 * x));
+            }
+            c.PxReady = false;
+            int ok = 0;
+            for (int y = 0; y < 4; y++) ok |= Spread4[opaque >> (4 * y) & 15] << y;
+            c.OpaqueK = ok;
+            return opaque;
+        }
+
+        /// <summary>The interleaved RGB copy the scalar searches use.</summary>
+        static void EnsurePx(Ctx c)
+        {
+            if (c.PxReady) return;
+            for (int i = 0; i < 16; i++) { c.Px[i * 3] = c.Rs[i]; c.Px[i * 3 + 1] = c.Gs[i]; c.Px[i * 3 + 2] = c.Bs[i]; }
+            c.PxReady = true;
+        }
+
         static bool IsSolid(Ctx c)
         {
-            int first = -1;
-            var px = c.Px;
-            for (int i = 0; i < 16; i++)
-            {
-                if ((c.Opaque >> i & 1) == 0) continue;
-                if (first < 0) { first = i; continue; }
-                if (px[i * 3] != px[first * 3] || px[i * 3 + 1] != px[first * 3 + 1] || px[i * 3 + 2] != px[first * 3 + 2]) return false;
-            }
-            return true;
+            int first = System.Numerics.BitOperations.TrailingZeroCount(c.Opaque);
+            var r = Vector128.Create(c.Rs[first]); var g = Vector128.Create(c.Gs[first]); var b = Vector128.Create(c.Bs[first]);
+            var diff = Vector128<int>.Zero;
+            for (int i = 0; i < 16; i += 4)
+                diff |= ((Load(c.Rs, i) ^ r) | (Load(c.Gs, i) ^ g) | (Load(c.Bs, i) ^ b)) & Load(c.Ms, i);
+            return diff == Vector128<int>.Zero;
         }
 
         // first SoA index of each sub-block (Halves order)
@@ -348,6 +389,82 @@ namespace PixCodec
             return Vector128.Sum(acc);
         }
 
+        // texel (row-major index) of each SoA position
+        static readonly int[] PosTexel = MakePosTexel();
+
+        static int[] MakePosTexel()
+        {
+            var t = new int[32];
+            for (int i = 0; i < 16; i++) { t[i] = i; t[16 + i] = (i & 3) * 4 + (i >> 2); }
+            return t;
+        }
+
+        /// <summary>The vector form of <see cref="PaintError"/> with choices: count (8 or 16) SoA texels from
+        /// <paramref name="off"/>, each taking its nearest paint (the first on ties, as the scalar form); the choices go to
+        /// <c>Sel</c> by texel, the exact error is returned.</summary>
+        static int SelectV(Ctx c, int off, int count, int[] p)
+        {
+            var r0 = Vector128.Create(p[0]); var g0 = Vector128.Create(p[1]); var b0 = Vector128.Create(p[2]);
+            var r1 = Vector128.Create(p[3]); var g1 = Vector128.Create(p[4]); var b1 = Vector128.Create(p[5]);
+            var r2 = Vector128.Create(p[6]); var g2 = Vector128.Create(p[7]); var b2 = Vector128.Create(p[8]);
+            var r3 = Vector128.Create(p[9]); var g3 = Vector128.Create(p[10]); var b3 = Vector128.Create(p[11]);
+            var wr = Vector128.Create(c.Wr); var wg = Vector128.Create(c.Wg); var wb = Vector128.Create(c.Wb);
+            Vector128<int> one = Vector128.Create(1), two = Vector128.Create(2), three = Vector128.Create(3);
+            var acc = Vector128<int>.Zero;
+            Span<int> lanes = stackalloc int[4];
+            for (int i = off; i < off + count; i += 4)
+            {
+                var r = Load(c.Rs, i); var g = Load(c.Gs, i); var b = Load(c.Bs, i);
+                Vector128<int> d, e, best, idx, lt;
+                d = r - r0; best = wr * d * d; d = g - g0; best += wg * d * d; d = b - b0; best += wb * d * d; idx = Vector128<int>.Zero;
+                d = r - r1; e = wr * d * d; d = g - g1; e += wg * d * d; d = b - b1; e += wb * d * d;
+                lt = Vector128.LessThan(e, best); best = Vector128.Min(best, e); idx = Vector128.ConditionalSelect(lt, one, idx);
+                d = r - r2; e = wr * d * d; d = g - g2; e += wg * d * d; d = b - b2; e += wb * d * d;
+                lt = Vector128.LessThan(e, best); best = Vector128.Min(best, e); idx = Vector128.ConditionalSelect(lt, two, idx);
+                d = r - r3; e = wr * d * d; d = g - g3; e += wg * d * d; d = b - b3; e += wb * d * d;
+                lt = Vector128.LessThan(e, best); best = Vector128.Min(best, e); idx = Vector128.ConditionalSelect(lt, three, idx);
+                acc += best & Load(c.Ms, i);
+                idx.CopyTo(lanes);
+                for (int j = 0; j < 4; j++) c.Sel[PosTexel[i + j]] = (byte)lanes[j];
+            }
+            return Vector128.Sum(acc);
+        }
+
+        // 4 bits spread to every 4th bit (row-major lane x to index bit position x * 4)
+        static readonly int[] Spread4 = { 0x0000, 0x0001, 0x0010, 0x0011, 0x0100, 0x0101, 0x0110, 0x0111, 0x1000, 0x1001, 0x1010, 0x1011, 0x1100, 0x1101, 0x1110, 0x1111 };
+
+        /// <summary>
+        /// As <see cref="SelectV"/>, but the choices go straight into the index word's bits (pixel k = x * 4 + y):
+        /// <paramref name="lsb"/> / <paramref name="msb"/> receive the low / high bits of the texels from off.
+        /// </summary>
+        static int SelectBits(Ctx c, int off, int count, int[] p, ref int lsb, ref int msb)
+        {
+            var r0 = Vector128.Create(p[0]); var g0 = Vector128.Create(p[1]); var b0 = Vector128.Create(p[2]);
+            var r1 = Vector128.Create(p[3]); var g1 = Vector128.Create(p[4]); var b1 = Vector128.Create(p[5]);
+            var r2 = Vector128.Create(p[6]); var g2 = Vector128.Create(p[7]); var b2 = Vector128.Create(p[8]);
+            var r3 = Vector128.Create(p[9]); var g3 = Vector128.Create(p[10]); var b3 = Vector128.Create(p[11]);
+            var wr = Vector128.Create(c.Wr); var wg = Vector128.Create(c.Wg); var wb = Vector128.Create(c.Wb);
+            Vector128<int> one = Vector128.Create(1), two = Vector128.Create(2), three = Vector128.Create(3);
+            var acc = Vector128<int>.Zero;
+            for (int i = off; i < off + count; i += 4)
+            {
+                var r = Load(c.Rs, i); var g = Load(c.Gs, i); var b = Load(c.Bs, i);
+                Vector128<int> d, e, best, idx, lt;
+                d = r - r0; best = wr * d * d; d = g - g0; best += wg * d * d; d = b - b0; best += wb * d * d; idx = Vector128<int>.Zero;
+                d = r - r1; e = wr * d * d; d = g - g1; e += wg * d * d; d = b - b1; e += wb * d * d;
+                lt = Vector128.LessThan(e, best); best = Vector128.Min(best, e); idx = Vector128.ConditionalSelect(lt, one, idx);
+                d = r - r2; e = wr * d * d; d = g - g2; e += wg * d * d; d = b - b2; e += wb * d * d;
+                lt = Vector128.LessThan(e, best); best = Vector128.Min(best, e); idx = Vector128.ConditionalSelect(lt, two, idx);
+                d = r - r3; e = wr * d * d; d = g - g3; e += wg * d * d; d = b - b3; e += wb * d * d;
+                lt = Vector128.LessThan(e, best); best = Vector128.Min(best, e); idx = Vector128.ConditionalSelect(lt, three, idx);
+                acc += best & Load(c.Ms, i);
+                int lo = (int)(idx << 31).ExtractMostSignificantBits(), hi = (int)(idx << 30).ExtractMostSignificantBits();
+                if (i >= 16) { lsb |= lo << (i - 16); msb |= hi << (i - 16); }        // column-major: lane order is k order
+                else { lsb |= Spread4[lo] << (i >> 2); msb |= Spread4[hi] << (i >> 2); }   // row y = i / 4, lane x
+            }
+            return Vector128.Sum(acc);
+        }
+
         /// <summary>Per texel (vectors of 4, count texels from off): weighted squared distance E to (r, g, b) and the
         /// weighted sum D of the channel differences (texel - colour); masked texels give 0.</summary>
         static void Terms(Ctx c, int off, int count, int r, int g, int b, Span<Vector128<int>> e, Span<Vector128<int>> d)
@@ -379,6 +496,7 @@ namespace PixCodec
         /// </summary>
         static int PaintError(Ctx c, int[] texels, int[] paint, int bound, byte[]? sel)
         {
+            EnsurePx(c);
             var px = c.Px;
             int wr = c.Wr, wg = c.Wg, wb = c.Wb, opaque = c.Opaque;
             int r0 = paint[0], g0 = paint[1], b0 = paint[2], r1 = paint[3], g1 = paint[4], b1 = paint[5];
@@ -440,6 +558,7 @@ namespace PixCodec
             SetPaint(p, 3, r - l, g - l, b - l);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int Pack(int r, int g, int b) => r << 10 | g << 5 | b;
 
         /// <summary>
@@ -453,23 +572,32 @@ namespace PixCodec
         {
             int r = Ext(qc >> 10, bits), g = Ext(qc >> 5 & 31, bits), b = Ext(qc & 31, bits);
             int off = HalfOffset[half], w = c.Wr + c.Wg + c.Wb;
-            Span<Vector128<int>> ev = stackalloc Vector128<int>[2], dv = stackalloc Vector128<int>[2];
-            Terms(c, off, 8, r, g, b, ev, dv);
-            var esum = ev[0] + ev[1];
-            var a0 = Vector128.Abs(dv[0]); var a1 = Vector128.Abs(dv[1]);
-            var m0 = Load(c.Ms, off); var m1 = Load(c.Ms, off + 4);
             int lo = Math.Min(r, Math.Min(g, b)), hi = Math.Max(r, Math.Max(g, b));
             bool tr = c.Transparent;
+            Span<int> sums = stackalloc int[8];
+            if (Avx2.IsSupported) TableSums256(c, off, r, g, b, w, tr, sums);
+            else
+            {
+                Span<Vector128<int>> ev = stackalloc Vector128<int>[2], dv = stackalloc Vector128<int>[2];
+                Terms(c, off, 8, r, g, b, ev, dv);
+                var esum = ev[0] + ev[1];
+                var a0 = Vector128.Abs(dv[0]); var a1 = Vector128.Abs(dv[1]);
+                var m0 = Load(c.Ms, off); var m1 = Load(c.Ms, off + 4);
+                Span<Vector128<int>> xs = stackalloc Vector128<int>[8];
+                for (int t = 0; t < 8; t++)
+                {
+                    int sa = tr ? 0 : ModSmall[t], la = ModLarge[t];
+                    var ks = Vector128.Create(w * sa * sa); var kl = Vector128.Create(w * la * la);
+                    var s2 = Vector128.Create(2 * sa); var l2 = Vector128.Create(2 * la);
+                    xs[t] = esum + (Vector128.Min(ks - s2 * a0, kl - l2 * a0) & m0) + (Vector128.Min(ks - s2 * a1, kl - l2 * a1) & m1);
+                }
+                HorizontalSums(xs, sums);
+            }
             int best = int.MaxValue;
             table = 0;
             for (int t = 0; t < 8; t++)
             {
-                int sa = tr ? 0 : ModSmall[t], la = ModLarge[t];
-                int e;
-                var ks = Vector128.Create(w * sa * sa); var kl = Vector128.Create(w * la * la);
-                var s2 = Vector128.Create(2 * sa); var l2 = Vector128.Create(2 * la);
-                var x = esum + (Vector128.Min(ks - s2 * a0, kl - l2 * a0) & m0) + (Vector128.Min(ks - s2 * a1, kl - l2 * a1) & m1);
-                e = Vector128.Sum(x);
+                int la = ModLarge[t], e = sums[t];
                 if ((lo - la < 0 || hi + la > 255) && Recheck(c, e, best))
                 {
                     SubPaints(c.Paint, r, g, b, t, tr);
@@ -478,6 +606,47 @@ namespace PixCodec
                 if (e < best) { best = e; table = t; }
             }
             return best;
+        }
+
+        /// <summary>The offset model's error of all eight tables for one sub-block (8 texels in one 256 bit vector).</summary>
+        static void TableSums256(Ctx c, int off, int r, int g, int b, int w, bool tr, Span<int> sums)
+        {
+            var m = Vector256.LoadUnsafe(ref c.Ms[0], (nuint)off);
+            var dr = Vector256.LoadUnsafe(ref c.Rs[0], (nuint)off) - Vector256.Create(r);
+            var dg = Vector256.LoadUnsafe(ref c.Gs[0], (nuint)off) - Vector256.Create(g);
+            var db = Vector256.LoadUnsafe(ref c.Bs[0], (nuint)off) - Vector256.Create(b);
+            Vector256<int> e, d;
+            if (c.Uniform) { e = dr * dr + dg * dg + db * db; d = dr + dg + db; }
+            else
+            {
+                var wr = Vector256.Create(c.Wr); var wg = Vector256.Create(c.Wg); var wb = Vector256.Create(c.Wb);
+                e = wr * dr * dr + wg * dg * dg + wb * db * db; d = wr * dr + wg * dg + wb * db;
+            }
+            var a = Vector256.Abs(d);
+            Span<Vector256<int>> x = stackalloc Vector256<int>[8];
+            for (int t = 0; t < 8; t++)
+            {
+                int sa = tr ? 0 : ModSmall[t], la = ModLarge[t];
+                x[t] = (e + Vector256.Min(Vector256.Create(w * sa * sa) - Vector256.Create(2 * sa) * a,
+                                          Vector256.Create(w * la * la) - Vector256.Create(2 * la) * a)) & m;
+            }
+            var g0 = Avx2.HorizontalAdd(Avx2.HorizontalAdd(x[0], x[1]), Avx2.HorizontalAdd(x[2], x[3]));
+            var g1 = Avx2.HorizontalAdd(Avx2.HorizontalAdd(x[4], x[5]), Avx2.HorizontalAdd(x[6], x[7]));
+            (g0.GetLower() + g0.GetUpper()).CopyTo(sums);
+            (g1.GetLower() + g1.GetUpper()).CopyTo(sums.Slice(4));
+        }
+
+        /// <summary>The lane sums of 8 vectors (pairwise horizontal adds where available).</summary>
+        static void HorizontalSums(ReadOnlySpan<Vector128<int>> x, Span<int> sums)
+        {
+            if (Ssse3.IsSupported)
+            {
+                var s0 = Ssse3.HorizontalAdd(Ssse3.HorizontalAdd(x[0], x[1]), Ssse3.HorizontalAdd(x[2], x[3]));
+                var s1 = Ssse3.HorizontalAdd(Ssse3.HorizontalAdd(x[4], x[5]), Ssse3.HorizontalAdd(x[6], x[7]));
+                s0.CopyTo(sums); s1.CopyTo(sums.Slice(4));
+            }
+            else
+                for (int t = 0; t < 8; t++) sums[t] = Vector128.Sum(x[t]);
         }
 
         /// <summary>Whether a candidate whose paints clamp (its offset model error <paramref name="model"/> only an upper
@@ -492,6 +661,7 @@ namespace PixCodec
         /// </summary>
         static void HalfSearch(Ctx c, int half, int bits, BcQuality q, HalfCands o)
         {
+            EnsurePx(c);
             var tex = Halves[half];
             var px = c.Px;
             int n = 0, sr = 0, sg = 0, sb = 0;
@@ -569,8 +739,81 @@ namespace PixCodec
             return Pack(r, g, b);
         }
 
+        /// <summary>Weighted-free sums of the opaque texels of a sub-block and their count.</summary>
+        static int HalfSums(Ctx c, int half, out int sr, out int sg, out int sb)
+        {
+            int off = HalfOffset[half];
+            var m0 = Load(c.Ms, off); var m1 = Load(c.Ms, off + 4);
+            sr = Vector128.Sum((Load(c.Rs, off) & m0) + (Load(c.Rs, off + 4) & m1));
+            sg = Vector128.Sum((Load(c.Gs, off) & m0) + (Load(c.Gs, off + 4) & m1));
+            sb = Vector128.Sum((Load(c.Bs, off) & m0) + (Load(c.Bs, off + 4) & m1));
+            return -Vector128.Sum(m0 + m1);
+        }
+
+        static int MeanColor(int sr, int sg, int sb, int n, int bits)
+        {
+            float f = 1f / n;
+            return Pack(Quant(sr * f, bits), Quant(sg * f, bits), Quant(sb * f, bits));
+        }
+
+        /// <summary>
+        /// Fast individual / differential search: per flip the quantized mean colours of the sub-blocks, as a differential
+        /// pair when they are in range, else as individual colours (punch-through: the second moved into range), each with
+        /// its best table by the offset model; the better flip is evaluated exactly.
+        /// </summary>
+        static void FastSubBlocks(Ctx c, bool allowIndividual, uint bit33)
+        {
+            int bestErr = int.MaxValue, bFlip = 0, bqa = 0, bqb = 0, bta = 0, btb = 0;
+            bool bDiff = true;
+            Span<int> sums = stackalloc int[16];   // per sub-block: count, r, g, b
+            for (int h = 0; h < 4; h++) sums[h * 4] = HalfSums(c, h, out sums[h * 4 + 1], out sums[h * 4 + 2], out sums[h * 4 + 3]);
+            int only = -1;
+            if (Efforts[0].FlipGuess)
+            {
+                // the flip whose sub-blocks are tighter around their means (the larger sum of |S|^2 / n; sum |p|^2 is common)
+                Span<double> score = stackalloc double[2];
+                for (int h = 0; h < 4; h++)
+                {
+                    int n = sums[h * 4];
+                    if (n == 0) continue;
+                    double sr = sums[h * 4 + 1], sg = sums[h * 4 + 2], sb = sums[h * 4 + 3];
+                    score[h >> 1] += (c.Wr * sr * sr + c.Wg * sg * sg + c.Wb * sb * sb) / n;
+                }
+                only = score[1] > score[0] ? 1 : 0;
+            }
+            for (int flip = 0; flip < 2; flip++)
+            {
+                if (only >= 0 && flip != only) continue;
+                int ha = flip * 2, hb = ha + 1;
+                int na = sums[ha * 4], ar = sums[ha * 4 + 1], ag = sums[ha * 4 + 2], ab = sums[ha * 4 + 3];
+                int nb = sums[hb * 4], br = sums[hb * 4 + 1], bg = sums[hb * 4 + 2], bbl = sums[hb * 4 + 3];
+                if (na == 0) { na = nb; ar = br; ag = bg; ab = bbl; }
+                if (nb == 0) { nb = na; br = ar; bg = ag; bbl = ab; }
+                int qa = MeanColor(ar, ag, ab, na, 5), qb = MeanColor(br, bg, bbl, nb, 5);
+                bool diff = true;
+                if (!DiffFeasible(qa, qb))
+                {
+                    if (allowIndividual)
+                    {
+                        diff = false;
+                        qa = MeanColor(ar, ag, ab, na, 4); qb = MeanColor(br, bg, bbl, nb, 4);
+                    }
+                    else qb = Project(qb, qa, -4);
+                }
+                int bits = diff ? 5 : 4;
+                int e = BestTable(c, ha, qa, bits, out int ta) + BestTable(c, hb, qb, bits, out int tb);
+                if (e < bestErr) { bestErr = e; bFlip = flip; bDiff = diff; bqa = qa; bqb = qb; bta = ta; btb = tb; }
+            }
+            OfferSub(c, bDiff, bFlip, bqa, bqb, bta, btb, bit33);
+        }
+
         static void SubBlockModes(Ctx c, BcQuality q, bool allowIndividual, uint bit33)
         {
+            if (q == BcQuality.Fast)
+            {
+                FastSubBlocks(c, allowIndividual, bit33);
+                return;
+            }
             var A = c.A; var B = c.B;
             // Fast measures candidates by the offset model (an upper bound where tables clamp) and evaluates only the best
             int lazyErr = int.MaxValue, lFlip = 0, lqa = 0, lqb = 0, lta = 0, ltb = 0;
@@ -633,18 +876,21 @@ namespace PixCodec
         /// <summary>Individual (4 bit colours) or differential (5 bit colours) block word, with its indices.</summary>
         static void OfferSub(Ctx c, bool diff, int flip, int qa, int qb, int ta, int tb, uint bit33)
         {
-            int bits = diff ? 5 : 4, err = 0;
+            int bits = diff ? 5 : 4, err = 0, lsb = 0, msb = 0;
             for (int h = 0; h < 2; h++)
             {
                 int qc = h == 0 ? qa : qb;
                 SubPaints(c.Paint, Ext(qc >> 10, bits), Ext(qc >> 5 & 31, bits), Ext(qc & 31, bits), h == 0 ? ta : tb, c.Transparent);
-                err += PaintError(c, Halves[flip * 2 + h], c.Paint, int.MaxValue, c.Sel);
+                err += SelectBits(c, HalfOffset[flip * 2 + h], 8, c.Paint, ref lsb, ref msb);
             }
-            if (err < c.BestErr) c.Offer(err, SubHeader(diff, qa, qb, ta, tb, bit33) | (ulong)(uint)flip << 32 | Indices(c, c.Sel));
+            // transparent texels: index 2
+            lsb &= c.OpaqueK; msb |= ~c.OpaqueK & 0xFFFF;
+            if (err < c.BestErr) c.Offer(err, SubHeader(diff, qa, qb, ta, tb, bit33) | (ulong)(uint)flip << 32 | (uint)lsb | (uint)msb << 16);
         }
 
         // ------------------------------------------------------------------ T and H modes
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int Pack4(int r, int g, int b) => r << 8 | g << 4 | b;
 
         static void TPaints(int[] p, int c1, int c2, int d, bool transparent)
@@ -683,7 +929,7 @@ namespace PixCodec
                 HPaints(c.Paint, c1, c2, d, c.Transparent);
             }
             else TPaints(c.Paint, c1, c2, d, c.Transparent);
-            return sel == null ? PaintErrorV(c, 0, 16, c.Paint) : PaintError(c, AllTexels, c.Paint, bound, sel);
+            return sel == null ? PaintErrorV(c, 0, 16, c.Paint) : SelectV(c, 0, 16, c.Paint);
         }
 
         /// <summary>
@@ -759,6 +1005,7 @@ namespace PixCodec
 
         static void TAndH(Ctx c, BcQuality q, uint bit33)
         {
+            EnsurePx(c);
             var px = c.Px;
             Span<int> tex = stackalloc int[16];
             int n = 0;
@@ -852,6 +1099,7 @@ namespace PixCodec
         /// single channel steps.</summary>
         static ThCand RefineTh(Ctx c, bool h, ThCand cur, BcQuality q)
         {
+            EnsurePx(c);
             var px = c.Px;
             int iterations = Efforts[(int)q].Refits;
             Span<int> s = stackalloc int[8];   // sums r, g, b, count for colour 1 and 2
@@ -905,13 +1153,42 @@ namespace PixCodec
         /// differential colour overflows in red (T), green (H) or blue (planar), as the decoder detects the modes.</summary>
         static uint FixFree(uint hi, int[] free, int mode)
         {
-            for (int m = 0; m < 1 << free.Length; m++)
+            // the channels are independent: red decides T (overflow), green H, blue planar; the channels before the
+            // mode's must not overflow. The settings of each channel's free bits come from a table per mode and channel.
+            var t = FreeTables[mode - 1];
+            for (int ch = 0; ch < mode; ch++)
             {
-                uint v = hi;
-                for (int k = 0; k < free.Length; k++) if ((m >> k & 1) != 0) v |= 1u << free[k];
-                if (ModeOf(v) == mode) return v;
+                int shift = 24 - 8 * ch;
+                hi = hi & ~(0xFFu << shift) | (uint)t[ch * 256 + (int)(hi >> shift & 0xFF)] << shift;
             }
-            throw new InvalidOperationException("ETC2 mode bits");
+            return hi;
+        }
+
+        // per mode (T, H, planar), channel and channel byte (free bits as given): the byte with the free bits set
+        static readonly byte[][] FreeTables = { MakeFreeTable(TFree, 1), MakeFreeTable(HFree, 2), MakeFreeTable(PlanarFree, 3) };
+
+        static byte[] MakeFreeTable(int[] free, int mode)
+        {
+            var table = new byte[mode * 256];
+            for (int ch = 0; ch < mode; ch++)
+            {
+                int top = 31 - 8 * ch;
+                bool want = ch == mode - 1;
+                int fm = 0;
+                foreach (int f in free) if (f <= top && f > top - 8) fm |= 1 << (f - (top - 7));
+                for (int v = 0; v < 256; v++)
+                {
+                    int bestV = -1;
+                    for (int m = 0; m < 256 && bestV < 0; m++)
+                    {
+                        if ((m & ~fm) != 0) continue;
+                        int x = v & ~fm | m, b5 = x >> 3, d = Signed3(x & 7);
+                        if (((uint)(b5 + d) > 31) == want) bestV = x;
+                    }
+                    table[ch * 256 + v] = (byte)(bestV < 0 ? v : bestV);
+                }
+            }
+            return table;
         }
 
         /// <summary>0 differential, 1 T, 2 H, 3 planar.</summary>
@@ -966,8 +1243,63 @@ namespace PixCodec
             return err;
         }
 
+        /// <summary>Planar mode, Fast: the least squares plane of each channel, quantized, evaluated exactly (vectors of
+        /// one row).</summary>
+        static void PlanarFast(Ctx c)
+        {
+            // per channel: sum v, sum (2x - 3) v, sum (2y - 3) v; the least squares residual of the three planes bounds what
+            // the quantized plane can reach (up to the decoder's rounding): blocks it cannot win are left at once
+            var w2 = Vector128.Create(-3, -1, 1, 3);
+            Span<long> fit = stackalloc long[9];
+            long resid = 0;
+            for (int ch = 0; ch < 3; ch++)
+            {
+                int[] a = ch == 0 ? c.Rs : ch == 1 ? c.Gs : c.Bs;
+                Vector128<int> q0 = Load(a, 0), q1 = Load(a, 4), q2 = Load(a, 8), q3 = Load(a, 12);
+                var rows = q0 + q1 + q2 + q3;
+                long sv = Vector128.Sum(rows), sx = Vector128.Sum(rows * w2), sy = 3L * Vector128.Sum(q3 - q0) + Vector128.Sum(q2 - q1);
+                long s2 = Vector128.Sum(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+                resid += (80 * s2 - 5 * sv * sv - sx * sx - sy * sy) * (ch == 0 ? c.Wr : ch == 1 ? c.Wg : c.Wb);
+                fit[ch * 3] = sv; fit[ch * 3 + 1] = sx; fit[ch * 3 + 2] = sy;
+            }
+            if (resid >= 80L * c.BestErr) return;
+            Span<int> ohv = stackalloc int[9];
+            int total = 0;
+            var x4 = Vector128.Create(0, 1, 2, 3);
+            Vector128<int> zero = Vector128<int>.Zero, max = Vector128.Create(255);
+            for (int ch = 0; ch < 3; ch++)
+            {
+                // plane o + x bx + y by (x, y centred): bx = sum (x - 1.5) v / 20 = sx / 40
+                float bx = fit[ch * 3 + 1] / 40f, by = fit[ch * 3 + 2] / 40f, o = fit[ch * 3] / 16f - 1.5f * (bx + by);
+                int bits = ch == 1 ? 7 : 6;
+                int qo = Quant(o, bits), qh = Quant(o + 4 * bx, bits), qv = Quant(o + 4 * by, bits);
+                int eo = Ext(qo, bits), eh = Ext(qh, bits), ev = Ext(qv, bits);
+                // row y: (x (h - o) + y (v - o) + 4 o + 2) >> 2
+                int[] a = ch == 0 ? c.Rs : ch == 1 ? c.Gs : c.Bs;
+                var row = Vector128.Create(4 * eo + 2) + x4 * Vector128.Create(eh - eo);
+                var step = Vector128.Create(ev - eo);
+                var err = Vector128<int>.Zero;
+                for (int y = 0; y < 4; y++)
+                {
+                    var d = Vector128.Min(Vector128.Max(row >> 2, zero), max) - Load(a, y * 4);
+                    err += d * d;
+                    row += step;
+                }
+                ohv[ch * 3] = qo; ohv[ch * 3 + 1] = qh; ohv[ch * 3 + 2] = qv;
+                total += Vector128.Sum(err) * (ch == 0 ? c.Wr : ch == 1 ? c.Wg : c.Wb);
+                if (total >= c.BestErr) return;
+            }
+            c.Offer(total, PlanarWord(ohv));
+        }
+
         static void Planar(Ctx c, BcQuality q)
         {
+            if (q == BcQuality.Fast)
+            {
+                PlanarFast(c);
+                return;
+            }
+            EnsurePx(c);
             Span<int> v = stackalloc int[16];
             Span<int> ohv = stackalloc int[9];
             int total = 0;
@@ -1028,6 +1360,7 @@ namespace PixCodec
         /// </summary>
         static void Solid(Ctx c, ColorFormat fmt, uint bit33)
         {
+            EnsurePx(c);
             int first = 0;
             while ((c.Opaque >> first & 1) == 0) first++;
             int vr = c.Px[first * 3], vg = c.Px[first * 3 + 1], vb = c.Px[first * 3 + 2];
@@ -1237,6 +1570,76 @@ namespace PixCodec
             return Vector128.Sum(acc);
         }
 
+        /// <summary><see cref="EacPalette"/> as one vector of 8 floats (AVX2).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector256<float> EacPaletteV(EacKind kind, int b, int mul, int tab)
+        {
+            var m = Vector256.LoadUnsafe(ref EacSorted[tab * 8]);
+            Vector256<int> x;
+            switch (kind)
+            {
+                case EacKind.Alpha8:
+                    x = Vector256.Min(Vector256.Max(Vector256.Create(b) + m * Vector256.Create(mul), Vector256<int>.Zero), Vector256.Create(255));
+                    break;
+                case EacKind.Unsigned11:
+                    x = Vector256.Min(Vector256.Max(Vector256.Create(b * 8 + 4) + m * Vector256.Create(mul != 0 ? mul * 8 : 1), Vector256<int>.Zero), Vector256.Create(2047));
+                    x = x << 5 | x >>> 6;
+                    break;
+                default:
+                    {
+                        x = Vector256.Min(Vector256.Max(Vector256.Create(b * 8) + m * Vector256.Create(mul != 0 ? mul * 8 : 1), Vector256.Create(-1023)), Vector256.Create(1023));
+                        var sign = x >> 31; var a = Vector256.Abs(x);
+                        x = ((a << 5 | a >> 5) ^ sign) - sign;
+                        break;
+                    }
+            }
+            return Vector256.ConvertToSingle(x);
+        }
+
+        static readonly Vector256<int>[] Lane = { Vector256.Create(0), Vector256.Create(1), Vector256.Create(2), Vector256.Create(3), Vector256.Create(4), Vector256.Create(5), Vector256.Create(6), Vector256.Create(7) };
+
+        /// <summary><see cref="EacErrorV256"/> with the palette in a vector (its entries broadcast by lane permutes).</summary>
+        static float EacErrorP(Vector256<float> t0, Vector256<float> t1, Vector256<float> pal, ReadOnlySpan<float> mods, out float msum)
+        {
+            var p = Avx2.PermuteVar8x32(pal, Lane[0]);
+            var d0 = t0 - p; var d1 = t1 - p;
+            var b0 = d0 * d0; var b1 = d1 * d1;
+            var m = Vector256.Create(mods[0]);
+            var ms0 = m; var ms1 = m;
+            for (int j = 1; j < 8; j++)
+            {
+                p = Avx2.PermuteVar8x32(pal, Lane[j]); m = Vector256.Create(mods[j]);
+                d0 = t0 - p; d1 = t1 - p;
+                var e0 = d0 * d0; var e1 = d1 * d1;
+                var l0 = Vector256.LessThan(e0, b0); var l1 = Vector256.LessThan(e1, b1);
+                b0 = Vector256.Min(b0, e0); b1 = Vector256.Min(b1, e1);
+                ms0 = Vector256.ConditionalSelect(l0, m, ms0); ms1 = Vector256.ConditionalSelect(l1, m, ms1);
+            }
+            msum = Vector256.Sum(ms0 + ms1);
+            return Vector256.Sum(b0 + b1);
+        }
+
+        /// <summary>The 256 bit form of <see cref="EacErrorV"/> (values 0..7 and 8..15 in two vectors).</summary>
+        static float EacErrorV256(Vector256<float> t0, Vector256<float> t1, ReadOnlySpan<int> pal, ReadOnlySpan<float> mods, out float msum)
+        {
+            var p = Vector256.Create((float)pal[0]);
+            var d0 = t0 - p; var d1 = t1 - p;
+            var b0 = d0 * d0; var b1 = d1 * d1;
+            var m = Vector256.Create(mods[0]);
+            var ms0 = m; var ms1 = m;
+            for (int j = 1; j < 8; j++)
+            {
+                p = Vector256.Create((float)pal[j]); m = Vector256.Create(mods[j]);
+                d0 = t0 - p; d1 = t1 - p;
+                var e0 = d0 * d0; var e1 = d1 * d1;
+                var l0 = Vector256.LessThan(e0, b0); var l1 = Vector256.LessThan(e1, b1);
+                b0 = Vector256.Min(b0, e0); b1 = Vector256.Min(b1, e1);
+                ms0 = Vector256.ConditionalSelect(l0, m, ms0); ms1 = Vector256.ConditionalSelect(l1, m, ms1);
+            }
+            msum = Vector256.Sum(ms0 + ms1);
+            return Vector256.Sum(b0 + b1);
+        }
+
         /// <summary>
         /// EAC block search. A first pass takes, for every table, the multipliers either side of the one whose palette
         /// spans the values, the base centring it on them and that base's least squares refit to the chosen modifiers
@@ -1245,6 +1648,7 @@ namespace PixCodec
         /// </summary>
         static ulong EacSearch(ReadOnlySpan<int> t, EacKind kind, BcQuality q)
         {
+            if (Avx2.IsSupported) return EacSearchWide(t, kind, q);
             // the 'x' domain of the specification: alpha 0..255, 11 bit 0..2047 / -1023..1023; x = c0 + unit * base + m * step
             double scale = kind == EacKind.Alpha8 ? 1 : kind == EacKind.Unsigned11 ? 2047.0 / 65535 : 1023.0 / 32767;
             double c0 = kind == EacKind.Unsigned11 ? 4 : 0, unit = kind == EacKind.Alpha8 ? 1 : 8;
@@ -1262,6 +1666,8 @@ namespace PixCodec
             Span<byte> sel = stackalloc byte[16];
             Span<Vector128<float>> tv = stackalloc Vector128<float>[4];
             for (int i = 0; i < 4; i++) tv[i] = Vector128.Create((float)t[i * 4], t[i * 4 + 1], t[i * 4 + 2], t[i * 4 + 3]);
+            bool wide = Vector256.IsHardwareAccelerated;
+            var t0 = Vector256.Create(tv[0], tv[1]); var t1 = Vector256.Create(tv[2], tv[3]);
             float bestErr = float.MaxValue;
             int bb = 0, bm = 0, bt = 0;
 
@@ -1290,12 +1696,12 @@ namespace PixCodec
                         {
                             // the centred base, then the least squares base for its choices
                             EacPalette(kind, b0, mul, tab, pal);
-                            float e = EacErrorV(tv, pal, mods, out float sm);
+                            float e = (wide ? EacErrorV256(t0, t1, pal, mods, out float sm) : EacErrorV(tv, pal, mods, out sm));
                             if (e < bestErr) { bestErr = e; bb = b0; bm = mul; bt = tab; if (e == 0) goto done; }
                             int b1 = Math.Clamp((int)Math.Round(((xsum - sm * step) / 16 - c0) / unit), baseLo, baseHi);
                             if (b1 == b0) continue;
                             EacPalette(kind, b1, mul, tab, pal);
-                            e = EacErrorV(tv, pal, mods, out _);
+                            e = (wide ? EacErrorV256(t0, t1, pal, mods, out _) : EacErrorV(tv, pal, mods, out _));
                             if (e < bestErr) { bestErr = e; bb = b1; bm = mul; bt = tab; if (e == 0) goto done; }
                             continue;
                         }
@@ -1303,7 +1709,84 @@ namespace PixCodec
                         for (int b = Math.Max(baseLo, b0 - reach); b <= Math.Min(baseHi, b0 + reach); b++)
                         {
                             EacPalette(kind, b, mul, tab, pal);
-                            float e = EacErrorV(tv, pal, mods, out _);
+                            float e = (wide ? EacErrorV256(t0, t1, pal, mods, out _) : EacErrorV(tv, pal, mods, out _));
+                            if (e < bestErr) { bestErr = e; bb = b; bm = mul; bt = tab; if (e == 0) goto done; }
+                        }
+                    }
+                }
+        done:
+            EacPalette(kind, bb, bm, bt, pal);
+            EacError(t, pal, long.MaxValue, sel);
+            ulong v = (ulong)(bb & 255) << 56 | (ulong)bm << 52 | (ulong)bt << 48;   // signed base: two's complement
+            for (int i = 0; i < 16; i++)
+            {
+                int k = (i & 3) * 4 + (i >> 2);
+                v |= (ulong)EacOrder[sel[i]] << (45 - 3 * k);
+            }
+            return v;
+        }
+
+        /// <summary><see cref="EacSearch"/> with vector palettes (AVX2).</summary>
+        static ulong EacSearchWide(ReadOnlySpan<int> t, EacKind kind, BcQuality q)
+        {
+            // the 'x' domain of the specification: alpha 0..255, 11 bit 0..2047 / -1023..1023; x = c0 + unit * base + m * step
+            double scale = kind == EacKind.Alpha8 ? 1 : kind == EacKind.Unsigned11 ? 2047.0 / 65535 : 1023.0 / 32767;
+            double c0 = kind == EacKind.Unsigned11 ? 4 : 0, unit = kind == EacKind.Alpha8 ? 1 : 8;
+            int baseLo = kind == EacKind.Signed11 ? -127 : 0, baseHi = kind == EacKind.Signed11 ? 127 : 255;
+            bool small = kind != EacKind.Alpha8;   // 11 bit: multiplier 0 means step 1
+            int tmin = int.MaxValue, tmax = int.MinValue;
+            long tsum = 0;
+            for (int i = 0; i < 16; i++)
+            {
+                tmin = Math.Min(tmin, t[i]); tmax = Math.Max(tmax, t[i]);
+                tsum += t[i];
+            }
+            double xmin = tmin * scale, xmax = tmax * scale, xsum = tsum * scale;
+            Span<int> pal = stackalloc int[8];
+            Span<byte> sel = stackalloc byte[16];
+            Span<Vector128<float>> tv = stackalloc Vector128<float>[4];
+            for (int i = 0; i < 4; i++) tv[i] = Vector128.Create((float)t[i * 4], t[i * 4 + 1], t[i * 4 + 2], t[i * 4 + 3]);
+            bool wide = Vector256.IsHardwareAccelerated;
+            var t0 = Vector256.Create(tv[0], tv[1]); var t1 = Vector256.Create(tv[2], tv[3]);
+            float bestErr = float.MaxValue;
+            int bb = 0, bm = 0, bt = 0;
+
+            if (tmin == tmax && kind == EacKind.Alpha8)
+            {
+                bb = tmin;   // multiplier 0: every entry is the base
+                goto done;
+            }
+
+            for (int pass = 0; pass < (q == BcQuality.Fast ? 1 : 2); pass++)
+                for (int tab = 0; tab < 16; tab++)
+                {
+                    int mmin = EacMod[tab * 8 + 3], mmax = EacMod[tab * 8 + 7];
+                    ReadOnlySpan<float> mods = EacSortedF.AsSpan(tab * 8, 8);
+                    double ideal = (xmax - xmin) / ((mmax - mmin) * unit);
+                    int lo, hi;
+                    if (pass == 0) { lo = (int)Math.Floor(ideal); hi = (int)Math.Ceiling(ideal); }
+                    else if (q == BcQuality.Normal) { lo = (int)Math.Floor(ideal) - 1; hi = (int)Math.Ceiling(ideal); }
+                    else { lo = (int)Math.Floor(ideal) - 2; hi = (int)Math.Ceiling(ideal) + 2; }
+                    lo = Math.Clamp(lo, small ? 0 : 1, 15); hi = Math.Clamp(hi, lo, 15);
+                    for (int mul = lo; mul <= hi; mul++)
+                    {
+                        double step = small && mul == 0 ? 1 : mul * unit;
+                        int b0 = Math.Clamp((int)Math.Round(((xmin + xmax) / 2 - (mmin + mmax) / 2.0 * step - c0) / unit), baseLo, baseHi);
+                        if (pass == 0)
+                        {
+                            // the centred base, then the least squares base for its choices
+                            float e = EacErrorP(t0, t1, EacPaletteV(kind, b0, mul, tab), mods, out float sm);
+                            if (e < bestErr) { bestErr = e; bb = b0; bm = mul; bt = tab; if (e == 0) goto done; }
+                            int b1 = Math.Clamp((int)Math.Round(((xsum - sm * step) / 16 - c0) / unit), baseLo, baseHi);
+                            if (b1 == b0) continue;
+                            e = EacErrorP(t0, t1, EacPaletteV(kind, b1, mul, tab), mods, out _);
+                            if (e < bestErr) { bestErr = e; bb = b1; bm = mul; bt = tab; if (e == 0) goto done; }
+                            continue;
+                        }
+                        int reach = q == BcQuality.High ? Math.Max(mul + 2, (int)Math.Ceiling((xmax - xmin) / unit / 2)) : mul + 2;
+                        for (int b = Math.Max(baseLo, b0 - reach); b <= Math.Min(baseHi, b0 + reach); b++)
+                        {
+                            float e = EacErrorP(t0, t1, EacPaletteV(kind, b, mul, tab), mods, out _);
                             if (e < bestErr) { bestErr = e; bb = b; bm = mul; bt = tab; if (e == 0) goto done; }
                         }
                     }
