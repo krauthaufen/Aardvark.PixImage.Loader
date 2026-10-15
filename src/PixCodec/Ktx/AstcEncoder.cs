@@ -643,7 +643,7 @@ namespace PixCodec
             public float EstFactor;    // a candidate is skipped when its estimated error times this exceeds the best error
             public int PartPre = 1;    // partition patterns matched per try, re-ranked by their line residual
             public int Spare = 2;      // extra candidates ranked before the decimation proper corrects the estimates
-            public float Gate;         // dual plane and partitions are only tried when the 1 partition line residual is this part of the error
+            public float Gate;         // LDR: dual plane and partitions are only tried when the 1 partition line residual is this part of the error
             public float GateMid, GateLarge;   // the same for LDR footprints of 36 to 63 texels, and 64 and more
         }
 
@@ -754,7 +754,7 @@ namespace PixCodec
             Trial(c, false, -1);
             // more planes or partitions only lower the line residual, at the cost of coarser quantization: when the
             // residual is a small part of the error, they do not pay
-            if (c.Residual * scale < (c.Hdr || n < 36 ? prm.Gate : n < 64 ? prm.GateMid : prm.GateLarge) * c.BestErr) good = long.MaxValue;
+            if (c.Residual * scale < (c.Hdr ? 0 : n < 36 ? prm.Gate : n < 64 ? prm.GateMid : prm.GateLarge) * c.BestErr) good = long.MaxValue;
 
             // one partition, two planes
             Span<int> order = stackalloc int[4];
