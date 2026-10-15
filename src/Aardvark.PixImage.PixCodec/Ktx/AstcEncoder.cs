@@ -1511,7 +1511,7 @@ namespace Aardvark.ImageCodecs
                         // the sweeps below are only needed where the weights were clamped or the importance varies
                         bool clamped = false;
                         int gs = g.GStride, vl = System.Numerics.Vector<float>.Count, nv = gs / vl;
-                        var accs = stackalloc System.Numerics.Vector<float>[8];
+                        var accs = stackalloc System.Numerics.Vector<float>[nv];   // up to 64 floats: 8 AVX2 or 16 NEON / SSE vectors
                         for (int j = 0; j < nv; j++) accs[j] = System.Numerics.Vector<float>.Zero;
                         fixed (float* pv = g.Pinv)
                             for (int t = 0; t < n; t++)
