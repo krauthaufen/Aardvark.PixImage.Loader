@@ -6,7 +6,8 @@ using PixCodec;
 namespace Aardvark.Base
 {
     /// <summary>
-    /// PixImage loader backed by the fully managed PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP).
+    /// PixImage loader backed by the fully managed PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA,
+    /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO).
     /// Register with <see cref="PixImagePixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
     public sealed class PixCodecLoader : IPixMipmapLoader
@@ -84,6 +85,29 @@ namespace Aardvark.Base
                     break;
                 case PixFileFormat.Gif:
                     Gif.Encode(ToRawImage(image, Target.Byte), stream);
+                    break;
+                case PixFileFormat.Hdr:
+                    Hdr.Encode(ToRawImage(image, Target.Native), stream);
+                    break;
+                case PixFileFormat.Pfm:
+                    Pfm.Encode(ToRawImage(image, Target.Native), stream);
+                    break;
+                case PixFileFormat.Pbm:
+                    Pnm.Encode(ToRawImage(image.ToPixImage<byte>().ToPixImage<byte>(Col.Format.Gray), Target.Byte), stream, new PnmEncodeOptions { Bilevel = true });
+                    break;
+                case PixFileFormat.Pgm:
+                case PixFileFormat.Ppm:
+                    {
+                        var raw = ToRawImage(image, Target.ByteOrUShort);
+                        // PGM holds gray, PPM colour; images with alpha become PAM
+                        bool gray = raw.Color is ColorModel.Gray or ColorModel.GrayAlpha;
+                        if (saveParams.Format == PixFileFormat.Pgm && !gray)
+                            raw = ToRawImage(raw.SampleType == SampleType.UInt16 ? image.ToPixImage<ushort>().ToPixImage<ushort>(Col.Format.Gray) : image.ToPixImage<byte>().ToPixImage<byte>(Col.Format.Gray), Target.ByteOrUShort);
+                        Pnm.Encode(raw, stream);
+                        break;
+                    }
+                case PixFileFormat.Ico:
+                    Ico.Encode(new[] { ToRawImage(image, Target.Byte) }, stream);
                     break;
                 case PixFileFormat.Tiff:
                     Tiff.Encode(ToRawImage(image, Target.Native), stream, new TiffEncodeOptions
@@ -302,9 +326,98 @@ namespace Aardvark.Base
         /// faces in: +X, -X, +Y, -Y, +Z, -Z). Faces a legacy file leaves out are null. <paramref name="item"/> selects the cube
         /// of a cube map array.
         /// </summary>
-        public static PixCube LoadCube(string path, int item = 0) => ToCube(Dds.DecodeTexture(File.ReadAllBytes(path)), item);
+        public static PixCube LoadCube(string path, int item = 0) => LoadCube(File.ReadAllBytes(path), item);
         /// <inheritdoc cref="LoadCube(string, int)"/>
-        public static PixCube LoadCube(Stream stream, int item = 0) => ToCube(Dds.DecodeTexture(ImageCodec.ReadAll(stream)), item);
+        public static PixCube LoadCube(Stream stream, int item = 0) => LoadCube(ImageCodec.ReadAll(stream), item);
+
+        /// <summary>A DDS or KTX cube map as a PixCube (see <see cref="LoadCube(string, int)"/>); <paramref name="item"/> is the cube (array layer).</summary>
+        public static PixCube LoadCube(byte[] data, int item = 0)
+        {
+            if (!Ktx.IsMatch(data)) return ToCube(Dds.DecodeTexture(data), item);
+            var t = Ktx.DecodeTexture(data);
+            if (t.Kind != KtxTextureKind.CubeMap) throw new ImageLoadException($"not a cube map but a {t.Kind}");
+            var sides = new PixImageMipMap[6];
+            for (int i = 0; i < 6; i++) sides[i] = PixCodecLoader.ToMipMap(t.GetMipChain(item, i));
+            return new PixCube(sides);
+        }
+
+        /// <summary>
+        /// The top level of a DDS or KTX volume (3D) texture as a PixVolume of the stored sample type (half floats as float), with
+        /// the dense layout channel, x, y, z. <paramref name="mip"/> picks a smaller level, <paramref name="item"/> a KTX array layer.
+        /// </summary>
+        public static PixVolume LoadVolume(string path, int mip = 0, int item = 0) => LoadVolume(File.ReadAllBytes(path), mip, item);
+        /// <inheritdoc cref="LoadVolume(string, int, int)"/>
+        public static PixVolume LoadVolume(Stream stream, int mip = 0, int item = 0) => LoadVolume(ImageCodec.ReadAll(stream), mip, item);
+        /// <inheritdoc cref="LoadVolume(string, int, int)"/>
+        public static PixVolume LoadVolume(byte[] data, int mip = 0, int item = 0)
+        {
+            RawImage[] slices;
+            if (Ktx.IsMatch(data))
+            {
+                var t = Ktx.DecodeTexture(data);
+                if (t.Kind != KtxTextureKind.Texture3D) throw new ImageLoadException($"not a volume texture but a {t.Kind}");
+                slices = t.GetSlices(mip, item);
+            }
+            else
+            {
+                var t = Dds.DecodeTexture(data);
+                if (t.Kind != DdsTextureKind.Texture3D) throw new ImageLoadException($"not a volume texture but a {t.Kind}");
+                slices = t.GetSlices(mip, item);
+            }
+            return ToVolume(slices);
+        }
+
+        static PixVolume ToVolume(RawImage[] slices) => slices[0].SampleType switch
+        {
+            SampleType.UInt8 => Volume<byte>(slices, s => (byte[])s.Data),
+            SampleType.UInt16 => Volume<ushort>(slices, s => (ushort[])s.Data),
+            SampleType.UInt32 => Volume<uint>(slices, s => (uint[])s.Data),
+            SampleType.Int8 => Volume<sbyte>(slices, s => (sbyte[])s.Data),
+            SampleType.Int16 => Volume<short>(slices, s => (short[])s.Data),
+            SampleType.Int32 => Volume<int>(slices, s => (int[])s.Data),
+            SampleType.Float16 => Volume<float>(slices, s => Array.ConvertAll((System.Half[])s.Data, h => (float)h)),
+            SampleType.Float32 => Volume<float>(slices, s => (float[])s.Data),
+            SampleType.Float64 => Volume<double>(slices, s => (double[])s.Data),
+            var t => throw new NotSupportedException($"unsupported sample type {t}"),
+        };
+
+        static PixVolume<T> Volume<T>(RawImage[] slices, Func<RawImage, T[]> data)
+        {
+            var f = slices[0];
+            long w = f.Width, h = f.Height, c = f.Channels, d = slices.Length;
+            var fmt = f.Color switch
+            {
+                ColorModel.Gray => Col.Format.Gray,
+                ColorModel.GrayAlpha => Col.Format.GrayAlpha,
+                ColorModel.Rgb => Col.Format.RGB,
+                ColorModel.Rgba => Col.Format.RGBA,
+                _ => c switch { 1 => Col.Format.Gray, 2 => Col.Format.RG, 3 => Col.Format.RGB, 4 => Col.Format.RGBA, _ => Col.Format.None },
+            };
+            var all = new T[w * h * c * d];
+            for (int z = 0; z < d; z++) data(slices[z]).CopyTo(all, z * w * h * c);
+            // channel fastest, then x, y, z
+            var tensor = new Tensor4<T>(all, 0, new V4l(w, h, d, c), new V4l(c, w * c, w * h * c, 1));
+            return new PixVolume<T>(fmt, tensor);
+        }
+
+        /// <summary>
+        /// Saves an image as KTX 2: uncompressed or BC1 to BC7 (<see cref="KtxEncodeOptions.Compression"/>), optionally with a
+        /// computed mip chain, Zstandard supercompressed by default.
+        /// </summary>
+        public static void SaveKtx(PixImage image, Stream stream, KtxEncodeOptions? options = null)
+            => Ktx.Encode(PixCodecLoader.ToRawImage(image), stream, options);
+
+        /// <summary>Saves a mip map as KTX 2 (every level half the size of the previous one, rounded down).</summary>
+        public static void SaveKtx(PixImageMipMap mipmap, Stream stream, KtxEncodeOptions? options = null)
+            => Ktx.EncodeMipmaps(Array.ConvertAll(mipmap.ImageArray, PixCodecLoader.ToRawImage), stream, options);
+
+        /// <summary>Saves a PixCube as a KTX 2 cube map, each side with its mip chain.</summary>
+        public static void SaveKtx(PixCube cube, Stream stream, KtxEncodeOptions? options = null)
+            => Ktx.EncodeCube(Array.ConvertAll(cube.MipMapArray, m => (IReadOnlyList<RawImage>)Array.ConvertAll(m.ImageArray, PixCodecLoader.ToRawImage)), stream, options);
+
+        /// <summary>Saves a PixVolume as a KTX 2 volume texture, with a 3D mip chain if <see cref="KtxEncodeOptions.GenerateMipmaps"/> is set.</summary>
+        public static void SaveKtx(PixVolume volume, Stream stream, KtxEncodeOptions? options = null)
+            => Ktx.EncodeVolume(VolumeSlices(volume), stream, options);
 
         static PixCube ToCube(DdsTexture t, int item)
         {
@@ -401,6 +514,15 @@ namespace Aardvark.Base
         /// <summary>Saves in the format given by the file extension, with default or the given parameters.</summary>
         public static void Save(PixImage image, string path, PixSaveParams? saveParams = null)
         {
+            // formats without a PixFileFormat
+            var codec = ImageCodec.FormatFromExtension(path);
+            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx)
+            {
+                using var fs = File.Create(path);
+                if (codec == ImageFormat.Qoi) Qoi.Encode(PixCodecLoader.ToRawImage(image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>()), fs);
+                else Ktx.Encode(PixCodecLoader.ToRawImage(image), fs);
+                return;
+            }
             var p = saveParams ?? new PixSaveParams(FileFormat(path));
             Loader.SaveToFile(path, image, p);
         }
@@ -421,6 +543,10 @@ namespace Aardvark.Base
             ImageFormat.Bmp => PixFileFormat.Bmp,
             ImageFormat.Tga => PixFileFormat.Targa,
             ImageFormat.Dds => PixFileFormat.Dds,
+            ImageFormat.Hdr => PixFileFormat.Hdr,
+            ImageFormat.Pfm => PixFileFormat.Pfm,
+            ImageFormat.Pnm => Path.GetExtension(path).ToLowerInvariant() switch { ".pbm" => PixFileFormat.Pbm, ".pgm" => PixFileFormat.Pgm, _ => PixFileFormat.Ppm },
+            ImageFormat.Ico => PixFileFormat.Ico,
             _ => throw new ArgumentException($"cannot infer the image format from '{path}'"),
         };
 

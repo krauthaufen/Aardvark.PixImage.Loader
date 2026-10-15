@@ -729,9 +729,11 @@ namespace PixCodec
                 b[0] = (byte)intent;
                 WriteChunk(output, PngChunks.sRGB, b.Slice(0, 1));
             }
-            if (meta != null && meta.Gamma > 0 && !double.IsInfinity(meta.Gamma))
+            // linear data (e.g. from ImageOps.ToLinear) is marked with gamma 1.0
+            double gamma = meta == null ? 0 : meta.Gamma > 0 ? meta.Gamma : meta.Transfer == TransferFunction.Linear && !hasIcc ? 1.0 : 0;
+            if (meta != null && gamma > 0 && !double.IsInfinity(gamma))
             {
-                BinaryPrimitives.WriteUInt32BigEndian(b, (uint)Math.Clamp(Math.Round(meta.Gamma * 100000.0), 1, int.MaxValue));
+                BinaryPrimitives.WriteUInt32BigEndian(b, (uint)Math.Clamp(Math.Round(gamma * 100000.0), 1, int.MaxValue));
                 WriteChunk(output, PngChunks.gAMA, b.Slice(0, 4));
             }
             if (png?.Chromaticities is { } c)

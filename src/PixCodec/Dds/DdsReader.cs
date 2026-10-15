@@ -119,6 +119,7 @@ namespace PixCodec.DdsImpl
             {
                 BitsPerSample = RawImage.BytesPerSample(i.SampleType) * 8,
                 MipLevels = i.MipLevels,
+                Transfer = i.IsSrgb ? TransferFunction.Srgb : TransferFunction.Unknown,
             };
         }
 

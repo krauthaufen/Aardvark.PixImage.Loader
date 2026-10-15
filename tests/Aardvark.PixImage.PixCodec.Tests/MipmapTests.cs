@@ -154,4 +154,67 @@ public class MipmapTests
         Assert.Equal(47.0707123, info.Metadata.Gps!.Latitude!.Value, 9);
         Assert.Equal("FC6310R", PixImagePixCodec.ReadMetadata(Fixture("metadata/meta.png")).Model);
     }
+
+    [Fact]
+    public void KtxTexturesAndVolumes()
+    {
+        // image with a computed BC7 mip chain
+        var img = PixImagePixCodec.Load(Fixture("jpeg/photo_444.jpg"));
+        var ms = new MemoryStream();
+        PixImagePixCodec.SaveKtx(img, ms, new KtxEncodeOptions { Compression = TextureCompression.BC7, GenerateMipmaps = true });
+        var info = Ktx.GetTextureInfo(ms.ToArray());
+        Assert.Equal(("BC7_SRGB_BLOCK", 8, TransferFunction.Srgb), (info.Format, info.MipLevels, info.Transfer));
+        var mm = PixImagePixCodec.LoadMipmap(new MemoryStream(ms.ToArray()));
+        Assert.Equal((8, Col.Format.RGBA, new V2i(160, 120)), (mm.LevelCount, mm.ImageArray[0].Format, mm.ImageArray[0].Size));
+
+        // a volume round trip, with a 3D mip chain
+        var vol = new PixVolume<ushort>(Col.Format.Gray, 9, 6, 4);
+        var t = vol.Tensor4;
+        for (int z = 0; z < 4; z++)
+            for (int y = 0; y < 6; y++)
+                for (int x = 0; x < 9; x++) t[x, y, z, 0] = (ushort)(x * 1000 + y * 100 + z * 7);
+        var vs = new MemoryStream();
+        PixImagePixCodec.SaveKtx(vol, vs, new KtxEncodeOptions { GenerateMipmaps = true });
+        var back = (PixVolume<ushort>)PixImagePixCodec.LoadVolume(new MemoryStream(vs.ToArray()));
+        Assert.Equal(new V3i(9, 6, 4), back.Size);
+        for (int z = 0; z < 4; z++)
+            for (int y = 0; y < 6; y++)
+                for (int x = 0; x < 9; x++) Assert.Equal(t[x, y, z, 0], back.Tensor4[x, y, z, 0]);
+        Assert.Equal(new V3i(4, 3, 2), PixImagePixCodec.LoadVolume(vs.ToArray(), mip: 1).Size);
+        // DDS volumes load the same way
+        var ds = new MemoryStream();
+        PixImagePixCodec.SaveDds(vol, ds);
+        var dv = (PixVolume<ushort>)PixImagePixCodec.LoadVolume(ds.ToArray());
+        Assert.Equal(t[5, 4, 3, 0], dv.Tensor4[5, 4, 3, 0]);
+
+        // cube maps
+        var face = new PixImage<byte>(Col.Format.RGBA, 8, 8);
+        for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) for (int c = 0; c < 4; c++) face.Volume[x, y, c] = (byte)(x * 30 + y * 5 + c * 60);
+        var cube = new PixCube(Enumerable.Range(0, 6).Select(_ => new PixImageMipMap(face)).ToArray());
+        var cs = new MemoryStream();
+        PixImagePixCodec.SaveKtx(cube, cs);
+        var c2 = PixImagePixCodec.LoadCube(cs.ToArray());
+        Assert.Equal(Bytes(face), Bytes((PixImage<byte>)c2.MipMapArray[3].ImageArray[0]));
+    }
+
+    [Fact]
+    public void SmallFormatsByExtension()
+    {
+        var img = (PixImage<byte>)PixImagePixCodec.Load(Fixture("png/f0_c6_d08.png"));
+        var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            foreach (var ext in new[] { ".qoi", ".ktx2", ".ico", ".pam", ".ppm", ".hdr", ".pfm", ".pgm", ".pbm" })
+            {
+                var path = Path.Combine(dir, "x" + ext);
+                PixImagePixCodec.Save(img, path);
+                var back = PixImagePixCodec.Load(path);
+                Assert.Equal(img.Size, back.Size);
+                if (ext is ".qoi" or ".ktx2" or ".ico" or ".pam" or ".ppm") Assert.Equal(Bytes(img), Bytes((PixImage<byte>)back));
+                Assert.Equal(ImageCodec.FormatFromExtension(path), PixImagePixCodec.GetInfo(path).Format);
+            }
+        }
+        finally { Directory.Delete(dir, true); }
+    }
 }

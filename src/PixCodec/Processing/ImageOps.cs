@@ -11,7 +11,7 @@ namespace PixCodec
     /// cropping, flips, rotations by multiples of 90 degrees, applying the EXIF orientation, rotation by any angle, affine and
     /// perspective warps and arbitrary remapping. Every operation returns a new image; the source is never modified.
     /// </summary>
-    public static class ImageOps
+    public static partial class ImageOps
     {
         #region Resize
 

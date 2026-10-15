@@ -44,6 +44,32 @@ namespace PixCodec
         Bmp,
         Tga,
         Dds,
+        Hdr,
+        Pnm,
+        Pfm,
+        Qoi,
+        Ico,
+        Ktx,
+    }
+
+    /// <summary>
+    /// How the sample values relate to light intensity (the transfer function or "gamma" of the colour channels; alpha is
+    /// always linear).
+    /// </summary>
+    public enum TransferFunction : byte
+    {
+        /// <summary>The file does not say and the format implies nothing (e.g. a DDS texture with a legacy header).</summary>
+        Unknown = 0,
+        /// <summary>The sRGB curve (IEC 61966-2-1): what 8 bit photos, web images and _SRGB texture formats hold.</summary>
+        Srgb,
+        /// <summary>Proportional to light: OpenEXR, Radiance HDR, PFM, float textures, data such as normal maps.</summary>
+        Linear,
+        /// <summary>A pure power law, value = light^g with g in <see cref="ImageMetadata.Gamma"/> (PNG gAMA, e.g. 0.45455 for "gamma 2.2").</summary>
+        Gamma,
+        /// <summary>SMPTE ST 2084 perceptual quantizer (HDR10), from a PNG cICP chunk.</summary>
+        Pq,
+        /// <summary>Hybrid log-gamma (ARIB STD-B67), from a PNG cICP chunk.</summary>
+        Hlg,
     }
 
     /// <summary>Optional, format independent metadata. Decoders fill in what they find, encoders write what they can.</summary>
@@ -62,6 +88,11 @@ namespace PixCodec
         public double DpiX, DpiY;
         /// <summary>File gamma (PNG gAMA), 0 if unknown.</summary>
         public double Gamma;
+        /// <summary>
+        /// The transfer function of the colour channels as the file declares it or the format implies it (see
+        /// <see cref="ImageInfo.Transfer"/>). Encoders that can record it do (PNG sRGB / gAMA, QOI, KTX, DDS).
+        /// </summary>
+        public TransferFunction Transfer;
         /// <summary>
         /// EXIF/TIFF orientation 1..8, 0 if unknown. Decoders turn the image upright by default and then report 1 (and set the
         /// tag in <see cref="Exif"/> to 1 too); encoders write this value, also into a copied <see cref="Exif"/> blob.
@@ -104,6 +135,20 @@ namespace PixCodec
         /// <summary>Whether the file embeds an ICC colour profile.</summary>
         public bool HasIccProfile { get; init; }
 
+        /// <summary>
+        /// The transfer function ("gamma") of the decoded colour values: what the file declares (PNG sRGB / gAMA / cICP, JPEG 2000
+        /// colour space, _SRGB texture formats, KTX data format descriptor, QOI header), else what the format implies (Linear for
+        /// OpenEXR, Radiance HDR, PFM and float samples; Srgb for JPEG, WebP, GIF, BMP, TGA, PNM, ICO and integer TIFF / PNG
+        /// without colour chunks). Unknown when neither says. An ICC profile (<see cref="HasIccProfile"/>) overrides it.
+        /// Decoders never convert: use <see cref="ImageOps.SrgbToLinear"/> / <see cref="ImageOps.LinearToSrgb"/>.
+        /// </summary>
+        public TransferFunction Transfer
+        {
+            get => transfer != TransferFunction.Unknown ? transfer : ColorTags.Implied(Format, SampleType, Color);
+            init => transfer = value;
+        }
+        readonly TransferFunction transfer;
+
         /// <summary>Whether the file is an animation (GIF, APNG, WebP) rather than a still image or a set of pages.</summary>
         public bool IsAnimated { get; init; }
 
@@ -124,11 +169,11 @@ namespace PixCodec
             => Format == o.Format && Width == o.Width && Height == o.Height && Channels == o.Channels && SampleType == o.SampleType
                && Color == o.Color && FrameCount == o.FrameCount && BitsPerSample == o.BitsPerSample && Orientation == o.Orientation
                && OrientationApplied == o.OrientationApplied && DpiX.Equals(o.DpiX) && DpiY.Equals(o.DpiY) && HasIccProfile == o.HasIccProfile
-               && IsAnimated == o.IsAnimated && MipLevels == o.MipLevels;
+               && IsAnimated == o.IsAnimated && MipLevels == o.MipLevels && Transfer == o.Transfer;
 
         public override int GetHashCode()
             => HashCode.Combine(HashCode.Combine(Format, Width, Height, Channels, SampleType, Color, FrameCount),
-                HashCode.Combine(BitsPerSample, Orientation, OrientationApplied, DpiX, DpiY, HasIccProfile, IsAnimated, MipLevels));
+                HashCode.Combine(BitsPerSample, Orientation, OrientationApplied, DpiX, DpiY, HasIccProfile, IsAnimated, HashCode.Combine(MipLevels, Transfer)));
 
         /// <summary>Width / Height of the pixels as stored in the file, before the orientation is applied (swapped for 5..8).</summary>
         public int StoredWidth => OrientationApplied && Orientation >= 5 ? Height : Width;

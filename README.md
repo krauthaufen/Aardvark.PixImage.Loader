@@ -17,6 +17,11 @@ Little-endian hosts only (x64 and arm64 are tested).
 | LERC | LERC1 and LERC2 v2..v6 (bands, depth, masks, no-data, lossless float) | decode only |
 | JBIG1 | the whole of T.82 (layers, all stripe orders, bit planes) | single layer, 1..8 bit planes |
 | JPEG 2000 | Part 1 and HTJ2K (.j2k / .jph codestreams, JP2 / JPH container), 1..38 bit, region / reduced resolution / layer limited decode | Part 1 and HTJ2K, lossless and lossy (up to 16 bit), target bitrate, tiles, progression orders |
+| KTX / KTX2 | KTX 1.1 and 2.0: 1D, 2D, 3D, cube map and array textures, mip chains; every uncompressed Vulkan / OpenGL format with 8..64 bit components and the packed ones; BC1..BC7, ETC1 / ETC2 / EAC, ASTC (LDR and HDR, all 2D footprints), Basis Universal ETC1S (BasisLZ) and UASTC; Zstandard and zlib supercompression; KTX 1 big endian files and orientation | KTX 2 with a full data format descriptor (passes `ktx validate`): uncompressed 8/16/32 bit int, half and float, or BC1..BC7; mip chains (given or computed), cube maps, arrays, volumes with 3D mip chains; Zstandard or zlib supercompression |
+| Radiance HDR | RGBE and XYZE, new and old RLE and flat scanlines, all eight scan orders, EXPOSURE / PRIMARIES | RLE RGBE from float (or 8/16 bit converted to linear light) |
+| PNM / PAM / PFM | P1..P7, any maxval up to 65535 (scaled to the full range), PAM tuple types, PFM gray / RGB in both byte orders | P1..P7 (plain or binary, bilevel), PFM |
+| QOI | everything (sRGB / linear header) | RGB, RGBA |
+| ICO / CUR | PNG and DIB entries of every bit depth with AND mask or alpha, cursor hotspots | PNG or 32 bit DIB entries, icons and cursors |
 
 Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions, ICC colour conversion.
 LERC encoding is not offered because Esri holds patents on LERC compression.
@@ -40,7 +45,10 @@ PhotoMetadata m = info.Metadata!;                   // or ImageCodec.ReadMetadat
 // m.Title, Description, Artist, Copyright, Keywords, Rating, City, ...; m.Panorama (GPano)
 // raw: m.Exif (every tag), m.Xmp (every property), m.Iptc, m.Comments, m.Text (PNG), m.ExrAttributes, m.Thumbnail
 if (ImageCodec.TryGetInfo(path, out var i)) { /* ... */ }
-RawImage[] levels = ImageCodec.DecodeMipmaps("tex.dds");   // stored mip levels (DDS, OpenEXR), else just the image
+RawImage[] levels = ImageCodec.DecodeMipmaps("tex.dds");   // stored mip levels (DDS, KTX, OpenEXR), else just the image
+KtxTexture kt = Ktx.DecodeTexture(bytes);               // kt.GetImage(mip, layer, face, slice), kt.Format, kt.KeyValues
+Ktx.Encode(img, stream, new KtxEncodeOptions { Compression = TextureCompression.BC7, GenerateMipmaps = true });
+Ktx.EncodeVolume(slices, stream, new KtxEncodeOptions { GenerateMipmaps = true });   // 3D texture with a 3D mip chain
 DdsTexture tex = Dds.DecodeTexture(bytes);              // every surface: tex.GetImage(mip, item, face, slice)
 Dds.Encode(img, stream, new DdsEncodeOptions { Compression = DdsCompression.BC7, Mipmaps = DdsMipmaps.Generate });
 Dds.EncodeVolume(slices, stream, new DdsEncodeOptions { Compression = DdsCompression.BC4 });   // 3D texture
@@ -49,11 +57,29 @@ Dds.EncodeVolume(slices, stream, new DdsEncodeOptions { Compression = DdsCompres
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
 in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF orientation (JPEG, PNG, WebP, TIFF, JPEG 2000)
 is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
-turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Lerc`, `Jbig`)
+turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`, `Dds`, `Ktx`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Lerc`, `Jbig`)
 with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data.
 
 Malformed files throw `ImageFormatException`, valid files using an unimplemented feature throw `ImageNotSupportedException`.
+
+### sRGB and gamma
+
+Decoders never convert colour values: an 8 bit JPEG gives the stored sRGB values, an EXR the stored linear floats.
+`ImageInfo.Transfer` (and `ImageMetadata.Transfer` of decoded images) says what they are: what the file declares (PNG sRGB,
+gAMA and cICP chunks, _SRGB texture formats, the KTX data format descriptor, the QOI header) or else what the format implies
+(`Linear` for OpenEXR, Radiance HDR, PFM and float samples; `Srgb` for 8 / 16 bit colour; `Unknown` for DDS without an
+_SRGB format and for non-colour data). `Gamma` is a pure power law (`ImageMetadata.Gamma`), `Pq` and `Hlg` are the HDR
+video curves. An ICC profile (`HasIccProfile`, `ImageMetadata.IccProfile`) is kept but not applied.
+
+```csharp
+RawImage lin  = ImageOps.ToLinear(img);                 // Float32 linear light per img's transfer function
+RawImage srgb = ImageOps.LinearToSrgb(lin);              // back to 8 bit sRGB (or UInt16, Float16, Float32)
+```
+
+Encoders record it where the format can: PNG writes gAMA 1.0 for linear images, QOI its colour space byte, KTX and DDS
+choose _SRGB formats for sRGB data (KTX by default from `Transfer`, DDS with `Srgb = true`). Mip levels of sRGB images are
+computed in linear light, as is `ResizeOptions.LinearLight` resizing.
 
 `GetInfo` never reads pixel data: files are memory mapped (only the pages holding headers and metadata are read),
 streams are walked by seeking past image chunks (PNG, WebP, JPEG 2000) or by reading just the TIFF directories. GIF
@@ -92,7 +118,8 @@ var w     = ImageOps.WarpPerspective(img, 800, 600, homography, new WarpOptions 
   (`Constant`, `Clamp`, `Wrap`, `Mirror`, `MirrorRepeat`).
 - Multi-threaded and vectorised: 4000x3000 RGB to 1000x750 with Lanczos3 takes about 30 ms on 8 cores (Pillow: 125 ms, one thread).
 
-`ImageCodec.DecodeAll` returns every page of a TIFF or every frame of an animated GIF, PNG or WebP.
+`ImageCodec.DecodeAll` returns every page of a TIFF, every frame of an animated GIF, PNG or WebP, every layer / face of a
+DDS or KTX texture (every slice of a KTX volume) and every image of an icon.
 
 ## Aardvark
 
@@ -120,6 +147,9 @@ PixImageMipMap mm  = PixImagePixCodec.LoadMipmap("tex.dds");                    
 PixCube cube       = PixImagePixCodec.LoadCube("sky.dds");                        // DDS cube map, every side with its mip chain
 PixImagePixCodec.SaveDds(cube, stream);
 PixImagePixCodec.SaveDds(volume, stream, new DdsEncodeOptions { Compression = DdsCompression.BC1 });   // PixVolume
+PixImagePixCodec.SaveKtx(cube, stream, new KtxEncodeOptions { Compression = TextureCompression.BC7 });
+PixVolume vol      = PixImagePixCodec.LoadVolume("ct.ktx2");                      // DDS or KTX volume texture
+PixImagePixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .qoi .ktx2 too
 ```
 
 `Init()` also registers `PixCodecProcessor`, so `PixImage.Scaled`, `Resized`, `Rotated`, `Remapped` and `PixImageMipMap.Create`
@@ -138,7 +168,8 @@ classes (JPEG quality, PNG level, TIFF / EXR compression, WebP quality / lossles
 library, Chromium, ...) through `.ref` sidecars generated by `tests/oracle/gen_*.py`; encoders are checked by decoding
 their output with the same reference tools. Running the encoder cross-checks needs `python3` with Pillow, numpy,
 tifffile, imagecodecs, opencv and OpenEXR; without python they are skipped. Some extra checks use tools fetched by
-`tests/oracle/gen_png.py --fetch-tools`.
+`tests/oracle/gen_png.py --fetch-tools`. Written KTX files are checked with KTX-Software's `ktx validate` when `ktx` is on the
+PATH or `PIXCODEC_KTX` points to it.
 
 Everything in `tests/fixtures` is generated by `tests/oracle/gen_*.py` from synthetic images. Third-party test files
 (the PngSuite, openexr-images samples, the lists of the libwebp vectors, the JPEG 2000 conformance suite and the

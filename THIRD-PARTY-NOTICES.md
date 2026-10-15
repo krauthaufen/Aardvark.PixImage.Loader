@@ -66,3 +66,20 @@ functionality it describes, as its copyright notice (https://www.khronos.org/reg
 
 Microsoft documentation: Copyright (c) Microsoft Corporation, licensed under the Creative Commons Attribution 4.0
 International licence (https://creativecommons.org/licenses/by/4.0/).
+
+## Khronos Data Format Specification - ETC and ASTC tables
+
+`src/PixCodec/Ktx/EtcBlocks.cs` and `src/PixCodec/Ktx/AstcBlocks.cs` contain tables printed in the Khronos Data Format
+Specification 1.3 (https://registry.khronos.org/DataFormat/specs/1.3/dataformat.1.3.html): the ETC1 / ETC2 intensity
+modifier and distance tables, the EAC modifier tables, and the ASTC weight / colour quantisation and unquantisation
+tables. Only the table values were taken; the decoders are written from the specification's text.
+
+Copyright © 2014-2019 The Khronos Group Inc., licensed under the Creative Commons Attribution 4.0 International License
+(https://creativecommons.org/licenses/by/4.0/).
+
+## Basis Universal specifications - ETC1S and UASTC tables
+
+`src/PixCodec/Ktx/BasisEtc1s.cs` and `src/PixCodec/Ktx/BasisUastc.cs` contain tables printed in Binomial's
+".basis File Format and ETC1S Texture Video Specification" and "UASTC LDR 4x4 Texture Specification"
+(https://github.com/BinomialLLC/basis_universal/wiki) and in Appendix C / D of the KTX 2.0 specification. Only the table
+values were taken; no code of basis_universal was used.

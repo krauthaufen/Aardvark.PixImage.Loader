@@ -14,7 +14,11 @@ namespace PixCodec.DdsImpl
             if (opt.Mipmaps == DdsMipmaps.None) return new[] { image };
             var levels = new List<RawImage> { image };
             int w = image.Width, h = image.Height;
-            var ro = new ResizeOptions { Filter = opt.MipmapFilter, MaxDegreeOfParallelism = opt.MaxDegreeOfParallelism };
+            var ro = new ResizeOptions
+            {
+                Filter = opt.MipmapFilter, MaxDegreeOfParallelism = opt.MaxDegreeOfParallelism,
+                LinearLight = opt.Srgb || image.Metadata?.Transfer == TransferFunction.Srgb,
+            };
             while (w > 1 || h > 1)
             {
                 w = Math.Max(1, w / 2); h = Math.Max(1, h / 2);
@@ -222,6 +226,16 @@ namespace PixCodec.DdsImpl
 
         static int ToSnorm8(RawImage img, long i)
             => img.SampleType == SampleType.Int8 ? Math.Max(-127, (int)((sbyte[])img.Data)[i]) : (int)MathF.Round(Math.Clamp(Normalized(img, i), -1, 1) * 127);
+
+        /// <summary>Block compresses one surface (for KTX): <paramref name="signed"/> picks BC4 / BC5 SNORM and BC6H SF16.</summary>
+        public static byte[] CompressSurface(RawImage img, DdsCompression bc, bool signed, DdsEncodeOptions opt)
+            => Compress(img, new Target
+            {
+                Bc = bc, Signed = signed, Alpha = bc == DdsCompression.BC1 && img.HasAlpha,
+                BlockBytes = bc is DdsCompression.BC1 or DdsCompression.BC4 ? 8 : 16,
+            }, opt);
+
+        public static bool HasNegative(RawImage img) => AnyNegative(new[] { new[] { new[] { img } } });
 
         static byte[] Compress(RawImage img, Target t, DdsEncodeOptions opt)
         {

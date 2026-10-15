@@ -18,6 +18,12 @@ namespace PixCodec
             if (Jp2.IsMatch(header)) return ImageFormat.Jp2;
             if (Bmp.IsMatch(header)) return ImageFormat.Bmp;
             if (Dds.IsMatch(header)) return ImageFormat.Dds;
+            if (Ktx.IsMatch(header)) return ImageFormat.Ktx;
+            if (Qoi.IsMatch(header)) return ImageFormat.Qoi;
+            if (Hdr.IsMatch(header)) return ImageFormat.Hdr;
+            if (Pfm.IsMatch(header)) return ImageFormat.Pfm;
+            if (Pnm.IsMatch(header)) return ImageFormat.Pnm;
+            if (Ico.IsMatch(header)) return ImageFormat.Ico;
             if (Tga.IsMatch(header)) return ImageFormat.Tga;   // no signature: last
             return ImageFormat.Unknown;
         }
@@ -35,6 +41,12 @@ namespace PixCodec
                 ".bmp" or ".dib" => ImageFormat.Bmp,
                 ".dds" => ImageFormat.Dds,
                 ".tga" or ".targa" or ".icb" or ".vda" or ".vst" => ImageFormat.Tga,
+                ".hdr" or ".rgbe" or ".pic" => ImageFormat.Hdr,
+                ".pbm" or ".pgm" or ".ppm" or ".pnm" or ".pam" => ImageFormat.Pnm,
+                ".pfm" => ImageFormat.Pfm,
+                ".qoi" => ImageFormat.Qoi,
+                ".ico" or ".cur" => ImageFormat.Ico,
+                ".ktx" or ".ktx2" => ImageFormat.Ktx,
                 _ => ImageFormat.Unknown,
             };
 
@@ -56,6 +68,12 @@ namespace PixCodec
             ImageFormat.Bmp => Bmp.GetInfo(data),
             ImageFormat.Tga => Tga.GetInfo(data),
             ImageFormat.Dds => Dds.GetInfo(data),
+            ImageFormat.Hdr => Hdr.GetInfo(data),
+            ImageFormat.Pnm => Pnm.GetInfo(data),
+            ImageFormat.Pfm => Pfm.GetInfo(data),
+            ImageFormat.Qoi => Qoi.GetInfo(data),
+            ImageFormat.Ico => Ico.GetInfo(data),
+            ImageFormat.Ktx => Ktx.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -188,7 +206,7 @@ namespace PixCodec
             // codes have to be walked: these need all the data. The others are parsed from a growing prefix; their
             // header parsers throw ImageFormatException when the prefix ends inside the headers, which is the signal
             // to read more.
-            bool needAll = format is ImageFormat.Tiff or ImageFormat.Gif or ImageFormat.Tga
+            bool needAll = format is ImageFormat.Tiff or ImageFormat.Gif or ImageFormat.Tga or ImageFormat.Ico
                 || format == ImageFormat.Bmp && Bmp.InfoNeedsAllData(buf.AsSpan(0, n));
             while (true)
             {
@@ -236,7 +254,9 @@ namespace PixCodec
             return total;
         }
 
-        public static RawImage Decode(ReadOnlySpan<byte> data) => DetectFormat(data) switch
+        public static RawImage Decode(ReadOnlySpan<byte> data) => ColorTags.Tag(DecodeCore(data), data, DetectFormat(data));
+
+        static RawImage DecodeCore(ReadOnlySpan<byte> data) => DetectFormat(data) switch
         {
             ImageFormat.Png => Png.Decode(data),
             ImageFormat.Jpeg => Jpeg.Decode(data),
@@ -248,6 +268,12 @@ namespace PixCodec
             ImageFormat.Bmp => Bmp.Decode(data),
             ImageFormat.Tga => Tga.Decode(data),
             ImageFormat.Dds => Dds.Decode(data),
+            ImageFormat.Hdr => Hdr.Decode(data),
+            ImageFormat.Pnm => Pnm.Decode(data),
+            ImageFormat.Pfm => Pfm.Decode(data),
+            ImageFormat.Qoi => Qoi.Decode(data),
+            ImageFormat.Ico => Ico.Decode(data),
+            ImageFormat.Ktx => Ktx.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -258,7 +284,9 @@ namespace PixCodec
         /// Decodes every image in the file: the pages of a TIFF, the frames of an animated GIF, PNG or WebP (each the whole canvas
         /// as a viewer shows it), the array elements / cube faces of a DDS texture (top mip level), or else the single image.
         /// </summary>
-        public static RawImage[] DecodeAll(ReadOnlySpan<byte> data)
+        public static RawImage[] DecodeAll(ReadOnlySpan<byte> data) => ColorTags.Tag(DecodeAllCore(data), data, DetectFormat(data));
+
+        static RawImage[] DecodeAllCore(ReadOnlySpan<byte> data)
         {
             switch (DetectFormat(data))
             {
@@ -283,6 +311,10 @@ namespace PixCodec
                             for (int face = 0; face < Math.Max(1, t.Faces.Count); face++) r.Add(t.GetImage(0, item, face));
                         return r.ToArray();
                     }
+                case ImageFormat.Ico:
+                    return Ico.DecodeAll(data);
+                case ImageFormat.Ktx:
+                    return Ktx.DecodeAll(data);
                 default:
                     return new[] { Decode(data) };
             }
@@ -296,10 +328,13 @@ namespace PixCodec
         /// the mip levels of an OpenEXR file (first part). Formats without stored levels give just the image; use
         /// <see cref="ImageOps.Resize(RawImage, int, int, ResizeOptions?)"/> to compute levels.
         /// </summary>
-        public static RawImage[] DecodeMipmaps(ReadOnlySpan<byte> data) => DetectFormat(data) switch
+        public static RawImage[] DecodeMipmaps(ReadOnlySpan<byte> data) => ColorTags.Tag(DecodeMipmapsCore(data), data, DetectFormat(data));
+
+        static RawImage[] DecodeMipmapsCore(ReadOnlySpan<byte> data) => DetectFormat(data) switch
         {
             ImageFormat.Dds => Dds.DecodeMipmaps(data),
             ImageFormat.Exr => Exr.DecodeMipmaps(data),
+            ImageFormat.Ktx => Ktx.DecodeMipmaps(data),
             _ => new[] { Decode(data) },
         };
 
@@ -328,6 +363,12 @@ namespace PixCodec
                 case ImageFormat.Bmp: Bmp.Encode(image, output); break;
                 case ImageFormat.Tga: Tga.Encode(image, output); break;
                 case ImageFormat.Dds: Dds.Encode(image, output); break;
+                case ImageFormat.Hdr: Hdr.Encode(image, output); break;
+                case ImageFormat.Pnm: Pnm.Encode(image, output); break;
+                case ImageFormat.Pfm: Pfm.Encode(image, output); break;
+                case ImageFormat.Qoi: Qoi.Encode(image, output); break;
+                case ImageFormat.Ico: Ico.Encode(new[] { image }, output); break;
+                case ImageFormat.Ktx: Ktx.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }

@@ -132,6 +132,7 @@ public class PngTests
             DpiX = meta?.DpiX ?? 0,
             DpiY = meta?.DpiY ?? 0,
             HasIccProfile = meta?.IccProfile != null,
+            Transfer = meta?.Transfer ?? TransferFunction.Unknown,
             IsAnimated = rel.Contains("apng"),
         }), info);
         Assert.Equal((img.Width, img.Height), (info.Width, info.Height));

@@ -357,11 +357,11 @@ namespace PixCodec
         /// chunk stored behind the pixel data (which the format allows) is found by Decode only, and
         /// HasIccProfile is set without inflating the profile, which Decode drops if its compressed data is corrupt.
         /// </summary>
-        public static ImageInfo GetInfo(ReadOnlySpan<byte> data) => PngDecoder.GetInfo(data);
+        public static ImageInfo GetInfo(ReadOnlySpan<byte> data) => ColorTags.With(PngDecoder.GetInfo(data), data);
 
         /// <summary>Decodes a complete PNG file held in memory. For an APNG this is the default image.</summary>
         public static RawImage Decode(ReadOnlySpan<byte> data, PngDecodeOptions? options = null)
-            => PngDecoder.Decode(data, options ?? DefaultDecode);
+            => ColorTags.Tag(PngDecoder.Decode(data, options ?? DefaultDecode), data, ImageFormat.Png);
 
         /// <summary>
         /// Returns the palette of a color type 3 PNG as RGBA quadruples (4 bytes per entry, alpha from tRNS or 255),
