@@ -72,6 +72,8 @@ namespace Aardvark.ImageCodecs.JpegXl
             long totalPixels = 0;
             foreach (var im in images) foreach (var c in im.Channels) totalPixels += (long)c.W * c.H;
             double frac = Math.Min(1.0, Math.Min(p.SampleFraction, (double)p.MaxSamples / Math.Max(1, totalPixels)));
+            // level 5 allows min(2^22, 1024 + samples / 16) nodes in the global tree (18181-1:2024 Table M.1)
+            int maxLeaves = (int)Math.Min(p.MaxLeaves, (Math.Min(1L << 22, 1024 + totalPixels / 16) + 1) / 2);
             uint threshold = (uint)Math.Min(uint.MaxValue, frac * 4294967296.0);
             var parts = new Samples[images.Count];
             void Collect(int i)
@@ -104,7 +106,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
             all.Count = n;
             double scale = n > 0 ? (double)totalPixels / n : 1;
-            return Build(all, p, scale);
+            return Build(all, p, scale, maxLeaves);
         }
 
         static void CollectChannel(List<JxlChannel> chans, int index, int stream, JxlTreeParams p, JxlWpHeader wph, bool needWp, int maxProp,
@@ -174,7 +176,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             return bits;
         }
 
-        static JxlEncTree Build(Samples s, JxlTreeParams p, double scale)
+        static JxlEncTree Build(Samples s, JxlTreeParams p, double scale, int maxLeaves)
         {
             int n = s.Count, np = s.NProps, npr = s.NPreds;
             var tree = new JxlEncTree();
@@ -350,7 +352,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 queue.Enqueue((lo, hi, node, depth, bestK, bestB), -(nodeCost - bestCost));
             }
             Evaluate(0, n, root, 0);
-            while (queue.Count > 0 && leaves < p.MaxLeaves)
+            while (queue.Count > 0 && leaves < maxLeaves)
             {
                 var (lo, hi, node, depth, bestK, bestB) = queue.Dequeue();
                 // split: left (property > threshold) = buckets > b

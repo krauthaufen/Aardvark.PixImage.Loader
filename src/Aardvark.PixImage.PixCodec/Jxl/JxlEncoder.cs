@@ -104,7 +104,9 @@ namespace Aardvark.ImageCodecs.JpegXl
             {
                 Width = img.Width, Height = img.Height, BitDepth = bd, XybEncoded = !lossless, Animation = animation,
                 Orientation = meta != null && meta.Orientation is >= 1 and <= 8 ? meta.Orientation : 1,
-                Modular16BitBuffers = !bd.Float && bd.Bits <= 12,
+                // int16 buffers suffice for modular samples of up to 12 bits (with room for transforms and residuals); lossy
+                // frames code only the extra channels at their bit depth
+                Modular16BitBuffers = lossless ? !bd.Float && bd.Bits <= 12 : !alpha || !bd.Float && bd.Bits <= 12,
             };
             if (alpha) h.ExtraChannels = new[] { new JxlExtraChannel { Type = JxlExtraChannelType.Alpha, BitDepth = bd } };
             h.Colour = ColourOf(img, meta, gray);
@@ -234,13 +236,15 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         /// <summary>
-        /// Whether the codestream exceeds the limits of level 5 (ISO/IEC 18181-2): more than 16 bits per sample, more than
-        /// 2^28 pixels or 2^18 per side, an ICC profile above 4 MB. It then needs a jxll box declaring level 10.
+        /// Whether the codestream exceeds the limits of level 5 (18181-1:2024 Annex M): more than 16 bits per sample,
+        /// 32 bit modular buffers, more than 4 extra channels or a black one, more than 2^28 pixels or 2^18 per side, an ICC
+        /// profile above 4 MB. It then needs a jxll box declaring level 10 (18181-2). (The MA trees the encoder learns stay
+        /// within the level 5 limits on nodes and depth.)
         /// </summary>
-        static bool NeedsLevel10(JxlImageHeader h)
+        internal static bool NeedsLevel10(JxlImageHeader h)
         {
-            if (h.BitDepth.Bits > 16) return true;
-            foreach (var e in h.ExtraChannels) if (e.BitDepth.Bits > 16) return true;
+            if (h.BitDepth.Bits > 16 || !h.Modular16BitBuffers || h.ExtraChannels.Length > 4) return true;
+            foreach (var e in h.ExtraChannels) if (e.BitDepth.Bits > 16 || e.Type == JxlExtraChannelType.Black) return true;
             if ((long)h.Width * h.Height > 1L << 28 || h.Width > 1 << 18 || h.Height > 1 << 18) return true;
             return h.Icc != null && h.Icc.Length > 1 << 22;
         }
