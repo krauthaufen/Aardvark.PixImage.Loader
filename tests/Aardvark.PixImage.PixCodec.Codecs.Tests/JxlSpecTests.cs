@@ -30,13 +30,16 @@ public class JxlSpecTests(ITestOutputHelper output)
         public readonly JxlImageHeader Header;
         readonly JxlBitWriter w = new();
 
+        static readonly JxlBitDepth Float32 = new() { Float = true, Bits = 32, ExpBits = 8 };
+
         public Stream(int width, int height, params JxlExtraChannelType[] extra)
+            : this(width, height, extra.Select(t => new JxlExtraChannel { Type = t, BitDepth = Float32 }).ToArray()) { }
+
+        public Stream(int width, int height, JxlExtraChannel[] extra)
         {
-            var bd = new JxlBitDepth { Float = true, Bits = 32, ExpBits = 8 };
             Header = new JxlImageHeader
             {
-                Width = width, Height = height, BitDepth = bd, XybEncoded = false, Modular16BitBuffers = false,
-                ExtraChannels = extra.Select(t => new JxlExtraChannel { Type = t, BitDepth = bd }).ToArray(),
+                Width = width, Height = height, BitDepth = Float32, XybEncoded = false, Modular16BitBuffers = false, ExtraChannels = extra,
             };
             JxlHeaderWriter.WriteImageHeader(w, Header);
             w.ZeroPadToByte();
@@ -57,10 +60,11 @@ public class JxlSpecTests(ITestOutputHelper output)
         /// <summary>Appends a frame; the planes are colour (3) then extra channels, at frame size before upsampling.</summary>
         public void Frame(JxlFrameHeader fh, Plane[] planes, Action<JxlBitWriter>? features = null)
         {
-            int fw = (fh.Width + fh.Upsampling - 1) / fh.Upsampling, fhh = (fh.Height + fh.Upsampling - 1) / fh.Upsampling;
-            var chans = planes.Select(p =>
+            var chans = planes.Select((p, k) =>
             {
-                var c = new JxlChannel(fw, fhh, 0, 0);
+                int up = k < 3 ? fh.Upsampling : fh.EcUpsampling[k - 3] << Header.ExtraChannels[k - 3].DimShift;
+                int shift = System.Numerics.BitOperations.Log2((uint)up) - System.Numerics.BitOperations.Log2((uint)fh.Upsampling);
+                var c = new JxlChannel((fh.Width + up - 1) / up, (fh.Height + up - 1) / up, shift, shift);
                 for (int i = 0; i < c.Data.Length; i++) c.Data[i] = BitConverter.SingleToInt32Bits(p.V[i]);
                 return c;
             }).ToList();
@@ -109,6 +113,65 @@ public class JxlSpecTests(ITestOutputHelper output)
         for (int i = 0; i < ours.Length; i++) m = Math.Max(m, Math.Abs(ours[i] - lib[i]));
         output.WriteLine($"{name}: largest difference to libjxl {m:g3} ({nc} channels)");
         Assert.True(m <= tol, $"{name}: {m} > {tol}");
+    }
+
+    // ------------------------------------------------------------------ L.4 extra channel upsampling
+
+    /// <summary>K.2 taken literally: k x k upsampling with the default weights, 5 x 5 windows mirrored, clamped to their range.</summary>
+    static float[] UpsampleReference(float[] src, int w, int h, int k, int ow, int oh)
+    {
+        var weights = k == 2 ? JxlUpsampling.Default2 : k == 4 ? JxlUpsampling.Default4 : JxlUpsampling.Default8;
+        int M(int c, int n) { while (c < 0 || c >= n) c = c < 0 ? -c - 1 : 2 * n - 1 - c; return c; }
+        var o = new float[ow * oh];
+        for (int oy = 0; oy < oh; oy++)
+            for (int ox = 0; ox < ow; ox++)
+            {
+                int px = ox / k, py = oy / k, kx = ox % k, ky = oy % k;
+                double sum = 0, lo = double.MaxValue, hi = double.MinValue;
+                for (int iy = 0; iy < 5; iy++)
+                    for (int ix = 0; ix < 5; ix++)
+                    {
+                        double v = src[M(py + iy - 2, h) * w + M(px + ix - 2, w)];
+                        lo = Math.Min(lo, v); hi = Math.Max(hi, v);
+                        int j = ky < k / 2 ? iy + 5 * ky : 4 - iy + 5 * (k - 1 - ky);
+                        int i = kx < k / 2 ? ix + 5 * kx : 4 - ix + 5 * (k - 1 - kx);
+                        int a = Math.Min(i, j), b = Math.Max(i, j);
+                        sum += weights[5 * k * a / 2 - a * (a - 1) / 2 + b - a] * v;
+                    }
+                o[oy * ow + ox] = (float)Math.Clamp(sum, lo, hi);
+            }
+        return o;
+    }
+
+    /// <summary>
+    /// L.4: an extra channel upsampled by f = ec_upsampling &lt;&lt; dim_shift, beyond 8 by 8 first, then by f / 8. libjxl
+    /// 0.12 decodes up to f = 8 (compared with it) and refuses more (compared with K.2 taken literally).
+    /// </summary>
+    [Theory]
+    [InlineData(1, 4)]
+    [InlineData(3, 1)]
+    [InlineData(0, 8)]
+    [InlineData(3, 2)]
+    [InlineData(4, 1)]
+    [InlineData(2, 8)]
+    public void ExtraChannelUpsampling(int dimShift, int ecUpsampling)
+    {
+        const int W = 150, H = 110;
+        int f = ecUpsampling << dimShift;
+        var s = new Stream(W, H, new[] { new JxlExtraChannel { Type = JxlExtraChannelType.Alpha, BitDepth = new JxlBitDepth { Float = true, Bits = 32, ExpBits = 8 }, DimShift = dimShift } });
+        var fr = s.NewFrame(W, H);
+        fr.IsLast = true; fr.EcUpsampling[0] = ecUpsampling;
+        int aw = (W + f - 1) / f, ah = (H + f - 1) / f;
+        var alpha = new Plane(aw, ah, (x, y) => Rand(9, x, y));
+        s.Frame(fr, Planes(W, H, 3, 2).Append(alpha).ToArray());
+        if (f <= 8) { AssertClose(s.ToArray(), $"extra channel upsampled {f}x", 1e-5); return; }
+        var ours = (float[])Jxl.Decode(s.ToArray()).Data;
+        int rest = f / 8, iw = Math.Min(8 * aw, (W + rest - 1) / rest), ih = Math.Min(8 * ah, (H + rest - 1) / rest);
+        var expected = UpsampleReference(UpsampleReference(alpha.V, aw, ah, 8, iw, ih), iw, ih, rest, W, H);
+        double m = 0;
+        for (int i = 0; i < W * H; i++) m = Math.Max(m, Math.Abs(ours[i * 4 + 3] - expected[i]));
+        output.WriteLine($"extra channel upsampled {f}x: largest difference to K.2 / L.4 taken literally {m:g3}");
+        Assert.True(m < 1e-5, $"{m}");
     }
 
     // ------------------------------------------------------------------ K.3 patches

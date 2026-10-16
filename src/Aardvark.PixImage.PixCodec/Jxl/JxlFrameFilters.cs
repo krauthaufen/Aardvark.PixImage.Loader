@@ -39,6 +39,13 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         float[] Upsample(float[] src, int w, int h, int up, int ow, int oh)
         {
+            if (up > 8)
+            {
+                // extra channels up to 64x: 8x first, then the rest (18181-1:2024 L.4)
+                int rest = up / 8;
+                int iw = (int)Math.Min(8L * w, ((long)ow + rest - 1) / rest), ih = (int)Math.Min(8L * h, ((long)oh + rest - 1) / rest);
+                return Upsample(Upsample(src, w, h, 8, iw, ih), iw, ih, rest, ow, oh);
+            }
             float[] weights = up switch
             {
                 2 => img.Up2Weights ?? JxlUpsampling.Default2,
