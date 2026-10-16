@@ -77,6 +77,24 @@ namespace Aardvark.ImageCodecs
         /// <summary>Reads size, channels, sample type, orientation and colour description from the headers.</summary>
         public static ImageInfo GetInfo(ReadOnlySpan<byte> data, JxlDecodeOptions? options = null)
         {
+            try { return GetInfoCore(data, options); }
+            catch (Exception e) when (IsCorruption(e)) { throw Corrupt(e); }
+        }
+
+        /// <summary>Malformed data must surface as <see cref="ImageFormatException"/>, whatever check caught it.</summary>
+        static bool IsCorruption(Exception e) => e is IndexOutOfRangeException or ArgumentException or OverflowException
+            or InvalidOperationException or InvalidCastException or DivideByZeroException or NullReferenceException
+            || e is AggregateException a && a.InnerExceptions.Count > 0 && a.InnerExceptions[0] is not (ImageFormatException or ImageNotSupportedException);
+
+        static Exception Corrupt(Exception e)
+        {
+            if (e is AggregateException a && a.InnerExceptions.Count == 1 && a.InnerExceptions[0] is ImageFormatException or ImageNotSupportedException)
+                return a.InnerExceptions[0];
+            return new ImageFormatException("JPEG XL: corrupt data (" + e.GetType().Name + ")", e);
+        }
+
+        static ImageInfo GetInfoCore(ReadOnlySpan<byte> data, JxlDecodeOptions? options)
+        {
             var opt = options ?? JxlDecodeOptions.Default;
             var c = JxlContainer.Parse(data);
             var cs = c.CodestreamPrefix(data, int.MaxValue);
@@ -100,7 +118,8 @@ namespace Aardvark.ImageCodecs
                 BitsPerSample = h.BitDepth.Bits,
                 Orientation = h.Orientation,
                 OrientationApplied = applied,
-                HasIccProfile = h.Colour.WantIcc,
+                // CMYK is returned as sRGB without the profile; enumerated encodings other than (linear) sRGB get one built
+                HasIccProfile = h.Colour.WantIcc ? !(BlackChannel(h) >= 0 && !h.Colour.IsGray && !h.XybEncoded) : JxlColour.DescribingIcc(h.Colour) != null,
                 IsAnimated = animated,
                 Transfer = tf,
             };
@@ -165,6 +184,12 @@ namespace Aardvark.ImageCodecs
         /// <summary>Decodes the image (for an animation: the first frame).</summary>
         public static RawImage Decode(ReadOnlySpan<byte> data, JxlDecodeOptions? options = null)
         {
+            try { return DecodeCore(data, options); }
+            catch (Exception e) when (IsCorruption(e)) { throw Corrupt(e); }
+        }
+
+        static RawImage DecodeCore(ReadOnlySpan<byte> data, JxlDecodeOptions? options)
+        {
             var opt = options ?? JxlDecodeOptions.Default;
             var c = JxlContainer.Parse(data);
             var dec = new JxlDecoder(c.Codestream(data), opt);
@@ -179,6 +204,12 @@ namespace Aardvark.ImageCodecs
 
         /// <summary>Decodes all displayed frames (each the whole canvas).</summary>
         public static JxlAnimation DecodeAnimation(ReadOnlySpan<byte> data, JxlDecodeOptions? options = null)
+        {
+            try { return DecodeAnimationCore(data, options); }
+            catch (Exception e) when (IsCorruption(e)) { throw Corrupt(e); }
+        }
+
+        static JxlAnimation DecodeAnimationCore(ReadOnlySpan<byte> data, JxlDecodeOptions? options)
         {
             var opt = options ?? JxlDecodeOptions.Default;
             var c = JxlContainer.Parse(data);
@@ -233,6 +264,8 @@ namespace Aardvark.ImageCodecs
                 m.Exif = exif; m.Xmp = xmp;
             }
             m.Transfer = TransferOf(h, out m.Gamma);
+            // an enumerated encoding other than (linear) sRGB: described by a profile built from it
+            m.IccProfile ??= JxlColour.DescribingIcc(h.Colour);
             return m;
         }
 

@@ -237,6 +237,39 @@ namespace Aardvark.ImageCodecs.JpegXl
             _ => ((ce.Red.x, ce.Red.y), (ce.Green.x, ce.Green.y), (ce.Blue.x, ce.Blue.y)),
         };
 
+        /// <summary>
+        /// An ICC profile describing an enumerated colour encoding the transfer function tag alone cannot (other primaries or
+        /// white point, a gamma, BT.709 or DCI curve), so the returned pixels can be interpreted. Null for sRGB and linear
+        /// sRGB / gray (said by the transfer function), PQ and HLG (said by the transfer function, no ICC curve), XYB and
+        /// unknown transfers.
+        /// </summary>
+        public static byte[]? DescribingIcc(JxlColourEncoding ce)
+        {
+            if (ce.WantIcc || ce.ColourSpace is not (JxlColourSpace.Rgb or JxlColourSpace.Grey)) return null;
+            IccCurve trc;
+            switch (ce.Transfer)
+            {
+                case JxlTransfer.Srgb: trc = IccCurve.Srgb; break;
+                case JxlTransfer.Linear: trc = IccCurve.Identity; break;
+                case JxlTransfer.Gamma: trc = IccCurve.Gamma(1 / ce.Gamma); break;
+                case JxlTransfer.Dci: trc = IccCurve.Gamma(2.6); break;
+                case JxlTransfer.Bt709: trc = IccCurve.Parametric(3, 1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5, 0.081); break;
+                default: return null;
+            }
+            bool plainCurve = ce.Transfer is JxlTransfer.Srgb or JxlTransfer.Linear;
+            if (plainCurve && ce.WhitePoint == JxlWhitePoint.D65 && (ce.IsGray || ce.Primaries == JxlPrimaries.Srgb)) return null;
+            var w = WhiteXy(ce);
+            var white = new CieXy(w.x, w.y);
+            try
+            {
+                if (ce.IsGray) return IccProfile.CreateGray("JPEG XL gray", white, trc).ToBytes();
+                var p = PrimariesXy(ce);
+                return IccProfile.CreateRgb("JPEG XL RGB", white, new CieXy(p.r.Item1, p.r.Item2), new CieXy(p.g.Item1, p.g.Item2),
+                    new CieXy(p.b.Item1, p.b.Item2), trc).ToBytes();
+            }
+            catch (Exception e) when (e is ArgumentException or ImageFormatException) { return null; }   // degenerate chromaticities
+        }
+
         /// <summary>Whether linear sRGB (D65) needs a matrix to get to the encoding's primaries / white point.</summary>
         public static bool NeedsPrimaryConversion(JxlColourEncoding ce)
             => !ce.IsGray && (ce.Primaries != JxlPrimaries.Srgb || ce.WhitePoint != JxlWhitePoint.D65);

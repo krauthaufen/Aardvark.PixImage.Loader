@@ -289,7 +289,6 @@ namespace Aardvark.ImageCodecs.JpegXl
                     quantEnc[t] = JxlQuantEncoding.Read(br, t, (table, cols, rows) => ReadRawQuant(br, table, cols, rows));
             }
             numHistoSets = 1 + (int)br.ReadBits(JxlHybridUint.CeilLog2(dims.NumGroups));
-            if (JxlModularChannelDecoder.DebugLog) Console.Error.WriteLine($"HfGlobal histosets {numHistoSets} blockctx {numBlockCtx} lfthr [{string.Join(",", lfThr[0])}] [{string.Join(",", lfThr[1])}] [{string.Join(",", lfThr[2])}] qfthr [{string.Join(",", qfThr)}] map [{string.Join(",", blockCtxMap)}] quant modes [{string.Join(",", Array.ConvertAll(quantEnc, q => q.Mode))}] globalScale {globalScale} quantLf {quantLf}");
             int np = fh.NumPasses;
             orders = new int[]?[np * 13 * 3];
             hfCodes = new JxlEntropyCode[np];
@@ -603,14 +602,8 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
         }
 
-        /// <summary>Test hook: receives the transform type of every block (XBlocks x YBlocks).</summary>
-        internal static Action<byte[], int, int>? DebugStrategies;
-        internal static Action<byte[], int[], int, int>? DebugBlocks;
-
         float[][] VarDctColour()
         {
-            DebugStrategies?.Invoke(strategy!, dims.XBlocks, dims.YBlocks);
-            DebugBlocks?.Invoke(sharpness!, qfField!, dims.XBlocks, dims.YBlocks);
             var r = new float[3][];
             for (int c = 0; c < 3; c++)
             {

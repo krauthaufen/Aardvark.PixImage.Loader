@@ -7,9 +7,6 @@ namespace Aardvark.ImageCodecs.JpegXl
     /// <summary>Decodes the samples of one modular channel with its (specialized) MA tree.</summary>
     internal static class JxlModularChannelDecoder
     {
-        internal static bool DebugLog = Environment.GetEnvironmentVariable("JXLDBG") == "1";
-        static IEnumerable<int> Distinct(JxlMaTree t) { var h = new SortedSet<int>(); for (int i = 0; i < t.Count; i++) if (t.Property[i] >= 0) h.Add(t.Property[i]); return h; }
-        static IEnumerable<int> Preds(JxlMaTree t) { var h = new SortedSet<int>(); for (int i = 0; i < t.Count; i++) if (t.Property[i] < 0) h.Add(t.Predictor[i]); return h; }
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static long Predict(int predictor, long W, long N, long NW, long NE, long NN, long WW, long NEE, long wp)
         {
@@ -47,7 +44,6 @@ namespace Aardvark.ImageCodecs.JpegXl
         public static void Decode(JxlBitReader br, JxlSymbolReader reader, JxlMaTree tree, JxlWpHeader wpHeader, List<JxlChannel> channels, int index)
         {
             var ch = channels[index];
-            if (DebugLog) Console.Error.WriteLine($"chan {index} {ch.W}x{ch.H} nodes {tree.Count} props [{string.Join(",", Distinct(tree))}] preds [{string.Join(",", Preds(tree))}]");
             if (tree.Property[0] < 0 && tree.Predictor[0] != 6)
             {
                 DecodeSingleLeaf(br, reader, tree, ch);
