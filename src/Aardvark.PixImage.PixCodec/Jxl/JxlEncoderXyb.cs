@@ -55,6 +55,23 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         /// <summary>
+        /// The HLG OOTF on scene light planes scaled by <paramref name="mul"/>: display = scene * Ys^(gamma - 1) with Ys the
+        /// scene luminance (weights null for grey, where the three planes are equal).
+        /// </summary>
+        public static void HlgOotf(float[][] planes, float[]? weights, float gamma, float mul)
+        {
+            if (gamma == 1) return;
+            float e = gamma - 1, inv = 1 / mul;
+            var (r, g, b) = (planes[0], planes[1], planes[2]);
+            for (int i = 0; i < r.Length; i++)
+            {
+                float ys = (weights == null ? r[i] : weights[0] * r[i] + weights[1] * g[i] + weights[2] * b[i]) * inv;
+                float f = ys > 0 ? MathF.Pow(ys, e) : 0;
+                r[i] *= f; g[i] *= f; b[i] *= f;
+            }
+        }
+
+        /// <summary>
         /// The colour channels as linear sRGB planes of size pw x ph (the image padded by repeating the last column and
         /// row), scaled by intensityScale (255 / intensity target times the nits of 1.0).
         /// </summary>

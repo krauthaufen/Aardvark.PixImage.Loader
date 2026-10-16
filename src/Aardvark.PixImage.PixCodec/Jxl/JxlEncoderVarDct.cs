@@ -156,10 +156,21 @@ namespace Aardvark.ImageCodecs.JpegXl
                 bool gray = h.Colour.IsGray;
                 icc = new IccTransform(src, gray ? IccProfile.GrayLinear : IccProfile.LinearSrgb, IccRenderingIntent.RelativeColorimetric);
             }
-            float scale = 255f / h.ToneMapping.IntensityTarget;
-            if (tf == TransferFunction.Pq) scale = 10000f / h.ToneMapping.IntensityTarget;
-            else if (tf == TransferFunction.Hlg) scale = 1000f / h.ToneMapping.IntensityTarget;
-            var planes = JxlEncColour.LinearPlanes(img, tf, img.Metadata?.Gamma ?? 0, icc, f.Pw, f.Ph, 1 / scale, f.Parallel);
+            // XYB holds linear light in units of 255 nits (the decoder scales by 255 / intensity target, L.2.2): samples
+            // whose 1.0 is the intensity target (SDR, and HLG after its OOTF) are scaled by it / 255, PQ (1.0 = 10000 nits)
+            // by 10000 / 255
+            float it = h.ToneMapping.IntensityTarget;
+            float mul = tf == TransferFunction.Pq && icc == null ? 10000f / 255 : it / 255;
+            var planes = JxlEncColour.LinearPlanes(img, tf, img.Metadata?.Gamma ?? 0, icc, f.Pw, f.Ph, mul, f.Parallel);
+            if (icc == null && !h.Colour.WantIcc)
+            {
+                // HLG is scene light: the OOTF makes it display light (18181-1:2024 Table E.6, NOTE 4), as the decoder undoes
+                if (tf == TransferFunction.Hlg)
+                    JxlEncColour.HlgOotf(planes, h.Colour.IsGray ? null : JxlColour.LuminanceWeights(h.Colour), JxlColour.HlgGamma(it), mul);
+                // XYB starts from linear sRGB
+                if (JxlColour.NeedsPrimaryConversion(h.Colour))
+                    JxlColour.ApplyMatrix(planes[0], planes[1], planes[2], planes[0].Length, JxlColour.TargetToSrgbMatrix(h.Colour));
+            }
             JxlProfile.Mark("vardct linear");
             JxlEncColour.ToXyb(planes[0], planes[1], planes[2], f.Parallel);
             JxlProfile.Mark("vardct xyb");

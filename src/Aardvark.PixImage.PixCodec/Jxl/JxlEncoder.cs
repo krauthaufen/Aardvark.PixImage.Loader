@@ -122,6 +122,9 @@ namespace Aardvark.ImageCodecs.JpegXl
                 }
             }
             if (!lossless && opt.IntensityTarget > 0) h.ToneMapping.IntensityTarget = opt.IntensityTarget;
+            // HDR defaults as libjxl has them: PQ reaches 10000 nits, HLG's nominal peak is 1000
+            else if (!lossless && !h.Colour.WantIcc && h.Colour.Transfer == JxlTransfer.Pq) h.ToneMapping.IntensityTarget = 10000;
+            else if (!lossless && !h.Colour.WantIcc && h.Colour.Transfer == JxlTransfer.Hlg) h.ToneMapping.IntensityTarget = 1000;
             return h;
         }
 

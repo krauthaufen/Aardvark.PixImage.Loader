@@ -674,6 +674,38 @@ public class JxlSpecTests(ITestOutputHelper output)
         Assert.Throws<ImageFormatException>(() => Jxl.GetGainMap(File_(GainMapBox(meta, pq, null, gainFile)[..30])));
     }
 
+    // ------------------------------------------------------------------ HDR encoding
+
+    /// <summary>
+    /// Lossy encoding of PQ and HLG images: XYB holds display light in units of 255 nits (L.2.2), so PQ samples are
+    /// scaled from 10000 nits, HLG goes through its OOTF (E.6 NOTE 4) and both from BT.2100 primaries to sRGB; the
+    /// intensity target defaults to 10000 / 1000 nits. Round trips through us and through libjxl.
+    /// </summary>
+    [Theory]
+    [InlineData(TransferFunction.Hlg, 0.9f, 0.08)]
+    [InlineData(TransferFunction.Pq, 0.3f, 0.05)]
+    public void HdrLossyRoundTrips(TransferFunction tf, float peak, double tol)
+    {
+        int w = 64, h = 48;
+        var d = new float[w * h * 3];
+        for (int i = 0; i < d.Length; i++)
+        {
+            int p = i / 3, c = i % 3;
+            d[i] = (float)(0.05 + (peak - 0.05) * (0.5 + 0.5 * Math.Sin(p % w * 0.07 + c) * Math.Cos(p / w * 0.05 - c)));
+        }
+        var enc = Jxl.Encode(new RawImage(w, h, ColorModel.Rgb, d, 3, new ImageMetadata { Transfer = tf }), new JxlEncodeOptions { Distance = 0.3f });
+        var hdr = JxlImageHeader.Read(new JxlBitReader(JxlContainer.Parse(enc).Codestream(enc)));
+        Assert.Equal(tf == TransferFunction.Pq ? 10000 : 1000, hdr.ToneMapping.IntensityTarget);
+        var ours = Jxl.Decode(enc);
+        Assert.Equal(tf, ours.Metadata?.Transfer);
+        double Max(float[] o) { double m = 0; for (int i = 0; i < d.Length; i++) m = Math.Max(m, Math.Abs(o[i] - d[i])); return m; }
+        double mo = Max((float[])ours.Data);
+        var lib = JxlEncodeTests.Libjxl(enc);
+        double ml = lib == null ? 0 : Max((float[])lib.Data);
+        output.WriteLine($"{tf}: round trip through us {mo:g3}, through libjxl {ml:g3}");
+        Assert.True(mo < tol && ml < tol, $"{mo} {ml}");
+    }
+
     // ------------------------------------------------------------------ fixtures of gen_jxl_spec.py
 
     static byte[] SpecFixture(string name) => File.ReadAllBytes(Path.Combine(FixtureDir, "jxl-spec", name));
@@ -686,11 +718,19 @@ public class JxlSpecTests(ITestOutputHelper output)
         Assert.Equal(SpecFixture("icc_xyz_shared.icc"), img.Metadata?.IccProfile);
     }
 
-    /// <summary>G.2.2: with an LF frame, the LF thresholds of the block context see no quantized LF (index 0).</summary>
+    /// <summary>
+    /// G.2.2: VarDCT frames whose LF comes from an LF frame (with LF thresholds in the block context, which then see no
+    /// quantized LF). E.6 NOTE 4: XYB decoded to an HLG encoding goes through the inverse HLG OOTF, its gamma from the
+    /// intensity target, its luminance from the encoding's primaries.
+    /// </summary>
     [Theory]
     [InlineData("lf_frame_e7.jxl")]
     [InlineData("lf_frame_e9.jxl")]
-    public void LfFrameBlockContexts(string name)
+    [InlineData("hlg_srgb.jxl")]
+    [InlineData("hlg_bt2100.jxl")]
+    [InlineData("hlg_gray.jxl")]
+    [InlineData("hlg_4000.jxl")]
+    public void LossyMatchesLibjxl(string name)
     {
         var img = Jxl.Decode(SpecFixture(name), new JxlDecodeOptions { ForceFloat = true });
         var reference = LoadRef(Path.Combine(FixtureDir, "jxl-spec", name + ".ref"));
