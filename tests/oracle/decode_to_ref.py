@@ -29,6 +29,8 @@ def decode(path):
         return decode_jp2(path)
     if ext == '.lerc':
         return decode_lerc(path)
+    if ext in ('.dpx', '.cin'):
+        return decode_oiio(path)
     if ext == '.dds' and dds_block_compressed(path):
         return decode_dds(path)
     from PIL import Image
@@ -388,6 +390,23 @@ def decode_lerc(path):
         with open(out + '.nodata', 'w') as f:
             f.write(' '.join(repr(v) if u else 'x' for u, v in nodata))
     return np.ascontiguousarray(data.transpose(1, 2, 0, 3).reshape(nr, nc, nb * nd))
+
+
+def decode_oiio(path):
+    """DPX / Cineon through OpenImageIO (optional python package; exit status 77 when it is missing): integers scaled to
+    16 bit, floats as float32, alpha as stored (unassociated)."""
+    try:
+        import OpenImageIO as oiio
+    except ImportError:
+        sys.exit(77)
+    i = oiio.ImageInput.open(path)
+    if i is None:
+        raise RuntimeError(oiio.geterror())
+    spec = i.spec()
+    flt = spec.format.basetype in (oiio.FLOAT, oiio.HALF, oiio.DOUBLE)
+    a = i.read_image(format='float' if flt else 'uint16')
+    i.close()
+    return np.ascontiguousarray(a.reshape(spec.height, spec.width, spec.nchannels))
 
 
 if __name__ == '__main__':

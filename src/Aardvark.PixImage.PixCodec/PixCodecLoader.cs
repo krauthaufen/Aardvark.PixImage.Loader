@@ -8,7 +8,7 @@ namespace Aardvark.Data
 {
     /// <summary>
     /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA,
-    /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO).
+    /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO, DPX, Cineon).
     /// Register with <see cref="PixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
     public sealed class PixCodecLoader : IPixMipmapLoader
@@ -532,15 +532,45 @@ namespace Aardvark.Data
         {
             // formats without a PixFileFormat
             var codec = ImageCodec.FormatFromExtension(path);
-            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx)
+            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.Dpx or ImageFormat.Cineon)
             {
                 using var fs = File.Create(path);
-                if (codec == ImageFormat.Qoi) Qoi.Encode(PixCodecLoader.ToRawImage(image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>()), fs);
-                else Ktx.Encode(PixCodecLoader.ToRawImage(image), fs);
+                switch (codec)
+                {
+                    case ImageFormat.Qoi: Qoi.Encode(PixCodecLoader.ToRawImage(image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>()), fs); break;
+                    case ImageFormat.Ktx: Ktx.Encode(PixCodecLoader.ToRawImage(image), fs); break;
+                    case ImageFormat.Dpx: SaveDpx(image, fs); break;
+                    default: SaveCineon(image, fs); break;
+                }
                 return;
             }
             var p = saveParams ?? new PixSaveParams(FileFormat(path));
             Loader.SaveToFile(path, image, p);
+        }
+
+        /// <summary>
+        /// Saves as DPX: 8 bit, 16 bit and float images keep their depth (other types are written as 16 bit). Use
+        /// <see cref="Dpx.Encode(RawImage, Stream, DpxEncodeOptions)"/> for 10 / 12 bit and the header fields.
+        /// </summary>
+        public static void SaveDpx(PixImage image, Stream stream, DpxEncodeOptions? options = null)
+        {
+            var t = image.PixFormat.Type;
+            if (t != typeof(byte) && t != typeof(ushort) && t != typeof(float) && t != typeof(double)) image = image.ToPixImage<ushort>();
+            Dpx.Encode(PixCodecLoader.ToRawImage(image), stream, options);
+        }
+
+        /// <summary>
+        /// Saves as Cineon (gray or RGB, alpha is dropped): 8 bit images as 10 bit (scaled), others as 16 bit, unless the options
+        /// say otherwise.
+        /// </summary>
+        public static void SaveCineon(PixImage image, Stream stream, CineonEncodeOptions? options = null)
+        {
+            bool gray = image.Format is Col.Format.Gray or Col.Format.GrayAlpha;
+            var fmt = gray ? Col.Format.Gray : Col.Format.RGB;
+            if (image.PixFormat.Type == typeof(byte)) image = image.ToPixImage<byte>().ToPixImage<byte>(fmt);
+            else image = image.ToPixImage<ushort>().ToPixImage<ushort>(fmt);
+            options ??= new CineonEncodeOptions { BitDepth = image.PixFormat.Type == typeof(byte) ? 10 : 16 };
+            Cineon.Encode(PixCodecLoader.ToRawImage(image), stream, options);
         }
 
         /// <summary>Saves to a stream in the given format.</summary>

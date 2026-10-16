@@ -38,12 +38,37 @@ namespace Aardvark.ImageCodecs
                     case ImageFormat.Gif: Gif(d, b); break;
                     case ImageFormat.Jp2: Jp2(d, b); break;
                     case ImageFormat.Exr: b.ExrAttributes = Aardvark.ImageCodecs.Exr.ReadHeaders(d)[0].Attributes; break;
+                    case ImageFormat.Dpx: Dpx(d, b); break;
+                    case ImageFormat.Cineon: Cineon(d, b); break;
                     case ImageFormat.Unknown: throw new ImageFormatException("unknown image format");
                 }
             }
             catch (ArgumentOutOfRangeException) { }   // truncated containers: keep what was found
             catch (IndexOutOfRangeException) { }
             return b;
+        }
+
+        // ------------------------------------------------------------------ DPX, Cineon
+
+        /// <summary>DPX header fields as text entries: creator (Software), creation time, copyright, project (Title).</summary>
+        static void Dpx(ReadOnlySpan<byte> d, MetadataBlocks b)
+        {
+            DpxHeader h;
+            try { h = DpxImpl.DpxDecoder.ReadHeader(d); } catch (ImageFormatException) { return; }
+            void Add(string key, string? v) { if (!string.IsNullOrWhiteSpace(v)) b.Text.Add(new(key, v.Trim())); }
+            Add("Software", h.Creator);
+            Add("Creation Time", h.CreationTime?.ToString("yyyy-MM-ddTHH:mm:sszzz", System.Globalization.CultureInfo.InvariantCulture));
+            Add("Copyright", h.Copyright);
+            Add("Title", h.Project);
+        }
+
+        /// <summary>Cineon header fields as text entries: creation time, label (Description).</summary>
+        static void Cineon(ReadOnlySpan<byte> d, MetadataBlocks b)
+        {
+            CineonHeader h;
+            try { h = CineonImpl.CineonCodec.ReadHeader(d); } catch (ImageFormatException) { return; }
+            if (h.CreationTime is DateTimeOffset t) b.Text.Add(new("Creation Time", t.ToString("yyyy-MM-ddTHH:mm:sszzz", System.Globalization.CultureInfo.InvariantCulture)));
+            if (!string.IsNullOrWhiteSpace(h.Label)) b.Text.Add(new("Description", h.Label.Trim()));
         }
 
         // ------------------------------------------------------------------ JPEG

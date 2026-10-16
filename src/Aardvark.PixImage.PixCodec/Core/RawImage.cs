@@ -50,6 +50,10 @@ namespace Aardvark.ImageCodecs
         Qoi,
         Ico,
         Ktx,
+        /// <summary>SMPTE 268M Digital Moving-Picture Exchange.</summary>
+        Dpx,
+        /// <summary>Kodak Cineon.</summary>
+        Cineon,
     }
 
     /// <summary>
