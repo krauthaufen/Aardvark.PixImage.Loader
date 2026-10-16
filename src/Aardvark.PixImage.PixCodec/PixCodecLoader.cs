@@ -8,7 +8,7 @@ namespace Aardvark.Data
 {
     /// <summary>
     /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA,
-    /// DDS, KTX, PVR, ASTC, Radiance HDR, PNM / PFM, QOI, ICO / CUR / ANI, ICNS, PCX / DCX, SGI, Sun Raster, XBM, XPM, WBMP,
+    /// DDS, KTX, PVR, ASTC, Radiance HDR, PNM / PFM, QOI, ICO / CUR / ANI, ICNS, PCX / DCX, SGI, Sun Raster, XBM, XPM, WBMP, DPX, Cineon,
     /// and the volume formats NRRD, NIfTI, MetaImage, FITS).
     /// Register with <see cref="PixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
@@ -719,7 +719,7 @@ namespace Aardvark.Data
                 ImageCodec.Encode(PixCodecLoader.ToRawImage(image), path);
                 return;
             }
-            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.Pvr or ImageFormat.Astc or ImageFormat.Icns or ImageFormat.Ani or ImageFormat.Dcx)
+            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.Pvr or ImageFormat.Astc or ImageFormat.Icns or ImageFormat.Ani or ImageFormat.Dcx or ImageFormat.Dpx or ImageFormat.Cineon)
             {
                 using var fs = File.Create(path);
                 var bytes = image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>();
@@ -731,12 +731,38 @@ namespace Aardvark.Data
                     case ImageFormat.Astc: Astc.Encode(PixCodecLoader.ToRawImage(image), fs); break;
                     case ImageFormat.Icns: Icns.Encode(new[] { PixCodecLoader.ToRawImage(bytes) }, fs); break;
                     case ImageFormat.Dcx: Pcx.EncodeDcx(new[] { PixCodecLoader.ToRawImage(bytes) }, fs); break;
+                    case ImageFormat.Dpx: SaveDpx(image, fs); break;
+                    case ImageFormat.Cineon: SaveCineon(image, fs); break;
                     default: Ani.Encode(new[] { new AniInputFrame(PixCodecLoader.ToRawImage(bytes)) }, fs); break;
                 }
                 return;
             }
             var p = saveParams ?? new PixSaveParams(FileFormat(path));
             Loader.SaveToFile(path, image, p);
+        }
+
+        /// <summary>
+        /// Saves as DPX: 8 bit, 16 bit and float images keep their depth (other types are written as 16 bit). Use
+        /// <see cref="Dpx.Encode(RawImage, Stream, DpxEncodeOptions)"/> for 10 / 12 bit and the header fields.
+        /// </summary>
+        public static void SaveDpx(PixImage image, Stream stream, DpxEncodeOptions? options = null)
+        {
+            var t = image.PixFormat.Type;
+            if (t != typeof(byte) && t != typeof(ushort) && t != typeof(float) && t != typeof(double)) image = image.ToPixImage<ushort>();
+            Dpx.Encode(PixCodecLoader.ToRawImage(image), stream, options);
+        }
+
+        /// <summary>
+        /// Saves as Cineon (gray or RGB, alpha is dropped): 8 bit images as 10 bit (scaled), others as 16 bit, unless the options
+        /// say otherwise.
+        /// </summary>
+        public static void SaveCineon(PixImage image, Stream stream, CineonEncodeOptions? options = null)
+        {
+            bool gray = image.Format is Col.Format.Gray or Col.Format.GrayAlpha;
+            var fmt = gray ? Col.Format.Gray : Col.Format.RGB;
+            if (image.PixFormat.Type == typeof(byte)) image = image.ToPixImage<byte>().ToPixImage<byte>(fmt);
+            else image = image.ToPixImage<ushort>().ToPixImage<ushort>(fmt);
+            Cineon.Encode(PixCodecLoader.ToRawImage(image), stream, options);
         }
 
         /// <summary>Saves to a stream in the given format.</summary>

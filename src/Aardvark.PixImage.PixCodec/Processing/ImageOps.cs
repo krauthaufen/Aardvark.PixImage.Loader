@@ -310,6 +310,7 @@ namespace Aardvark.ImageCodecs
         static ImageMetadata? CopyMetadata(ImageMetadata? m) => m == null ? null : new ImageMetadata
         {
             IccProfile = m.IccProfile, Exif = m.Exif, Xmp = m.Xmp, DpiX = m.DpiX, DpiY = m.DpiY, Gamma = m.Gamma, Orientation = m.Orientation,
+            Transfer = m.Transfer,
         };
 
         static ImageMetadata? ScaledMetadata(ImageMetadata? m, double sx, double sy)

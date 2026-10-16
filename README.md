@@ -55,6 +55,8 @@ code living in any `Aardvark.*` namespace.
 | NIfTI | NIfTI-1 and -2, .nii, .nii.gz, .hdr + .img (also gzipped), Analyze 7.5 headers; every data type but float128 / complex256 (RGB24 / RGBA32 as RGB(A), complex as two channels, vector intents as channels), scl_slope / scl_inter, sform / qform, dim_info, intents, extensions | NIfTI-1 .nii and .nii.gz: every integer and float type, RGB24 / RGBA32, vectors; qform and sform |
 | MetaImage | .mha and .mhd; every MET_ type, ElementNumberOfChannels, zlib (CompressedData), both byte orders, HeaderSize (also -1), ElementDataFile LOCAL / file / LIST / pattern; TransformMatrix, Offset, ElementSpacing | .mha and .mhd + .raw / .zraw, compressed or not, every type, channels |
 | FITS | primary array, IMAGE extensions, tile compressed images (RICE_1, GZIP_1, GZIP_2, PLIO_1, NOCOMPRESS; quantized floats with NO_DITHER / SUBTRACTIVE_DITHER_1 / 2), BITPIX 8 / 16 / 32 / 64 / -32 / -64, BSCALE / BZERO (unsigned conventions exact), BLANK, CONTINUE, linear WCS, .fits.gz | primary image of every BITPIX (unsigned via BZERO), optionally RICE_1 / GZIP_1 / GZIP_2 tile compressed, WCS from the metadata |
+| DPX | SMPTE 268M 1.0 / 2.0, both byte orders, 1/8/10/12/16 bit int and 32/64 bit float, packed / filled method A / B, RLE, several image elements, luma, R/G/B/A/depth, RGB, RGBA, ABGR, Cb Y Cr (Y) 4:2:2 / 4:4:4 (+ alpha) to RGB, user defined 2..8 components, orientation, padding, all header fields (time code, film, television) | gray, RGB, RGBA, 2..8 components at 8, 10, 12, 16 bit and 32/64 bit float, packed / filled A / B, either byte order, header fields |
+| Cineon | Kodak 4.5 draft: 1..16 and 32 bit, all packings, pixel / line / channel interleave, both byte orders, orientation, header fields | gray, RGB at 8, 10 (default for 8 bit images), 16 bit |
 
 Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions,
 PVRTC2, YUV and Basis Universal PVR formats, writing 3D ASTC footprints, ANI frames that are raw bitmaps (no AF_ICON),
@@ -103,8 +105,10 @@ in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF or
 is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
 turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the
 stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`,
-`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
-EXR headers, named channels, levels and deep data.
+`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`, `Dpx`, `Cineon`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
+EXR headers, named channels, levels and deep data, DPX / Cineon headers (`Dpx.GetHeader`, `Cineon.GetHeader`) and DPX image
+elements. Bit depths that do not fill a sample type keep their stored values: 10 bit DPX and Cineon decode to UInt16 0..1023,
+12 bit to 0..4095 (as 12 bit TIFF and JPEG); 1, 2 and 4 bit samples are stretched to 0..255.
 
 Malformed files throw `ImageFormatException`, valid files using an unimplemented feature throw `ImageNotSupportedException`.
 
@@ -157,7 +161,9 @@ Decoders never convert colour values: an 8 bit JPEG gives the stored sRGB values
 `ImageInfo.Transfer` (and `ImageMetadata.Transfer` of decoded images) says what they are: what the file declares (PNG sRGB,
 gAMA and cICP chunks, _SRGB texture formats, the KTX data format descriptor, the QOI header) or else what the format implies
 (`Linear` for OpenEXR, Radiance HDR, PFM and float samples; `Srgb` for 8 / 16 bit colour; `Unknown` for DDS without an
-_SRGB format, PVR in the linear colour space, LDR .astc files and non-colour data). `Gamma` is a pure power law (`ImageMetadata.Gamma`), `Pq` and `Hlg` are the HDR
+_SRGB format, PVR in the linear colour space, LDR .astc files and non-colour data). DPX reports its transfer characteristic (linear, the video curves as `Gamma`;
+printing density / logarithmic and user defined as `Unknown`, the raw code is in `Dpx.GetHeader`), Cineon `Unknown` for its
+printing density log data. `Gamma` is a pure power law (`ImageMetadata.Gamma`), `Pq` and `Hlg` are the HDR
 video curves. An ICC profile (`HasIccProfile`, `ImageMetadata.IccProfile`) overrides them; decoders keep it, the colour
 management below applies it.
 
@@ -323,7 +329,8 @@ RawVolume rv = ct.ToRawVolume(meta);  PixVolume pv = rv.ToPixVolume();
 PixCodec.SavePvr(volume, stream);  PixCodec.SaveAstc(volume, stream);  PixCodec.SaveIcns(images, stream);  PixCodec.SaveAni(steps, stream);
 PixCodec.WriteMetadata("a.jpg", "a.jpg", new MetadataEdit { Gps = new GpsEdit { Latitude = 47.07, Longitude = 15.44 } });
 PixImage srgb      = PixCodec.LoadSrgb("adobe-rgb.jpg");                 // converted through the embedded ICC profile
-PixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .ani .icns .qoi .ktx2 .pvr .astc .nrrd .nii .mha .fits too
+PixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .ani .icns .qoi .ktx2 .pvr .astc .nrrd .nii .mha .fits .dpx .cin too
+PixCodec.SaveDpx(img, stream, new DpxEncodeOptions { BitDepth = 10 });   // 10 bit filled method A, big endian
 ```
 
 `PixImage.Save` of Aardvark.Base only accepts the file extensions Aardvark.Base knows; `PixCodec.Save` takes every format

@@ -37,7 +37,7 @@ to run the net8.0 tests.
 | Path | Contents |
 |------|----------|
 | `src/Aardvark.PixImage.PixCodec/Core` | `RawImage`, `RawVolume` / `PhysicalMetadata` (volumes), `ImageCodec` (format detection, `Decode`, `GetInfo`, `DecodeVolume`), managed zlib / zstd / xz / gzip / bzip2 |
-| `src/Aardvark.PixImage.PixCodec/<Format>` | one folder per format: `Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Jbig`, `Bmp`, `Tga`, `Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Qoi`, `Ico` (with ANI), `Icns`, `Lerc`, `Pcx` (+ DCX), `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits` |
+| `src/Aardvark.PixImage.PixCodec/<Format>` | one folder per format: `Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Jbig`, `Bmp`, `Tga`, `Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Qoi`, `Ico` (with ANI), `Icns`, `Lerc`, `Pcx` (+ DCX), `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`, `Dpx`, `Cineon` |
 | `src/Aardvark.PixImage.PixCodec/Metadata` | EXIF / XMP / IPTC / GPS reading without decoding pixels, lossless metadata writing |
 | `src/Aardvark.PixImage.PixCodec/Color` | ICC profiles and colour management |
 | `src/Aardvark.PixImage.PixCodec/Processing` | `ImageOps`: resize filters, warps, orientation, transfer functions |

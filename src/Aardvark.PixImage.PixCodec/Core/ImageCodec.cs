@@ -30,6 +30,8 @@ namespace Aardvark.ImageCodecs
             if (Sgi.IsMatch(header)) return ImageFormat.Sgi;
             if (SunRaster.IsMatch(header)) return ImageFormat.SunRaster;
             if (Pcx.IsDcx(header)) return ImageFormat.Dcx;
+            if (Dpx.IsMatch(header)) return ImageFormat.Dpx;
+            if (Cineon.IsMatch(header)) return ImageFormat.Cineon;
             if (Hdr.IsMatch(header)) return ImageFormat.Hdr;
             if (Pfm.IsMatch(header)) return ImageFormat.Pfm;
             if (Pnm.IsMatch(header)) return ImageFormat.Pnm;
@@ -87,6 +89,8 @@ namespace Aardvark.ImageCodecs
                 ".ani" => ImageFormat.Ani,
                 ".astc" => ImageFormat.Astc,
                 ".pvr" => ImageFormat.Pvr,
+                ".dpx" => ImageFormat.Dpx,
+                ".cin" or ".cineon" => ImageFormat.Cineon,
                 _ => ImageFormat.Unknown,
             };
         }
@@ -129,6 +133,8 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Ani => Ani.GetInfo(data),
             ImageFormat.Astc => Astc.GetInfo(data),
             ImageFormat.Pvr => Pvr.GetInfo(data),
+            ImageFormat.Dpx => Dpx.GetInfo(data),
+            ImageFormat.Cineon => Cineon.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -367,6 +373,8 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Ani => Ani.Decode(data),
             ImageFormat.Astc => Astc.Decode(data),
             ImageFormat.Pvr => Pvr.Decode(data),
+            ImageFormat.Dpx => Dpx.Decode(data),
+            ImageFormat.Cineon => Cineon.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -492,8 +500,9 @@ namespace Aardvark.ImageCodecs
         }
 
         /// <summary>
-        /// Decodes every image in the file: the pages of a TIFF or DCX, the frames of an animated GIF, PNG or WebP (each the whole canvas
-        /// as a viewer shows it), the array elements / cube faces of a DDS texture (top mip level), or else the single image.
+        /// Decodes every image in the file: the pages of a TIFF or DCX, the frames of an animated GIF, PNG or WebP (each the whole
+        /// canvas as a viewer shows it), the array elements / cube faces of a DDS texture (top mip level), the image elements of a
+        /// DPX file, or else the single image.
         /// </summary>
         public static RawImage[] DecodeAll(ReadOnlySpan<byte> data) => ColorTags.Tag(DecodeAllCore(data), data, DetectFormat(data));
 
@@ -550,6 +559,8 @@ namespace Aardvark.ImageCodecs
                     return Astc.DecodeVolume(data);
                 case ImageFormat.Pvr:
                     return Pvr.DecodeAll(data);
+                case ImageFormat.Dpx:
+                    return Dpx.DecodeAll(data);
                 default:
                     return new[] { Decode(data) };
             }
@@ -641,6 +652,8 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Ani: Ani.Encode(new[] { new AniInputFrame(image) }, output); break;
                 case ImageFormat.Astc: Astc.Encode(image, output); break;
                 case ImageFormat.Pvr: Pvr.Encode(image, output); break;
+                case ImageFormat.Dpx: Dpx.Encode(image, output); break;
+                case ImageFormat.Cineon: Cineon.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }
