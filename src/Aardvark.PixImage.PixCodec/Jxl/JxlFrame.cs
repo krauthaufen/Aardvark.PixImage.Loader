@@ -135,10 +135,8 @@ namespace Aardvark.ImageCodecs.JpegXl
                     int hs = 0, vs = 0;
                     if (fh.DoYCbCr && numModularColour == 3)
                     {
-                        // jpeg_upsampling is given in Y, Cb, Cr order; modular channels are Cb, Y, Cr
-                        int mode = fh.JpegUpsampling[c == 0 ? 1 : c == 1 ? 0 : 2];
-                        hs = mode is 1 or 2 ? 1 : 0;
-                        vs = mode is 1 or 3 ? 1 : 0;
+                        // modular colour channels are Y, Cb, Cr (frame channels 1, 0, 2)
+                        fh.ChromaShift(c == 0 ? 1 : c == 1 ? 0 : 2, out hs, out vs);
                         int mhs = MaxJpegShift(true), mvs = MaxJpegShift(false);
                         int w = (dims.XSize + (1 << mhs) - 1 >> mhs << (mhs - hs));
                         int h = (dims.YSize + (1 << mvs) - 1 >> mvs << (mvs - vs));

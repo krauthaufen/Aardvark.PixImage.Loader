@@ -418,6 +418,23 @@ namespace Aardvark.ImageCodecs.JpegXl
         public ulong Flags;
         public bool DoYCbCr;
         public int[] JpegUpsampling = new int[3];
+
+        /// <summary>
+        /// Chroma subsampling shift of channel c (VarDCT order: Cb, Y, Cr): the jpeg_upsampling modes are sampling factors
+        /// (0 = 1x1, 1 = 2x2, 2 = 2x1, 3 = 1x2), a channel is subsampled by the maximum factor minus its own.
+        /// </summary>
+        public void ChromaShift(int c, out int hs, out int vs)
+        {
+            hs = vs = 0;
+            if (!DoYCbCr) return;
+            int mh = 0, mv = 0;
+            for (int i = 0; i < 3; i++) { mh = Math.Max(mh, ModeH(JpegUpsampling[i])); mv = Math.Max(mv, ModeV(JpegUpsampling[i])); }
+            hs = mh - ModeH(JpegUpsampling[c]);
+            vs = mv - ModeV(JpegUpsampling[c]);
+        }
+
+        static int ModeH(int m) => m is 1 or 2 ? 1 : 0;
+        static int ModeV(int m) => m is 1 or 3 ? 1 : 0;
         public int Upsampling = 1;
         public int[] EcUpsampling = Array.Empty<int>();
         public int GroupSizeShift = 1;

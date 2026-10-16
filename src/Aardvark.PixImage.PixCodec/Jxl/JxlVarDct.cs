@@ -28,8 +28,11 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         // LF image and block information (frame wide, in 8x8 blocks)
         float[][]? dc;            // [3][XBlocks * YBlocks]
-        int dcStride;
+        int dcStride;             // stride of the block arrays (luma blocks)
         int[][]? quantDc;
+        readonly int[] hs = new int[3], vs = new int[3];   // chroma subsampling shifts per channel (X, Y, B)
+        readonly int[] dcw = new int[3], dch = new int[3];  // LF image size per channel
+        bool Is444 => (hs[0] | hs[1] | hs[2] | vs[0] | vs[1] | vs[2]) == 0;
         byte[]? strategy;         // per block, 255 = not yet set
         bool[]? firstBlock;
         int[]? qfField;
@@ -47,7 +50,7 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         // output (XYB, padded to whole blocks)
         float[][]? planes;
-        int planeStride;
+        int planeStride;          // luma plane stride; channel c uses planeStride >> hs[c]
 
         // per group coefficient accumulators (kept across passes)
         int[][][]? groupCoeffs;   // [group][channel], null until the first pass
@@ -91,8 +94,15 @@ namespace Aardvark.ImageCodecs.JpegXl
             // frame wide block arrays
             int nb = dims.XBlocks * dims.YBlocks;
             dcStride = dims.XBlocks;
-            dc = new[] { new float[nb], new float[nb], new float[nb] };
-            quantDc = new[] { new int[nb], new int[nb], new int[nb] };
+            for (int c = 0; c < 3; c++) fh.ChromaShift(c, out hs[c], out vs[c]);
+            dc = new float[3][];
+            quantDc = new int[3][];
+            for (int c = 0; c < 3; c++)
+            {
+                dcw[c] = dims.XBlocks >> hs[c]; dch[c] = dims.YBlocks >> vs[c];
+                dc[c] = new float[dcw[c] * dch[c]];
+                quantDc[c] = new int[dcw[c] * dch[c]];
+            }
             strategy = new byte[nb];
             Array.Fill(strategy, (byte)255);
             firstBlock = new bool[nb];
@@ -106,7 +116,8 @@ namespace Aardvark.ImageCodecs.JpegXl
             planeStride = dims.XBlocks * 8;
             long pn = (long)planeStride * dims.YBlocks * 8;
             if (pn > int.MaxValue) throw new ImageNotSupportedException("JPEG XL: frame too large");
-            planes = new[] { new float[pn], new float[pn], new float[pn] };
+            planes = new float[3][];
+            for (int c = 0; c < 3; c++) planes[c] = new float[(long)(planeStride >> hs[c]) * ((dims.YBlocks * 8) >> vs[c])];
             groupCoeffs = new int[dims.NumGroups][][];
             groupOffsets = new int[dims.NumGroups][];
         }
@@ -119,27 +130,50 @@ namespace Aardvark.ImageCodecs.JpegXl
             int gx = index % dims.LfGroupsX, gy = index / dims.LfGroupsX;
             int bx0 = gx * 256, by0 = gy * 256;
             int w = Math.Min(256, dims.XBlocks - bx0), h = Math.Min(256, dims.YBlocks - by0);
-            var chans = new List<JxlChannel> { new(w, h, 0, 0, false), new(w, h, 0, 0, false), new(w, h, 0, 0, false) };
+            // modular channels: Y, X, B
+            int[] order = { 1, 0, 2 };
+            var chans = new List<JxlChannel>();
+            foreach (int c in order) chans.Add(new JxlChannel((w + (1 << hs[c]) - 1) >> hs[c], (h + (1 << vs[c]) - 1) >> vs[c], hs[c], vs[c], false));
             var img2 = JxlModularImage.Decode(br, chans, img.BitDepth.Bits, 1 + index, modularGlobal, 0, 1 << 22, true, out _);
             img2.Undo();
             if (img2.Channels.Count != 3) throw new ImageFormatException("JPEG XL: LF image has the wrong channel count");
-            var qy = img2.Channels[0].Data; var qx = img2.Channels[1].Data; var qb = img2.Channels[2].Data;
             float mul = InvGlobalScale / quantLf / (1 << extra);
-            float mx = lfDequant[0] * mul, my = lfDequant[1] * mul, mb = lfDequant[2] * mul;
-            float cfx = baseCorrX + (xFactorLf - 128) / (float)colourFactor;
-            float cfb = baseCorrB + (bFactorLf - 128) / (float)colourFactor;
-            var dx = dc![0]; var dy = dc[1]; var db = dc[2];
-            for (int y = 0; y < h; y++)
+            if (Is444)
             {
-                int o = (by0 + y) * dcStride + bx0, s = y * w;
-                for (int x = 0; x < w; x++)
+                var qy = img2.Channels[0].Data; var qx = img2.Channels[1].Data; var qb = img2.Channels[2].Data;
+                float mx = lfDequant[0] * mul, my = lfDequant[1] * mul, mb = lfDequant[2] * mul;
+                float cfx = baseCorrX + (xFactorLf - 128) / (float)colourFactor;
+                float cfb = baseCorrB + (bFactorLf - 128) / (float)colourFactor;
+                var dx = dc![0]; var dy = dc[1]; var db = dc[2];
+                for (int y = 0; y < h; y++)
                 {
-                    float vy = qy[s + x] * my;
-                    dy[o + x] = vy;
-                    dx[o + x] = qx[s + x] * mx + cfx * vy;
-                    db[o + x] = qb[s + x] * mb + cfb * vy;
-                    quantDc![0][o + x] = qx[s + x]; quantDc[1][o + x] = qy[s + x]; quantDc[2][o + x] = qb[s + x];
+                    int o = (by0 + y) * dcStride + bx0, s = y * w;
+                    for (int x = 0; x < w; x++)
+                    {
+                        float vy = qy[s + x] * my;
+                        dy[o + x] = vy;
+                        dx[o + x] = qx[s + x] * mx + cfx * vy;
+                        db[o + x] = qb[s + x] * mb + cfb * vy;
+                        quantDc![0][o + x] = qx[s + x]; quantDc[1][o + x] = qy[s + x]; quantDc[2][o + x] = qb[s + x];
+                    }
                 }
+                return;
+            }
+            // subsampled chroma: no chroma from luma
+            for (int k = 0; k < 3; k++)
+            {
+                int c = order[k];
+                var ch = img2.Channels[k];
+                var q = ch.Data;
+                float m = lfDequant[c] * mul;
+                int cx0 = bx0 >> hs[c], cy0 = by0 >> vs[c];
+                for (int y = 0; y < ch.H && cy0 + y < dch[c]; y++)
+                    for (int x = 0; x < ch.W && cx0 + x < dcw[c]; x++)
+                    {
+                        int o = (cy0 + y) * dcw[c] + cx0 + x;
+                        dc![c][o] = q[y * ch.W + x] * m;
+                        quantDc![c][o] = q[y * ch.W + x];
+                    }
             }
         }
 
@@ -208,12 +242,12 @@ namespace Aardvark.ImageCodecs.JpegXl
             {
                 var lf = state.LfFrames[fh.LfLevel] ?? throw new ImageFormatException("JPEG XL: frame uses a missing LF frame");
                 for (int c = 0; c < 3; c++)
-                    for (int y = 0; y < dims.YBlocks; y++)
-                        for (int x = 0; x < dims.XBlocks; x++)
-                            dc![c][y * dcStride + x] = lf.Planes[c][Math.Min(y, lf.Height - 1) * lf.Width + Math.Min(x, lf.Width - 1)];
+                    for (int y = 0; y < dch[c]; y++)
+                        for (int x = 0; x < dcw[c]; x++)
+                            dc![c][y * dcw[c] + x] = lf.Planes[c][Math.Min(y, lf.Height - 1) * lf.Width + Math.Min(x, lf.Width - 1)];
                 return;
             }
-            if (fh.Has(JxlFrameHeader.FlagSkipAdaptiveLfSmoothing)) return;
+            if (fh.Has(JxlFrameHeader.FlagSkipAdaptiveLfSmoothing) || !Is444) return;
             int W = dims.XBlocks, H = dims.YBlocks;
             if (W < 3 || H < 3) return;
             float mul = InvGlobalScale / quantLf;
@@ -325,7 +359,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206,
         };
 
-        int BlockContext(int c, int ord, int qf, int b)
+        int BlockContext(int c, int ord, int qf, int bx, int by)
         {
             int idx = (c < 2 ? c ^ 1 : 2) * 13 + ord;
             int qi = 0;
@@ -336,7 +370,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 int d = 0;
                 for (int cc = 0; cc < 3; cc++)
                 {
-                    int v = quantDc![cc][b];
+                    int v = quantDc![cc][(by >> vs[cc]) * dcw[cc] + (bx >> hs[cc])];
                     int k = 0;
                     foreach (int t in lfThr[cc]) if (v > t) k++;
                     d = d * (lfThr[cc].Length + 1) + k;
@@ -379,7 +413,12 @@ namespace Aardvark.ImageCodecs.JpegXl
             int histOff = 495 * numBlockCtx * sel;
             int zdOff0 = numBlockCtx * 37;
             var nzeros = new int[3][];
-            for (int c = 0; c < 3; c++) nzeros[c] = new int[gw * gh];
+            var nzw = new int[3];
+            for (int c = 0; c < 3; c++)
+            {
+                nzw[c] = (gw + (1 << hs[c]) - 1) >> hs[c];
+                nzeros[c] = new int[nzw[c] * ((gh + (1 << vs[c]) - 1) >> vs[c])];
+            }
             for (int y = 0; y < gh; y++)
             {
                 for (int x = 0; x < gw; x++)
@@ -396,19 +435,21 @@ namespace Aardvark.ImageCodecs.JpegXl
                     for (int ci = 0; ci < 3; ci++)
                     {
                         int c = ci == 0 ? 1 : ci == 1 ? 0 : 2;
-                        int bctx = BlockContext(c, ord, qf, b);
+                        if ((x & ((1 << hs[c]) - 1)) != 0 || (y & ((1 << vs[c]) - 1)) != 0) continue;
+                        int bctx = BlockContext(c, ord, qf, bx0 + x, by0 + y);
                         var nzc = nzeros[c];
+                        int gwc = nzw[c], xc = x >> hs[c], yc = y >> vs[c];
                         int pred;
-                        if (x == 0 && y == 0) pred = 32;
-                        else if (x == 0) pred = nzc[(y - 1) * gw];
-                        else if (y == 0) pred = nzc[x - 1];
-                        else pred = (nzc[(y - 1) * gw + x] + nzc[y * gw + x - 1] + 1) >> 1;
+                        if (xc == 0 && yc == 0) pred = 32;
+                        else if (xc == 0) pred = nzc[(yc - 1) * gwc];
+                        else if (yc == 0) pred = nzc[xc - 1];
+                        else pred = (nzc[(yc - 1) * gwc + xc] + nzc[yc * gwc + xc - 1] + 1) >> 1;
                         int nzBucket = pred >= 64 ? 36 : pred >= 8 ? 4 + pred / 2 : pred;
                         int nz = (int)reader.ReadUint(br, histOff + nzBucket * numBlockCtx + bctx);
                         if (nz > size - covered) throw new ImageFormatException("JPEG XL: too many nonzero coefficients");
                         int stored = (nz + covered - 1) >> logCovered;
                         for (int j = 0; j < sy; j++)
-                            for (int i = 0; i < sx; i++) nzc[(y + j) * gw + x + i] = stored;
+                            for (int i = 0; i < sx; i++) nzc[(yc + j) * gwc + xc + i] = stored;
                         if (nz == 0) continue;
                         var order = orders![(pass * 13 + ord) * 3 + c] ?? JxlAcStrategy.NaturalOrder(ord);
                         var cf = coeffs![c];
@@ -472,8 +513,12 @@ namespace Aardvark.ImageCodecs.JpegXl
                         int tile = ((by0 + y) / 8) * tilesX + (bx0 + x) / 8;
                         float rx = baseCorrX + cflX![tile] / (float)colourFactor;
                         float rb = baseCorrB + cflB![tile] / (float)colourFactor;
+                        bool[] present = new bool[3];
+                        for (int c = 0; c < 3; c++)
+                            present[c] = (x & ((1 << hs[c]) - 1)) == 0 && (y & ((1 << vs[c]) - 1)) == 0;
                         for (int c = 0; c < 3; c++)
                         {
+                            if (!present[c]) continue;
                             var q = coeffs![c];
                             var dm = Dequant(table, c);
                             float m = mul * (c == 0 ? xm : c == 2 ? bm : 1);
@@ -484,25 +529,27 @@ namespace Aardvark.ImageCodecs.JpegXl
                                 int v = q[off + k];
                                 float fv;
                                 if (v == 0) fv = 0;
-                                else if (xyb && (v == 1 || v == -1)) fv = v * bias;
-                                else if (xyb) fv = v - qbn / v;
-                                else fv = v;
+                                else if (v == 1 || v == -1) fv = v * bias;
+                                else fv = v - qbn / v;
                                 d[k] = fv * m * dm[k];
                             }
                         }
-                        for (int k = 0; k < size; k++) { float yv = pY[k]; pX[k] += rx * yv; pB[k] += rb * yv; }
+                        if (Is444)
+                            for (int k = 0; k < size; k++) { float yv = pY[k]; pX[k] += rx * yv; pB[k] += rb * yv; }
                         // LLF from DC
                         bool wide = sx > sy;
                         int W = sx * 8, H = sy * 8;
                         for (int c = 0; c < 3; c++)
                         {
+                            if (!present[c]) continue;
                             float* d = cbuf[c];
+                            int bc = ((by0 + y) >> vs[c]) * dcw[c] + ((bx0 + x) >> hs[c]);
                             fixed (float* pdc = dc![c])
                             {
-                                if (sx == 1 && sy == 1) d[0] = pdc[b];
+                                if (sx == 1 && sy == 1) d[0] = pdc[bc];
                                 else
                                 {
-                                    JxlTransforms.LlfFromDc(pdc + b, dcStride, sx, sy, pl);
+                                    JxlTransforms.LlfFromDc(pdc + bc, dcw[c], sx, sy, pl);
                                     for (int ky = 0; ky < sy; ky++)
                                         for (int kx = 0; kx < sx; kx++)
                                         {
@@ -511,8 +558,8 @@ namespace Aardvark.ImageCodecs.JpegXl
                                         }
                                 }
                             }
-                            int px = (bx0 + x) * 8, py = (by0 + y) * 8;
-                            JxlTransforms.Inverse(st, d, outs[c] + (long)py * planeStride + px, planeStride, ps);
+                            int px = ((bx0 + x) >> hs[c]) * 8, py = ((by0 + y) >> vs[c]) * 8, pst = planeStride >> hs[c];
+                            JxlTransforms.Inverse(st, d, outs[c] + (long)py * pst + px, pst, ps);
                         }
                     }
             }
@@ -531,9 +578,19 @@ namespace Aardvark.ImageCodecs.JpegXl
             for (int c = 0; c < 3; c++)
             {
                 var p = planes![c];
-                if (planeStride == dims.XSize && dims.YBlocks * 8 == dims.YSize) { r[c] = p; continue; }
+                int pst = planeStride >> hs[c];
+                if (hs[c] != 0 || vs[c] != 0)
+                {
+                    // the stored chroma covers ceil(size / 2) samples
+                    int cw = (dims.XSize + (1 << hs[c]) - 1) >> hs[c], chh = (dims.YSize + (1 << vs[c]) - 1) >> vs[c];
+                    var small = new float[cw * chh];
+                    for (int y = 0; y < chh; y++) Array.Copy(p, y * pst, small, y * cw, cw);
+                    r[c] = JxlColour.UpsampleJpegChroma(small, cw, chh, hs[c], vs[c], dims.XSize, dims.YSize);
+                    continue;
+                }
+                if (pst == dims.XSize && dims.YBlocks * 8 == dims.YSize) { r[c] = p; continue; }
                 var o = new float[dims.XSize * dims.YSize];
-                for (int y = 0; y < dims.YSize; y++) Array.Copy(p, y * planeStride, o, y * dims.XSize, dims.XSize);
+                for (int y = 0; y < dims.YSize; y++) Array.Copy(p, y * pst, o, y * dims.XSize, dims.XSize);
                 r[c] = o;
             }
             if (fh.DoYCbCr) JxlColour.YCbCrToRgbInPlace(r[0], r[1], r[2], dims.XSize * dims.YSize);

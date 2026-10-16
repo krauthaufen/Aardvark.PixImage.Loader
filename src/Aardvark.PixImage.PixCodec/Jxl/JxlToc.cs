@@ -17,6 +17,14 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         public static JxlFrameDims Of(JxlFrameHeader f)
         {
+            int mhs = 0, mvs = 0;
+            if (f.DoYCbCr)
+                for (int i = 0; i < 3; i++)
+                {
+                    int m = f.JpegUpsampling[i];
+                    mhs = Math.Max(mhs, m is 1 or 2 ? 1 : 0);
+                    mvs = Math.Max(mvs, m is 1 or 3 ? 1 : 0);
+                }
             var d = new JxlFrameDims { Width = f.Width, Height = f.Height, Upsampling = f.Upsampling, NumPasses = f.NumPasses };
             d.XSize = (int)(((long)f.Width + f.Upsampling - 1) / f.Upsampling);
             d.YSize = (int)(((long)f.Height + f.Upsampling - 1) / f.Upsampling);
@@ -28,8 +36,8 @@ namespace Aardvark.ImageCodecs.JpegXl
             d.LfGroupsX = (d.XSize + d.LfGroupDim - 1) / d.LfGroupDim;
             d.LfGroupsY = (d.YSize + d.LfGroupDim - 1) / d.LfGroupDim;
             d.NumLfGroups = d.LfGroupsX * d.LfGroupsY;
-            d.XBlocks = (d.XSize + 7) / 8;
-            d.YBlocks = (d.YSize + 7) / 8;
+            d.XBlocks = ((d.XSize + (8 << mhs) - 1) / (8 << mhs)) << mhs;
+            d.YBlocks = ((d.YSize + (8 << mvs) - 1) / (8 << mvs)) << mvs;
             return d;
         }
     }
