@@ -42,7 +42,7 @@ public class ExrFeatureTests
 
     static RawImage? RunOracle(byte[] exr, string arguments)
     {
-        if (OracleTool == null) return null;
+        if (!Oracles.Have("exr_oracle", OracleTool != null, "$EXR_ORACLE: tests/oracle/exr_oracle.cpp built against OpenEXR")) return null;
         var tmp = Path.Combine(TestUtil.FixtureDir, "_tmp");
         Directory.CreateDirectory(tmp);
         var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + ".exr");

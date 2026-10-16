@@ -73,7 +73,8 @@ public class BasisEncodeTests
             Assert.Equal((e.Width, e.Height), (g.Width, g.Height));
             Assert.True(e.GetBytes().SequenceEqual(g.GetBytes()), Path.GetFileName(r));
         }
-        KtxTests.Validate(data);
+        // (no `ktx validate`: these files are basisu's, and KTX-Software 4.4 rejects its UASTC HDR colour model 167 and
+        // KTXmapRange key)
     }
 
     // ------------------------------------------------------------------ quality against basisu's own numbers
@@ -362,8 +363,8 @@ public class BasisEncodeTests
     static string? Basisu()
     {
         var env = Environment.GetEnvironmentVariable("PIXCODEC_BASISU");
-        if (!string.IsNullOrEmpty(env)) return File.Exists(env) ? env : null;
-        return MiscFormatTests.ToolAvailable("basisu") ? "basisu" : null;
+        var tool = !string.IsNullOrEmpty(env) ? (File.Exists(env) ? env : null) : TestUtil.FindOnPath("basisu");
+        return Oracles.Have("basisu", tool != null, "basisu ($PIXCODEC_BASISU or on the PATH)") ? tool : null;
     }
 
     /// <summary>When basisu is available: it decodes freshly encoded textures (every effort, alpha, mips) like our decoder.</summary>

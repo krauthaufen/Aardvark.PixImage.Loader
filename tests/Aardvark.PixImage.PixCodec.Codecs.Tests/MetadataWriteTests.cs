@@ -155,7 +155,12 @@ public class MetadataWriteTests
             }
             finally { File.Delete(tmp); if (tmpIn != null) File.Delete(tmpIn); }
         }
-        if (!File.Exists(goldenPath)) { _out.WriteLine("no golden output (run tests/oracle/gen_meta_write.py)"); return; }
+        if (!File.Exists(goldenPath))
+        {
+            Oracles.Missing("golden", goldenPath + " (run tests/oracle/gen_meta_write.py)");
+            _out.WriteLine("no golden output (run tests/oracle/gen_meta_write.py)");
+            return;
+        }
         var golden = File.ReadAllBytes(goldenPath);
         Assert.True(golden.AsSpan().SequenceEqual(dst), $"{OutName(input, edit)} differs from the golden output: regenerate with tests/oracle/gen_meta_write.py if the change is intended");
         if (File.Exists(goldenPath + ".exiftool.json"))
@@ -239,32 +244,49 @@ public class MetadataWriteTests
 
     // ------------------------------------------------------------------ ExifTool
 
-    internal static string? ExifTool { get; } = FindExifTool();
+    static readonly string? s_exifTool = FindExifTool();
 
-    /// <summary>ExifTool: $EXIFTOOL or ~/.local/share/exiftool/exiftool; PIXCODEC_NO_EXIFTOOL=1 tests the stored readings only.</summary>
+    /// <summary>ExifTool (a gate, see <see cref="Oracles"/>): null when it is not installed.</summary>
+    internal static string? ExifTool => Oracles.Have("exiftool", s_exifTool != null, "ExifTool ($EXIFTOOL or ~/.local/share/exiftool/exiftool)") ? s_exifTool : null;
+
+    /// <summary>ExifTool: $EXIFTOOL, ~/.local/share/exiftool/exiftool or on the PATH; PIXCODEC_NO_EXIFTOOL=1 tests the stored readings only.</summary>
     static string? FindExifTool()
     {
         if (Environment.GetEnvironmentVariable("PIXCODEC_NO_EXIFTOOL") == "1") return null;
         foreach (var p in new[] { Environment.GetEnvironmentVariable("EXIFTOOL"), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local/share/exiftool/exiftool") })
             if (!string.IsNullOrEmpty(p) && File.Exists(p)) return p;
-        return null;
+        return TestUtil.FindOnPath("exiftool");
+    }
+
+    /// <summary>ExifTool is a perl script: on Windows (no #! lines) it runs through perl unless it is an .exe build.</summary>
+    static ProcessStartInfo StartInfo(string exe)
+    {
+        if (!OperatingSystem.IsWindows() || exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return new ProcessStartInfo(exe);
+        var psi = new ProcessStartInfo("perl");
+        psi.ArgumentList.Add(exe);
+        return psi;
     }
 
     static string Run(string exe, params string[] args)
     {
-        var psi = new ProcessStartInfo(exe) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, StandardOutputEncoding = Encoding.UTF8 };
+        var psi = StartInfo(exe);
+        psi.RedirectStandardOutput = true; psi.RedirectStandardError = true; psi.UseShellExecute = false; psi.StandardOutputEncoding = Encoding.UTF8;
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
+        var err = p.StandardError.ReadToEndAsync();
         var o = p.StandardOutput.ReadToEnd();
         p.WaitForExit();
+        _ = err.Result;
         return o;
     }
 
     internal static byte[] RunBytes(string exe, params string[] args)
     {
-        var psi = new ProcessStartInfo(exe) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        var psi = StartInfo(exe);
+        psi.RedirectStandardOutput = true; psi.RedirectStandardError = true; psi.UseShellExecute = false;
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
+        var err = p.StandardError.ReadToEndAsync();
         var m = new MemoryStream();
         p.StandardOutput.BaseStream.CopyTo(m);
         p.WaitForExit();

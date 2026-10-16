@@ -248,7 +248,7 @@ public static class CompressionTestData
     public static byte[]? Python(string code, byte[] input)
     {
         if (!TestUtil.PythonAvailable) return null;
-        var psi = new ProcessStartInfo("python3")
+        var psi = new ProcessStartInfo(TestUtil.PythonExe!)
         {
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
         };

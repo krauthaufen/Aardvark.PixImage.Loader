@@ -64,7 +64,7 @@ public static class Jp2TestUtil
         {
             File.WriteAllBytes(f, encoded);
             var (exit, output) = RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
-            if (exit == 77) return null;
+            if (TestUtil.CannotVerify(exit, output)) return null;
             Assert.True(exit == 0, "oracle decode failed: " + output);
             return LoadRef(f + ".ref");
         }

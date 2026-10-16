@@ -195,7 +195,7 @@ public class CompressionXzEncodeTests
             }
             finally { File.Delete(f); }
         }
-        catch (System.ComponentModel.Win32Exception) { return null; } // 7z not installed
+        catch (System.ComponentModel.Win32Exception) { Oracles.Missing("7z", "7-Zip (7z) on the PATH"); return null; }
     }
 
     /// <summary>

@@ -14,11 +14,29 @@ permissions:
   packages: write
 
 jobs:
+  testdata:
+    name: Test data
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Checkout test data
+        uses: actions/checkout@v4
+        with:
+          repository: krauthaufen/Aardvark.PixImage.PixCodec.TestData
+          path: testdata
+      - name: Fetch downloaded test data
+        uses: ./.github/actions/testdata
+        with:
+          mode: fetch
+
   pack:
     name: Package
+    needs: testdata
     runs-on: windows-latest
     env:
       PIXCODEC_TESTDATA: ${{ github.workspace }}\testdata
+      PIXCODEC_REQUIRE_ORACLES: 1
     steps:
       - name: Keep line endings
         run: git config --global core.autocrlf false
@@ -29,6 +47,12 @@ jobs:
         with:
           repository: krauthaufen/Aardvark.PixImage.PixCodec.TestData
           path: testdata
+      - name: Restore downloaded test data
+        uses: ./.github/actions/testdata
+        with:
+          mode: restore
+      - name: Oracles
+        uses: ./.github/actions/oracles
       - name: Install Dotnet
         uses: actions/setup-dotnet@v4
         with:
@@ -41,7 +65,10 @@ jobs:
       - name: Build
         run: dotnet build -c Release Aardvark.PixImage.PixCodec.slnx
       - name: Test
-        run: dotnet test Aardvark.PixImage.PixCodec.slnx -c Release --no-build --nologo
+        shell: bash
+        run: |
+          export PATH="$PATH:/c/cygwin/bin"   # netpbm from Cygwin, after everything else
+          dotnet test Aardvark.PixImage.PixCodec.slnx -c Release --no-build --nologo
       - name: Pack
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

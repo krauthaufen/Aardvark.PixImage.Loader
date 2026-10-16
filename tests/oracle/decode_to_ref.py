@@ -8,7 +8,7 @@ extended by the codec owner (keep the others untouched).
 import os
 import sys
 import numpy as np
-from pxref import write_ref
+from pxref import missing, unverifiable, write_ref
 
 
 def decode(path):
@@ -37,7 +37,7 @@ def decode(path):
         # JPEG-LS through CharLS (charls.py: any interleave mode, interleaved output); exit 77 without imagecodecs
         import charls
         if charls.find() is None:
-            sys.exit(77)
+            missing('python:imagecodecs', 'CharLS (from imagecodecs) for JPEG-LS')
         with open(path, 'rb') as f:
             return charls.decode(f.read())
     if ext == '.dds' and dds_block_compressed(path):
@@ -77,8 +77,8 @@ def decode_jbig(path):
     """JBIG1 through jbigkit's jbgtopbm (optional tool, see gen_jbig.py); exit status 77 when it is not available."""
     import gen_jbig
     tool = os.path.join(gen_jbig.TOOLS, 'jbgtopbm')
-    if not os.path.exists(tool):
-        sys.exit(77)
+    if not os.path.exists(tool) and not os.path.exists(tool + '.exe'):
+        missing('jbigkit', f'jbigkit\'s jbgtopbm ({tool}; set PIXCODEC_JBIGKIT to its pbmtools folder)')
     with open(path, 'rb') as f:
         return gen_jbig.decode(f.read())
 
@@ -159,8 +159,13 @@ def decode_apng(path, im):
     alone = wide and [r[0] for r in results] == ['libjxl']
     if len(results) < 2 and not alone:
         # not verifiable with what is installed here (libjxl is optional): the caller skips the check
-        sys.stderr.write(f'only {[r[0] for r in results]} can decode this animation\n')
-        sys.exit(77)
+        import shutil
+        from gen_png import tool
+        if shutil.which('ffmpeg') is None:
+            missing('ffmpeg', 'ffmpeg on the PATH for APNG')
+        if tool('cjxl') is None or tool('djxl') is None:
+            missing('libjxl', 'cjxl and djxl (libjxl) for APNG, on the PATH or in .tmp/tools')
+        unverifiable(f'only {[r[0] for r in results]} can decode this animation')
 
     def visible(a):
         a = a.copy()
@@ -198,7 +203,7 @@ def decode_tiff(path):
     try:
         import tifffile
     except ImportError:
-        sys.exit(77)
+        missing('python:tifffile')
     m = re.search(r'\.p(\d+)\.tiff?$', path)
     page = int(m.group(1)) if m else 0
     with tifffile.TiffFile(path) as t:
@@ -209,9 +214,9 @@ def decode_tiff(path):
             try:
                 r = subprocess.run(['magick', f'{path}[{page}]', '-depth', '8', 'gray:-'], capture_output=True)
             except FileNotFoundError:
-                sys.exit(77)
+                missing('magick', 'ImageMagick 7 (magick) for bilevel TIFF')
             if r.returncode == 127:
-                sys.exit(77)
+                missing('magick', 'ImageMagick 7 (magick) for bilevel TIFF')
             if r.returncode != 0 or len(r.stdout) != pg.imagewidth * pg.imagelength:
                 raise ValueError('ImageMagick cannot read the bilevel page: ' + r.stderr.decode(errors='replace'))
             return np.frombuffer(r.stdout, np.uint8).reshape(pg.imagelength, pg.imagewidth)
@@ -221,7 +226,7 @@ def decode_tiff(path):
             try:
                 import imagecodecs  # noqa: F401
             except ImportError:
-                sys.exit(77)    # tifffile without imagecodecs reads little more than uncompressed whole-byte data
+                missing('python:imagecodecs')    # tifffile without imagecodecs reads little more than uncompressed whole-byte data
             raise
         if pg.planarconfig == 2 and pg.samplesperpixel > 1:
             a = np.moveaxis(a, 0, -1)
@@ -234,9 +239,9 @@ def decode_jxl(path):
     try:
         import imagecodecs
         if not imagecodecs.JPEGXL.available:
-            sys.exit(77)
+            missing('python:imagecodecs', 'imagecodecs without JPEG XL')
     except (ImportError, AttributeError):
-        sys.exit(77)
+        missing('python:imagecodecs', 'imagecodecs with JPEG XL')
     with open(path, 'rb') as f:
         a = imagecodecs.jpegxl_decode(f.read(), keeporientation=True)
     if a.ndim == 4:
@@ -253,7 +258,7 @@ def decode_webp(path):
         from PIL import _webp
         _webp.WebPAnimDecoder
     except (ImportError, AttributeError):
-        sys.exit(77)        # Pillow without (animated) WebP support: cannot be verified here
+        missing('python:PIL.webp', 'Pillow with (animated) WebP support')
     with open(path, 'rb') as f:
         data = f.read()
     frames = libwebp_frames(data)[0]
@@ -271,7 +276,7 @@ def decode_jp2(path):
     try:
         import imagecodecs
     except ImportError:
-        sys.exit(77)
+        missing('python:imagecodecs')
     with open(path, 'rb') as f:
         data = f.read()
     i = data.find(b'\xff\x4f\xff\x51')
@@ -286,8 +291,7 @@ def decode_jp2(path):
         except Exception as e:   # noqa: BLE001 - whatever the binding raises means "cannot read this one"
             err = e
     if a is None:
-        sys.stderr.write(f'no JPEG 2000 decoder here reads this file: {err}\n')
-        sys.exit(77)
+        unverifiable(f'no JPEG 2000 decoder reads this file: {err}')
     if a.ndim == 2:
         a = a[:, :, None]
     elif a.shape[2] != nc and a.shape[0] == nc:
@@ -319,13 +323,13 @@ def decode_exr(path):
         OpenEXR = None
     if OpenEXR is None:
         # (OpenCV can read some EXR files, but converts and orders channels its own way: not a usable reference)
-        sys.exit(77)
+        missing('python:OpenEXR')
     newer = any(t in tokens for t in ('zstd', 'htj2k', 'deep'))       # need OpenEXR 3.4 / 3.5
     try:
         chans = OpenEXR.File(path, separate_channels=True).parts[part].channels
     except Exception:
         if newer and tuple(int(v) for v in OpenEXR.__version__.split('.')[:2]) < (3, 5):
-            sys.exit(77)
+            missing('python:OpenEXR', f'OpenEXR {OpenEXR.__version__} is too old for this file (needs 3.5)')
         raise
     names = sorted(chans.keys(), key=lambda n: n.encode())
     if 'deep' in tokens:
@@ -412,18 +416,18 @@ def decode_legacy(path, ext):
     elif ext in ('.sgi', '.rgb', '.rgba', '.bw'):
         dim, zs = struct.unpack_from('>H', d, 4)[0], struct.unpack_from('>H', d, 10)[0]
         if dim == 3 and zs == 2:
-            sys.exit(77)
+            unverifiable('2 channel SGI: ImageMagick drops the alpha')
         depth = 16 if d[3] == 2 else 8
     elif ext == '.ras':
         w, _, bits, _, typ = struct.unpack_from('>5I', d, 4)
         if typ == 2 and (bits == 32 or (w * bits + 15) // 16 * 16 != w * bits):
-            sys.exit(77)
+            unverifiable('RLE coded Sun Raster with 32 bit or padded rows')
         use_pillow = typ == 2
     if use_pillow:
         a = pillow(path)
     else:
         if shutil.which('magick') is None:
-            sys.exit(77)
+            missing('magick', 'ImageMagick 7 (magick) on the PATH')
         a = magick(path, 0, depth)
     if a is None:
         raise ValueError('the reference tool cannot read the file')
@@ -438,7 +442,7 @@ def decode_lerc(path):
     try:
         import lerc  # noqa: F401
     except ImportError:
-        sys.exit(77)
+        missing('python:lerc')
     from gen_lerc import lerc_decode
     with open(path, 'rb') as f:
         blob = f.read()
@@ -466,7 +470,7 @@ def decode_oiio(path):
     try:
         import OpenImageIO as oiio
     except ImportError:
-        sys.exit(77)
+        missing('python:OpenImageIO')
     i = oiio.ImageInput.open(path)
     if i is None:
         raise RuntimeError(oiio.geterror())

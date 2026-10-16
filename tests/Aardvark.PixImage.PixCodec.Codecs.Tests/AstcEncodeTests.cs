@@ -1,18 +1,25 @@
 using System.Diagnostics;
 using Xunit;
 using Xunit.Abstractions;
+using Xunit.Sdk;
 using static Aardvark.ImageCodecs.Tests.TestUtil;
 
 namespace Aardvark.ImageCodecs.Tests;
 
-/// <summary>A fact that needs ARM astcenc ($ASTCENC, run only): skipped when it is not set.</summary>
-public sealed class AstcencFactAttribute : FactAttribute
+/// <summary>
+/// A fact that needs ARM astcenc (run only; $ASTCENC or on the PATH, see <see cref="AstcFileTests.Astcenc"/>): skipped
+/// without it, failing then under PIXCODEC_REQUIRE_ORACLES=1.
+/// </summary>
+[XunitTestCaseDiscoverer("Aardvark.ImageCodecs.Tests.OracleFactDiscoverer", "Aardvark.PixImage.PixCodec.Codecs.Tests")]
+public sealed class AstcencFactAttribute : FactAttribute, IOracleAttribute
 {
     public AstcencFactAttribute()
     {
-        var p = Environment.GetEnvironmentVariable("ASTCENC");
-        if (string.IsNullOrEmpty(p) || !File.Exists(p)) Skip = "set ASTCENC to an astcenc binary to run";
+        Missing = AstcFileTests.Astcenc() == null ? "set ASTCENC to an astcenc binary (or put astcenc on the PATH) to run" : null;
+        if (!Oracles.Enforced(Gate)) Skip = Missing;
     }
+    public string Gate => "astcenc";
+    public string? Missing { get; }
 }
 
 /// <summary>
@@ -446,7 +453,7 @@ public class AstcEncodeTests
 
     static void RunAstcenc(params string[] args)
     {
-        var psi = new ProcessStartInfo(Environment.GetEnvironmentVariable("ASTCENC")!) { RedirectStandardOutput = true, RedirectStandardError = true };
+        var psi = new ProcessStartInfo(AstcFileTests.Astcenc()!) { RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var a in args) psi.ArgumentList.Add(a);
         psi.ArgumentList.Add("-silent");
         using var p = Process.Start(psi)!;

@@ -391,8 +391,8 @@ public class KtxTests
     /// <summary>Runs `ktx validate` (KTX-Software, $PIXCODEC_KTX or on the PATH) when it is available.</summary>
     internal static void Validate(byte[] ktx2)
     {
-        var tool = Environment.GetEnvironmentVariable("PIXCODEC_KTX") ?? (MiscFormatTests.ToolAvailable("ktx") ? "ktx" : null);
-        if (tool == null) return;
+        var tool = Environment.GetEnvironmentVariable("PIXCODEC_KTX") ?? TestUtil.FindOnPath("ktx");
+        if (!Oracles.Have("ktx", tool != null, "KTX-Software's ktx ($PIXCODEC_KTX or on the PATH)")) return;
         var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".ktx2");
         try
         {

@@ -26,7 +26,7 @@ public static class ExrOracle
         {
             File.WriteAllBytes(f, encoded);
             var (exit, output) = TestUtil.RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
-            if (exit == 77) return null;
+            if (TestUtil.CannotVerify(exit, output)) return null;
             Assert.True(exit == 0, "oracle decode failed: " + output);
             return TestUtil.LoadRef(f + ".ref");
         }

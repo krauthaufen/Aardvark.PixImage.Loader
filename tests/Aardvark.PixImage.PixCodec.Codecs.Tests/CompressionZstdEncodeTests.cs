@@ -15,11 +15,14 @@ public class CompressionZstdEncodeTests
     static List<byte[]>? Reference(IReadOnlyList<byte[]> frames)
         => PythonBatch("import imagecodecs\nresults=[bytes(imagecodecs.zstd_decode(x)) for x in items]", frames);
 
-    static bool ReferenceAvailable { get; } = Probe();
+    static readonly bool s_reference = Probe();
+
+    /// <summary>libzstd through imagecodecs (a gate, see <see cref="Oracles"/>).</summary>
+    static bool ReferenceAvailable => Oracles.Have("python:imagecodecs", s_reference, "python with imagecodecs (zstd_decode)");
 
     static bool Probe()
     {
-        try { return TestUtil.PythonAvailable && TestUtil.RunPython("-c \"import imagecodecs; imagecodecs.zstd_decode\"").exit == 0; }
+        try { return TestUtil.PythonExe != null && TestUtil.RunPython("-c \"import imagecodecs; imagecodecs.zstd_decode\"").exit == 0; }
         catch { return false; }
     }
 
@@ -110,7 +113,7 @@ public class CompressionZstdEncodeTests
             Assert.True(p.ExitCode == 0, "zstd -D failed: " + err.Result);
             return ms.ToArray();
         }
-        catch (System.ComponentModel.Win32Exception) { return null; }
+        catch (System.ComponentModel.Win32Exception) { Oracles.Missing("zstd", "the zstd command line tool"); return null; }
         finally { File.Delete(f); }
     }
 

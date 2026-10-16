@@ -29,6 +29,19 @@ def write_ref(path, arr):
         f.write(np.ascontiguousarray(arr).astype(arr.dtype.newbyteorder('<')).tobytes())
 
 
+def missing(name, detail=''):
+    """Exit status 77 because a tool or package the check needs is not installed. The C# tests then check less
+    (TestUtil.CannotVerify), or fail under PIXCODEC_REQUIRE_ORACLES=1 naming `name`."""
+    sys.stderr.write(f'[missing oracle: {name}] {detail}\n')
+    sys.exit(77)
+
+
+def unverifiable(why):
+    """Exit status 77 for a file no reference decoder can verify, whatever is installed (the C# test checks less)."""
+    sys.stderr.write(f'[unverifiable] {why}\n')
+    sys.exit(77)
+
+
 def read_ref(path):
     with open(path, 'rb') as f:
         assert f.read(4) == b'PXRF'

@@ -264,7 +264,7 @@ public class LegacyFormatTests
         {
             File.WriteAllBytes(f, encoded);
             var (exit, output) = RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
-            if (exit == 77) return;
+            if (TestUtil.CannotVerify(exit, output)) return;
             Assert.True(exit == 0, "oracle decode failed: " + output);
             AssertEqual(ToRgba(expected), LoadRef(f + ".ref"));
         }

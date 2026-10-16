@@ -1003,7 +1003,7 @@ public class JpegTests
         {
             File.WriteAllBytes(f, jpeg);
             var (exit, output) = TestUtil.RunPython($"-c \"import sys, gen_jpeg; gen_jpeg.iso_decode(sys.argv[1], sys.argv[2])\" \"{f}\" \"{f}.ref\"");
-            if (exit == 77) return null;
+            if (TestUtil.CannotVerify(exit, output)) return null;
             Assert.True(exit == 0, "reference software failed: " + output);
             return TestUtil.LoadRef(f + ".ref");
         }

@@ -1,0 +1,90 @@
+name: Downloaded test data
+description: >
+  The third-party test files that are fetched rather than committed (TestData/fetch/*.sh, tests/oracle/fetch_*.py),
+  through a cache shared by all operating systems. mode "fetch" (Linux) downloads them and writes their references
+  when the cache has none; mode "restore" restores them into testdata/ and fails without them.
+inputs:
+  mode:
+    description: fetch or restore
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Cache key
+      id: key
+      shell: bash
+      run: echo "key=testdata-v1-${{ hashFiles('tests/oracle/fetch_*.py', 'tests/oracle/gen_tiff.py', 'tests/oracle/pxref.py', 'tests/oracle/requirements.txt', 'testdata/fetch/*', 'testdata/fixtures/webp/vectors/refs.txt', 'testdata/fixtures/jp2/conformance/limits.txt', 'testdata/fixtures/tga/gimp/sha256.txt') }}" >> "$GITHUB_OUTPUT"
+
+    - name: Look up downloads
+      if: inputs.mode == 'fetch'
+      id: lookup
+      uses: actions/cache/restore@v4
+      with:
+        key: ${{ steps.key.outputs.key }}
+        enableCrossOsArchive: true
+        lookup-only: true
+        path: |
+          testdata/downloads
+          testdata/fixtures/webp/vectors/*.webp
+          testdata/fixtures/jp2/conformance/codestreams_*
+          testdata/fixtures/jp2/conformance/htj2k_*
+          testdata/fixtures/jp2/conformance/reference_*
+          testdata/fixtures/tga/gimp/*.tga
+          testdata/fixtures/tga/gimp/*.png
+
+    - name: Set up Python
+      if: inputs.mode == 'fetch' && steps.lookup.outputs.cache-hit != 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+
+    - name: Fetch
+      if: inputs.mode == 'fetch' && steps.lookup.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        PIXCODEC_TESTDATA: ${{ github.workspace }}/testdata
+      run: |
+        set -e
+        python -m pip install -q -r tests/oracle/requirements.txt
+        sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libtiff6 > /dev/null
+        bash tests/oracle/ci/install.sh magick
+        export PATH="$(pwd)/.tmp/ci-tools/magick/bin:$PATH"
+        for f in testdata/fetch/*.sh; do sh "$f"; done
+        cd tests/oracle
+        python fetch_tiff_samples.py
+        python fetch_tiff_samples.py --aperio
+        python fetch_tiff_samples.py --gdal
+        python fetch_jpegls_conformance.py
+        python fetch_jxl_conformance.py
+        du -sh "$PIXCODEC_TESTDATA/downloads"
+
+    - name: Save downloads
+      if: inputs.mode == 'fetch' && steps.lookup.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        key: ${{ steps.key.outputs.key }}
+        enableCrossOsArchive: true
+        path: |
+          testdata/downloads
+          testdata/fixtures/webp/vectors/*.webp
+          testdata/fixtures/jp2/conformance/codestreams_*
+          testdata/fixtures/jp2/conformance/htj2k_*
+          testdata/fixtures/jp2/conformance/reference_*
+          testdata/fixtures/tga/gimp/*.tga
+          testdata/fixtures/tga/gimp/*.png
+
+    - name: Restore downloads
+      if: inputs.mode == 'restore'
+      uses: actions/cache/restore@v4
+      with:
+        key: ${{ steps.key.outputs.key }}
+        enableCrossOsArchive: true
+        fail-on-cache-miss: true
+        path: |
+          testdata/downloads
+          testdata/fixtures/webp/vectors/*.webp
+          testdata/fixtures/jp2/conformance/codestreams_*
+          testdata/fixtures/jp2/conformance/htj2k_*
+          testdata/fixtures/jp2/conformance/reference_*
+          testdata/fixtures/tga/gimp/*.tga
+          testdata/fixtures/tga/gimp/*.png

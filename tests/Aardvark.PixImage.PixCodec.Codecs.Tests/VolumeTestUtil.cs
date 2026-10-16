@@ -135,7 +135,7 @@ public static class VolumeTestUtil
                 if (File.Exists(c)) return c;
             d = d.Parent;
         }
-        return null;
+        return TestUtil.PythonExe;
     }
 
     static readonly string? Python = FindPython();
@@ -144,14 +144,14 @@ public static class VolumeTestUtil
     /// <summary>Whether the oracle python has the module (pynrrd's is "nrrd", SimpleITK, nibabel, astropy).</summary>
     public static bool Has(string module)
     {
-        if (Python == null) return false;
-        lock (Modules)
-        {
-            if (Modules.TryGetValue(module, out var ok)) return ok;
-            ok = Run($"-c \"import {module}\"").exit == 0;
-            Modules[module] = ok;
-            return ok;
-        }
+        bool ok = false;
+        if (Python != null)
+            lock (Modules)
+            {
+                if (!Modules.TryGetValue(module, out ok))
+                    Modules[module] = ok = Run($"-c \"import {module}\"").exit == 0;
+            }
+        return Oracles.Have("python:" + module, ok, $"the python module {module} ($PIXCODEC_PYTHON, .tmp/venv or the python on the PATH)");
     }
 
     public static (int exit, string output) Run(string args)

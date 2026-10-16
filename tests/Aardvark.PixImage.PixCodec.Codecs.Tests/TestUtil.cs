@@ -1,24 +1,101 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using Aardvark.ImageCodecs;
 using Xunit;
+using Xunit.Abstractions;
+using Xunit.Sdk;
 
 namespace Aardvark.ImageCodecs.Tests;
 
 /// <summary>
-/// A fact on third-party test data (see <see cref="TestUtil.TestDataDir"/>): skipped when the test-data repository, or
-/// one of the paths given (relative to it), is missing.
+/// Oracle gates: what a test does when a reference tool, python package or third-party test file it needs is missing.
+/// By default it skips itself (or checks less). With PIXCODEC_REQUIRE_ORACLES=1 (CI) every such gate fails instead,
+/// naming what is missing, unless the gate's name is listed in PIXCODEC_ORACLE_EXEMPT (comma separated).
 /// </summary>
-public sealed class TestDataFactAttribute : FactAttribute
+public static class Oracles
 {
-    public TestDataFactAttribute(params string[] requires) => Skip = TestUtil.TestDataSkipReason(requires);
+    public static bool Required { get; } = Environment.GetEnvironmentVariable("PIXCODEC_REQUIRE_ORACLES") == "1";
+
+    static readonly HashSet<string> Exempt = new(
+        (Environment.GetEnvironmentVariable("PIXCODEC_ORACLE_EXEMPT") ?? "").Split(',', ';').Select(s => s.Trim()).Where(s => s.Length > 0),
+        StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Whether a missing <paramref name="gate"/> fails the test.</summary>
+    public static bool Enforced(string gate) => Required && !Exempt.Contains(gate);
+
+    /// <summary>A gate found its oracle missing: false (the caller skips or checks less), or a failure when enforced.</summary>
+    public static bool Missing(string gate, string what)
+    {
+        if (Enforced(gate)) throw new OracleMissingException(gate, what);
+        return false;
+    }
+
+    /// <summary><paramref name="available"/>, or <see cref="Missing"/>.</summary>
+    public static bool Have(string gate, bool available, string what) => available || Missing(gate, what);
+}
+
+public sealed class OracleMissingException(string gate, string what)
+    : Exception($"PIXCODEC_REQUIRE_ORACLES=1, but the oracle '{gate}' is missing: {what}");
+
+/// <summary>An attribute whose test needs an oracle: <see cref="Missing"/> says what is missing (null: nothing).</summary>
+public interface IOracleAttribute
+{
+    string Gate { get; }
+    string? Missing { get; }
+}
+
+/// <summary>
+/// A fact on third-party test data (see <see cref="TestUtil.TestDataDir"/>): skipped when the test-data repository, or
+/// one of the paths given (relative to it), is missing; fails then under PIXCODEC_REQUIRE_ORACLES=1.
+/// </summary>
+[XunitTestCaseDiscoverer("Aardvark.ImageCodecs.Tests.OracleFactDiscoverer", "Aardvark.PixImage.PixCodec.Codecs.Tests")]
+public sealed class TestDataFactAttribute : FactAttribute, IOracleAttribute
+{
+    public TestDataFactAttribute(params string[] requires)
+    {
+        Missing = TestUtil.TestDataSkipReason(requires);
+        if (!Oracles.Enforced(Gate)) Skip = Missing;
+    }
+    public string Gate => "testdata";
+    public string? Missing { get; }
 }
 
 /// <summary>A theory on third-party test data, skipped like <see cref="TestDataFactAttribute"/>.</summary>
-public sealed class TestDataTheoryAttribute : TheoryAttribute
+[XunitTestCaseDiscoverer("Aardvark.ImageCodecs.Tests.OracleTheoryDiscoverer", "Aardvark.PixImage.PixCodec.Codecs.Tests")]
+public sealed class TestDataTheoryAttribute : TheoryAttribute, IOracleAttribute
 {
-    public TestDataTheoryAttribute(params string[] requires) => Skip = TestUtil.TestDataSkipReason(requires);
+    public TestDataTheoryAttribute(params string[] requires)
+    {
+        Missing = TestUtil.TestDataSkipReason(requires);
+        if (!Oracles.Enforced(Gate)) Skip = Missing;
+    }
+    public string Gate => "testdata";
+    public string? Missing { get; }
+}
+
+static class OracleDiscovery
+{
+    /// <summary>A failing test case when the attribute's oracle is missing and enforced, else null.</summary>
+    public static IXunitTestCase? Failure(IMessageSink sink, ITestFrameworkDiscoveryOptions options, ITestMethod method, IAttributeInfo attribute)
+    {
+        if ((attribute as IReflectionAttributeInfo)?.Attribute is not IOracleAttribute a || a.Missing == null || !Oracles.Enforced(a.Gate)) return null;
+        return new ExecutionErrorTestCase(sink, options.MethodDisplayOrDefault(), options.MethodDisplayOptionsOrDefault(), method,
+            new OracleMissingException(a.Gate, a.Missing).Message);
+    }
+}
+
+public sealed class OracleFactDiscoverer(IMessageSink sink) : FactDiscoverer(sink)
+{
+    public override IEnumerable<IXunitTestCase> Discover(ITestFrameworkDiscoveryOptions options, ITestMethod method, IAttributeInfo attribute)
+        => OracleDiscovery.Failure(DiagnosticMessageSink, options, method, attribute) is { } f ? new[] { f } : base.Discover(options, method, attribute);
+}
+
+public sealed class OracleTheoryDiscoverer(IMessageSink sink) : TheoryDiscoverer(sink)
+{
+    public override IEnumerable<IXunitTestCase> Discover(ITestFrameworkDiscoveryOptions options, ITestMethod method, IAttributeInfo attribute)
+        => OracleDiscovery.Failure(DiagnosticMessageSink, options, method, attribute) is { } f ? new[] { f } : base.Discover(options, method, attribute);
 }
 
 public static class TestUtil
@@ -187,16 +264,64 @@ public static class TestUtil
         return se == 0 ? double.PositiveInfinity : 10 * Math.Log10(peak * peak / (se / e.Length));
     }
 
-    public static bool PythonAvailable { get; } = ProbePython();
+    /// <summary>
+    /// Whether python with numpy and Pillow (the oracle scripts in tests/oracle) is there: a gate (see <see cref="Oracles"/>),
+    /// so check it only where a test would skip without python.
+    /// </summary>
+    public static bool PythonAvailable => Oracles.Have("python", PythonExe != null, "python3 (or python) with numpy and Pillow");
 
-    static bool ProbePython()
+    /// <summary>The python that has numpy and Pillow: python3, else python (Windows); null if neither.</summary>
+    public static string? PythonExe { get; } = ProbePython();
+
+    static string? ProbePython()
     {
-        try { return RunPython("-c \"import numpy, PIL\"").exit == 0; } catch { return false; }
+        foreach (var exe in new[] { "python3", "python" })
+            try { if (Run(exe, "-c \"import numpy, PIL\"").exit == 0) return exe; } catch { }
+        return null;
+    }
+
+    static (int exit, string output) Run(string exe, string args)
+    {
+        var psi = new ProcessStartInfo(exe, args) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        using var p = Process.Start(psi)!;
+        var so = p.StandardOutput.ReadToEndAsync();
+        var se = p.StandardError.ReadToEndAsync();
+        p.WaitForExit();
+        return (p.ExitCode, so.Result + se.Result);
+    }
+
+    /// <summary>
+    /// Exit status 77 of a tests/oracle script means "cannot verify here": true when the file is beyond every reference
+    /// decoder (the script printed "[unverifiable]"), or when a tool or package it needs is missing ("[missing oracle: name]",
+    /// or anything else) - which fails the test under PIXCODEC_REQUIRE_ORACLES=1. False for any other exit status.
+    /// </summary>
+    public static bool CannotVerify(int exit, string output)
+    {
+        if (exit != 77) return false;
+        if (output.Contains("[unverifiable]")) return true;
+        var m = Regex.Match(output, @"\[missing oracle: ([^\]]+)\]");
+        Oracles.Missing(m.Success ? m.Groups[1].Value : "python-oracle", output.Trim());
+        return true;
+    }
+
+    /// <summary>The full path of an executable on the PATH (with the PATHEXT extensions on Windows), or null.</summary>
+    public static string? FindOnPath(string name)
+    {
+        var exts = OperatingSystem.IsWindows()
+            ? new[] { "" }.Concat((Environment.GetEnvironmentVariable("PATHEXT") ?? ".EXE;.CMD;.BAT").Split(';', StringSplitOptions.RemoveEmptyEntries)).ToArray()
+            : new[] { "" };
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+            foreach (var e in exts)
+            {
+                var p = Path.Combine(dir.Trim('"'), name + e);
+                if (File.Exists(p)) return p;
+            }
+        return null;
     }
 
     public static (int exit, string output) RunPython(string args)
     {
-        var psi = new ProcessStartInfo("python3", args)
+        var psi = new ProcessStartInfo(PythonExe ?? "python3", args)
         {
             RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
             WorkingDirectory = OracleDir,

@@ -98,7 +98,7 @@ public class JxlEncodeTests(ITestOutputHelper output)
         {
             File.WriteAllBytes(f, encoded);
             var (exit, text) = RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
-            if (exit == 77) return null;
+            if (TestUtil.CannotVerify(exit, text)) return null;
             Assert.True(exit == 0, "libjxl decode failed: " + text);
             return LoadRef(f + ".ref");
         }

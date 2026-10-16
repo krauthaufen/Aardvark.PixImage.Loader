@@ -20,7 +20,12 @@ public class PngFeatureTests
             File.WriteAllBytes(f, png);
             var (exit, output) = TestUtil.RunPython($"gen_png.py --meta \"{f}\"");
             Assert.True(exit == 0, "metadata oracle failed: " + output);
-            return JsonDocument.Parse(output.Trim().Split('\n').Last(l => l.StartsWith('{'))).RootElement;
+            var meta = JsonDocument.Parse(output.Trim().Split('\n').Last(l => l.StartsWith('{'))).RootElement;
+            // a live check reads the rarer chunks with pngcheck and exiftool when they are installed (gen_png.py tool())
+            var tools = meta.TryGetProperty("tools", out var t) ? t.EnumerateArray().Select(v => v.GetString()).ToArray() : Array.Empty<string?>();
+            foreach (var name in new[] { "pngcheck", "exiftool" })
+                Oracles.Have(name, tools.Contains(name), $"{name} for tests/oracle/gen_png.py --meta (on the PATH or in .tmp/tools, see gen_png.py --fetch-tools)");
+            return meta;
         }
         finally { File.Delete(f); }
     }
@@ -40,7 +45,7 @@ public class PngFeatureTests
         {
             File.WriteAllBytes(f, encoded);
             var (exit, output) = TestUtil.RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
-            if (exit == 77) return null;
+            if (TestUtil.CannotVerify(exit, output)) return null;
             Assert.True(exit == 0, "oracle decode failed: " + output);
             return TestUtil.LoadRef(f + ".ref");
         }

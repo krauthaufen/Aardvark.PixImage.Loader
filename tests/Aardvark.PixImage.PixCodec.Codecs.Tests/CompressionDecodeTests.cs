@@ -410,7 +410,7 @@ public class CompressionDecodeTests
             Assert.True(p.ExitCode == 0, "zstd failed: " + err);
             return File.ReadAllBytes(f + ".zst");
         }
-        catch (System.ComponentModel.Win32Exception) { return null; }
+        catch (System.ComponentModel.Win32Exception) { Oracles.Missing("zstd", "the zstd command line tool"); return null; }
         finally { File.Delete(f); File.Delete(f + ".zst"); }
     }
 

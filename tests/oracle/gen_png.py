@@ -42,8 +42,8 @@ ADAM7 = [(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (
 # ---------------------------------------------------------------------------------------------- extra tools
 
 def tool(name):
-    """Command line (list) of an oracle tool that distributions rarely package, or None: looked up on PATH and
-    in .tmp/tools, where `gen_png.py --fetch-tools` puts them.
+    """Command line (list) of an oracle tool that distributions rarely package, or None: looked up in $EXIFTOOL
+    (exiftool only), on PATH and in .tmp/tools, where `gen_png.py --fetch-tools` puts them.
       pngcheck  prints the contents of nearly every chunk (the only reader at hand for sBIT values, hIST, sPLT,
                 oFFs, pCAL, sCAL, mDCV, cLLI)
       exiftool  second reader for sBIT, cICP, sCAL, sTER
@@ -54,6 +54,9 @@ def tool(name):
              'exiftool': ['perl', os.path.join(TOOLS, 'exiftool-src', 'exiftool')],
              'cjxl': [os.path.join(TOOLS, 'jxl', 'tools', 'cjxl')],
              'djxl': [os.path.join(TOOLS, 'jxl', 'tools', 'djxl')]}[name]
+    env = os.environ.get('EXIFTOOL') if name == 'exiftool' else None
+    if env and os.path.exists(env):
+        return [env] if env.lower().endswith('.exe') or os.name != 'nt' else ['perl', env]
     found = shutil.which(name)
     if found:
         return [found]

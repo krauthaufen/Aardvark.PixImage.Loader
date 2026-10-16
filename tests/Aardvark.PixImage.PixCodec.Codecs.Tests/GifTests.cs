@@ -886,7 +886,7 @@ public class GifTests(ITestOutputHelper output)
             File.WriteAllBytes(f, again);
             var psi = new ProcessStartInfo("magick", $"\"{f}\" \"icc:{f}.icc\"") { RedirectStandardError = true, UseShellExecute = false };
             Process? p;
-            try { p = Process.Start(psi); } catch { return; }        // no ImageMagick here
+            try { p = Process.Start(psi); } catch { Oracles.Missing("magick", "ImageMagick 7 (magick) on the PATH"); return; }
             p!.WaitForExit();
             Assert.Equal(0, p.ExitCode);
             Assert.Equal(expected, File.ReadAllBytes(f + ".icc"));

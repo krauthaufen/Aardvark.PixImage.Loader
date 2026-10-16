@@ -747,7 +747,7 @@ public class TiffTests
         {
             File.WriteAllBytes(f, encoded);
             var (exit, output) = TestUtil.RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
-            if (exit == 77) return null; // a decoder this file needs is not installed
+            if (TestUtil.CannotVerify(exit, output)) return null; // a decoder this file needs is not installed
             Assert.True(exit == 0, "oracle decode failed: " + output);
             return TestUtil.LoadRef(f + ".ref");
         }
@@ -759,11 +759,12 @@ public class TiffTests
 
     /// <summary>
     /// Wraps a python snippet so that a missing optional module (rasterio, OpenCV, tifffile, imagecodecs, ...) ends
-    /// it with status 77 = "cannot be verified here" instead of an error.
+    /// it with status 77 = "cannot be verified here" instead of an error (see <see cref="TestUtil.CannotVerify"/>).
     /// </summary>
     static string Guarded(string code) =>
         "def _snippet():\n" + string.Join("\n", code.Replace("\r", "").Split('\n').Select(l => "    " + l)) +
-        "\ntry:\n    _snippet()\nexcept ImportError:\n    sys.exit(77)\nexcept Exception as e:\n    if 'imagecodecs' in str(e):\n        sys.exit(77)\n    raise\n";
+        "\ntry:\n    _snippet()\nexcept ImportError as e:\n    sys.stderr.write(f'[missing oracle: python:{e.name}] {e}\\n')\n    sys.exit(77)\n" +
+        "except Exception as e:\n    if 'imagecodecs' in str(e):\n        sys.stderr.write(f'[missing oracle: python:imagecodecs] {e}\\n')\n        sys.exit(77)\n    raise\n";
 
     /// <summary>Runs a python snippet on a file we wrote and returns what it prints (for tags and EXIF as other libraries see them).</summary>
     static string? PythonOn(byte[] encoded, string code)
@@ -778,7 +779,7 @@ public class TiffTests
             File.WriteAllBytes(f, encoded);
             File.WriteAllText(script, "import sys, warnings\nwarnings.filterwarnings('ignore')\nPATH = sys.argv[1]\n" + Guarded(code));
             var (exit, output) = TestUtil.RunPython($"\"{script}\" \"{f}\"");
-            if (exit == 77) return null; // a module the snippet needs is not installed
+            if (TestUtil.CannotVerify(exit, output)) return null; // a module the snippet needs is not installed
             Assert.True(exit == 0, "python failed: " + output);
             return output.Replace("\r", "").Trim();
         }
@@ -1201,7 +1202,7 @@ public class TiffTests
             File.WriteAllText(f + ".py", "import sys, os, warnings\nwarnings.filterwarnings('ignore')\nos.environ['OPENCV_LOG_LEVEL'] = 'SILENT'\nsys.path.insert(0, os.getcwd())\nimport numpy as np\nfrom pxref import write_ref\n" +
                 "PATH = sys.argv[1]\ndef write(a):\n    write_ref(PATH + '.ref', np.ascontiguousarray(a))\n" + Guarded(code));
             var (exit, output) = TestUtil.RunPython($"\"{f}.py\" \"{f}\"");
-            if (exit == 77) return null; // the snippet's reader is not installed
+            if (TestUtil.CannotVerify(exit, output)) return null; // the snippet's reader is not installed
             Assert.True(exit == 0, "python failed: " + output);
             return TestUtil.LoadRef(f + ".ref");
         }
@@ -1369,7 +1370,7 @@ public class TiffTests
                     if (be || comp == TiffCompression.Deflate) continue;
                     // tifffile unpacks the unsigned ones, GDAL the signed ones (as unsigned bit patterns)
                     var seen = signed
-                        ? PythonImage(file, "try:\n    import rasterio\nexcept ImportError:\n    sys.exit(77)\na = np.moveaxis(rasterio.open(PATH).read(), 0, -1)\n" +
+                        ? PythonImage(file, "import rasterio\na = np.moveaxis(rasterio.open(PATH).read(), 0, -1)\n" +
                             $"v = a.astype(np.int64)\nwrite(np.where(v >= {1L << (bits - 1)}, v - {1L << bits}, v).astype(a.dtype.name[1:]))")
                         : Oracle(file);
                     if (seen != null) Assert.True(seen.SampleType == type && bytes.SequenceEqual(seen.GetBytes()), what + ": independent decoder disagrees");
@@ -1461,7 +1462,7 @@ public class TiffTests
         for (int i = 0; i < m.Length; i++) Assert.Equal(m[i] != 0 ? 255 : 0, decoded[i]);
         if (levels > 1) Assert.Equal(5, Tiff.ReadTags(file, 3).Single(t => t.Id == 254).AsIntegers()[0]);   // mask of an overview
         // GDAL takes it as the internal mask of the dataset
-        var seen = PythonImage(file, "try:\n    import rasterio\nexcept ImportError:\n    sys.exit(77)\nds = rasterio.open(PATH)\n" +
+        var seen = PythonImage(file, "import rasterio\nds = rasterio.open(PATH)\n" +
             "assert [f.name for f in ds.mask_flag_enums[0]] == ['per_dataset'], ds.mask_flag_enums\nassert ds.count == 3 and len(ds.overviews(1)) == " + (levels - 1) + "\nwrite(ds.dataset_mask())");
         if (seen != null) Assert.True(seen.GetData<byte>().AsSpan().SequenceEqual(decoded), "GDAL reads another mask");
         Assert.Throws<ArgumentException>(() => Tiff.Encode(new[] { new TiffPage(img) { Mask = MakeImage(10, 10, ColorModel.Gray, SampleType.UInt8, 1) } }, new MemoryStream()));

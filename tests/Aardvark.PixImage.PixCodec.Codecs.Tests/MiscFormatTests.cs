@@ -357,10 +357,8 @@ public class MiscFormatTests
         return img;
     }
 
-    internal static bool ToolAvailable(string tool)
-    {
-        try { return RunTool("sh", $"-c \"command -v {tool}\"").Length > 0; } catch { return false; }
-    }
+    /// <summary>Whether the command line tool is on the PATH: a gate (see <see cref="Oracles"/>).</summary>
+    internal static bool ToolAvailable(string tool) => Oracles.Have(tool, FindOnPath(tool) != null, $"{tool} on the PATH");
 
     internal static byte[] RunTool(string exe, string? args, byte[]? stdin = null)
     {

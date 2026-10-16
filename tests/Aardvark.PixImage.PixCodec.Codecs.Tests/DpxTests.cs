@@ -299,7 +299,7 @@ public class DpxTests
             try
             {
                 var (exit, output) = RunPython($"decode_to_ref.py \"{file}\" \"{file}.ref\"");
-                if (exit == 77) return null;
+                if (TestUtil.CannotVerify(exit, output)) return null;
                 Assert.True(exit == 0, "OpenImageIO decode failed: " + output);
                 return LoadRef(file + ".ref");
             }

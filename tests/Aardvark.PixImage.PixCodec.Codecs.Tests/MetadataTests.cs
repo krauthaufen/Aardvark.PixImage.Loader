@@ -123,7 +123,7 @@ public class MetadataTests
     void CompareWithExifTool(string path)
     {
         var refPath = path + ".exiftool.json";
-        if (!File.Exists(refPath)) return;
+        if (!File.Exists(refPath)) { Oracles.Missing("exiftool-json", refPath + " (ExifTool's reading, see tests/oracle/gen_meta.py)"); return; }
         var et = JsonDocument.Parse(File.ReadAllText(refPath)).RootElement;
         var m = ImageCodec.ReadMetadata(path);
         var bad = new List<string>();

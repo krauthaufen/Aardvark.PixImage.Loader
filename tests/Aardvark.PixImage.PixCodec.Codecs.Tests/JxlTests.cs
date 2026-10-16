@@ -256,11 +256,10 @@ public class JxlTests(ITestOutputHelper output)
         Assert.True(Jxl.DecodeExtraChannels(File.ReadAllBytes(Fixture("jxl/ll_premultiplied.jxl")))[0].AlphaPremultiplied);
     }
 
-    [TestDataFact]
+    [TestDataFact("downloads/jxl-conformance/spot/input.jxl", "downloads/jxl-conformance/cmyk_layers/input.jxl")]
     public void SpotAndBlackChannelsAreReturned()
     {
         string C(string n) => Path.Combine(TestDataDir!, "downloads", "jxl-conformance", n, "input.jxl");
-        if (!File.Exists(C("spot"))) return;
         var spot = Jxl.DecodeExtraChannels(File.ReadAllBytes(C("spot")));
         var s = spot.First(e => e.Kind == JxlExtraChannelKind.SpotColour);
         Assert.Equal(2, spot.Count(e => e.Kind == JxlExtraChannelKind.SpotColour));

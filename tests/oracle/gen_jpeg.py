@@ -241,7 +241,8 @@ ISO_TOOL = os.environ.get('PIXCODEC_ISO_JPEG', os.path.join(os.path.dirname(os.p
 def iso_decode(src, ref):
     """Decodes a JPEG file with the reference software, components as stored; exit status 77 without the tool."""
     if not os.path.exists(ISO_TOOL):
-        sys.exit(77)
+        from pxref import missing
+        missing('jpeg-iso', f'the ISO/IEC 10918 reference software (libjpeg by Thomas Richter, {ISO_TOOL}; set PIXCODEC_ISO_JPEG)')
     with tempfile.TemporaryDirectory() as t:
         out = os.path.join(t, 'o.pnm')
         r = subprocess.run([ISO_TOOL, '-c', src, out], capture_output=True, text=True)

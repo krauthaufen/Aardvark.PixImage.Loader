@@ -54,7 +54,8 @@ public class AstcFileTests
         if (!string.IsNullOrEmpty(env) && File.Exists(env)) return env;
         foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
             foreach (var n in new[] { "astcenc", "astcenc-avx2", "astcenc-sse4.1", "astcenc-neon" })
-                if (dir.Length > 0 && File.Exists(Path.Combine(dir, n))) return Path.Combine(dir, n);
+                foreach (var e in OperatingSystem.IsWindows() ? new[] { ".exe", "" } : new[] { "" })
+                    if (dir.Length > 0 && File.Exists(Path.Combine(dir, n + e))) return Path.Combine(dir, n + e);
         return null;
     }
 
@@ -62,7 +63,7 @@ public class AstcFileTests
     static RawImage[]? AstcencDecode(byte[] astc, string mode)
     {
         var exe = Astcenc();
-        if (exe == null) return null;
+        if (!Oracles.Have("astcenc", exe != null, "ARM astcenc ($ASTCENC or on the PATH)")) return null;
         var tmp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
         try
         {

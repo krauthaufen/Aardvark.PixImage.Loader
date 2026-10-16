@@ -9,9 +9,28 @@ on:
     paths-ignore:
     - 'README.md'
     - 'RELEASE_NOTES.md'
+  workflow_dispatch:
 
 jobs:
+  testdata:
+    name: Test data
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Checkout test data
+      uses: actions/checkout@v4
+      with:
+        repository: krauthaufen/Aardvark.PixImage.PixCodec.TestData
+        path: testdata
+
+    - name: Fetch downloaded test data
+      uses: ./.github/actions/testdata
+      with:
+        mode: fetch
+
   build:
+    needs: testdata
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,6 +38,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     env:
       PIXCODEC_TESTDATA: ${{ github.workspace }}/testdata
+      # every oracle gate fails instead of skipping (see AGENTS.md, Tests); PIXCODEC_ORACLE_EXEMPT would list the gates a
+      # platform cannot provide (none at the moment)
+      PIXCODEC_REQUIRE_ORACLES: 1
     steps:
     - name: Keep line endings
       run: git config --global core.autocrlf false
@@ -30,6 +52,11 @@ jobs:
       with:
         repository: krauthaufen/Aardvark.PixImage.PixCodec.TestData
         path: testdata
+
+    - name: Restore downloaded test data
+      uses: ./.github/actions/testdata
+      with:
+        mode: restore
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
@@ -45,11 +72,18 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-paket-
 
+    - name: Oracles
+      uses: ./.github/actions/oracles
+
     - name: Build
       run: bash ./build.sh
 
     - name: Test
-      run: dotnet test Aardvark.PixImage.PixCodec.slnx -c Release --no-build --nologo --blame --results-directory TestResults
+      shell: bash
+      run: |
+        # Windows: netpbm from Cygwin, after everything else
+        [ "$RUNNER_OS" = Windows ] && export PATH="$PATH:/c/cygwin/bin"
+        dotnet test Aardvark.PixImage.PixCodec.slnx -c Release --no-build --nologo --blame --results-directory TestResults
 
     - name: Upload test diagnostics
       if: failure()
