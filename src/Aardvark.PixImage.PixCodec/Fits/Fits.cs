@@ -701,10 +701,35 @@ namespace Aardvark.ImageCodecs
         internal static string Logical(string key, bool v, string? comment) => Raw(key, v ? "T" : "F", comment);
         internal static string Str(string key, string v, string? comment)
         {
-            var q = "'" + v.Replace("'", "''").PadRight(8) + "'";
-            if (q.Length > 70) q = "'" + v.Replace("'", "''").Substring(0, Math.Min(v.Length, 66)) + "'";
-            return Pad80(key.PadRight(8) + "= " + q + (comment != null ? " / " + comment : ""));
+            var esc = v.Replace("'", "''");
+            if (esc.Length <= 68)
+                return Pad80(key.PadRight(8) + "= " + "'" + esc.PadRight(8) + "'" + (comment != null ? " / " + comment : ""));
+            // long string convention: chunks ending in '&', continued on CONTINUE cards
+            var sb = new StringBuilder();
+            int pos = 0;
+            bool first = true;
+            while (pos < esc.Length)
+            {
+                int n = Math.Min(67, esc.Length - pos);
+                bool last = pos + n == esc.Length;
+                if (!last && esc[pos + n - 1] == '\'' && QuoteRunOdd(esc, pos, n)) n--; // never split an escaped quote
+                string chunk = esc.Substring(pos, n);
+                pos += n;
+                last = pos == esc.Length;
+                string val = "'" + chunk + (last ? "" : "&") + "'";
+                sb.Append(Pad80((first ? key.PadRight(8) + "= " : "CONTINUE  ") + val));
+                first = false;
+            }
+            return sb.ToString();
         }
+
+        static bool QuoteRunOdd(string s, int start, int n)
+        {
+            int k = 0;
+            for (int i = start + n - 1; i >= start && s[i] == '\''; i--) k++;
+            return (k & 1) == 1;
+        }
+
         static string Commentary(string key, string text) => Pad80(key.PadRight(8) + text);
 
         internal static void WriteHeader(Stream s, List<string> cards)
