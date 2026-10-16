@@ -34,13 +34,11 @@ namespace Aardvark.ImageCodecs
         int _iccCount;
         int _scans;
         bool _oversize;
-        int _interleaveFirst = -1;
 
         // output
         Array? _out;
         byte* _outPtr;
         ushort[][]? _planes;
-        int _decodedComps;
 
         public JpegLsDecoder(byte* data, int length) { _d = data; _len = length; }
 
@@ -133,7 +131,6 @@ namespace Aardvark.ImageCodecs
                             {
                                 if ((long)Width * Height > maxPixels || (long)Width * Height * Nf > Array.MaxLength)
                                     throw new ImageNotSupportedException($"JPEG-LS: {Width}x{Height} exceeds MaxPixels");
-                                _interleaveFirst = scan.ilv;
                             }
                             foreach (var ci in scan.comps) CompTable[ci] = scan.tables[Array.IndexOf(scan.comps, ci)];
                             if (headerOnly)
@@ -409,10 +406,6 @@ namespace Aardvark.ImageCodecs
             {
                 byte* dst = _outPtr + baseIdx;
                 if (nf == 1) for (int x = 0; x < w; x++) dst[x] = (byte)line[x];
-                else if (nf == 3)
-                {
-                    for (int x = 0; x < w; x++) dst[3 * x] = (byte)line[x];
-                }
                 else for (int x = 0; x < w; x++) dst[(long)x * nf] = (byte)line[x];
             }
         }
@@ -490,7 +483,6 @@ namespace Aardvark.ImageCodecs
                         }
                     }
                 }
-                _decodedComps += ns;
                 int end = NextMarker((int)(r.Position - _d));
                 return end < 0 ? _len : end;
             }
@@ -509,9 +501,6 @@ namespace Aardvark.ImageCodecs
             prev[w] = prev[w - 1];
             cur[-1] = prev[0];
         }
-
-        /// <summary>Interleave mode of the first scan (for tests and info).</summary>
-        public int FirstInterleave => _interleaveFirst;
 
         public Dictionary<int, (int wt, List<byte> data)> Tables => _tables;
     }

@@ -81,6 +81,70 @@ public class JpegLsTests
         Assert.Equal((20, 11), (stored.Width, stored.Height));
     }
 
+    // ------------------------------------------------------------------ T.87 conformance data (downloaded)
+
+    /// <summary>Binary PGM / PPM samples as stored (no scaling of maxval), as the conformance images need.</summary>
+    static RawImage ReadPnm(string path)
+    {
+        var d = File.ReadAllBytes(path);
+        int pos = 0;
+        string Token()
+        {
+            while (char.IsWhiteSpace((char)d[pos])) pos++;
+            int s = pos;
+            while (!char.IsWhiteSpace((char)d[pos])) pos++;
+            return System.Text.Encoding.ASCII.GetString(d, s, pos - s);
+        }
+        int ch = Token() == "P6" ? 3 : 1;
+        int w = int.Parse(Token()), h = int.Parse(Token()), max = int.Parse(Token());
+        pos++;
+        var img = RawImage.Create(w, h, RawImage.DefaultColorModel(ch), max > 255 ? SampleType.UInt16 : SampleType.UInt8, ch);
+        if (max > 255)
+        {
+            var o = (ushort[])img.Data;
+            for (int i = 0; i < o.Length; i++) o[i] = (ushort)(d[pos + 2 * i] << 8 | d[pos + 2 * i + 1]);
+        }
+        else d.AsSpan(pos, w * h * ch).CopyTo((byte[])img.Data);
+        return img;
+    }
+
+    /// <summary>
+    /// The JPEG-LS conformance images of T.87 Annex E (tests/oracle/fetch_jpegls_conformance.py puts them into
+    /// downloads/jpegls-conformance of the test-data repository): lossless codings decode to the test images exactly,
+    /// NEAR = 3 ones within 3. t8sse* have line interleaved subsampled components (G 4x vertically, B 2x2), compared
+    /// with the components replicated to the full size.
+    /// </summary>
+    [TestDataFact("downloads/jpegls-conformance/t8sse0.jls")]
+    public void ConformanceImages()
+    {
+        string Dir(string f) => TestData(Path.Combine("downloads", "jpegls-conformance", f));
+        var t8 = ReadPnm(Dir("test8.ppm"));
+        var r = ReadPnm(Dir("test8r.pgm")); var g4 = ReadPnm(Dir("test8gr4.pgm")); var b2 = ReadPnm(Dir("test8bs2.pgm"));
+        var ss = RawImage.Create(256, 256, ColorModel.Rgb, SampleType.UInt8);
+        var sd = (byte[])ss.Data;
+        for (int y = 0; y < 256; y++)
+            for (int x = 0; x < 256; x++)
+            {
+                sd[(y * 256 + x) * 3] = ((byte[])r.Data)[y * 256 + x];
+                sd[(y * 256 + x) * 3 + 1] = ((byte[])g4.Data)[y / 4 * 256 + x];
+                sd[(y * 256 + x) * 3 + 2] = ((byte[])b2.Data)[y / 2 * 128 + x / 2];
+            }
+        var t16 = ReadPnm(Dir("test16.pgm"));
+        foreach (var (file, expected) in new[] { ("t8c0e{0}", t8), ("t8c1e{0}", t8), ("t8c2e{0}", t8), ("t8nde{0}", b2), ("t16e{0}", t16), ("t8sse{0}", ss) })
+            foreach (var near in new[] { 0, 3 })
+            {
+                var img = JpegLs.Decode(File.ReadAllBytes(Dir(string.Format(file, near) + ".jls")));
+                Assert.Equal((expected.Width, expected.Height, expected.Channels), (img.Width, img.Height, img.Channels));
+                Assert.True(MaxDiff(expected, img) <= near, $"{string.Format(file, near)}: {MaxDiff(expected, img)}");
+            }
+        // our lossless codings of the test image in every interleave mode
+        foreach (var ilv in new[] { 0, 1, 2 })
+        {
+            var enc = JpegLs.Encode(t8, new JpegLsEncodeOptions { Interleave = (JpegLsInterleave)ilv });
+            AssertEqual(t8, JpegLs.Decode(enc));
+        }
+    }
+
     // ------------------------------------------------------------------ encoder
 
     public sealed record EncodeCase(string name, int bits, int near, int ilv, int tf, int[]? preset);

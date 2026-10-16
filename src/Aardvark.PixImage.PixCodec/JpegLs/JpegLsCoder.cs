@@ -136,28 +136,6 @@ namespace Aardvark.ImageCodecs
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static void UpdateRegular(int* c, int err, int step, int reset)
-        {
-            int b = c[1] + err * step, a = c[0] + Math.Abs(err), n = c[3];
-            if (n == reset) { a >>= 1; b >>= 1; n >>= 1; }
-            n++;
-            c[0] = a; c[3] = n;
-            if (b <= -n)
-            {
-                b += n;
-                if (c[2] > -128) c[2]--;
-                if (b <= -n) b = -n + 1;
-            }
-            else if (b > 0)
-            {
-                b -= n;
-                if (c[2] < 127) c[2]++;
-                if (b > 0) b = 0;
-            }
-            c[1] = b;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void UpdateRunInterruption(int* r, int err, int em, int riType, int reset)
         {
             if (err < 0) r[2]++;
