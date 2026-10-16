@@ -45,6 +45,7 @@ jobs:
       # every oracle gate fails instead of skipping (see AGENTS.md, Tests); PIXCODEC_ORACLE_EXEMPT would list the gates a
       # platform cannot provide (none at the moment)
       PIXCODEC_REQUIRE_ORACLES: 1
+      VSTEST_CONNECTION_TIMEOUT: 600
     steps:
     - name: Keep line endings
       run: git config --global core.autocrlf false

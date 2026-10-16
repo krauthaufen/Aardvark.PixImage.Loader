@@ -40,6 +40,7 @@ jobs:
     env:
       PIXCODEC_TESTDATA: ${{ github.workspace }}\testdata
       PIXCODEC_REQUIRE_ORACLES: 1
+      VSTEST_CONNECTION_TIMEOUT: 600
     steps:
       - name: Keep line endings
         run: git config --global core.autocrlf false
