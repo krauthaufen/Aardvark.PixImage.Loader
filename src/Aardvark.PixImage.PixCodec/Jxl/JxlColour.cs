@@ -226,13 +226,43 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// Linear light to rounded 8 bit sRGB values, the same as <see cref="FromLinear(Span{float}, JxlColourEncoding, float)"/>
         /// followed by rounding and clamping, without evaluating the curve.
         /// </summary>
-        public static void LinearToSrgb8(ReadOnlySpan<float> src, Span<byte> dst, int stride)
+        public static unsafe void LinearToSrgb8(ReadOnlySpan<float> src, Span<byte> dst, int stride)
         {
             var (thr, coarse) = Srgb8Tables;
+            const float Below1 = 0.99999994f;
+            int i = 0;
+            if (System.Runtime.Intrinsics.X86.Avx2.IsSupported && src.Length >= 8)
+            {
+                if ((long)(src.Length - 1) * stride >= dst.Length) throw new ArgumentException("destination too small");
+                var ci = Srgb8CoarseInt;
+                int* tmp = stackalloc int[8];
+                fixed (float* ps = src, pt = thr)
+                fixed (int* pc = ci)
+                fixed (byte* pd = dst)
+                {
+                    var zero = System.Runtime.Intrinsics.Vector256<float>.Zero;
+                    var below = System.Runtime.Intrinsics.Vector256.Create(Below1);
+                    var cells = System.Runtime.Intrinsics.Vector256.Create((float)Srgb8Cells);
+                    for (; i + 8 <= src.Length; i += 8)
+                    {
+                        var v = System.Runtime.Intrinsics.X86.Avx.LoadVector256(ps + i);
+                        v = System.Runtime.Intrinsics.X86.Avx.Max(v, zero);      // NaN -> 0
+                        v = System.Runtime.Intrinsics.X86.Avx.Min(v, below);
+                        var k = System.Runtime.Intrinsics.X86.Avx.ConvertToVector256Int32WithTruncation(System.Runtime.Intrinsics.X86.Avx.Multiply(v, cells));
+                        var b = System.Runtime.Intrinsics.X86.Avx2.GatherVector256(pc, k, 4);
+                        var t = System.Runtime.Intrinsics.X86.Avx2.GatherVector256(pt, b, 4);
+                        var ge = System.Runtime.Intrinsics.Vector256.AsInt32(System.Runtime.Intrinsics.X86.Avx.CompareGreaterThanOrEqual(v, t));
+                        b = System.Runtime.Intrinsics.X86.Avx2.Subtract(b, ge);
+                        System.Runtime.Intrinsics.X86.Avx.Store(tmp, b);
+                        byte* o = pd + (long)i * stride;
+                        o[0] = (byte)tmp[0]; o[stride] = (byte)tmp[1]; o[2 * stride] = (byte)tmp[2]; o[3 * stride] = (byte)tmp[3];
+                        o[4 * stride] = (byte)tmp[4]; o[5 * stride] = (byte)tmp[5]; o[6 * stride] = (byte)tmp[6]; o[7 * stride] = (byte)tmp[7];
+                    }
+                }
+            }
             ref float t0 = ref MemoryMarshal.GetArrayDataReference(thr);
             ref byte c0 = ref MemoryMarshal.GetArrayDataReference(coarse);
-            const float Below1 = 0.99999994f;
-            for (int i = 0; i < src.Length; i++)
+            for (; i < src.Length; i++)
             {
                 float v = src[i];
                 v = v > 0 ? v : 0;            // also NaN
@@ -241,6 +271,19 @@ namespace Aardvark.ImageCodecs.JpegXl
                 // branch free: one more when v >= thr[b] (the sign bit of v - thr[b] is clear)
                 b += 1 - (int)((uint)BitConverter.SingleToInt32Bits(v - Unsafe.Add(ref t0, b)) >> 31);
                 dst[i * stride] = (byte)b;
+            }
+        }
+
+        static int[]? srgb8CoarseInt;
+        static int[] Srgb8CoarseInt
+        {
+            get
+            {
+                if (srgb8CoarseInt is { } c) return c;
+                var coarse = Srgb8Tables.coarse;
+                var ci = new int[coarse.Length];
+                for (int k = 0; k < ci.Length; k++) ci[k] = coarse[k];
+                return srgb8CoarseInt = ci;
             }
         }
 
