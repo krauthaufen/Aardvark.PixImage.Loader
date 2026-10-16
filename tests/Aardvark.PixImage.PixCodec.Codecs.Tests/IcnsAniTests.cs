@@ -173,7 +173,7 @@ public class IcnsAniTests
         Assert.DoesNotContain("rate", System.Text.Encoding.Latin1.GetString(simple));
         var s2 = Ani.DecodeAnimation(simple);
         Assert.Equal((2, 10), (s2.StepCount, s2.Steps[1].Jiffies));
-        Assert.Equal(1, Ico.ReadEntries(s2.FrameData[0]).Count);
+        Assert.Single(Ico.ReadEntries(s2.FrameData[0]));
         Assert.Throws<ArgumentException>(() => Ani.Encode(Array.Empty<AniInputFrame>()));
         Assert.Throws<ArgumentException>(() => Ani.Encode(new[] { new AniInputFrame(f0, 0) }));
         // through ImageCodec

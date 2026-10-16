@@ -199,6 +199,60 @@ public class MipmapTests
     }
 
     [Fact]
+    public void PvrAndAstcTexturesAndVolumes()
+    {
+        var img = PixCodec.Load(Fixture("jpeg/photo_444.jpg"));
+        var ms = new MemoryStream();
+        PixCodec.SavePvr(img, ms, new PvrEncodeOptions { Compression = TextureCompression.Etc2, GenerateMipmaps = true });
+        var mm = PixCodec.LoadMipmap(new MemoryStream(ms.ToArray()));
+        Assert.Equal((8, new V2i(160, 120)), (mm.LevelCount, mm.ImageArray[0].Size));
+        var vol = new PixVolume<ushort>(Col.Format.Gray, 9, 6, 4);
+        var t = vol.Tensor4;
+        for (int z = 0; z < 4; z++)
+            for (int y = 0; y < 6; y++)
+                for (int x = 0; x < 9; x++) t[x, y, z, 0] = (ushort)(x * 1000 + y * 100 + z * 7);
+        var vs = new MemoryStream();
+        PixCodec.SavePvr(vol, vs, new PvrEncodeOptions { GenerateMipmaps = true });
+        var back = (PixVolume<ushort>)PixCodec.LoadVolume(new MemoryStream(vs.ToArray()));
+        Assert.Equal(new V3i(9, 6, 4), back.Size);
+        Assert.Equal(t[5, 4, 3, 0], back.Tensor4[5, 4, 3, 0]);
+        Assert.Equal(new V3i(4, 3, 2), PixCodec.LoadVolume(vs.ToArray(), mip: 1).Size);
+        // ASTC volume (lossy): an 8 bit RGBA volume
+        var v8 = new PixVolume<byte>(Col.Format.RGBA, 12, 8, 3);
+        var t8 = v8.Tensor4;
+        for (int z = 0; z < 3; z++) for (int y = 0; y < 8; y++) for (int x = 0; x < 12; x++) for (int c = 0; c < 4; c++) t8[x, y, z, c] = (byte)(x * 20 + z * 50 + c * 10);
+        var asr = new MemoryStream();
+        PixCodec.SaveAstc(v8, asr, new AstcEncodeOptions { BlockWidth = 4, BlockHeight = 4 });
+        var av = (PixVolume<byte>)PixCodec.LoadVolume(asr.ToArray());
+        Assert.Equal(new V3i(12, 8, 3), av.Size);
+        Assert.InRange(av.Tensor4[6, 3, 2, 0], t8[6, 3, 2, 0] - 8, t8[6, 3, 2, 0] + 8);
+        // PVR cube maps
+        var face = new PixImage<byte>(Col.Format.RGBA, 8, 8);
+        for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) for (int c = 0; c < 4; c++) face.Volume[x, y, c] = (byte)(x * 30 + y * 5 + c * 60);
+        var cube = new PixCube(Enumerable.Range(0, 6).Select(_ => new PixImageMipMap(face)).ToArray());
+        var cs = new MemoryStream();
+        PixCodec.SavePvr(cube, cs);
+        var c2 = PixCodec.LoadCube(cs.ToArray());
+        Assert.Equal(Bytes(face), Bytes((PixImage<byte>)c2.MipMapArray[4].ImageArray[0]));
+        // a PVRTexTool cube with mips, and its legacy (v2) twin
+        foreach (var f in new[] { "pvr/cube.pvr", "pvr/v2cubem.pvr" })
+        {
+            var c = PixCodec.LoadCube(Fixture(f));
+            Assert.Equal(6, c.MipMapArray[2].LevelCount);
+        }
+        Assert.Throws<ImageLoadException>(() => PixCodec.LoadVolume(Fixture("pvr/rgba8.pvr")));
+        // icons and animated cursors
+        var icon = new PixImage<byte>(Col.Format.RGBA, 32, 32);
+        icon.Volume[3, 4, 3] = 200;
+        var ic = new MemoryStream();
+        PixCodec.SaveIcns(new PixImage[] { icon, new PixImage<byte>(Col.Format.RGB, 16, 16) }, ic);
+        Assert.Equal(2, PixCodec.LoadAll(ic.ToArray()).Length);
+        var an = new MemoryStream();
+        PixCodec.SaveAni(new PixImage[] { icon, icon }, an, 6);
+        Assert.Equal(Bytes(icon), Bytes((PixImage<byte>)PixCodec.LoadAll(an.ToArray())[1]));
+    }
+
+    [Fact]
     public void SmallFormatsByExtension()
     {
         var img = (PixImage<byte>)PixCodec.Load(Fixture("png/f0_c6_d08.png"));
@@ -206,13 +260,13 @@ public class MipmapTests
         Directory.CreateDirectory(dir);
         try
         {
-            foreach (var ext in new[] { ".qoi", ".ktx2", ".ico", ".pam", ".ppm", ".hdr", ".pfm", ".pgm", ".pbm" })
+            foreach (var ext in new[] { ".qoi", ".ktx2", ".ico", ".pam", ".ppm", ".hdr", ".pfm", ".pgm", ".pbm", ".pvr", ".ani", ".astc" })
             {
                 var path = Path.Combine(dir, "x" + ext);
                 PixCodec.Save(img, path);
                 var back = PixCodec.Load(path);
                 Assert.Equal(img.Size, back.Size);
-                if (ext is ".qoi" or ".ktx2" or ".ico" or ".pam" or ".ppm") Assert.Equal(Bytes(img), Bytes((PixImage<byte>)back));
+                if (ext is ".qoi" or ".ktx2" or ".ico" or ".pam" or ".ppm" or ".pvr" or ".ani") Assert.Equal(Bytes(img), Bytes((PixImage<byte>)back));
                 Assert.Equal(ImageCodec.FormatFromExtension(path), PixCodec.GetInfo(path).Format);
             }
         }

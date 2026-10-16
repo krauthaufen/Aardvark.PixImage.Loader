@@ -8,7 +8,7 @@ namespace Aardvark.Data
 {
     /// <summary>
     /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA,
-    /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO).
+    /// DDS, KTX, PVR, ASTC, Radiance HDR, PNM / PFM, QOI, ICO / CUR / ANI, ICNS).
     /// Register with <see cref="PixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
     public sealed class PixCodecLoader : IPixMipmapLoader
@@ -331,9 +331,17 @@ namespace Aardvark.Data
         /// <inheritdoc cref="LoadCube(string, int)"/>
         public static PixCube LoadCube(Stream stream, int item = 0) => LoadCube(ImageCodec.ReadAll(stream), item);
 
-        /// <summary>A DDS or KTX cube map as a PixCube (see <see cref="LoadCube(string, int)"/>); <paramref name="item"/> is the cube (array layer).</summary>
+        /// <summary>A DDS, KTX or PVR cube map as a PixCube (see <see cref="LoadCube(string, int)"/>); <paramref name="item"/> is the cube (array layer).</summary>
         public static PixCube LoadCube(byte[] data, int item = 0)
         {
+            if (Pvr.IsMatch(data))
+            {
+                var p = Pvr.DecodeTexture(data);
+                if (p.Faces != 6) throw new ImageLoadException("not a cube map");
+                var ps = new PixImageMipMap[6];
+                for (int i = 0; i < 6; i++) ps[i] = PixCodecLoader.ToMipMap(p.GetMipChain(item, i));
+                return new PixCube(ps);
+            }
             if (!Ktx.IsMatch(data)) return ToCube(Dds.DecodeTexture(data), item);
             var t = Ktx.DecodeTexture(data);
             if (t.Kind != KtxTextureKind.CubeMap) throw new ImageLoadException($"not a cube map but a {t.Kind}");
@@ -343,8 +351,9 @@ namespace Aardvark.Data
         }
 
         /// <summary>
-        /// The top level of a DDS or KTX volume (3D) texture as a PixVolume of the stored sample type (half floats as float), with
-        /// the dense layout channel, x, y, z. <paramref name="mip"/> picks a smaller level, <paramref name="item"/> a KTX array layer.
+        /// The top level of a DDS, KTX or PVR volume (3D) texture or of an .astc volume as a PixVolume of the stored sample type
+        /// (half floats as float), with the dense layout channel, x, y, z. <paramref name="mip"/> picks a smaller level,
+        /// <paramref name="item"/> a KTX array layer / PVR surface.
         /// </summary>
         public static PixVolume LoadVolume(string path, int mip = 0, int item = 0) => LoadVolume(File.ReadAllBytes(path), mip, item);
         /// <inheritdoc cref="LoadVolume(string, int, int)"/>
@@ -353,7 +362,18 @@ namespace Aardvark.Data
         public static PixVolume LoadVolume(byte[] data, int mip = 0, int item = 0)
         {
             RawImage[] slices;
-            if (Ktx.IsMatch(data))
+            if (Astc.IsMatch(data))
+            {
+                if (mip != 0 || item != 0) throw new ImageLoadException(".astc files hold a single level");
+                slices = Astc.DecodeVolume(data);
+            }
+            else if (Pvr.IsMatch(data))
+            {
+                var t = Pvr.DecodeTexture(data);
+                if (t.Depth == 1) throw new ImageLoadException("not a volume texture");
+                slices = t.GetSlices(mip, item);
+            }
+            else if (Ktx.IsMatch(data))
             {
                 var t = Ktx.DecodeTexture(data);
                 if (t.Kind != KtxTextureKind.Texture3D) throw new ImageLoadException($"not a volume texture but a {t.Kind}");
@@ -427,6 +447,41 @@ namespace Aardvark.Data
             for (int i = 0; i < t.Faces.Count; i++) sides[t.Faces[i]] = PixCodecLoader.ToMipMap(t.GetMipChain(item, i));
             return new PixCube(sides);
         }
+
+        /// <summary>
+        /// Saves an image as PVR v3: uncompressed (the image's sample type) or block compressed (BC1 to BC7, ETC2 / EAC, ASTC; see
+        /// <see cref="PvrEncodeOptions.Compression"/>), optionally with a computed mip chain.
+        /// </summary>
+        public static void SavePvr(PixImage image, Stream stream, PvrEncodeOptions? options = null)
+            => Pvr.Encode(PixCodecLoader.ToRawImage(image), stream, options);
+
+        /// <summary>Saves a mip map as PVR (every level half the size of the previous one, rounded down).</summary>
+        public static void SavePvr(PixImageMipMap mipmap, Stream stream, PvrEncodeOptions? options = null)
+            => Pvr.EncodeMipmaps(Array.ConvertAll(mipmap.ImageArray, PixCodecLoader.ToRawImage), stream, options);
+
+        /// <summary>Saves a PixCube as a PVR cube map, each side with its mip chain.</summary>
+        public static void SavePvr(PixCube cube, Stream stream, PvrEncodeOptions? options = null)
+            => Pvr.EncodeCube(Array.ConvertAll(cube.MipMapArray, m => (IReadOnlyList<RawImage>)Array.ConvertAll(m.ImageArray, PixCodecLoader.ToRawImage)), stream, options);
+
+        /// <summary>Saves a PixVolume as a PVR volume texture, with a 3D mip chain if <see cref="PvrEncodeOptions.GenerateMipmaps"/> is set.</summary>
+        public static void SavePvr(PixVolume volume, Stream stream, PvrEncodeOptions? options = null)
+            => Pvr.EncodeVolume(VolumeSlices(volume), stream, options);
+
+        /// <summary>Saves an image as a plain .astc file (LDR from integer images, HDR from float images).</summary>
+        public static void SaveAstc(PixImage image, Stream stream, AstcEncodeOptions? options = null)
+            => Astc.Encode(PixCodecLoader.ToRawImage(image), stream, options);
+
+        /// <summary>Saves a PixVolume as an .astc volume (2D footprint, slice by slice).</summary>
+        public static void SaveAstc(PixVolume volume, Stream stream, AstcEncodeOptions? options = null)
+            => Astc.EncodeVolume(VolumeSlices(volume), stream, options);
+
+        /// <summary>Saves square images (16 to 1024 pixels) as an Apple icon file, see <see cref="Icns.Encode(IReadOnlyList{RawImage}, Stream, IcnsEncodeOptions?)"/>.</summary>
+        public static void SaveIcns(IEnumerable<PixImage> images, Stream stream, IcnsEncodeOptions? options = null)
+            => Icns.Encode(System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(images, i => PixCodecLoader.ToRawImage(i.PixFormat.Type == typeof(byte) ? i : i.ToPixImage<byte>()))), stream, options);
+
+        /// <summary>Saves an animated cursor (ANI): one step per image, each shown for <paramref name="jiffies"/> (1/60 s).</summary>
+        public static void SaveAni(IEnumerable<PixImage> steps, Stream stream, int jiffies = 10, AniEncodeOptions? options = null)
+            => Ani.Encode(System.Linq.Enumerable.Select(steps, i => new AniInputFrame(PixCodecLoader.ToRawImage(i.PixFormat.Type == typeof(byte) ? i : i.ToPixImage<byte>()), jiffies)), stream, options);
 
         /// <summary>
         /// Saves an image as DDS: uncompressed, or block compressed (BC1 to BC7) per <see cref="DdsEncodeOptions.Compression"/>,
@@ -532,11 +587,19 @@ namespace Aardvark.Data
         {
             // formats without a PixFileFormat
             var codec = ImageCodec.FormatFromExtension(path);
-            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx)
+            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.Pvr or ImageFormat.Astc or ImageFormat.Icns or ImageFormat.Ani)
             {
                 using var fs = File.Create(path);
-                if (codec == ImageFormat.Qoi) Qoi.Encode(PixCodecLoader.ToRawImage(image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>()), fs);
-                else Ktx.Encode(PixCodecLoader.ToRawImage(image), fs);
+                var bytes = image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>();
+                switch (codec)
+                {
+                    case ImageFormat.Qoi: Qoi.Encode(PixCodecLoader.ToRawImage(bytes), fs); break;
+                    case ImageFormat.Ktx: Ktx.Encode(PixCodecLoader.ToRawImage(image), fs); break;
+                    case ImageFormat.Pvr: Pvr.Encode(PixCodecLoader.ToRawImage(image), fs); break;
+                    case ImageFormat.Astc: Astc.Encode(PixCodecLoader.ToRawImage(image), fs); break;
+                    case ImageFormat.Icns: Icns.Encode(new[] { PixCodecLoader.ToRawImage(bytes) }, fs); break;
+                    default: Ani.Encode(new[] { new AniInputFrame(PixCodecLoader.ToRawImage(bytes)) }, fs); break;
+                }
                 return;
             }
             var p = saveParams ?? new PixSaveParams(FileFormat(path));
