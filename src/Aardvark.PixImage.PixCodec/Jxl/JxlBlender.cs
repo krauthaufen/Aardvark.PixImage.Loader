@@ -42,6 +42,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                     }
                 }
                 bool isAlpha = fa != null && c == nc + bi.AlphaChannel;
+                bool isAwaAlpha = isAlpha && bi.Mode == JxlBlendMode.AlphaWeightedAdd;
                 for (int y = 0; y < oh; y++)
                 {
                     int fr = (fy0 + y) * frame.Width + fx0, cr = (cy0 + y) * W + cx0;
@@ -62,6 +63,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                             }
                             break;
                         case JxlBlendMode.AlphaWeightedAdd:
+                            if (isAwaAlpha) break;   // the alpha channel itself keeps the background
                             for (int x = 0; x < ow; x++)
                             {
                                 float a = fa != null ? fa[fr + x] : 1;

@@ -31,6 +31,10 @@ namespace Aardvark.ImageCodecs
         /// <summary>Test hook: return Float32 samples whatever the header says.</summary>
         internal bool ForceFloat { get; set; }
 
+        /// <summary>Test hook: Float32 output of the colour channels followed by all extra channels, without spot rendering
+        /// or unpremultiplication (as the conformance references have them).</summary>
+        internal bool AllChannels { get; set; }
+
         internal static readonly JxlDecodeOptions Default = new();
     }
 
@@ -232,8 +236,25 @@ namespace Aardvark.ImageCodecs
 
         // ------------------------------------------------------------------ output conversion
 
+        /// <summary>Test hook output: Float32, colour channels then every extra channel as decoded (spot colours not rendered).</summary>
+        static RawImage OutputAll(JxlImageHeader h, JxlFrameImage canvas, ImageMetadata meta, JxlDecodeOptions opt)
+        {
+            var col = ColourPlanes(h, canvas, meta, opt);
+            int ne = h.ExtraChannels.Length, nch = col.Length + ne, n = canvas.Width * canvas.Height;
+            var data = new float[(long)n * nch];
+            for (int c = 0; c < nch; c++)
+            {
+                var src = c < col.Length ? col[c] : canvas.Planes[canvas.NumColour + c - col.Length];
+                for (int i = 0; i < n; i++) data[(long)i * nch + c] = src[i];
+            }
+            var img = new RawImage(canvas.Width, canvas.Height, ColorModel.Other, data, nch, meta);
+            if (opt.ApplyOrientation && h.Orientation > 1) img = ImageOps.ApplyOrientation(img, h.Orientation);
+            return img;
+        }
+
         static RawImage Output(JxlImageHeader h, JxlFrameImage canvas, ImageMetadata meta, JxlDecodeOptions opt)
         {
+            if (opt.AllChannels) return OutputAll(h, canvas, meta, opt);
             var (color, nch, type) = OutputFormat(h);
             if (opt.ForceFloat) type = SampleType.Float32;
             int w = canvas.Width, hh = canvas.Height, n = w * hh;
@@ -245,39 +266,7 @@ namespace Aardvark.ImageCodecs
             if (ints != null && (opt.ForceFloat || opt.RenderSpotColours && HasSpot(h) || alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated)) ints = null;
             if (ints == null)
             {
-                // colour planes in the output colour space
-                float[][] col = new float[ncol][];
-                if (h.XybEncoded && h.Colour.WantIcc && h.Icc != null && IccOutput(h, p, n, ncol, opt) is { } viaIcc)
-                {
-                    col = viaIcc;
-                }
-                else if (h.XybEncoded)
-                {
-                    var r = (float[])p[0].Clone(); var g = (float[])p[1].Clone(); var b = (float[])p[2].Clone();
-                    if (!h.Colour.WantIcc && JxlColour.NeedsPrimaryConversion(h.Colour))
-                        JxlColour.ApplyMatrix(r, g, b, n, JxlColour.SrgbToTargetMatrix(h.Colour));
-                    var ce = h.Colour.WantIcc ? new JxlColourEncoding() : h.Colour;
-                    if (ncol == 1)
-                    {
-                        // grey: the luminance of the (achromatic) linear RGB
-                        var gr = new float[n];
-                        for (int i = 0; i < n; i++) gr[i] = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i];
-                        JxlColour.FromLinear(gr, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
-                        col[0] = gr;
-                    }
-                    else
-                    {
-                        JxlColour.FromLinear(r, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
-                        JxlColour.FromLinear(g, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
-                        JxlColour.FromLinear(b, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
-                        col[0] = r; col[1] = g; col[2] = b;
-                    }
-                    if (h.Colour.WantIcc) meta.IccProfile = null;   // converted to sRGB
-                }
-                else
-                {
-                    for (int c = 0; c < ncol; c++) col[c] = p[Math.Min(c, canvas.NumColour - 1)];
-                }
+                var col = ColourPlanes(h, canvas, meta, opt);
                 if (opt.RenderSpotColours && HasSpot(h)) col = RenderSpot(h, canvas, col, n);
                 for (int c = 0; c < ncol; c++) planes[c] = col[c];
                 if (alpha >= 0)
@@ -312,6 +301,48 @@ namespace Aardvark.ImageCodecs
             var img = new RawImage(w, hh, color, data, nch, meta);
             if (opt.ApplyOrientation && h.Orientation > 1) img = ImageOps.ApplyOrientation(img, h.Orientation);
             return img;
+        }
+
+        /// <summary>The colour planes in the output colour space (XYB converted to the header's encoding or ICC profile).</summary>
+        static float[][] ColourPlanes(JxlImageHeader h, JxlFrameImage canvas, ImageMetadata meta, JxlDecodeOptions opt)
+        {
+            int n = canvas.Width * canvas.Height;
+            int ncol = h.Colour.IsGray ? 1 : 3;
+            var p = canvas.Planes;
+            float[][] col = new float[ncol][];
+
+            if (h.XybEncoded && h.Colour.WantIcc && h.Icc != null && IccOutput(h, p, n, ncol, opt) is { } viaIcc)
+            {
+                col = viaIcc;
+            }
+            else if (h.XybEncoded)
+            {
+                var r = (float[])p[0].Clone(); var g = (float[])p[1].Clone(); var b = (float[])p[2].Clone();
+                if (!h.Colour.WantIcc && JxlColour.NeedsPrimaryConversion(h.Colour))
+                    JxlColour.ApplyMatrix(r, g, b, n, JxlColour.SrgbToTargetMatrix(h.Colour));
+                var ce = h.Colour.WantIcc ? new JxlColourEncoding() : h.Colour;
+                if (ncol == 1)
+                {
+                    // grey: the luminance of the (achromatic) linear RGB
+                    var gr = new float[n];
+                    for (int i = 0; i < n; i++) gr[i] = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i];
+                    JxlColour.FromLinear(gr, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
+                    col[0] = gr;
+                }
+                else
+                {
+                    JxlColour.FromLinear(r, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
+                    JxlColour.FromLinear(g, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
+                    JxlColour.FromLinear(b, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
+                    col[0] = r; col[1] = g; col[2] = b;
+                }
+                if (h.Colour.WantIcc) meta.IccProfile = null;   // converted to sRGB
+            }
+            else
+            {
+                for (int c = 0; c < ncol; c++) col[c] = p[Math.Min(c, canvas.NumColour - 1)];
+            }
+            return col;
         }
 
         /// <summary>XYB images with an ICC profile: linear sRGB to the profile's device space (relative colorimetric).</summary>

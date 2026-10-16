@@ -136,6 +136,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                                     }
                                 case JxlPatchBlend.AlphaWeightedAddAbove:
                                     {
+                                        if (isAlpha) { r = d; break; }
                                         float a = fa != null ? fa[si] : 1;
                                         if (bl.Clamp) a = Math.Clamp(a, 0, 1);
                                         r = d + s * a;
@@ -143,6 +144,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                                     }
                                 default:
                                     {
+                                        if (isAlpha) { r = s; break; }
                                         float a = ba != null ? ba[di] : 1;
                                         if (bl.Clamp) a = Math.Clamp(a, 0, 1);
                                         r = s + d * a;
