@@ -719,12 +719,14 @@ def anim_libjxl(path, w, h, dtype):
     """cjxl stores the APNG frames losslessly together with their blend and dispose operations; djxl renders the
     animation with floating point compositing and writes full frames, which any APNG reader can take apart.
     Its blending is rounded from float32, so it can differ from exact rounding by 1 (see judge: 'near')."""
-    import imagecodecs
+    import imagecodecs, uuid
     cjxl, djxl = tool('cjxl'), tool('djxl')
     if not cjxl or not djxl:
         return None
     os.makedirs(TMP, exist_ok=True)
-    jxl, out = os.path.join(TMP, '_oracle.jxl'), os.path.join(TMP, '_oracle.apng')
+    # unique names: test processes for both frameworks call this concurrently
+    tag = f'_oracle_{os.getpid()}_{uuid.uuid4().hex}'
+    jxl, out = os.path.join(TMP, tag + '.jxl'), os.path.join(TMP, tag + '.apng')
     try:
         subprocess.run(cjxl + [path, jxl, '-d', '0', '-e', '3', '--quiet'], check=True, capture_output=True)
         subprocess.run(djxl + [jxl, out, '--quiet'], check=True, capture_output=True)
