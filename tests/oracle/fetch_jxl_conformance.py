@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetches the JPEG XL conformance suite for JxlConformanceTests.
+"""Fetches the JPEG XL conformance suite for JxlTests.Conformance.
 
 Source: https://github.com/libjxl/conformance (BSD-3-Clause; the licences of the source images are listed in its
 testcases/README.md, all allow reproduction for testing) at a pinned commit. Per test case input.jxl and test.json
