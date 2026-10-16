@@ -185,7 +185,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 var x = (float[])orig.Clone();
                 for (int it = 0; it < iters; it++)
                 {
-                    var g = JxlFilters.Gaborish(x, w, h, gw[2 * c], gw[2 * c + 1], f.Parallel);
+                    var g = Gaborish(x, w, h, gw[2 * c], gw[2 * c + 1], f.Parallel);
                     for (int i = 0; i < x.Length; i++) x[i] += orig[i] - g[i];
                 }
                 for (int y = 0; y < h; y++)
@@ -195,6 +195,27 @@ namespace Aardvark.ImageCodecs.JpegXl
                 }
                 for (int y = h; y < f.Ph; y++) Array.Copy(p, (h - 1) * f.Pw, p, y * f.Pw, f.Pw);
             });
+        }
+
+        /// <summary>The decoder's Gaborish smoothing (3x3, borders mirrored: the edge sample repeats).</summary>
+        static float[] Gaborish(float[] src, int w, int h, float w1, float w2, bool parallel)
+        {
+            var o = new float[src.Length];
+            float norm = 1 / (1 + 4 * w1 + 4 * w2);
+            float c0 = norm, c1 = w1 * norm, c2 = w2 * norm;
+            void Row(int y)
+            {
+                int ru = Math.Max(0, y - 1) * w, rm = y * w, rd = Math.Min(h - 1, y + 1) * w;
+                for (int x = 0; x < w; x++)
+                {
+                    int xl = x > 0 ? x - 1 : 0, xr = x + 1 < w ? x + 1 : w - 1;
+                    float side = src[ru + x] + src[rd + x] + src[rm + xl] + src[rm + xr];
+                    float corner = src[ru + xl] + src[ru + xr] + src[rd + xl] + src[rd + xr];
+                    o[rm + x] = src[rm + x] * c0 + side * c1 + corner * c2;
+                }
+            }
+            if (parallel && h >= 64) Parallel.For(0, h, Row); else for (int y = 0; y < h; y++) Row(y);
+            return o;
         }
 
         // ------------------------------------------------------------------ quantizer and LF
