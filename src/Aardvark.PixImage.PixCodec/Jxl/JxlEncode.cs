@@ -60,6 +60,8 @@ namespace Aardvark.ImageCodecs
         /// <summary>Lossy only: test hooks for the restoration filters (null = automatic).</summary>
         internal bool? Gaborish { get; set; }
         internal int? EpfIterations { get; set; }
+        /// <summary>Test hook: writes custom dequantization matrix encodings (after the "not all default" bit).</summary>
+        internal Action<JxlBitWriter>? DequantMatrices { get; set; }
 
         /// <summary>The distance that will be used (0 = lossless).</summary>
         public float EffectiveDistance

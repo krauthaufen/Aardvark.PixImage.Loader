@@ -706,6 +706,59 @@ public class JxlSpecTests(ITestOutputHelper output)
         Assert.True(mo < tol && ml < tol, $"{mo} {ml}");
     }
 
+    // ------------------------------------------------------------------ I.2.4 dequantization matrices
+
+    /// <summary>
+    /// Table I.5: the Hornuss, DCT2, DCT4, DCT4x8 and AFV encodings may describe any of the 8 x 8 tables (indices 0, 1,
+    /// 2, 3, 9, 10), not only the one of the same name. Frames of one transform type whose table uses another table's
+    /// encoding, decoded by us and by libjxl.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 3)]    // DCT8x8 table as DCT4
+    [InlineData(0, 1)]    // DCT8x8 table as Hornuss
+    [InlineData(12, 2)]   // DCT4x8 table as DCT2
+    [InlineData(13, 5)]   // DCT8x4 table as AFV
+    [InlineData(3, 5)]    // DCT4x4 table as AFV
+    public void EightByEightEncodingsOnOtherTables(int strategy, int mode)
+    {
+        int table = JxlAcStrategy.QuantTable[strategy];
+        void Write(JxlBitWriter w)
+        {
+            void F(params double[] v) { foreach (var x in v) w.WriteF16((float)x); }
+            void DctParams(int n) { w.Write(4, (uint)(n - 1)); for (int c = 0; c < 3; c++) { F(2000 / (c + 1.0)); for (int i = 1; i < n; i++) F(-0.3 * i / n); } }
+            for (int t = 0; t < 17; t++)
+            {
+                if (t != table) { w.Write(3, 0); continue; }   // library
+                w.Write(3, (uint)mode);
+                for (int c = 0; c < 3; c++)
+                    switch (mode)
+                    {
+                        case 1: F(40, 20, 30); break;                        // Hornuss (x 64)
+                        case 2: F(20, 25, 30, 35, 40, 45); break;            // DCT2 (x 64)
+                        case 3: F(1.5, 0.8); break;                          // DCT4
+                        case 4: F(1.2); break;                               // DCT4x8
+                        default: F(1500, 1500, 120, 120, 120, 200, -0.2, -0.2, -0.3); break;   // AFV
+                    }
+                if (mode is 3 or 4 or 5) DctParams(4);
+                if (mode == 5) DctParams(3);
+            }
+        }
+        var img = JxlEncodeTests.Synthetic(64, 48, ColorModel.Rgb, SampleType.UInt8, 0);
+        var data = Jxl.Encode(img, new JxlEncodeOptions { Distance = 1, ForceStrategy = strategy, DequantMatrices = Write });
+        var ours = Jxl.Decode(data, new JxlDecodeOptions { ForceFloat = true });
+        var lib = JxlEncodeTests.Libjxl(data);
+        if (lib == null) return;
+        var a = (float[])ours.Data; var e = JxlTests_Floats(lib);
+        double m = 0;
+        for (int i = 0; i < a.Length; i++) m = Math.Max(m, Math.Abs(Math.Clamp(a[i], 0, 1) - Math.Clamp(e[i], 0, 1)));
+        output.WriteLine($"strategy {strategy}, table {table} as mode {mode}: largest difference to libjxl {m:g3}");
+        Assert.True(m < 2 / 255.0, $"{m}");
+    }
+
+    static float[] JxlTests_Floats(RawImage r) => r.SampleType == SampleType.UInt8
+        ? ((byte[])r.Data).Select(b => b / 255f).ToArray() : r.SampleType == SampleType.UInt16
+        ? ((ushort[])r.Data).Select(b => b / 65535f).ToArray() : (float[])r.Data;
+
     // ------------------------------------------------------------------ fixtures of gen_jxl_spec.py
 
     static byte[] SpecFixture(string name) => File.ReadAllBytes(Path.Combine(FixtureDir, "jxl-spec", name));

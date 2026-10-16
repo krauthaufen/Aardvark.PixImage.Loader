@@ -117,6 +117,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             public float[] DcStep = new float[3];
             public int[][] QDc = null!;            // quantized LF per block, channels X, Y, B
             public float[][] Dc = null!;           // dequantized LF (no smoothing)
+            public Action<JxlBitWriter>? DequantMatrices;
             public int[] Qf = null!;               // quant field per block (1..256)
             public byte[] Strategy = null!;        // per block (255 = covered by an earlier block of the varblock)
             public byte[] Sharp = null!;
@@ -139,6 +140,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             fh.XQmScale = 3; fh.BQmScale = 2;
             f.XQm = MathF.Pow(0.8f, fh.XQmScale - 2); f.BQm = MathF.Pow(0.8f, fh.BQmScale - 2);
             bool gab = opt.Gaborish ?? true;
+            f.DequantMatrices = opt.DequantMatrices;
             fh.Filter = new JxlRestorationFilter { Gab = gab, EpfIters = opt.EpfIterations ?? EpfFor(d) };
             f.QuantBias = h.Opsin.QuantBias; f.QuantBiasNum = h.Opsin.QuantBiasNumerator;
             var dims = f.Dims = JxlFrameDims.Of(fh);
@@ -899,7 +901,8 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
             void HfGlobal(JxlBitWriter w)
             {
-                w.WriteBool(true);   // default dequantization matrices
+                w.WriteBool(f.DequantMatrices == null);   // default dequantization matrices
+                f.DequantMatrices?.Invoke(w);
                 w.Write(JxlHybridUint.CeilLog2(dims.NumGroups), 0);   // one histogram set
                 w.WriteU32(0, Val(0x5F), Val(0x13), Val(0), Bits(13));   // natural coefficient orders
                 hf.WriteCode(w);
