@@ -81,6 +81,7 @@ namespace Aardvark.ImageCodecs
         /// <summary>Kodak Cineon.</summary>
         Cineon,
         JpegLs,
+        Jxl,
     }
 
     /// <summary>

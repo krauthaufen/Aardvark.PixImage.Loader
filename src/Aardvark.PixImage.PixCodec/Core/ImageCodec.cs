@@ -17,6 +17,7 @@ namespace Aardvark.ImageCodecs
             if (Exr.IsMatch(header)) return ImageFormat.Exr;
             if (Webp.IsMatch(header)) return ImageFormat.Webp;
             if (Jp2.IsMatch(header)) return ImageFormat.Jp2;
+            if (Jxl.IsMatch(header)) return ImageFormat.Jxl;
             if (Bmp.IsMatch(header)) return ImageFormat.Bmp;
             if (Dds.IsMatch(header)) return ImageFormat.Dds;
             if (Ktx.IsMatch(header)) return ImageFormat.Ktx;
@@ -93,6 +94,7 @@ namespace Aardvark.ImageCodecs
                 ".dpx" => ImageFormat.Dpx,
                 ".cin" or ".cineon" => ImageFormat.Cineon,
                 ".jls" => ImageFormat.JpegLs,
+                ".jxl" => ImageFormat.Jxl,
                 _ => ImageFormat.Unknown,
             };
         }
@@ -138,6 +140,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Dpx => Dpx.GetInfo(data),
             ImageFormat.Cineon => Cineon.GetInfo(data),
             ImageFormat.JpegLs => JpegLs.GetInfo(data),
+            ImageFormat.Jxl => Jxl.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -379,6 +382,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Dpx => Dpx.Decode(data),
             ImageFormat.Cineon => Cineon.Decode(data),
             ImageFormat.JpegLs => JpegLs.Decode(data),
+            ImageFormat.Jxl => Jxl.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -504,7 +508,7 @@ namespace Aardvark.ImageCodecs
         }
 
         /// <summary>
-        /// Decodes every image in the file: the pages of a TIFF or DCX, the frames of an animated GIF, PNG or WebP (each the whole
+        /// Decodes every image in the file: the pages of a TIFF or DCX, the frames of an animated GIF, PNG, WebP or JPEG XL (each the whole
         /// canvas as a viewer shows it), the array elements / cube faces of a DDS texture (top mip level), the image elements of a
         /// DPX file, or else the single image.
         /// </summary>
@@ -565,6 +569,8 @@ namespace Aardvark.ImageCodecs
                     return Pvr.DecodeAll(data);
                 case ImageFormat.Dpx:
                     return Dpx.DecodeAll(data);
+                case ImageFormat.Jxl:
+                    return Jxl.DecodeAll(data);
                 default:
                     return new[] { Decode(data) };
             }
@@ -659,6 +665,7 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Dpx: Dpx.Encode(image, output); break;
                 case ImageFormat.Cineon: Cineon.Encode(image, output); break;
                 case ImageFormat.JpegLs: JpegLs.Encode(image, output); break;
+                case ImageFormat.Jxl: throw new ImageNotSupportedException("JPEG XL encoding is not available");
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }

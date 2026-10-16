@@ -1,0 +1,153 @@
+using System;
+using System.Collections.Generic;
+
+namespace Aardvark.ImageCodecs.JpegXl
+{
+    /// <summary>Reference frames and LF frames kept between frames.</summary>
+    internal sealed class JxlDecoderState
+    {
+        public readonly JxlFrameImage?[] References = new JxlFrameImage?[4];
+        /// <summary>Whether the reference slot holds a frame saved before its colour transform.</summary>
+        public readonly bool[] ReferencePreCt = new bool[4];
+        public readonly JxlFrameImage?[] LfFrames = new JxlFrameImage?[4];
+        /// <summary>Displayed and other frames decoded so far (they seed the noise generator).</summary>
+        public int VisibleFrames, NonVisibleFrames;
+    }
+
+    /// <summary>A displayed frame: the composited canvas after a frame with a duration (or the last one).</summary>
+    internal sealed class JxlDisplayedFrame
+    {
+        public JxlFrameImage Canvas = null!;
+        public uint Duration;
+        public uint Timecode;
+        public string Name = "";
+    }
+
+    /// <summary>Walks the frames of a codestream and composes them.</summary>
+    internal sealed class JxlDecoder
+    {
+        public readonly byte[] Data;
+        public readonly JxlImageHeader Header;
+        readonly JxlDecodeOptions opt;
+        readonly JxlDecoderState state = new();
+        int pos;          // byte offset of the next frame
+        public bool Done { get; private set; }
+        public int FramesDecoded;
+
+        public JxlDecoder(byte[] codestream, JxlDecodeOptions opt)
+        {
+            Data = codestream;
+            this.opt = opt;
+            var br = new JxlBitReader(codestream);
+            Header = JxlImageHeader.Read(br);
+            CheckSize(Header.Width, Header.Height);
+            if (Header.Colour.WantIcc) Header.Icc = JxlIcc.Read(br);
+            br.ZeroPadToByte();
+            br.CheckEnd();
+            pos = br.BytePosition;
+            if (Header.HavePreview) SkipPreview();
+        }
+
+        void CheckSize(long w, long h)
+        {
+            if (w * h > opt.MaxPixels)
+                throw new ImageNotSupportedException($"JPEG XL: {w}x{h} exceeds JxlDecodeOptions.MaxPixels ({opt.MaxPixels})");
+        }
+
+        void SkipPreview()
+        {
+            var pimg = PreviewHeader();
+            var br = new JxlBitReader(Data, pos, Data.Length - pos);
+            var fh = JxlFrameHeader.Read(br, pimg);
+            var toc = JxlToc.Read(br, JxlFrameDims.Of(fh));
+            long next = (long)pos + br.BytePosition + toc.TotalSize;
+            if (next > Data.Length) throw new ImageFormatException("JPEG XL: truncated preview frame");
+            pos = (int)next;
+        }
+
+        JxlImageHeader PreviewHeader()
+        {
+            var h = (JxlImageHeader)MemberwiseCloneHeader(Header);
+            h.Width = Header.PreviewWidth; h.Height = Header.PreviewHeight;
+            h.Animation = null;
+            return h;
+        }
+
+        static JxlImageHeader MemberwiseCloneHeader(JxlImageHeader h)
+        {
+            var c = new JxlImageHeader
+            {
+                Width = h.Width, Height = h.Height, Orientation = h.Orientation, BitDepth = h.BitDepth, Modular16BitBuffers = h.Modular16BitBuffers,
+                ExtraChannels = h.ExtraChannels, XybEncoded = h.XybEncoded, Colour = h.Colour, ToneMapping = h.ToneMapping, Opsin = h.Opsin,
+                Up2Weights = h.Up2Weights, Up4Weights = h.Up4Weights, Up8Weights = h.Up8Weights, Animation = h.Animation, Icc = h.Icc,
+            };
+            return c;
+        }
+
+        /// <summary>Decodes frames until the next displayed one; null after the last frame.</summary>
+        public JxlDisplayedFrame? Next()
+        {
+            while (!Done)
+            {
+                if (pos >= Data.Length) throw new ImageFormatException("JPEG XL: codestream ends before the last frame");
+                var br = new JxlBitReader(Data, pos, Data.Length - pos);
+                var fh = JxlFrameHeader.Read(br, Header);
+                CheckSize(fh.Width, fh.Height);
+                var dims = JxlFrameDims.Of(fh);
+                var toc = JxlToc.Read(br, dims);
+                int sectionsStart = pos + br.BytePosition;
+                long next = (long)sectionsStart + toc.TotalSize;
+                if (next > Data.Length) throw new ImageFormatException("JPEG XL: truncated frame");
+                if (++FramesDecoded > 1 << 16) throw new ImageNotSupportedException("JPEG XL: too many frames");
+                var dec = new JxlFrameDecoder(Header, fh, state, Data, sectionsStart, toc, opt.Multithreaded);
+                var frame = dec.Decode();
+                JxlProfile.Mark("finish frame");
+                pos = (int)next;
+                if (fh.IsLast) Done = true;
+                var shown = Process(fh, frame);
+                if (shown != null) return shown;
+            }
+            return null;
+        }
+
+        JxlDisplayedFrame? Process(JxlFrameHeader fh, JxlFrameImage frame)
+        {
+            if (fh.Type == JxlFrameType.LfFrame)
+            {
+                state.LfFrames[fh.LfLevel - 1] = frame;
+                state.NonVisibleFrames++;
+                return null;
+            }
+            bool canReference = !fh.IsLast && fh.Type != JxlFrameType.LfFrame;
+            if (fh.SaveBeforeColourTransform && canReference)
+            {
+                state.References[fh.SaveAsReference] = frame;
+                state.ReferencePreCt[fh.SaveAsReference] = true;
+            }
+            var post = ColourTransform(frame);
+            JxlProfile.Mark("XYB to linear");
+            var canvas = JxlBlender.Blend(Header, fh, post, state);
+            if (!fh.SaveBeforeColourTransform && canReference)
+            {
+                state.References[fh.SaveAsReference] = canvas;
+                state.ReferencePreCt[fh.SaveAsReference] = false;
+            }
+            bool displayed = (fh.Type == JxlFrameType.Regular || fh.Type == JxlFrameType.SkipProgressive)
+                             && (fh.IsLast || Header.Animation != null && fh.Duration != 0);
+            if (!displayed) { state.NonVisibleFrames++; return null; }
+            state.VisibleFrames++;
+            return new JxlDisplayedFrame { Canvas = canvas, Duration = fh.Duration, Timecode = fh.Timecode, Name = fh.Name };
+        }
+
+        /// <summary>XYB to linear RGB (sRGB primaries); other frames are already in the output colour space.</summary>
+        JxlFrameImage ColourTransform(JxlFrameImage f)
+        {
+            if (!Header.XybEncoded) return f;
+            var r = new JxlFrameImage { Width = f.Width, Height = f.Height, NumColour = f.NumColour, Planes = (float[][])f.Planes.Clone() };
+            var x = (float[])f.Planes[0].Clone(); var y = (float[])f.Planes[1].Clone(); var b = (float[])f.Planes[2].Clone();
+            JxlColour.XybToLinear(x, y, b, f.Width * f.Height, Header.Opsin, Header.ToneMapping.IntensityTarget, opt.Multithreaded);
+            r.Planes[0] = x; r.Planes[1] = y; r.Planes[2] = b;
+            return r;
+        }
+    }
+}

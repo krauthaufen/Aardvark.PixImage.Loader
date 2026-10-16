@@ -25,6 +25,7 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Png: return Chunks(s, start, 8, png: true);
                 case ImageFormat.Webp: return Chunks(s, start, 12, png: false);
                 case ImageFormat.Jp2: return Boxes(s, start, prefix);
+                case ImageFormat.Jxl: return JxlBoxes(s, start, prefix);
                 case ImageFormat.Tiff: return Tiff(s, start) ?? prefix;
                 default: return prefix;
             }
@@ -119,6 +120,44 @@ namespace Aardvark.ImageCodecs
                 else if (len == 0) len = end - pos;
                 if (len < 8) break;
                 if (!h.AsSpan(4, 4).SequenceEqual("jp2c"u8) && len <= MaxBlock) o.Write(ReadAt(s, pos, (int)Math.Min(len, end - pos)));
+                pos += len;
+            }
+            return o.ToArray();
+        }
+
+        /// <summary>
+        /// JPEG XL container: the boxes, codestream boxes shortened to their first 64 KB (the image header and ICC profile
+        /// are at the start). A bare codestream keeps the prefix.
+        /// </summary>
+        static byte[] JxlBoxes(Stream s, long start, byte[] prefix)
+        {
+            if (prefix.Length >= 2 && prefix[0] == 0xFF && prefix[1] == 0x0A) return prefix;
+            var o = new MemoryStream();
+            long pos = start, end = s.Length;
+            var h = new byte[16];
+            const int CodestreamKeep = 1 << 16;
+            while (pos + 8 <= end)
+            {
+                s.Position = pos;
+                int got = ReadFully(s, h);
+                if (got < 8) break;
+                long len = BinaryPrimitives.ReadUInt32BigEndian(h);
+                int head = 8;
+                if (len == 1 && got >= 16) { len = (long)BinaryPrimitives.ReadUInt64BigEndian(h.AsSpan(8)); head = 16; }
+                else if (len == 0) len = end - pos;
+                if (len < head) break;
+                var type = h.AsSpan(4, 4);
+                bool codestream = type.SequenceEqual("jxlc"u8) || type.SequenceEqual("jxlp"u8);
+                if (codestream && len - head > CodestreamKeep)
+                {
+                    var box = ReadAt(s, pos, head + CodestreamKeep);
+                    var hdr = new byte[8];
+                    BinaryPrimitives.WriteUInt32BigEndian(hdr, (uint)(8 + box.Length - head));
+                    type.CopyTo(hdr.AsSpan(4));
+                    o.Write(hdr);
+                    o.Write(box, head, box.Length - head);
+                }
+                else if (len <= MaxBlock) o.Write(ReadAt(s, pos, (int)Math.Min(len, end - pos)));
                 pos += len;
             }
             return o.ToArray();
