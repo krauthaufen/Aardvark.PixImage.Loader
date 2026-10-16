@@ -289,17 +289,20 @@ namespace Aardvark.ImageCodecs
             }
             Array data = RawImage.CreateArray(type, checked(n * nch));
             int maxv = h.BitDepth.Float ? 0 : (int)Math.Min((1L << h.BitDepth.Bits) - 1, int.MaxValue);
-            for (int c = 0; c < nch; c++)
+            JxlColour.Chunked(n, opt.Multithreaded, (s0, e0) =>
             {
-                bool isAlpha = c == ncol;
-                if (ints != null)
+                for (int c = 0; c < nch; c++)
                 {
-                    var src = isAlpha ? ints[canvas.NumColour + alpha] : ints[c];
-                    int srcBits = isAlpha ? h.ExtraChannels[alpha].BitDepth.Bits : h.BitDepth.Bits;
-                    WriteInts(data, type, c, nch, src, srcBits, h.BitDepth.Bits);
+                    bool isAlpha = c == ncol;
+                    if (ints != null)
+                    {
+                        var src = isAlpha ? ints[canvas.NumColour + alpha] : ints[c];
+                        int srcBits = isAlpha ? h.ExtraChannels[alpha].BitDepth.Bits : h.BitDepth.Bits;
+                        WriteInts(data, type, c, nch, src, srcBits, h.BitDepth.Bits, s0, e0);
+                    }
+                    else WriteFloats(data, type, c, nch, planes[c], maxv, s0, e0);
                 }
-                else WriteFloats(data, type, c, nch, planes[c], maxv);
-            }
+            });
             var img = new RawImage(w, hh, color, data, nch, meta);
             if (opt.ApplyOrientation && h.Orientation > 1) img = ImageOps.ApplyOrientation(img, h.Orientation);
             return img;
@@ -449,12 +452,11 @@ namespace Aardvark.ImageCodecs
             return r;
         }
 
-        static void WriteInts(Array data, SampleType type, int c, int nch, int[] src, int srcBits, int dstBits)
+        static void WriteInts(Array data, SampleType type, int c, int nch, int[] src, int srcBits, int dstBits, int start, int n)
         {
-            int n = src.Length;
             long maxSrc = (1L << srcBits) - 1, maxDst = (1L << dstBits) - 1;
             bool rescale = srcBits != dstBits;
-            for (int i = 0; i < n; i++)
+            for (int i = start; i < n; i++)
             {
                 long v = src[i];
                 if (v < 0) v = 0; else if (v > maxSrc) v = maxSrc;
@@ -469,27 +471,26 @@ namespace Aardvark.ImageCodecs
             }
         }
 
-        static void WriteFloats(Array data, SampleType type, int c, int nch, float[] src, int maxv)
+        static void WriteFloats(Array data, SampleType type, int c, int nch, float[] src, int maxv, int start, int n)
         {
-            int n = src.Length;
             switch (type)
             {
                 case SampleType.Float32:
                     {
                         var d = (float[])data;
-                        for (int i = 0; i < n; i++) d[i * nch + c] = src[i];
+                        for (int i = start; i < n; i++) d[i * nch + c] = src[i];
                         break;
                     }
                 case SampleType.Float16:
                     {
                         var d = (Half[])data;
-                        for (int i = 0; i < n; i++) d[i * nch + c] = (Half)src[i];
+                        for (int i = start; i < n; i++) d[i * nch + c] = (Half)src[i];
                         break;
                     }
                 case SampleType.UInt8:
                     {
                         var d = (byte[])data;
-                        for (int i = 0; i < n; i++)
+                        for (int i = start; i < n; i++)
                         {
                             float v = src[i] * maxv;
                             d[i * nch + c] = (byte)(v <= 0 ? 0 : v >= maxv ? maxv : (int)(v + 0.5f));
@@ -499,7 +500,7 @@ namespace Aardvark.ImageCodecs
                 case SampleType.UInt16:
                     {
                         var d = (ushort[])data;
-                        for (int i = 0; i < n; i++)
+                        for (int i = start; i < n; i++)
                         {
                             float v = src[i] * maxv;
                             d[i * nch + c] = (ushort)(v <= 0 ? 0 : v >= maxv ? maxv : (int)(v + 0.5f));
@@ -509,7 +510,7 @@ namespace Aardvark.ImageCodecs
                 default:
                     {
                         var d = (uint[])data;
-                        for (int i = 0; i < n; i++)
+                        for (int i = start; i < n; i++)
                         {
                             double v = (double)src[i] * maxv;
                             d[i * nch + c] = (uint)(v <= 0 ? 0 : v >= maxv ? maxv : (long)(v + 0.5));

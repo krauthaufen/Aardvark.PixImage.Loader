@@ -27,7 +27,7 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         public static unsafe float[] Gaborish(float[] src, int w, int h, float w1, float w2, bool parallel)
         {
-            var P = Pad(src, w, h, 1);
+            var P = Pad(src, w, h, 1, parallel);
             int pw = w + 2;
             var o = new float[src.Length];
             float norm = 1 / (1 + 4 * w1 + 4 * w2);
@@ -69,23 +69,26 @@ namespace Aardvark.ImageCodecs.JpegXl
         static readonly (int dx, int dy)[] Pass12 = { (0, -1), (-1, 0), (1, 0), (0, 1) };
 
         /// <summary>The planes with a mirrored border of pad samples on every side.</summary>
-        static float[] Pad(float[] src, int w, int h, int pad)
+        static float[] Pad(float[] src, int w, int h, int pad, bool parallel = false)
         {
             int pw = w + 2 * pad;
             var o = new float[(long)pw * (h + 2 * pad)];
-            for (int y = -pad; y < h + pad; y++)
+            Rows(h + 2 * pad, parallel, yy =>
             {
+                int y = yy - pad;
                 int sy = Mirror(y, h);
-                int orow = (y + pad) * pw;
+                int orow = yy * pw;
                 Array.Copy(src, sy * w, o, orow + pad, w);
                 for (int x = 1; x <= pad; x++)
                 {
                     o[orow + pad - x] = src[sy * w + Mirror(-x, w)];
                     o[orow + pad + w - 1 + x] = src[sy * w + Mirror(w - 1 + x, w)];
                 }
-            }
+            });
             return o;
         }
+
+        [ThreadStatic] static float[]? rowBuffers;
 
         /// <summary>
         /// One EPF pass over the three planes. invSigma[block] holds InvSigmaNum / sigma per 8x8 block (very negative to
@@ -95,7 +98,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         {
             const int pad = 3;
             int pw = w + 2 * pad;
-            var P = new[] { Pad(src[0], w, h, pad), Pad(src[1], w, h, pad), Pad(src[2], w, h, pad) };
+            var P = new[] { Pad(src[0], w, h, pad, parallel), Pad(src[1], w, h, pad, parallel), Pad(src[2], w, h, pad, parallel) };
             var dst = new[] { new float[src[0].Length], new float[src[1].Length], new float[src[2].Length] };
             var nb = pass == 0 ? Pass0 : Pass12;
             float sigmaScale = SadScale * (pass == 0 ? f.EpfPass0SigmaScale : pass == 2 ? f.EpfPass2SigmaScale : 1);
@@ -106,7 +109,9 @@ namespace Aardvark.ImageCodecs.JpegXl
             Rows(h, parallel, y =>
             {
                 // per pixel scaled inverse sigma (0 where the block is skipped) and SAD multiplier
-                var inv = new float[w];   // scaled inverse sigma times the SAD multiplier, -1e30 where the block is skipped
+                var rb = rowBuffers;
+                if (rb == null || rb.Length < 9 * (w + 2)) rowBuffers = rb = new float[9 * (w + 2)];
+                var inv = new Span<float>(rb, 0, w);   // scaled inverse sigma times the SAD multiplier, -1e30 where the block is skipped
                 bool any = false;
                 bool yBorder = (y & 7) == 0 || (y & 7) == 7;
                 for (int x = 0; x < w; x++)
@@ -122,9 +127,9 @@ namespace Aardvark.ImageCodecs.JpegXl
                     for (int c = 0; c < 3; c++) Array.Copy(src[c], orow, dst[c], orow, w);
                     return;
                 }
-                var wsum = new float[w];
-                var acc0 = new float[w]; var acc1 = new float[w]; var acc2 = new float[w];
-                var d = new float[3 * (w + 2)];   // D rows y-1, y, y+1 over x = -1 .. w
+                var wsum = new Span<float>(rb, w, w);
+                var acc0 = new Span<float>(rb, 2 * w, w); var acc1 = new Span<float>(rb, 3 * w, w); var acc2 = new Span<float>(rb, 4 * w, w);
+                var d = new Span<float>(rb, 5 * w, 3 * (w + 2));   // D rows y-1, y, y+1 over x = -1 .. w
                 fixed (float* pa = P[0], pb = P[1], pc = P[2], pd = d, pwsum = wsum, pacc0 = acc0, pacc1 = acc1, pacc2 = acc2, pinv = inv)
                 {
                     for (int x = 0; x < w; x++) { pwsum[x] = 1; pacc0[x] = pa[prow + x]; pacc1[x] = pb[prow + x]; pacc2[x] = pc[prow + x]; }

@@ -91,6 +91,15 @@ namespace Aardvark.ImageCodecs.JpegXl
         public static void Neighbours(int[] d, int w, int x, int y, out long W, out long N, out long NW, out long NE, out long NN, out long WW, out long NEE)
         {
             int i = y * w + x;
+            if (y >= 2 && x >= 2 && x + 2 < w)
+            {
+                ref int r = ref System.Runtime.InteropServices.MemoryMarshal.GetArrayDataReference(d);
+                W = Unsafe.Add(ref r, i - 1); WW = Unsafe.Add(ref r, i - 2);
+                int n = i - w;
+                N = Unsafe.Add(ref r, n); NW = Unsafe.Add(ref r, n - 1); NE = Unsafe.Add(ref r, n + 1); NEE = Unsafe.Add(ref r, n + 2);
+                NN = Unsafe.Add(ref r, n - w);
+                return;
+            }
             W = x > 0 ? d[i - 1] : y > 0 ? d[i - w] : 0;
             N = y > 0 ? d[i - w] : W;
             NW = x > 0 && y > 0 ? d[i - w - 1] : W;
@@ -98,6 +107,61 @@ namespace Aardvark.ImageCodecs.JpegXl
             NN = y > 1 ? d[i - 2 * w] : N;
             WW = x > 1 ? d[i - 2] : W;
             NEE = x + 2 < w && y > 0 ? d[i - w + 2] : NE;
+        }
+
+        /// <summary>
+        /// Trees whose decisions all test one property: the leaves as intervals of that property (value &lt;= bounds[k] picks
+        /// leaves[k], the last bound is int.MaxValue).
+        /// </summary>
+        static bool OnlyProperty(JxlMaTree t, int property, out int[] bounds, out int[] leaves)
+        {
+            bounds = leaves = Array.Empty<int>();
+            for (int i = 0; i < t.Count; i++)
+                if (t.Property[i] >= 0 && t.Property[i] != property) return false;
+            if (t.Count > 4096) return false;
+            var b = new List<int>(); var l = new List<int>();
+            void Walk(int n, long lo, long hi)
+            {
+                if (lo > hi) return;
+                if (t.Property[n] < 0) { b.Add((int)hi); l.Add(n); return; }
+                long v = t.Value[n];
+                Walk(t.Right[n], lo, Math.Min(hi, v));     // value <= v
+                Walk(t.Left[n], Math.Max(lo, v + 1), hi);  // value > v
+            }
+            Walk(0, int.MinValue, int.MaxValue);
+            bounds = b.ToArray(); leaves = l.ToArray();
+            return true;
+        }
+
+        /// <summary>Weighted predictor trees that split on its maximum error only (lossless effort 3 and many DC images).</summary>
+        static void DecodeWpIntervals(JxlBitReader br, JxlSymbolReader reader, JxlMaTree tree, JxlWeightedPredictor wp, int[] d, int w, int h,
+            int[] bounds, int[] leaves)
+        {
+            int nl = leaves.Length;
+            var lpred = new int[nl]; var loff = new long[nl]; var lmul = new long[nl]; var lctx = new int[nl];
+            for (int k = 0; k < nl; k++)
+            {
+                lpred[k] = tree.Predictor[leaves[k]]; loff[k] = tree.Offset[leaves[k]];
+                lmul[k] = tree.Multiplier[leaves[k]]; lctx[k] = tree.Context[leaves[k]];
+            }
+            for (int y = 0; y < h; y++)
+            {
+                wp.StartRow(y);
+                int row = y * w;
+                for (int x = 0; x < w; x++)
+                {
+                    Neighbours(d, w, x, y, out long W, out long N, out long NW, out long NE, out long NN, out long WW, out long NEE);
+                    long wpPred = wp.Predict(x, y, N, W, NE, NW, NN);
+                    int me = wp.MaxError;
+                    int k = 0;
+                    while (me > bounds[k]) k++;
+                    long r = JxlBitReader.UnpackSigned(reader.ReadUint(br, lctx[k])) * lmul[k] + loff[k];
+                    long v = r + (lpred[k] == 6 ? wpPred : Predict(lpred[k], W, N, NW, NE, NN, WW, NEE, wpPred));
+                    d[row + x] = (int)v;
+                    wp.Update(x, (int)v);
+                }
+                if (br.Overrun) throw new ImageFormatException("JPEG XL: unexpected end of modular data");
+            }
         }
 
         static void DecodeGeneral(JxlBitReader br, JxlSymbolReader reader, JxlMaTree tree, JxlWpHeader wpHeader, List<JxlChannel> channels, int index)
@@ -119,6 +183,11 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
             var prop = tree.Property; var val = tree.Value; var left = tree.Left; var right = tree.Right;
             var lpred = tree.Predictor; var loff = tree.Offset; var lmul = tree.Multiplier; var lctx = tree.Context;
+            if (wp != null && OnlyProperty(tree, 15, out var bounds, out var leaves))
+            {
+                DecodeWpIntervals(br, reader, tree, wp, d, w, h, bounds, leaves);
+                return;
+            }
             for (int y = 0; y < h; y++)
             {
                 wp?.StartRow(y);

@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Aardvark.ImageCodecs.JpegXl
 {
@@ -153,13 +156,20 @@ namespace Aardvark.ImageCodecs.JpegXl
     /// </summary>
     internal sealed class JxlWeightedPredictor
     {
+        struct Cell
+        {
+            public uint E0, E1, E2, E3;   // sub-predictor errors (the N-E cell also accumulates the errors of W and WW)
+            public int True;              // error of the final prediction
+        }
+
         readonly JxlWpHeader h;
         readonly int w, stride;
-        readonly int[] trueErr;
-        readonly uint[] err0, err1, err2, err3;
+        readonly Cell[] cells;
         int cur, prev;
         long pred, sub0, sub1, sub2, sub3;
         public int MaxError;
+        readonly int p1c, p2c, p3a, p3b, p3c, p3d, p3e;
+        readonly uint mw0, mw1, mw2, mw3;
 
         static readonly uint[] DivLookup = BuildDiv();
 
@@ -173,8 +183,9 @@ namespace Aardvark.ImageCodecs.JpegXl
         public JxlWeightedPredictor(JxlWpHeader header, int width)
         {
             h = header; w = width; stride = width + 2;
-            trueErr = new int[2 * stride];
-            err0 = new uint[2 * stride]; err1 = new uint[2 * stride]; err2 = new uint[2 * stride]; err3 = new uint[2 * stride];
+            cells = new Cell[2 * stride];
+            p1c = h.P1C; p2c = h.P2C; p3a = h.P3Ca; p3b = h.P3Cb; p3c = h.P3Cc; p3d = h.P3Cd; p3e = h.P3Ce;
+            mw0 = h.W0; mw1 = h.W1; mw2 = h.W2; mw3 = h.W3;
         }
 
         public void StartRow(int y)
@@ -183,35 +194,40 @@ namespace Aardvark.ImageCodecs.JpegXl
             prev = (y & 1) != 0 ? stride : 0;
         }
 
-        static int FloorLog2(uint x) => 31 - System.Numerics.BitOperations.LeadingZeroCount(x);
-
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static uint ErrorWeight(uint x, uint maxWeight)
         {
-            int shift = 63 - System.Numerics.BitOperations.LeadingZeroCount((ulong)x + 1) - 5;
+            int shift = 63 - BitOperations.LeadingZeroCount((ulong)x + 1) - 5;
             if (shift < 0) shift = 0;
             return 4 + ((maxWeight * DivLookup[x >> shift]) >> shift);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static long Abs(long v) => (v ^ (v >> 63)) - (v >> 63);
+
         /// <summary>Returns the prediction (pixel units) for (x, y); the neighbours are the plain sample values.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public long Predict(int x, int y, long N, long W, long NE, long NW, long NN)
         {
+            ref Cell c0 = ref MemoryMarshal.GetArrayDataReference(cells);
             int pN = prev + x;
-            int pNE = x < w - 1 ? pN + 1 : pN;
-            int pNW = x > 0 ? pN - 1 : pN;
-            uint w0 = ErrorWeight(err0[pN] + err0[pNE] + err0[pNW], h.W0);
-            uint w1 = ErrorWeight(err1[pN] + err1[pNE] + err1[pNW], h.W1);
-            uint w2 = ErrorWeight(err2[pN] + err2[pNE] + err2[pNW], h.W2);
-            uint w3 = ErrorWeight(err3[pN] + err3[pNE] + err3[pNW], h.W3);
+            ref Cell cn = ref Unsafe.Add(ref c0, pN);
+            ref Cell cne = ref Unsafe.Add(ref c0, x < w - 1 ? pN + 1 : pN);
+            ref Cell cnw = ref Unsafe.Add(ref c0, x > 0 ? pN - 1 : pN);
+            uint w0 = ErrorWeight(cn.E0 + cne.E0 + cnw.E0, mw0);
+            uint w1 = ErrorWeight(cn.E1 + cne.E1 + cnw.E1, mw1);
+            uint w2 = ErrorWeight(cn.E2 + cne.E2 + cnw.E2, mw2);
+            uint w3 = ErrorWeight(cn.E3 + cne.E3 + cnw.E3, mw3);
             long N3 = N << 3, W3 = W << 3, NE3 = NE << 3, NW3 = NW << 3, NN3 = NN << 3;
-            long teW = x == 0 ? 0 : trueErr[cur + x - 1];
-            long teN = trueErr[pN], teNW = trueErr[pNW], teNE = trueErr[pNE];
+            long teW = x == 0 ? 0 : Unsafe.Add(ref c0, cur + x - 1).True;
+            long teN = cn.True, teNW = cnw.True, teNE = cne.True;
             long sumWN = teN + teW;
             long p0 = W3 + NE3 - N3;
-            long p1 = N3 - ((sumWN + teNE) * h.P1C >> 5);
-            long p2 = W3 - ((sumWN + teNW) * h.P2C >> 5);
-            long p3 = N3 - ((teNW * h.P3Ca + teN * h.P3Cb + teNE * h.P3Cc + (NN3 - N3) * h.P3Cd + (NW3 - W3) * h.P3Ce) >> 5);
+            long p1 = N3 - ((sumWN + teNE) * p1c >> 5);
+            long p2 = W3 - ((sumWN + teNW) * p2c >> 5);
+            long p3 = N3 - ((teNW * p3a + teN * p3b + teNE * p3c + (NN3 - N3) * p3d + (NW3 - W3) * p3e) >> 5);
             uint ws = w0 + w1 + w2 + w3;
-            int lw = FloorLog2(ws) - 4;
+            int lw = 31 - BitOperations.LeadingZeroCount(ws) - 4;
             w0 >>= lw; w1 >>= lw; w2 >>= lw; w3 >>= lw;
             uint sum = w0 + w1 + w2 + w3;
             long s = (sum >> 1) - 1 + p0 * w0 + p1 * w1 + p2 * w2 + p3 * w3;
@@ -222,24 +238,27 @@ namespace Aardvark.ImageCodecs.JpegXl
                 if (p < mn) p = mn; else if (p > mx) p = mx;
             }
             long me = teW;
-            if (Math.Abs(teN) > Math.Abs(me)) me = teN;
-            if (Math.Abs(teNW) > Math.Abs(me)) me = teNW;
-            if (Math.Abs(teNE) > Math.Abs(me)) me = teNE;
+            if (Abs(teN) > Abs(me)) me = teN;
+            if (Abs(teNW) > Abs(me)) me = teNW;
+            if (Abs(teNE) > Abs(me)) me = teNE;
             MaxError = (int)me;
             pred = p; sub0 = p0; sub1 = p1; sub2 = p2; sub3 = p3;
             return (p + 3) >> 3;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Update(int x, long value)
         {
             long v3 = value << 3;
-            int i = cur + x, ne = prev + x + 1;
-            trueErr[i] = (int)(pred - v3);
+            ref Cell c0 = ref MemoryMarshal.GetArrayDataReference(cells);
+            ref Cell c = ref Unsafe.Add(ref c0, cur + x);
+            ref Cell ne = ref Unsafe.Add(ref c0, prev + x + 1);
+            c.True = (int)(pred - v3);
             uint e;
-            e = (uint)((Math.Abs(sub0 - v3) + 3) >> 3); err0[i] = e; err0[ne] += e;
-            e = (uint)((Math.Abs(sub1 - v3) + 3) >> 3); err1[i] = e; err1[ne] += e;
-            e = (uint)((Math.Abs(sub2 - v3) + 3) >> 3); err2[i] = e; err2[ne] += e;
-            e = (uint)((Math.Abs(sub3 - v3) + 3) >> 3); err3[i] = e; err3[ne] += e;
+            e = (uint)((Abs(sub0 - v3) + 3) >> 3); c.E0 = e; ne.E0 += e;
+            e = (uint)((Abs(sub1 - v3) + 3) >> 3); c.E1 = e; ne.E1 += e;
+            e = (uint)((Abs(sub2 - v3) + 3) >> 3); c.E2 = e; ne.E2 += e;
+            e = (uint)((Abs(sub3 - v3) + 3) >> 3); c.E3 = e; ne.E3 += e;
         }
     }
 }
