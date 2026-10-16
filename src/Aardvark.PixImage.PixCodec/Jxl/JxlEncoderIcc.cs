@@ -4,8 +4,8 @@ using System.Collections.Generic;
 namespace Aardvark.ImageCodecs.JpegXl
 {
     /// <summary>
-    /// The compressed ICC stream of the image header (B.3 of ISO/IEC 18181-1): the header predicted, no tag list and no
-    /// content commands (the rest stored as it is), entropy coded with the 41 byte contexts.
+    /// The compressed ICC stream of the image header (B.3 of ISO/IEC 18181-1): the header predicted, no tag list and one
+    /// copy command for the rest, entropy coded with the 41 byte contexts.
     /// </summary>
     internal static class JxlIccWriter
     {
@@ -48,8 +48,11 @@ namespace Aardvark.ImageCodecs.JpegXl
             VarInt(o, (ulong)icc.Length);
             if (icc.Length > 128)
             {
-                VarInt(o, 1);
-                o.Add(0);   // no tags
+                // commands: no tag list (0), then one copy command (1) for everything after the header
+                var cmd = new List<byte> { 0, 1 };
+                VarInt(cmd, (ulong)(icc.Length - 128));
+                VarInt(o, (ulong)cmd.Count);
+                o.AddRange(cmd);
             }
             else VarInt(o, 0);
             var header = (byte[])InitialHeader.Clone();

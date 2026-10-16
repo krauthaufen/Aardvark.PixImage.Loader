@@ -143,7 +143,7 @@ public class JxlEncodeMetadataTests(ITestOutputHelper output)
         var frames = new List<JxlInputFrame>();
         int[] durations = { 100, 40, 250, 1 };
         for (int i = 0; i < durations.Length; i++)
-            frames.Add(new JxlInputFrame(Synthetic(70, 50, ColorModel.Rgba, SampleType.UInt8, i == 2 ? 1 : 0, 10 + i), durations[i], $"frame {i}"));
+            frames.Add(new JxlInputFrame(Synthetic(70, 50, ColorModel.Rgba, SampleType.UInt8, i == 2 ? (lossless ? 1 : 4) : 0, 10 + i), durations[i], $"frame {i}"));
         var enc = Jxl.EncodeAnimation(frames, new JxlEncodeOptions { Lossless = lossless }, loopCount: 3);
         var anim = Jxl.DecodeAnimation(enc);
         Assert.True(anim.IsAnimated);
