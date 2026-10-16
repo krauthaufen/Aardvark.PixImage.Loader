@@ -1,18 +1,55 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace Aardvark.ImageCodecs.JpegXl
 {
+    /// <summary>
+    /// Receives the restored colour of a frame tile by tile instead of full frame planes (the last frame of a still image,
+    /// converted straight to the output).
+    /// </summary>
+    internal abstract unsafe class JxlTileSink
+    {
+        /// <summary>Rows y0 .. y0 + h - 1, columns x0 .. x0 + w - 1 of the three colour planes, at p[c] + row * stride.</summary>
+        public abstract void WriteRows(int x0, int y0, int w, int h, float* p0, float* p1, float* p2, int stride);
+    }
+
     /// <summary>A decoded frame (or reference / LF frame): float planes of the colour and extra channels.</summary>
     internal sealed class JxlFrameImage
     {
         public int Width, Height;
         /// <summary>Colour planes (1 or 3) followed by the extra channels, each Width * Height.</summary>
-        public float[][] Planes = Array.Empty<float[]>();
+        public float[][] Planes
+        {
+            get
+            {
+                if (lazyPlanes != null) { planes = lazyPlanes(); lazyPlanes = null; }
+                return planes;
+            }
+            set { planes = value; lazyPlanes = null; }
+        }
+        float[][] planes = Array.Empty<float[]>();
+        Func<float[][]>? lazyPlanes;
+
+        /// <summary>Planes built on first use (exact integer frames are usually output from <see cref="IntPlanes"/>).</summary>
+        public void SetLazyPlanes(Func<float[][]> build) { planes = Array.Empty<float[]>(); lazyPlanes = build; }
         /// <summary>Exact integer samples of a lossless modular frame (colour + extra), when no float stage touched them.</summary>
         public int[][]? IntPlanes;
         public int NumColour;
+        /// <summary>Set when the colour planes are still XYB: the conversion to linear RGB is left to the output stage.</summary>
+        public JxlOpsinParams? PendingXyb;
+        public float PendingIntensityTarget;
+        /// <summary>Set when the colour went to this sink: the colour planes are then absent.</summary>
+        public JxlTileSink? Sink;
+
+        /// <summary>Converts pending XYB colour planes to linear RGB in place.</summary>
+        public void EnsureLinear(bool parallel)
+        {
+            if (PendingXyb == null) return;
+            JxlColour.XybToLinear(Planes[0], Planes[1], Planes[2], Width * Height, PendingXyb, PendingIntensityTarget, parallel);
+            PendingXyb = null;
+        }
     }
 
     /// <summary>Decodes one frame: sections, modular and VarDCT data, filters, features and colour conversion.</summary>
@@ -26,6 +63,8 @@ namespace Aardvark.ImageCodecs.JpegXl
         readonly int sectionsStart;
         readonly JxlToc toc;
         readonly bool parallel;
+        /// <summary>Where the restored colour goes instead of planes (only set when the restoration filters run).</summary>
+        public JxlTileSink? Sink;
 
         // modular
         JxlModularGlobal modularGlobal = new();
@@ -76,16 +115,20 @@ namespace Aardvark.ImageCodecs.JpegXl
             DecodeLfGlobal(lfGlobal, maxTree);
             JxlProfile.Mark("LfGlobal");
 
-            // LF groups
-            ForEach(dims.NumLfGroups, toc.Single, i => DecodeLfGroup(SectionReader(toc.LfGroupIndex(i)), i, maxTree));
+            // LF groups; the HF global section (it does not depend on them) alongside
+            var hfGlobal = !fh.Modular && parallel && !toc.Single
+                ? System.Threading.Tasks.Task.Run(() => DecodeHfGlobal(SectionReader(toc.HfGlobalIndex(dims)))) : null;
+            try { ForEach(dims.NumLfGroups, toc.Single, i => DecodeLfGroup(SectionReader(toc.LfGroupIndex(i)), i, maxTree)); }
+            finally { try { hfGlobal?.Wait(); } catch (AggregateException) when (hfGlobal!.IsFaulted) { } }
+            if (hfGlobal != null && hfGlobal.IsFaulted) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(hfGlobal.Exception!.InnerException!).Throw();
             if (!fh.Modular) AfterLfGroups();
             JxlProfile.Mark("LF groups");
-            if (!fh.Modular) DecodeHfGlobal(SectionReader(toc.HfGlobalIndex(dims)));
+            if (!fh.Modular && hfGlobal == null) DecodeHfGlobal(SectionReader(toc.HfGlobalIndex(dims)));
             JxlProfile.Mark("HfGlobal");
             ForEach(dims.NumGroups, toc.Single, g =>
             {
                 for (int p = 0; p < fh.NumPasses; p++) DecodePassGroup(SectionReader(toc.PassGroupIndex(dims, p, g)), p, g, maxTree);
-                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                long t0 = JxlProfile.On ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 if (!fh.Modular) FinishVarDctGroup(g);
                 if (JxlProfile.On) System.Threading.Interlocked.Add(ref finishTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
             });
@@ -275,36 +318,38 @@ namespace Aardvark.ImageCodecs.JpegXl
         JxlFrameImage Finish()
         {
             var full = globalImage!;
-            full.Undo();
+            full.Undo(parallel);
             var chans = full.Channels;
             int expected = numModularColour + img.ExtraChannels.Length;
             if (chans.Count != expected) throw new ImageFormatException("JPEG XL: modular transforms changed the channel count");
             var result = new JxlFrameImage { Width = dims.Width, Height = dims.Height };
             result.NumColour = img.XybEncoded || fh.Type == JxlFrameType.LfFrame || !img.Colour.IsGray ? 3 : 1;
 
-            // colour at the coded resolution, filtered, then upsampled
             JxlProfile.Mark("modular undo");
-            float[][] colour = fh.Modular ? ModularColourToFloat(chans) : VarDctColour();
-            JxlProfile.Mark("to float");
-            ApplyRestorationFilters(colour);
-            JxlProfile.Mark("filters"); 
-            if (fh.Upsampling > 1)
-                for (int c = 0; c < colour.Length; c++) colour[c] = Upsample(colour[c], dims.XSize, dims.YSize, fh.Upsampling, dims.Width, dims.Height);
-            var planes = new float[result.NumColour + img.ExtraChannels.Length][];
-            for (int c = 0; c < result.NumColour; c++) planes[c] = colour[Math.Min(c, colour.Length - 1)];
-
-            // extra channels
-            for (int e = 0; e < img.ExtraChannels.Length; e++)
+            if (fh.Modular && !img.XybEncoded && !fh.DoYCbCr && IntegerExact() && numModularColour == result.NumColour)
             {
-                var ch = chans[numModularColour + e];
-                var f = ToFloat(ch, img.ExtraChannels[e].BitDepth);
-                int ecUp = fh.EcUpsampling[e] << img.ExtraChannels[e].DimShift;
-                planes[result.NumColour + e] = ecUp > 1 ? Upsample(f, ch.W, ch.H, ecUp, dims.Width, dims.Height) : Crop(f, ch.W, ch.H, dims.Width, dims.Height);
+                // exact integers: the float planes only when something asks for them
+                var ip = new int[result.NumColour + img.ExtraChannels.Length][];
+                bool ok = true;
+                for (int c = 0; c < numModularColour; c++) ip[c] = chans[c].Data;
+                for (int e = 0; e < img.ExtraChannels.Length && ok; e++)
+                {
+                    var ch = chans[numModularColour + e];
+                    if (ch.W != dims.Width || ch.H != dims.Height || img.ExtraChannels[e].BitDepth.Float) ok = false;
+                    else ip[numModularColour + e] = ch.Data;
+                }
+                if (ok)
+                {
+                    result.IntPlanes = ip;
+                    result.SetLazyPlanes(() => FloatPlanes(chans, result));
+                    return result;
+                }
             }
-            result.Planes = planes;
+            result.Planes = FloatPlanes(chans, result);
             ApplyFeatures(result);
             if (fh.Modular && !img.XybEncoded && !fh.DoYCbCr && IntegerExact())
             {
+                var planes = result.Planes;
                 var ip = new int[planes.Length][];
                 bool ok = numModularColour == result.NumColour;
                 for (int c = 0; c < numModularColour && ok; c++) ip[c] = chans[c].Data;
@@ -319,10 +364,36 @@ namespace Aardvark.ImageCodecs.JpegXl
             return result;
         }
 
+        /// <summary>Colour (filtered, upsampled) and extra channels as float planes of the frame size.</summary>
+        float[][] FloatPlanes(List<JxlChannel> chans, JxlFrameImage result)
+        {
+            // colour at the coded resolution, filtered, then upsampled
+            float[][] colour = fh.Modular ? ModularColourToFloat(chans) : VarDctColour();
+            JxlProfile.Mark("to float");
+            ApplyRestorationFilters(colour);
+            if (Sink != null) result.Sink = Sink;
+            JxlProfile.Mark("filters");
+            if (fh.Upsampling > 1)
+                for (int c = 0; c < colour.Length; c++) colour[c] = Upsample(colour[c], dims.XSize, dims.YSize, fh.Upsampling, dims.Width, dims.Height);
+            var planes = new float[result.NumColour + img.ExtraChannels.Length][];
+            for (int c = 0; c < result.NumColour; c++) planes[c] = colour[Math.Min(c, colour.Length - 1)];
+
+            // extra channels
+            for (int e = 0; e < img.ExtraChannels.Length; e++)
+            {
+                var ch = chans[numModularColour + e];
+                var f = ToFloat(ch, img.ExtraChannels[e].BitDepth);
+                int ecUp = fh.EcUpsampling[e] << img.ExtraChannels[e].DimShift;
+                planes[result.NumColour + e] = ecUp > 1 ? Upsample(f, ch.W, ch.H, ecUp, dims.Width, dims.Height) : Crop(f, ch.W, ch.H, dims.Width, dims.Height);
+            }
+            return planes;
+        }
+
         bool IntegerExact()
             => fh.Upsampling == 1 && !fh.Filter.Gab && fh.Filter.EpfIters == 0 && patches == null && splines == null && noise == null
                && dims.XSize == dims.Width && dims.YSize == dims.Height && !img.BitDepth.Float;
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         float[] ToFloat(JxlChannel ch, JxlBitDepth bd)
         {
             var d = ch.Data;
@@ -335,7 +406,14 @@ namespace Aardvark.ImageCodecs.JpegXl
             else
             {
                 float s = 1.0f / (float)((1L << bd.Bits) - 1);
-                for (int i = 0; i < d.Length; i++) f[i] = d[i] * s;
+                JxlColour.Chunked(d.Length, parallel, (a, e) =>
+                {
+                    var vs = new System.Numerics.Vector<float>(s);
+                    int vc = System.Numerics.Vector<float>.Count, i = a;
+                    for (; i + vc <= e; i += vc)
+                        (System.Numerics.Vector.ConvertToSingle(new System.Numerics.Vector<int>(d, i)) * vs).CopyTo(f, i);
+                    for (; i < e; i++) f[i] = d[i] * s;
+                });
             }
             return f;
         }

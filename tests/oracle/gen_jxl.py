@@ -114,6 +114,17 @@ def text_image(w, h, alpha=False):
     return np.array(im)
 
 
+def gen_anim_noise(t, o):
+    """Noise in layers (zero duration frames) and displayed frames: each frame seeds the generator differently."""
+    a = np.full((40, 192, 3), 128, np.uint8)
+    frames = []
+    for k in range(6):
+        if k: a[:, 32 * k:32 * k + 32] = 40 + 30 * k
+        frames.append(Image.fromarray(a.copy()))
+    frames[0].save(t('anim_noise.png'), save_all=True, append_images=frames[1:], duration=[0, 0, 100, 0, 100, 100], loop=0, disposal=0, blend=0)
+    cjxl(t('anim_noise.png'), o('anim_noise.jxl'), '-d 1 --photon_noise_iso=25600'); finish('anim_noise.jxl', False)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     os.makedirs(TMP, exist_ok=True)
@@ -224,8 +235,8 @@ def main():
         finish(name, False, extra={'premultiplied': True} if 'premultiplied' in name else None)
     f01 = np.clip(f32, 0, 1)
     open(o('vd_float.jxl'), 'wb').write(imagecodecs.jpegxl_encode(f01, distance=1)); finish('vd_float.jxl', False)
-    # noise: the generated grain is not libjxl's pseudo random sequence; the tests check its amplitude only
-    cjxl(t('rgb.png'), o('vd_noise.jxl'), '-d 1 --photon_noise_iso=3200'); finish('vd_noise.jxl', False, extra={'noise': True})
+    cjxl(t('rgb.png'), o('vd_noise.jxl'), '-d 1 --photon_noise_iso=3200'); finish('vd_noise.jxl', False)
+    gen_anim_noise(t, o)
 
     # ---- JPEG recompression (VarDCT in YCbCr, chroma subsampling)
     for name, kw in [('jpeg420', {'subsampling': 2}), ('jpeg422', {'subsampling': 1}), ('jpeg444', {'subsampling': 0}), ('jpeg_progressive', {'subsampling': 2, 'progressive': True})]:

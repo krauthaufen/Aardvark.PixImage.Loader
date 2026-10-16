@@ -60,8 +60,7 @@ code living in any `Aardvark.*` namespace.
 | DPX | SMPTE 268M 1.0 / 2.0, both byte orders, 1/8/10/12/16 bit int and 32/64 bit float, packed / filled method A / B, RLE, several image elements, luma, R/G/B/A/depth, RGB, RGBA, ABGR, Cb Y Cr (Y) 4:2:2 / 4:4:4 (+ alpha) to RGB, user defined 2..8 components, orientation, padding, all header fields (time code, film, television) | gray, RGB, RGBA, 2..8 components at 8, 10, 12, 16 bit and 32/64 bit float, packed / filled A / B, either byte order, header fields |
 | Cineon | Kodak 4.5 draft: 1..16 and 32 bit, all packings, pixel / line / channel interleave, both byte orders, orientation, header fields | gray, RGB at 8, 10 (default for 8 bit images), 16 bit |
 
-Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, JPEG XL encoding, the exact noise pattern of
-libjxl (JPEG XL noise is synthesized with the right strength and spectrum but another pseudo random sequence), lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions,
+Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, JPEG XL encoding, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions,
 PVRTC2, YUV and Basis Universal PVR formats, writing 3D ASTC footprints, ANI frames that are raw bitmaps (no AF_ICON),
 FITS HCOMPRESS_1 tiles (the convention does not specify its bit stream), FITS tables and random groups, NRRD's block type,
 NIfTI float128 / complex256, ASCII MetaImage data.
@@ -125,7 +124,8 @@ CMYK profile) are converted to sRGB through the profile, since `RawImage` has no
 onto the colour (`RenderSpotColours = false` keeps them out). `Jxl.DecodeExtraChannels` returns every extra channel
 (depth, thermal, selection masks, spot colours, black, ...) with its type and name. `Jxl.DecodeAnimation` gives every displayed frame with durations, `Jxl.GetMetadataBoxes` the raw EXIF / XMP /
 JUMBF. Groups and colour conversion run in parallel (`Multithreaded = false` for one thread). On 8 cores a 13 MP photo
-takes about 0.5 s (lossy, distance 1) and 1.2 s (lossless, effort 3), libjxl 0.07 s and 0.28 s.
+takes about 0.13 s (lossy, distance 1) and 0.5 s (lossless, effort 3), libjxl 0.08 s and 0.29 s; on one thread 0.5 s and
+2.4 s, libjxl 0.3 s and 1.6 s.
 
 ### Volumes and scientific images
 

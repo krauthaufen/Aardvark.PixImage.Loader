@@ -10,7 +10,10 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// <summary>Whether the reference slot holds a frame saved before its colour transform.</summary>
         public readonly bool[] ReferencePreCt = new bool[4];
         public readonly JxlFrameImage?[] LfFrames = new JxlFrameImage?[4];
-        /// <summary>Displayed and other frames decoded so far (they seed the noise generator).</summary>
+        /// <summary>
+        /// Displayed frames so far and frames since the last displayed one, both counting the frame being decoded (they seed
+        /// the noise generator).
+        /// </summary>
         public int VisibleFrames, NonVisibleFrames;
     }
 
@@ -33,6 +36,8 @@ namespace Aardvark.ImageCodecs.JpegXl
         int pos;          // byte offset of the next frame
         public bool Done { get; private set; }
         public int FramesDecoded;
+        /// <summary>Supplies a sink for the restored colour of the last frame when it is shown as it is (see CanFuse).</summary>
+        public Func<JxlTileSink?>? SinkFactory;
 
         public JxlDecoder(byte[] codestream, JxlDecodeOptions opt)
         {
@@ -99,7 +104,10 @@ namespace Aardvark.ImageCodecs.JpegXl
                 long next = (long)sectionsStart + toc.TotalSize;
                 if (next > Data.Length) throw new ImageFormatException("JPEG XL: truncated frame");
                 if (++FramesDecoded > 1 << 16) throw new ImageNotSupportedException("JPEG XL: too many frames");
+                if (IsDisplayed(fh)) { state.VisibleFrames++; state.NonVisibleFrames = 0; }
+                else state.NonVisibleFrames++;
                 var dec = new JxlFrameDecoder(Header, fh, state, Data, sectionsStart, toc, opt.Multithreaded);
+                if (SinkFactory != null && CanFuse(fh)) dec.Sink = SinkFactory();
                 var frame = dec.Decode();
                 JxlProfile.Mark("finish frame");
                 pos = (int)next;
@@ -110,12 +118,25 @@ namespace Aardvark.ImageCodecs.JpegXl
             return null;
         }
 
+        /// <summary>
+        /// Whether the restoration filters of this frame can hand its colour straight to the output: the last, displayed XYB
+        /// frame covering the image, without extra channels, features, upsampling or blending.
+        /// </summary>
+        bool CanFuse(JxlFrameHeader fh)
+            => fh.IsLast && fh.Type == JxlFrameType.Regular && IsDisplayed(fh) && Header.XybEncoded && Header.ExtraChannels.Length == 0
+               && fh.Upsampling == 1 && !fh.Has(JxlFrameHeader.FlagNoise) && !fh.Has(JxlFrameHeader.FlagPatches) && !fh.Has(JxlFrameHeader.FlagSplines)
+               && fh.X0 == 0 && fh.Y0 == 0 && fh.Width == Header.Width && fh.Height == Header.Height && fh.Blending.Mode == JxlBlendMode.Replace
+               && (fh.Filter.Gab || fh.Filter.EpfIters > 0);
+
+        bool IsDisplayed(JxlFrameHeader fh)
+            => (fh.Type == JxlFrameType.Regular || fh.Type == JxlFrameType.SkipProgressive)
+               && (fh.IsLast || Header.Animation != null && fh.Duration != 0);
+
         JxlDisplayedFrame? Process(JxlFrameHeader fh, JxlFrameImage frame)
         {
             if (fh.Type == JxlFrameType.LfFrame)
             {
                 state.LfFrames[fh.LfLevel - 1] = frame;
-                state.NonVisibleFrames++;
                 return null;
             }
             bool canReference = !fh.IsLast && fh.Type != JxlFrameType.LfFrame;
@@ -124,7 +145,16 @@ namespace Aardvark.ImageCodecs.JpegXl
                 state.References[fh.SaveAsReference] = frame;
                 state.ReferencePreCt[fh.SaveAsReference] = true;
             }
-            var post = ColourTransform(frame);
+            // the last frame shown as it is: XYB is converted to linear RGB by the output stage, block by block
+            bool defer = fh.IsLast && Header.XybEncoded && frame.Planes.Length >= 3 && IsDisplayed(fh) && JxlBlender.IsPassthrough(Header, fh, frame);
+            JxlFrameImage post;
+            if (defer)
+            {
+                frame.PendingXyb = Header.Opsin;
+                frame.PendingIntensityTarget = Header.ToneMapping.IntensityTarget;
+                post = frame;
+            }
+            else post = ColourTransform(frame);
             JxlProfile.Mark("XYB to linear");
             var canvas = JxlBlender.Blend(Header, fh, post, state);
             if (!fh.SaveBeforeColourTransform && canReference)
@@ -132,10 +162,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 state.References[fh.SaveAsReference] = canvas;
                 state.ReferencePreCt[fh.SaveAsReference] = false;
             }
-            bool displayed = (fh.Type == JxlFrameType.Regular || fh.Type == JxlFrameType.SkipProgressive)
-                             && (fh.IsLast || Header.Animation != null && fh.Duration != 0);
-            if (!displayed) { state.NonVisibleFrames++; return null; }
-            state.VisibleFrames++;
+            if (!IsDisplayed(fh)) return null;
             return new JxlDisplayedFrame { Canvas = canvas, Duration = fh.Duration, Timecode = fh.Timecode, Name = fh.Name };
         }
 

@@ -87,12 +87,6 @@ public class JxlTests(ITestOutputHelper output)
         Assert.Equal(SampleType.Float32, f.SampleType);
         double max = LossyDiff(expected, f, Flag(j, "premultiplied"), out double rms);
         output.WriteLine($"{file}: max {max:E2} rms {rms:E2}");
-        if (Flag(j, "noise"))
-        {
-            // the grain is not libjxl's pseudo random sequence: only its strength is compared
-            Assert.InRange(rms, 0.002, 0.03);
-            return;
-        }
         Assert.True(max <= LossyTolerance, $"{file}: max difference {max:E2} > {LossyTolerance:E2}");
         // the integer output is the float output rounded (libjxl's own integer output is dithered)
         if (img.SampleType is SampleType.UInt8 or SampleType.UInt16)
@@ -141,6 +135,19 @@ public class JxlTests(ITestOutputHelper output)
         var mt = Jxl.Decode(data, new JxlDecodeOptions { ForceFloat = true });
         var st = Jxl.Decode(data, new JxlDecodeOptions { ForceFloat = true, Multithreaded = false });
         AssertEqual(mt, st);
+    }
+
+    /// <summary>
+    /// Decode hands the restored tiles of a still XYB image straight to the output conversion; DecodeAnimation goes through
+    /// full frame planes. Both must give the same samples, integer and float.
+    /// </summary>
+    [Theory, MemberData(nameof(Fixtures))]
+    public void TiledOutputMatchesFramePlanes(string file)
+    {
+        var data = File.ReadAllBytes(Fixture(file));
+        if (Jxl.GetInfo(data).FrameCount != 1) return;
+        foreach (var opt in new[] { new JxlDecodeOptions(), new JxlDecodeOptions { ForceFloat = true }, new JxlDecodeOptions { Multithreaded = false } })
+            AssertEqual(Jxl.DecodeAnimation(data, opt).Frames[0].Image, Jxl.Decode(data, opt));
     }
 
     [Theory, MemberData(nameof(Fixtures))]
@@ -429,11 +436,7 @@ public class JxlTests(ITestOutputHelper output)
     }
 
     /// <summary>Cases that do not meet the suite's tolerance, and why.</summary>
-    static readonly Dictionary<string, string> KnownFailures = new()
-    {
-        ["noise"] = "the noise synthesis uses a different pseudo random sequence than libjxl (amplitude and spectrum match)",
-        ["noise_5"] = "the noise synthesis uses a different pseudo random sequence than libjxl (amplitude and spectrum match)",
-    };
+    static readonly Dictionary<string, string> KnownFailures = new();
 
     /// <summary>Reads a little endian float32 .npy array (frames x height x width x channels).</summary>
     static (float[] data, int[] shape) LoadNpy(string path)

@@ -20,7 +20,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             if (splines != null && f.Planes.Length >= 3) splines.Draw(f.Planes, f.Width, f.Height, baseCorrX, baseCorrB);
             if (noise != null && f.Planes.Length >= 3)
                 noise.Apply(f.Planes[0], f.Planes[1], f.Planes[2], f.Width, f.Height, dims.GroupDim * fh.Upsampling,
-                    state.VisibleFrames, state.NonVisibleFrames, baseCorrX, baseCorrB);
+                    ((ulong)(uint)state.VisibleFrames << 32) + (uint)state.NonVisibleFrames, baseCorrX, baseCorrB, parallel);
         }
     }
 }

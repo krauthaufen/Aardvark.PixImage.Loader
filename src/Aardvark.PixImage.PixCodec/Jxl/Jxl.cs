@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.IO;
 using Aardvark.ImageCodecs.JpegXl;
@@ -218,9 +219,18 @@ namespace Aardvark.ImageCodecs
             var opt = options ?? JxlDecodeOptions.Default;
             var c = JxlContainer.Parse(data);
             var dec = new JxlDecoder(c.Codestream(data), opt);
+            var hd = dec.Header;
+            XybOutputSink? sink = null;
+            if (!opt.AllChannels && hd.XybEncoded && hd.ExtraChannels.Length == 0 && !(hd.Colour.WantIcc && hd.Icc != null))
+            {
+                // a still XYB image: the restoration filters of its last frame write straight into the output
+                var (color0, nch0, type0) = OutputFormat(hd);
+                if (opt.ForceFloat) type0 = SampleType.Float32;
+                dec.SinkFactory = () => sink = new XybOutputSink(new XybOutputWriter(hd, hd.Width, hd.Height, nch0, type0, hd.Opsin, hd.ToneMapping.IntensityTarget), hd.Width);
+            }
             var f = dec.Next() ?? throw new ImageFormatException("JPEG XL: no displayed frame");
             var meta = Metadata(c, data, dec.Header);
-            var outImg = Output(dec.Header, f.Canvas, meta, opt);
+            var outImg = f.Canvas.Sink is XybOutputSink s && s == sink ? s.Writer.Finish(hd, meta, opt, OutputFormat(hd).color) : Output(dec.Header, f.Canvas, meta, opt);
             JxlProfile.Mark("output");
             return outImg;
         }
@@ -343,6 +353,7 @@ namespace Aardvark.ImageCodecs
         /// <summary>Test hook output: Float32, colour channels then every extra channel as decoded (spot colours not rendered).</summary>
         static RawImage OutputAll(JxlImageHeader h, JxlFrameImage canvas, ImageMetadata meta, JxlDecodeOptions opt)
         {
+            canvas.EnsureLinear(opt.Multithreaded);
             var col = ColourPlanes(h, canvas, meta, opt);
             int ne = h.ExtraChannels.Length, nch = col.Length + ne, n = canvas.Width * canvas.Height;
             var data = new float[(long)n * nch];
@@ -366,12 +377,13 @@ namespace Aardvark.ImageCodecs
             int alpha = h.AlphaChannel;
             var planes = new float[nch][];
             int[][]? ints = canvas.IntPlanes;
-            var p = canvas.Planes;
             if (ints != null && (opt.ForceFloat || opt.RenderSpotColours && HasSpot(h) || alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated || BlackChannel(h) >= 0)) ints = null;
             if (ints == null && h.XybEncoded && !(h.Colour.WantIcc && h.Icc != null) && !(opt.RenderSpotColours && HasSpot(h)))
                 return FusedXybOutput(h, canvas, meta, opt, color, nch, type);
+            canvas.EnsureLinear(opt.Multithreaded);
             if (ints == null)
             {
+                var p = canvas.Planes;
                 var col = CmykToSrgb(h, canvas, meta, opt) ?? ColourPlanes(h, canvas, meta, opt);
                 if (opt.RenderSpotColours && HasSpot(h)) col = RenderSpot(h, canvas, col, n);
                 for (int c = 0; c < ncol; c++) planes[c] = col[c];
@@ -393,8 +405,22 @@ namespace Aardvark.ImageCodecs
             }
             Array data = RawImage.CreateArray(type, checked(n * nch));
             int maxv = h.BitDepth.Float ? 0 : (int)Math.Min((1L << h.BitDepth.Bits) - 1, int.MaxValue);
+            bool rgb8 = ints != null && type == SampleType.UInt8 && nch == 3 && ncol == 3 && h.BitDepth.Bits == 8;
             JxlColour.Chunked(n, opt.Multithreaded, (s0, e0) =>
             {
+                if (rgb8)
+                {
+                    // 8 bit RGB as coded: clamp and interleave in one pass
+                    var d = ((byte[])data).AsSpan(3 * s0, 3 * (e0 - s0));
+                    var r = ints![0].AsSpan(s0, e0 - s0); var g = ints[1].AsSpan(s0, e0 - s0); var b = ints[2].AsSpan(s0, e0 - s0);
+                    for (int i = 0; i < r.Length; i++)
+                    {
+                        d[3 * i] = (byte)Math.Clamp(r[i], 0, 255);
+                        d[3 * i + 1] = (byte)Math.Clamp(g[i], 0, 255);
+                        d[3 * i + 2] = (byte)Math.Clamp(b[i], 0, 255);
+                    }
+                    return;
+                }
                 for (int c = 0; c < nch; c++)
                 {
                     bool isAlpha = c == ncol;
@@ -419,55 +445,108 @@ namespace Aardvark.ImageCodecs
         static RawImage FusedXybOutput(JxlImageHeader h, JxlFrameImage canvas, ImageMetadata meta, JxlDecodeOptions opt, ColorModel color, int nch, SampleType type)
         {
             int w = canvas.Width, hh = canvas.Height, n = w * hh;
-            int ncol = h.Colour.IsGray ? 1 : 3;
             int alpha = h.AlphaChannel;
             var p = canvas.Planes;
             float[]? a = alpha >= 0 ? p[canvas.NumColour + alpha] : null;
-            bool premul = alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated;
-            var matrix = !h.Colour.WantIcc && JxlColour.NeedsPrimaryConversion(h.Colour) ? JxlColour.SrgbToTargetMatrix(h.Colour) : null;
-            var ce = h.Colour.WantIcc ? new JxlColourEncoding() : h.Colour;
-            float it = h.ToneMapping.IntensityTarget;
-            Array data = RawImage.CreateArray(type, checked(n * nch));
-            int maxv = h.BitDepth.Float ? 0 : (int)Math.Min((1L << h.BitDepth.Bits) - 1, int.MaxValue);
+            var wr = new XybOutputWriter(h, w, hh, nch, type, canvas.PendingXyb, canvas.PendingIntensityTarget);
             const int Block = 4096;
-            bool srgb8 = type == SampleType.UInt8 && ce.Transfer == JxlTransfer.Srgb && !premul;
             JxlColour.Chunked(n, opt.Multithreaded, (s0, e0) =>
             {
                 var buf = new float[3 * Block];
                 for (int s = s0; s < e0; s += Block)
                 {
                     int cnt = Math.Min(Block, e0 - s);
-                    var r = buf.AsSpan(0, cnt); var g = buf.AsSpan(Block, cnt); var b = buf.AsSpan(2 * Block, cnt);
-                    p[0].AsSpan(s, cnt).CopyTo(r); p[1].AsSpan(s, cnt).CopyTo(g); p[2].AsSpan(s, cnt).CopyTo(b);
-                    if (matrix != null) JxlColour.ApplyMatrix(r, g, b, matrix);
-                    if (ncol == 1)
-                        for (int i = 0; i < cnt; i++) r[i] = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i];
-                    if (srgb8)
-                    {
-                        var d = ((byte[])data).AsSpan(s * nch);
-                        for (int c = 0; c < ncol; c++) JxlColour.LinearToSrgb8(c == 0 ? r : c == 1 ? g : b, d.Slice(c), nch);
-                        if (a != null) WriteFloats(data, type, ncol, nch, a.AsSpan(s, cnt), maxv, s);
-                        continue;
-                    }
-                    if (ncol == 1) JxlColour.FromLinear(r, ce, it);
-                    else
-                    {
-                        JxlColour.FromLinear(r, ce, it); JxlColour.FromLinear(g, ce, it); JxlColour.FromLinear(b, ce, it);
-                    }
-                    for (int c = 0; c < ncol; c++)
-                    {
-                        var col = c == 0 ? r : c == 1 ? g : b;
-                        if (premul)
-                            for (int i = 0; i < cnt; i++) { float av = a![s + i]; col[i] = av > 0 ? col[i] / av : 0; }
-                        WriteFloats(data, type, c, nch, col, maxv, s);
-                    }
-                    if (a != null) WriteFloats(data, type, ncol, nch, a.AsSpan(s, cnt), maxv, s);
+                    wr.Convert(p[0].AsSpan(s, cnt), p[1].AsSpan(s, cnt), p[2].AsSpan(s, cnt), a != null ? a.AsSpan(s, cnt) : default, s, buf);
                 }
             });
-            if (h.Colour.WantIcc) meta.IccProfile = null;   // converted to sRGB
-            var img = new RawImage(w, hh, color, data, nch, meta);
-            if (opt.ApplyOrientation && h.Orientation > 1) img = ImageOps.ApplyOrientation(img, h.Orientation);
-            return img;
+            return wr.Finish(h, meta, opt, color);
+        }
+
+        /// <summary>The conversion of <see cref="FusedXybOutput"/> for runs of pixels, into one output array.</summary>
+        sealed class XybOutputWriter
+        {
+            public readonly Array Data;
+            readonly int width, height, nch, ncol, maxv;
+            readonly SampleType type;
+            readonly float[]? matrix;
+            readonly JxlColourEncoding ce;
+            readonly float it;
+            readonly bool srgb8, premul;
+            readonly JxlOpsinParams? xyb;
+            readonly float xybIntensity;
+
+            public XybOutputWriter(JxlImageHeader h, int w, int hh, int nch, SampleType type, JxlOpsinParams? xyb, float xybIntensity)
+            {
+                width = w; height = hh; this.nch = nch; this.type = type; this.xyb = xyb; this.xybIntensity = xybIntensity;
+                ncol = h.Colour.IsGray ? 1 : 3;
+                int alpha = h.AlphaChannel;
+                premul = alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated;
+                matrix = !h.Colour.WantIcc && JxlColour.NeedsPrimaryConversion(h.Colour) ? JxlColour.SrgbToTargetMatrix(h.Colour) : null;
+                ce = h.Colour.WantIcc ? new JxlColourEncoding() : h.Colour;
+                it = h.ToneMapping.IntensityTarget;
+                Data = RawImage.CreateArray(type, checked(w * hh * nch));
+                maxv = h.BitDepth.Float ? 0 : (int)Math.Min((1L << h.BitDepth.Bits) - 1, int.MaxValue);
+                srgb8 = type == SampleType.UInt8 && ce.Transfer == JxlTransfer.Srgb && !premul;
+            }
+
+            /// <summary>Pixels s .. s + x.Length - 1 (row major) from their colour (XYB when pending) and alpha; scratch: 3 * count floats.</summary>
+            public void Convert(ReadOnlySpan<float> x, ReadOnlySpan<float> y, ReadOnlySpan<float> bp, ReadOnlySpan<float> a, int s, Span<float> scratch)
+            {
+                int cnt = x.Length;
+                var r = scratch.Slice(0, cnt); var g = scratch.Slice(cnt, cnt); var b = scratch.Slice(2 * cnt, cnt);
+                if (xyb != null) JxlColour.XybToLinear(x, y, bp, r, g, b, xyb, xybIntensity);
+                else { x.CopyTo(r); y.CopyTo(g); bp.CopyTo(b); }
+                if (matrix != null) JxlColour.ApplyMatrix(r, g, b, matrix);
+                if (ncol == 1)
+                    for (int i = 0; i < cnt; i++) r[i] = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i];
+                var data = Data;
+                if (srgb8)
+                {
+                    var d = ((byte[])data).AsSpan(s * nch);
+                    if (nch == 3) JxlColour.LinearToSrgb8x3(r, g, b, d);
+                    else for (int c = 0; c < ncol; c++) JxlColour.LinearToSrgb8(c == 0 ? r : c == 1 ? g : b, d.Slice(c), nch);
+                    if (!a.IsEmpty) WriteFloats(data, type, ncol, nch, a, maxv, s);
+                    return;
+                }
+                if (ncol == 1) JxlColour.FromLinear(r, ce, it);
+                else
+                {
+                    JxlColour.FromLinear(r, ce, it); JxlColour.FromLinear(g, ce, it); JxlColour.FromLinear(b, ce, it);
+                }
+                for (int c = 0; c < ncol; c++)
+                {
+                    var col = c == 0 ? r : c == 1 ? g : b;
+                    if (premul)
+                        for (int i = 0; i < cnt; i++) { float av = a[i]; col[i] = av > 0 ? col[i] / av : 0; }
+                    WriteFloats(data, type, c, nch, col, maxv, s);
+                }
+                if (!a.IsEmpty) WriteFloats(data, type, ncol, nch, a, maxv, s);
+            }
+
+            public RawImage Finish(JxlImageHeader h, ImageMetadata meta, JxlDecodeOptions opt, ColorModel color)
+            {
+                if (h.Colour.WantIcc) meta.IccProfile = null;   // converted to sRGB
+                var img = new RawImage(width, height, color, Data, nch, meta);
+                if (opt.ApplyOrientation && h.Orientation > 1) img = ImageOps.ApplyOrientation(img, h.Orientation);
+                return img;
+            }
+        }
+
+        /// <summary>Restored XYB tiles of the last frame converted straight into the output (no full size colour planes).</summary>
+        sealed unsafe class XybOutputSink : JxlTileSink
+        {
+            public readonly XybOutputWriter Writer;
+            readonly int width;
+
+            public XybOutputSink(XybOutputWriter writer, int width) { Writer = writer; this.width = width; }
+
+            public override void WriteRows(int x0, int y0, int w, int h, float* p0, float* p1, float* p2, int stride)
+            {
+                Span<float> scratch = stackalloc float[3 * w];
+                for (int r = 0; r < h; r++)
+                    Writer.Convert(new ReadOnlySpan<float>(p0 + r * stride, w), new ReadOnlySpan<float>(p1 + r * stride, w),
+                        new ReadOnlySpan<float>(p2 + r * stride, w), default, (y0 + r) * width + x0, scratch);
+            }
         }
 
         static int BlackChannel(JxlImageHeader h)
@@ -614,22 +693,50 @@ namespace Aardvark.ImageCodecs
             return r;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void WriteInts(Array data, SampleType type, int c, int nch, int[] src, int srcBits, int dstBits, int start, int n)
         {
             long maxSrc = (1L << srcBits) - 1, maxDst = (1L << dstBits) - 1;
-            bool rescale = srcBits != dstBits;
-            for (int i = start; i < n; i++)
+            if (srcBits != dstBits)
             {
-                long v = src[i];
-                if (v < 0) v = 0; else if (v > maxSrc) v = maxSrc;
-                if (rescale) v = (v * maxDst + maxSrc / 2) / maxSrc;
-                int o = i * nch + c;
-                switch (type)
+                for (int i = start; i < n; i++)
                 {
-                    case SampleType.UInt8: ((byte[])data)[o] = (byte)v; break;
-                    case SampleType.UInt16: ((ushort[])data)[o] = (ushort)v; break;
-                    default: ((uint[])data)[o] = (uint)v; break;
+                    long v = Math.Clamp(src[i], 0, maxSrc);
+                    v = (v * maxDst + maxSrc / 2) / maxSrc;
+                    int o = i * nch + c;
+                    switch (type)
+                    {
+                        case SampleType.UInt8: ((byte[])data)[o] = (byte)v; break;
+                        case SampleType.UInt16: ((ushort[])data)[o] = (ushort)v; break;
+                        default: ((uint[])data)[o] = (uint)v; break;
+                    }
                 }
+                return;
+            }
+            // same depth: clamp and store, one loop per sample type
+            var s = src.AsSpan(start, n - start);
+            switch (type)
+            {
+                case SampleType.UInt8:
+                    {
+                        var d = ((byte[])data).AsSpan(start * nch + c);
+                        int mx = (int)maxSrc;
+                        for (int i = 0; i < s.Length; i++) d[i * nch] = (byte)Math.Clamp(s[i], 0, mx);
+                        break;
+                    }
+                case SampleType.UInt16:
+                    {
+                        var d = ((ushort[])data).AsSpan(start * nch + c);
+                        int mx = (int)maxSrc;
+                        for (int i = 0; i < s.Length; i++) d[i * nch] = (ushort)Math.Clamp(s[i], 0, mx);
+                        break;
+                    }
+                default:
+                    {
+                        var d = ((uint[])data).AsSpan(start * nch + c);
+                        for (int i = 0; i < s.Length; i++) d[i * nch] = (uint)Math.Clamp(s[i], 0, maxSrc);
+                        break;
+                    }
             }
         }
 
@@ -637,6 +744,7 @@ namespace Aardvark.ImageCodecs
             => WriteFloats(data, type, c, nch, src.AsSpan(start, n - start), maxv, start);
 
         /// <summary>Writes src as channel c of pixels start, start + 1, ... (rounded and clamped for integer types).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void WriteFloats(Array data, SampleType type, int c, int nch, ReadOnlySpan<float> src, int maxv, int start)
         {
             int o = start * nch + c;
