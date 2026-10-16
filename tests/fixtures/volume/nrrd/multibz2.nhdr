@@ -1,0 +1,7 @@
+NRRD0004
+type: int16
+dimension: 3
+sizes: 8 8 4
+endian: little
+encoding: bzip2
+data file: multi.raw.bz2

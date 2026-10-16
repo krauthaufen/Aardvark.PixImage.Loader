@@ -1,0 +1,17 @@
+{
+ "sizes": [
+  4,
+  3,
+  2
+ ],
+ "channels": 1,
+ "type": "Int16",
+ "spacing": [
+  1,
+  2,
+  3
+ ],
+ "space": "LPS",
+ "origin": null,
+ "direction": null
+}

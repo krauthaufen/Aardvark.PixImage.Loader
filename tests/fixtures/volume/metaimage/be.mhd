@@ -1,0 +1,10 @@
+ObjectType = Image
+NDims = 3
+BinaryData = True
+BinaryDataByteOrderMSB = True
+CompressedData = False
+ElementSpacing = 1 2 3
+DimSize = 4 3 2
+HeaderSize = 8
+ElementType = MET_SHORT
+ElementDataFile = be.raw

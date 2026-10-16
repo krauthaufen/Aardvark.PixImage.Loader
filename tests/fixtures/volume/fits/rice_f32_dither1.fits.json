@@ -1,0 +1,9 @@
+{
+ "sizes": [
+  30,
+  20
+ ],
+ "channels": 1,
+ "type": "Float32",
+ "tol": 0
+}

@@ -65,3 +65,32 @@ def test_pattern(w, h, c, dtype=np.uint8, seed=1):
         info = np.iinfo(dt)
         return np.round(a * (float(info.max) - float(info.min)) + info.min).astype(dt)
     return (a * 4.0 - 1.0).astype(dt)
+
+
+def write_vref(path, arr, channels=1):
+    """n-dimensional grid sidecar ('PXVR'): arr in OUR layout as a numpy array of shape (..., z, y, x[, c]) in C order, i.e.
+    the slowest axis first. channels: size of the last axis if it holds interleaved channels, else 1.
+
+      magic 'PXVR' | int32 ndims | int32 sizes[ndims] (x first) | int32 channels | int32 sampleType | raw little-endian samples
+    """
+    arr = np.ascontiguousarray(np.asarray(arr))
+    shape = arr.shape[:-1] if channels > 1 else arr.shape
+    sizes = list(reversed(shape))
+    t = _TYPES[arr.dtype.newbyteorder('=')]
+    with open(path, 'wb') as f:
+        f.write(b'PXVR')
+        f.write(struct.pack('<i', len(sizes)))
+        f.write(struct.pack('<%di' % len(sizes), *sizes))
+        f.write(struct.pack('<2i', channels, t))
+        f.write(arr.astype(arr.dtype.newbyteorder('<')).tobytes())
+
+
+def read_vref(path):
+    with open(path, 'rb') as f:
+        assert f.read(4) == b'PXVR'
+        n, = struct.unpack('<i', f.read(4))
+        sizes = struct.unpack('<%di' % n, f.read(4 * n))
+        c, t = struct.unpack('<2i', f.read(8))
+        dt = _DTYPES[t].newbyteorder('<')
+        shape = tuple(reversed(sizes)) + ((c,) if c > 1 else ())
+        return np.frombuffer(f.read(), dtype=dt).reshape(shape), c

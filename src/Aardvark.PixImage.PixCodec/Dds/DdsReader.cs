@@ -120,6 +120,7 @@ namespace Aardvark.ImageCodecs.DdsImpl
                 BitsPerSample = RawImage.BytesPerSample(i.SampleType) * 8,
                 MipLevels = i.MipLevels,
                 Transfer = i.IsSrgb ? TransferFunction.Srgb : TransferFunction.Unknown,
+                Depth = i.Depth,
             };
         }
 

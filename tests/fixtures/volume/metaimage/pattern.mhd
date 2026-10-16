@@ -1,0 +1,7 @@
+ObjectType = Image
+NDims = 3
+BinaryData = True
+BinaryDataByteOrderMSB = False
+DimSize = 4 3 3
+ElementType = MET_USHORT
+ElementDataFile = sl_%d.raw 0 2 1

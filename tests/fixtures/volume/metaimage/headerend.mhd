@@ -1,0 +1,6 @@
+ObjectType = Image
+NDims = 3
+DimSize = 3 3 2
+HeaderSize = -1
+ElementType = MET_FLOAT
+ElementDataFile = end.raw

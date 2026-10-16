@@ -1,0 +1,45 @@
+{
+ "sizes": [
+  5,
+  4,
+  3
+ ],
+ "channels": 1,
+ "type": "UInt8",
+ "space": "RAS",
+ "spacing": [
+  1.0,
+  1.0,
+  1.5
+ ],
+ "origin": [
+  30.0,
+  -40.0,
+  7.0
+ ],
+ "direction": [
+  [
+   -1.0,
+   0.0,
+   0.0
+  ],
+  [
+   0.0,
+   1.0,
+   0.0
+  ],
+  [
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "tol": 1e-05,
+ "header": {
+  "intent_code": "1002",
+  "intent_name": "labels",
+  "dim_info": "54",
+  "qform_code": "1",
+  "sform_code": "0"
+ }
+}

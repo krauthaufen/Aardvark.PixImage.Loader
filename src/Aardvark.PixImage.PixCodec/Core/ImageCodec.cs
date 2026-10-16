@@ -19,6 +19,9 @@ namespace Aardvark.ImageCodecs
             if (Bmp.IsMatch(header)) return ImageFormat.Bmp;
             if (Dds.IsMatch(header)) return ImageFormat.Dds;
             if (Ktx.IsMatch(header)) return ImageFormat.Ktx;
+            if (Nrrd.IsMatch(header)) return ImageFormat.Nrrd;
+            if (Fits.IsMatch(header)) return ImageFormat.Fits;
+            if (Nifti.IsMatch(header)) return ImageFormat.Nifti;
             if (Qoi.IsMatch(header)) return ImageFormat.Qoi;
             if (Sgi.IsMatch(header)) return ImageFormat.Sgi;
             if (SunRaster.IsMatch(header)) return ImageFormat.SunRaster;
@@ -27,6 +30,7 @@ namespace Aardvark.ImageCodecs
             if (Pfm.IsMatch(header)) return ImageFormat.Pfm;
             if (Pnm.IsMatch(header)) return ImageFormat.Pnm;
             if (Ico.IsMatch(header)) return ImageFormat.Ico;
+            if (MetaImage.IsMatch(header)) return ImageFormat.MetaImage; // text header without a signature
             // no signatures, strict plausibility checks
             if (Pcx.IsMatch(header)) return ImageFormat.Pcx;
             if (Xbm.IsMatch(header)) return ImageFormat.Xbm;
@@ -37,7 +41,16 @@ namespace Aardvark.ImageCodecs
         }
 
         public static ImageFormat FormatFromExtension(string path)
-            => Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            var ext = Path.GetExtension(path).ToLowerInvariant();
+            if (ext == ".gz")
+                return Path.GetExtension(Path.GetFileNameWithoutExtension(path)).ToLowerInvariant() switch
+                {
+                    ".nii" => ImageFormat.Nifti,
+                    ".fits" or ".fit" or ".fts" => ImageFormat.Fits,
+                    _ => ImageFormat.Unknown,
+                };
+            return ext switch
             {
                 ".png" => ImageFormat.Png,
                 ".jpg" or ".jpeg" or ".jpe" or ".jfif" => ImageFormat.Jpeg,
@@ -62,8 +75,13 @@ namespace Aardvark.ImageCodecs
                 ".xbm" or ".bm" => ImageFormat.Xbm,
                 ".xpm" or ".pm" => ImageFormat.Xpm,
                 ".wbmp" or ".wbm" => ImageFormat.Wbmp,
+                ".nrrd" or ".nhdr" => ImageFormat.Nrrd,
+                ".nii" => ImageFormat.Nifti,
+                ".mha" or ".mhd" => ImageFormat.MetaImage,
+                ".fits" or ".fit" or ".fts" => ImageFormat.Fits,
                 _ => ImageFormat.Unknown,
             };
+        }
 
         /// <summary>
         /// Reads format, dimensions, channels, sample type, frame count and the descriptive metadata
@@ -95,7 +113,19 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Xbm => Xbm.GetInfo(data),
             ImageFormat.Xpm => Xpm.GetInfo(data),
             ImageFormat.Wbmp => Wbmp.GetInfo(data),
+            ImageFormat.Nrrd => Nrrd.GetInfo(data),
+            ImageFormat.Nifti => Nifti.GetInfo(data),
+            ImageFormat.MetaImage => MetaImage.GetInfo(data),
+            ImageFormat.Fits => Fits.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
+        };
+
+        /// <summary>Header info from a prefix of the file (stream path): text headers must not be parsed from a cut line.</summary>
+        static ImageInfo HeaderInfoPrefix(ReadOnlySpan<byte> data, ImageFormat format) => format switch
+        {
+            ImageFormat.Nrrd => Nrrd.GetInfo(data, true),
+            ImageFormat.MetaImage => MetaImage.GetInfo(data, true),
+            _ => HeaderInfo(data),
         };
 
         /// <summary>Metadata problems never make the header information unreadable.</summary>
@@ -251,7 +281,7 @@ namespace Aardvark.ImageCodecs
                 if (!needAll && (format != ImageFormat.Png || PngHeadersComplete(buf.AsSpan(0, n)))
                     && (format != ImageFormat.Bmp || n >= Math.Min(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(10)), 1u << 20)))
                 {
-                    try { var r = HeaderInfo(buf.AsSpan(0, n)); prefix = buf.AsSpan(0, n).ToArray(); return r; }
+                    try { var r = HeaderInfoPrefix(buf.AsSpan(0, n), format); prefix = buf.AsSpan(0, n).ToArray(); return r; }
                     catch (ImageFormatException) { }
                 }
                 Array.Resize(ref buf, (int)Math.Min((long)buf.Length * 4, Array.MaxLength));
@@ -317,11 +347,127 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Xbm => Xbm.Decode(data),
             ImageFormat.Xpm => Xpm.Decode(data),
             ImageFormat.Wbmp => Wbmp.Decode(data),
+            ImageFormat.Nrrd => Nrrd.Decode(data),
+            ImageFormat.Nifti => Nifti.Decode(data),
+            ImageFormat.MetaImage => MetaImage.Decode(data),
+            ImageFormat.Fits => Fits.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
         public static RawImage Decode(Stream stream) => Decode(ReadAll(stream));
-        public static RawImage Decode(string path) => Decode(File.ReadAllBytes(path));
+
+        /// <summary>
+        /// Decodes an image file. For volumes (NRRD, NIfTI, MetaImage, FITS cubes, DDS / KTX volume textures) this is the first z
+        /// slice; detached NRRD / MetaImage / NIfTI data files are found next to the header.
+        /// </summary>
+        public static RawImage Decode(string path)
+        {
+            var f = SniffFile(path);
+            if (IsVolumeFormat(f)) return ColorTags.Tag(DecodeVolume(path).GetSlice(0), default, f);
+            return Decode(File.ReadAllBytes(path));
+        }
+
+        static bool IsVolumeFormat(ImageFormat f) => f is ImageFormat.Nrrd or ImageFormat.Nifti or ImageFormat.MetaImage or ImageFormat.Fits;
+
+        static ImageFormat SniffFile(string path)
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1);
+            var b = new byte[8192];
+            int n = Fill(fs, b, 0);
+            return DetectFormat(b.AsSpan(0, n));
+        }
+
+        // ------------------------------------------------------------------ volumes
+
+        /// <summary>
+        /// Decodes the whole sample grid of a volume file: NRRD (.nrrd, .nhdr with its data files), NIfTI (.nii, .nii.gz, .hdr +
+        /// .img), MetaImage (.mha, .mhd with its data files), FITS (the first image HDU), or a DDS / KTX volume texture (top mip
+        /// level). 2D files give a grid with one slice. Physical metadata is in <see cref="RawVolume.Metadata"/>.
+        /// </summary>
+        public static RawVolume DecodeVolume(string path, VolumeDecodeOptions? options = null)
+        {
+            switch (SniffFile(path))
+            {
+                case ImageFormat.Nrrd: return Nrrd.DecodeVolume(path, options);
+                case ImageFormat.Nifti: return Nifti.DecodeVolume(path, options);
+                case ImageFormat.MetaImage: return MetaImage.DecodeVolume(path, options);
+                case ImageFormat.Fits: return Fits.DecodeVolume(path, options);
+                default: return DecodeVolume(File.ReadAllBytes(path), options);
+            }
+        }
+
+        /// <summary>
+        /// <see cref="DecodeVolume(string, VolumeDecodeOptions?)"/> from memory (detached data files need
+        /// <see cref="VolumeDecodeOptions.DataDirectory"/> or <see cref="VolumeDecodeOptions.OpenDataFile"/>).
+        /// </summary>
+        public static RawVolume DecodeVolume(ReadOnlySpan<byte> data, VolumeDecodeOptions? options = null)
+        {
+            switch (DetectFormat(data))
+            {
+                case ImageFormat.Nrrd: return Nrrd.DecodeVolume(data, options);
+                case ImageFormat.Nifti: return Nifti.DecodeVolume(data, options);
+                case ImageFormat.MetaImage: return MetaImage.DecodeVolume(data, options);
+                case ImageFormat.Fits: return Fits.DecodeVolume(data, options);
+                case ImageFormat.Dds:
+                    {
+                        var t = Dds.DecodeTexture(data);
+                        return RawVolume.FromSlices(t.Kind == DdsTextureKind.Texture3D ? t.GetSlices() : new[] { t.GetImage() });
+                    }
+                case ImageFormat.Ktx:
+                    {
+                        var t = Ktx.DecodeTexture(data);
+                        return RawVolume.FromSlices(t.Kind == KtxTextureKind.Texture3D ? t.GetSlices() : new[] { Ktx.Decode(data) });
+                    }
+                case ImageFormat.Unknown: throw new ImageFormatException("unknown image format");
+                default: return RawVolume.FromImage(Decode(data));
+            }
+        }
+
+        /// <inheritdoc cref="DecodeVolume(ReadOnlySpan{byte}, VolumeDecodeOptions?)"/>
+        public static RawVolume DecodeVolume(Stream stream, VolumeDecodeOptions? options = null) => DecodeVolume(ReadAll(stream), options);
+
+        /// <summary>
+        /// Writes a sample grid in the format given by the extension: .nrrd (gzip), .nhdr (+ .raw.gz), .nii, .nii.gz, .mha,
+        /// .mhd (+ .zraw), .fits / .fit / .fts (also .gz), .dds and .ktx2 (volume textures of the first frame).
+        /// </summary>
+        public static void EncodeVolume(RawVolume volume, string path)
+        {
+            ArgumentNullException.ThrowIfNull(volume);
+            var ext = Path.GetExtension(path).ToLowerInvariant();
+            switch (ext)
+            {
+                case ".nhdr": Nrrd.EncodeDetached(volume, path); return;
+                case ".mhd": MetaImage.EncodeDetached(volume, path); return;
+            }
+            var format = FormatFromExtension(path);
+            if (format == ImageFormat.Unknown) throw new ArgumentException($"cannot infer the volume format from '{path}'");
+            using var fs = File.Create(path);
+            EncodeVolume(volume, fs, format, ext == ".gz");
+        }
+
+        /// <summary>Writes a sample grid as an attached file of the given format (NRRD, NIfTI-1, MetaImage .mha, FITS, DDS, KTX).</summary>
+        public static void EncodeVolume(RawVolume volume, Stream output, ImageFormat format) => EncodeVolume(volume, output, format, false);
+
+        static void EncodeVolume(RawVolume volume, Stream output, ImageFormat format, bool gz)
+        {
+            switch (format)
+            {
+                case ImageFormat.Nrrd: Nrrd.Encode(volume, output); break;
+                case ImageFormat.Nifti: Nifti.Encode(volume, output, new NiftiEncodeOptions { Gzip = gz }); break;
+                case ImageFormat.MetaImage: MetaImage.Encode(volume, output); break;
+                case ImageFormat.Fits:
+                    if (gz)
+                    {
+                        using var g = Compression.Gzip.CreateCompressor(output);
+                        Fits.Encode(volume, g);
+                    }
+                    else Fits.Encode(volume, output);
+                    break;
+                case ImageFormat.Dds: Dds.EncodeVolume(volume.GetFrame(0).GetSlices(), output); break;
+                case ImageFormat.Ktx: Ktx.EncodeVolume(volume.GetFrame(0).GetSlices(), output); break;
+                default: throw new ArgumentException($"cannot write a volume as {format}", nameof(format));
+            }
+        }
 
         /// <summary>
         /// Decodes every image in the file: the pages of a TIFF or DCX, the frames of an animated GIF, PNG or WebP (each the whole canvas
@@ -360,13 +506,48 @@ namespace Aardvark.ImageCodecs
                     return Ktx.DecodeAll(data);
                 case ImageFormat.Dcx:
                     return Pcx.DecodeAll(data);
+                case ImageFormat.Fits:
+                    {
+                        var r = new List<RawImage>();
+                        foreach (var v in Fits.DecodeAllVolumes(data)) AddSlices(r, v);
+                        return r.ToArray();
+                    }
+                case ImageFormat.Nrrd:
+                case ImageFormat.Nifti:
+                case ImageFormat.MetaImage:
+                    {
+                        var r = new List<RawImage>();
+                        AddSlices(r, DecodeVolume(data));
+                        return r.ToArray();
+                    }
                 default:
                     return new[] { Decode(data) };
             }
         }
 
+        static void AddSlices(List<RawImage> r, RawVolume v)
+        {
+            for (int f = 0; f < v.FrameCount; f++)
+                for (int z = 0; z < v.Depth; z++) r.Add(v.GetSlice(z, f));
+        }
+
         public static RawImage[] DecodeAll(Stream stream) => DecodeAll(ReadAll(stream));
-        public static RawImage[] DecodeAll(string path) => DecodeAll(File.ReadAllBytes(path));
+
+        /// <summary>
+        /// <see cref="DecodeAll(ReadOnlySpan{byte})"/> of a file; for NRRD, NIfTI, MetaImage and FITS every z slice of every frame
+        /// (of every image HDU for FITS), detached data files included.
+        /// </summary>
+        public static RawImage[] DecodeAll(string path)
+        {
+            var f = SniffFile(path);
+            if (f is ImageFormat.Nrrd or ImageFormat.Nifti or ImageFormat.MetaImage)
+            {
+                var r = new List<RawImage>();
+                AddSlices(r, DecodeVolume(path));
+                return ColorTags.Tag(r.ToArray(), default, f);
+            }
+            return DecodeAll(File.ReadAllBytes(path));
+        }
 
         /// <summary>
         /// The image with its stored mip levels, largest first: the mip chain of a DDS texture (first array element / face) or
@@ -421,6 +602,10 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Xbm: Xbm.Encode(image, output); break;
                 case ImageFormat.Xpm: Xpm.Encode(image, output); break;
                 case ImageFormat.Wbmp: Wbmp.Encode(image, output); break;
+                case ImageFormat.Nrrd: Nrrd.Encode(image, output); break;
+                case ImageFormat.Nifti: Nifti.Encode(image, output); break;
+                case ImageFormat.MetaImage: MetaImage.Encode(image, output); break;
+                case ImageFormat.Fits: Fits.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }
@@ -429,6 +614,7 @@ namespace Aardvark.ImageCodecs
         {
             var format = FormatFromExtension(path);
             if (format == ImageFormat.Unknown) throw new ArgumentException($"cannot infer image format from '{path}'");
+            if (IsVolumeFormat(format)) { EncodeVolume(RawVolume.FromImage(image), path); return; }
             using var fs = File.Create(path);
             Encode(image, fs, format);
         }

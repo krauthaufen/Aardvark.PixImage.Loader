@@ -64,6 +64,14 @@ namespace Aardvark.ImageCodecs
         Xpm,
         /// <summary>Wireless Bitmap (type 0).</summary>
         Wbmp,
+        /// <summary>NRRD (.nrrd, detached .nhdr).</summary>
+        Nrrd,
+        /// <summary>NIfTI-1 / NIfTI-2 (.nii, .nii.gz, .hdr + .img).</summary>
+        Nifti,
+        /// <summary>MetaImage (.mha, .mhd with detached data).</summary>
+        MetaImage,
+        /// <summary>FITS (.fits, .fit, .fts).</summary>
+        Fits,
     }
 
     /// <summary>
@@ -112,6 +120,11 @@ namespace Aardvark.ImageCodecs
         /// tag in <see cref="Exif"/> to 1 too); encoders write this value, also into a copied <see cref="Exif"/> blob.
         /// </summary>
         public int Orientation;
+        /// <summary>
+        /// Physical description of the sample grid (spacing, origin, orientation, value scaling, header entries) for images from
+        /// scientific formats (NRRD, NIfTI, MetaImage, FITS); null otherwise.
+        /// </summary>
+        public PhysicalMetadata? Physical;
     }
 
     /// <summary>
@@ -174,6 +187,13 @@ namespace Aardvark.ImageCodecs
         public int MipLevels { get; init; } = 1;
 
         /// <summary>
+        /// Number of z slices of a volume (NRRD, NIfTI, MetaImage, FITS cubes, DDS / KTX volume textures), 1 for 2D images. Decode
+        /// returns the first slice; the format's DecodeVolume (or <see cref="ImageCodec.DecodeVolume(string, VolumeDecodeOptions?)"/>) all of them.
+        /// For scientific formats <see cref="FrameCount"/> is the product of the axes beyond the third (time, ...).
+        /// </summary>
+        public int Depth { get; init; } = 1;
+
+        /// <summary>
         /// The file's descriptive metadata (EXIF, XMP, IPTC; camera, exposure, dates, GPS, drone attitude, description), filled
         /// by <see cref="ImageCodec.GetInfo(string)"/> and its overloads without decoding pixels; null from the format specific
         /// GetInfo methods. Not part of equality.
@@ -184,11 +204,11 @@ namespace Aardvark.ImageCodecs
             => Format == o.Format && Width == o.Width && Height == o.Height && Channels == o.Channels && SampleType == o.SampleType
                && Color == o.Color && FrameCount == o.FrameCount && BitsPerSample == o.BitsPerSample && Orientation == o.Orientation
                && OrientationApplied == o.OrientationApplied && DpiX.Equals(o.DpiX) && DpiY.Equals(o.DpiY) && HasIccProfile == o.HasIccProfile
-               && IsAnimated == o.IsAnimated && MipLevels == o.MipLevels && Transfer == o.Transfer;
+               && IsAnimated == o.IsAnimated && MipLevels == o.MipLevels && Transfer == o.Transfer && Depth == o.Depth;
 
         public override int GetHashCode()
             => HashCode.Combine(HashCode.Combine(Format, Width, Height, Channels, SampleType, Color, FrameCount),
-                HashCode.Combine(BitsPerSample, Orientation, OrientationApplied, DpiX, DpiY, HasIccProfile, IsAnimated, HashCode.Combine(MipLevels, Transfer)));
+                HashCode.Combine(BitsPerSample, Orientation, OrientationApplied, DpiX, DpiY, HasIccProfile, IsAnimated, HashCode.Combine(MipLevels, Transfer, Depth)));
 
         /// <summary>Width / Height of the pixels as stored in the file, before the orientation is applied (swapped for 5..8).</summary>
         public int StoredWidth => OrientationApplied && Orientation >= 5 ? Height : Width;

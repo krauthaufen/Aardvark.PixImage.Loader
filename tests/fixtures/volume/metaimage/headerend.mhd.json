@@ -1,0 +1,10 @@
+{
+ "sizes": [
+  3,
+  3,
+  2
+ ],
+ "channels": 1,
+ "type": "Float32",
+ "space": "LPS"
+}

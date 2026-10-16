@@ -8,7 +8,8 @@ namespace Aardvark.Data
 {
     /// <summary>
     /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA,
-    /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO, PCX / DCX, SGI, Sun Raster, XBM, XPM, WBMP).
+    /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO, PCX / DCX, SGI, Sun Raster, XBM, XPM, WBMP, and the volume formats
+    /// NRRD, NIfTI, MetaImage, FITS).
     /// Register with <see cref="PixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
     public sealed class PixCodecLoader : IPixMipmapLoader
@@ -361,15 +362,38 @@ namespace Aardvark.Data
         }
 
         /// <summary>
-        /// The top level of a DDS or KTX volume (3D) texture as a PixVolume of the stored sample type (half floats as float), with
-        /// the dense layout channel, x, y, z. <paramref name="mip"/> picks a smaller level, <paramref name="item"/> a KTX array layer.
+        /// A volume as a PixVolume of the stored sample type (half floats as float) with the dense layout channel, x, y, z: the
+        /// top level of a DDS or KTX volume (3D) texture, or a NRRD / NIfTI / MetaImage / FITS volume (detached data files are
+        /// found next to the header). <paramref name="mip"/> picks a smaller texture level; <paramref name="item"/> a KTX array
+        /// layer, or the frame (time point, ...) of a scientific volume with more than three axes. The physical metadata
+        /// (spacing, origin, orientation, header) of scientific formats comes with
+        /// <see cref="LoadVolume(string, out PhysicalMetadata?, int, VolumeDecodeOptions?)"/>.
         /// </summary>
-        public static PixVolume LoadVolume(string path, int mip = 0, int item = 0) => LoadVolume(File.ReadAllBytes(path), mip, item);
+        public static PixVolume LoadVolume(string path, int mip = 0, int item = 0)
+        {
+            var f = ImageCodec.FormatFromExtension(path);
+            if (IsScientific(path))
+                return ToPixVolume(ImageCodec.DecodeVolume(path), item);
+            return LoadVolume(File.ReadAllBytes(path), mip, item);
+        }
+
+        static bool IsScientific(string path)
+        {
+            using var fs = File.OpenRead(path);
+            var b = new byte[8192];
+            int n = fs.Read(b, 0, b.Length);
+            var f = ImageCodec.DetectFormat(b.AsSpan(0, n));
+            return f is ImageFormat.Nrrd or ImageFormat.Nifti or ImageFormat.MetaImage or ImageFormat.Fits;
+        }
+
         /// <inheritdoc cref="LoadVolume(string, int, int)"/>
         public static PixVolume LoadVolume(Stream stream, int mip = 0, int item = 0) => LoadVolume(ImageCodec.ReadAll(stream), mip, item);
         /// <inheritdoc cref="LoadVolume(string, int, int)"/>
         public static PixVolume LoadVolume(byte[] data, int mip = 0, int item = 0)
         {
+            var format = ImageCodec.DetectFormat(data);
+            if (format is ImageFormat.Nrrd or ImageFormat.Nifti or ImageFormat.MetaImage or ImageFormat.Fits)
+                return ToPixVolume(ImageCodec.DecodeVolume(data), item);
             RawImage[] slices;
             if (Ktx.IsMatch(data))
             {
@@ -386,6 +410,90 @@ namespace Aardvark.Data
             return ToVolume(slices);
         }
 
+        /// <summary>
+        /// A NRRD, NIfTI, MetaImage or FITS volume (or any file <see cref="ImageCodec.DecodeVolume(string, VolumeDecodeOptions?)"/>
+        /// reads) with its physical metadata: voxel spacing, origin, direction matrix, value scaling and the header entries.
+        /// <paramref name="frame"/> selects the volume of a series with more than three axes.
+        /// </summary>
+        public static PixVolume LoadVolume(string path, out PhysicalMetadata? metadata, int frame = 0, VolumeDecodeOptions? options = null)
+        {
+            var v = ImageCodec.DecodeVolume(path, options);
+            metadata = v.Metadata;
+            return ToPixVolume(v, frame);
+        }
+
+        /// <summary>
+        /// <see cref="LoadVolume(string, int, int)"/> converted to PixVolume&lt;T&gt; if the file holds another sample type (by
+        /// PixVolume.ToPixVolume, which maps integer ranges as PixImage conversions do: byte 255 becomes float 1).
+        /// </summary>
+        public static PixVolume<T> LoadVolume<T>(string path, int frame = 0) => AsVolume<T>(LoadVolume(path, 0, frame));
+
+        /// <summary><see cref="LoadVolume(string, out PhysicalMetadata?, int, VolumeDecodeOptions?)"/> as PixVolume&lt;T&gt;.</summary>
+        public static PixVolume<T> LoadVolume<T>(string path, out PhysicalMetadata? metadata, int frame = 0, VolumeDecodeOptions? options = null)
+            => AsVolume<T>(LoadVolume(path, out metadata, frame, options));
+
+        static PixVolume<T> AsVolume<T>(PixVolume v) => v as PixVolume<T> ?? v.ToPixVolume<T>();
+
+        /// <summary>
+        /// Loads an image with the physical metadata of scientific formats (pixel spacing, WCS / orientation, value scaling,
+        /// header entries; null for other formats). Volumes give their first slice.
+        /// </summary>
+        public static PixImage Load(string path, out PhysicalMetadata? metadata)
+        {
+            var img = ImageCodec.Decode(path);
+            metadata = img.Metadata?.Physical;
+            return Convert(img);
+        }
+
+        /// <summary>
+        /// Saves a PixVolume in the format given by the extension (.nrrd, .nhdr, .nii, .nii.gz, .mha, .mhd, .fits, .dds, .ktx2),
+        /// with the physical metadata (spacing, origin, direction, ...) where the format can hold it.
+        /// </summary>
+        public static void SaveVolume(PixVolume volume, string path, PhysicalMetadata? metadata = null)
+            => ImageCodec.EncodeVolume(PixCodecRawImageExtensions.ToRawVolume(volume, metadata), path);
+
+        /// <summary>Saves a PixVolume to a stream in the given format (NRRD, NIfTI-1, MetaImage .mha, FITS, DDS, KTX).</summary>
+        public static void SaveVolume(PixVolume volume, Stream stream, ImageFormat format, PhysicalMetadata? metadata = null)
+            => ImageCodec.EncodeVolume(PixCodecRawImageExtensions.ToRawVolume(volume, metadata), stream, format);
+
+        /// <summary>One frame of a decoded grid as a PixVolume (no copy for a single frame volume; half floats become float).</summary>
+        public static PixVolume ToPixVolume(RawVolume v, int frame = 0)
+        {
+            var f = v.GetFrame(frame);
+            var meta = f.Metadata;
+            return f.SampleType switch
+            {
+                SampleType.UInt8 => Wrap(f, (byte[])f.Data),
+                SampleType.UInt16 => Wrap(f, (ushort[])f.Data),
+                SampleType.UInt32 => Wrap(f, (uint[])f.Data),
+                SampleType.UInt64 => Wrap(f, (ulong[])f.Data),
+                SampleType.Int8 => Wrap(f, (sbyte[])f.Data),
+                SampleType.Int16 => Wrap(f, (short[])f.Data),
+                SampleType.Int32 => Wrap(f, (int[])f.Data),
+                SampleType.Int64 => Wrap(f, (long[])f.Data),
+                SampleType.Float16 => Wrap(f, Array.ConvertAll((System.Half[])f.Data, h => (float)h)),
+                SampleType.Float32 => Wrap(f, (float[])f.Data),
+                SampleType.Float64 => Wrap(f, (double[])f.Data),
+                var t => throw new NotSupportedException($"unsupported sample type {t}"),
+            };
+        }
+
+        static PixVolume<T> Wrap<T>(RawVolume v, T[] data)
+        {
+            long w = v.Width, h = v.Height, d = v.Depth, c = v.Channels;
+            var tensor = new Tensor4<T>(data, 0, new V4l(w, h, d, c), new V4l(c, w * c, w * h * c, 1));
+            return new PixVolume<T>(VolFormat(v.Color, (int)c), tensor);
+        }
+
+        static Col.Format VolFormat(ColorModel color, int c) => color switch
+        {
+            ColorModel.Gray => Col.Format.Gray,
+            ColorModel.GrayAlpha => Col.Format.GrayAlpha,
+            ColorModel.Rgb => Col.Format.RGB,
+            ColorModel.Rgba => Col.Format.RGBA,
+            _ => c switch { 1 => Col.Format.Gray, 2 => Col.Format.RG, 3 => Col.Format.RGB, 4 => Col.Format.RGBA, _ => Col.Format.None },
+        };
+
         static PixVolume ToVolume(RawImage[] slices) => slices[0].SampleType switch
         {
             SampleType.UInt8 => Volume<byte>(slices, s => (byte[])s.Data),
@@ -397,6 +505,8 @@ namespace Aardvark.Data
             SampleType.Float16 => Volume<float>(slices, s => Array.ConvertAll((System.Half[])s.Data, h => (float)h)),
             SampleType.Float32 => Volume<float>(slices, s => (float[])s.Data),
             SampleType.Float64 => Volume<double>(slices, s => (double[])s.Data),
+            SampleType.UInt64 => Volume<ulong>(slices, s => (ulong[])s.Data),
+            SampleType.Int64 => Volume<long>(slices, s => (long[])s.Data),
             var t => throw new NotSupportedException($"unsupported sample type {t}"),
         };
 
@@ -550,6 +660,11 @@ namespace Aardvark.Data
         {
             // formats without a PixFileFormat
             var codec = ImageCodec.FormatFromExtension(path);
+            if (saveParams == null && codec is ImageFormat.Nrrd or ImageFormat.Nifti or ImageFormat.MetaImage or ImageFormat.Fits)
+            {
+                ImageCodec.Encode(PixCodecLoader.ToRawImage(image), path);
+                return;
+            }
             if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.Dcx)
             {
                 using var fs = File.Create(path);
@@ -612,5 +727,61 @@ namespace Aardvark.Data
 
         /// <summary>Views a PixImage as a RawImage (no copy when it already has RGB(A)/gray image layout; BGR(A) is reordered).</summary>
         public static RawImage ToRawImage(this PixImage image) => PixCodecLoader.ToRawImage(image);
+
+        /// <summary>One frame of a decoded grid as a PixVolume (see <see cref="PixCodec.ToPixVolume"/>).</summary>
+        public static PixVolume ToPixVolume(this RawVolume volume, int frame = 0) => PixCodec.ToPixVolume(volume, frame);
+
+        /// <summary>
+        /// A PixVolume as a RawVolume (dense: channel, x, y, z; BGR(A) reordered to RGB(A)), with the given physical metadata.
+        /// No copy when the volume already has that layout.
+        /// </summary>
+        public static RawVolume ToRawVolume(this PixVolume volume, PhysicalMetadata? metadata = null) => volume switch
+        {
+            PixVolume<byte> v => Raw(v, metadata),
+            PixVolume<ushort> v => Raw(v, metadata),
+            PixVolume<uint> v => Raw(v, metadata),
+            PixVolume<ulong> v => Raw(v, metadata),
+            PixVolume<sbyte> v => Raw(v, metadata),
+            PixVolume<short> v => Raw(v, metadata),
+            PixVolume<int> v => Raw(v, metadata),
+            PixVolume<long> v => Raw(v, metadata),
+            PixVolume<float> v => Raw(v, metadata),
+            PixVolume<double> v => Raw(v, metadata),
+            _ => throw new NotSupportedException($"unsupported PixVolume type {volume.GetType()}"),
+        };
+
+        static RawVolume Raw<T>(PixVolume<T> v, PhysicalMetadata? m)
+        {
+            var t = v.Tensor4;
+            long w = t.Size.X, h = t.Size.Y, d = t.Size.Z, c = t.Size.W;
+            bool bgr = v.Format is Col.Format.BGR or Col.Format.BGRA && c >= 3;
+            var color = v.Format switch
+            {
+                Col.Format.Gray or Col.Format.BW or Col.Format.Alpha => ColorModel.Gray,
+                Col.Format.GrayAlpha => ColorModel.GrayAlpha,
+                Col.Format.RGB or Col.Format.BGR => ColorModel.Rgb,
+                Col.Format.RGBA or Col.Format.BGRA => ColorModel.Rgba,
+                _ => c <= 4 && c != 2 ? RawImage.DefaultColorModel((int)c) : ColorModel.Other,
+            };
+            if (color != ColorModel.Other && RawImage.ChannelCount(color) != c) color = ColorModel.Other;
+            var dl = t.Delta;
+            T[] data;
+            if (!bgr && t.FirstIndex == 0 && dl == new V4l(c, w * c, w * h * c, 1) && t.Data.LongLength == w * h * d * c) data = t.Data;
+            else
+            {
+                data = new T[w * h * d * c];
+                var src = t.Data;
+                long f0 = t.FirstIndex, o = 0;
+                for (long z = 0; z < d; z++)
+                    for (long y = 0; y < h; y++)
+                        for (long x = 0; x < w; x++)
+                            for (long k = 0; k < c; k++)
+                            {
+                                long sk = bgr && k < 3 ? 2 - k : k;
+                                data[o++] = src[f0 + x * dl.X + y * dl.Y + z * dl.Z + sk * dl.W];
+                            }
+            }
+            return new RawVolume(new[] { (int)w, (int)h, (int)d }, color, data, (int)c, m);
+        }
     }
 }
