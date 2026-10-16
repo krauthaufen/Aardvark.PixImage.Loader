@@ -11,6 +11,9 @@ namespace Aardvark.ImageCodecs.JpegXl
             public readonly List<(double X, double Y)> Points = new();
             public readonly float[][] Colour = { new float[32], new float[32], new float[32] };
             public readonly float[] Sigma = new float[32];
+            /// <summary>For the area estimate of 18181-1:2024 K.4.1: sums of the dequantized magnitudes (rounded up) per
+            /// channel, the sum of the squared sigma weights and the Manhattan distance of the control points so far.</summary>
+            public double ColourX, ColourY, ColourB, SigmaWeights, Manhattan;
         }
 
         readonly List<Spline> splines = new();
@@ -35,8 +38,11 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
             int qa = JxlBitReader.UnpackSigned(r.ReadUint(br, 0));
             float invQuant = qa >= 0 ? 1f / (1f + 0.125f * qa) : 1f - 0.125f * qa;
+            // |q| divided by the quantization factor (1 + qa / 8, or 1 / (1 - qa / 8)), exact where the result is an integer
+            double Dequant(int q) => qa >= 0 ? Math.Abs((double)q) / (1 + qa / 8.0) : Math.Abs((double)q) * (1 - qa / 8.0);
             var s = new JxlSplines();
             long totalPoints = 0;
+            double manhattan = 0;   // over all splines so far, as K.4.1 accumulates it
             for (int i = 0; i < num; i++)
             {
                 var sp = new Spline();
@@ -50,14 +56,30 @@ namespace Aardvark.ImageCodecs.JpegXl
                     dx += JxlBitReader.UnpackSigned(r.ReadUint(br, 4));
                     dy += JxlBitReader.UnpackSigned(r.ReadUint(br, 4));
                     cx += dx; cy += dy;
+                    manhattan += Math.Abs(dx) + Math.Abs(dy);
                     if (Math.Abs(cx) > 1L << 30 || Math.Abs(cy) > 1L << 30) throw new ImageFormatException("JPEG XL: spline out of range");
                     sp.Points.Add((cx, cy));
                 }
+                sp.Manhattan = manhattan;
+                Span<double> sums = stackalloc double[3];
                 for (int c = 0; c < 3; c++)
+                {
+                    sums[c] = 0;
                     for (int k = 0; k < 32; k++)
-                        sp.Colour[c][k] = JxlBitReader.UnpackSigned(r.ReadUint(br, 5)) * (k == 0 ? 1 / Sqrt2 : 1) * invQuant * ChannelWeight[c];
+                    {
+                        int q = JxlBitReader.UnpackSigned(r.ReadUint(br, 5));
+                        sums[c] += Math.Ceiling(Dequant(q));
+                        sp.Colour[c][k] = q * (k == 0 ? 1 / Sqrt2 : 1) * invQuant * ChannelWeight[c];
+                    }
+                }
+                (sp.ColourX, sp.ColourY, sp.ColourB) = (sums[0], sums[1], sums[2]);
                 for (int k = 0; k < 32; k++)
-                    sp.Sigma[k] = JxlBitReader.UnpackSigned(r.ReadUint(br, 5)) * (k == 0 ? 1 / Sqrt2 : 1) * invQuant * ChannelWeight[3];
+                {
+                    int q = JxlBitReader.UnpackSigned(r.ReadUint(br, 5));
+                    double weight = Math.Max(1, Math.Ceiling(Dequant(q)));
+                    sp.SigmaWeights += weight * weight;
+                    sp.Sigma[k] = q * (k == 0 ? 1 / Sqrt2 : 1) * invQuant * ChannelWeight[3];
+                }
                 s.splines.Add(sp);
                 if (br.Overrun) throw new ImageFormatException("JPEG XL: truncated splines");
             }
@@ -167,9 +189,28 @@ namespace Aardvark.ImageCodecs.JpegXl
             return x >= 0 ? y : -y;
         }
 
+        /// <summary>
+        /// The estimated area the splines reach (18181-1:2024 K.4.1), which level 10 limits to
+        /// min(1024 w h + 2^32, 2^42) (Table M.1); a frame beyond that is not conforming and is rejected before drawing.
+        /// </summary>
+        public double EstimatedArea(float ytox, float ytob)
+        {
+            double area = 0;
+            foreach (var sp in splines)
+            {
+                double cx = sp.ColourX + Math.Ceiling(Math.Abs(ytox)) * sp.ColourY;
+                double cb = sp.ColourB + Math.Ceiling(Math.Abs(ytob)) * sp.ColourY;
+                double logColour = Math.Max(1, Math.Ceiling(Math.Log2(1 + Math.Max(cx, Math.Max(sp.ColourY, cb)))));
+                area += sp.SigmaWeights * logColour * sp.Manhattan;
+            }
+            return area;
+        }
+
         /// <summary>Adds the splines to the three colour planes of the frame.</summary>
         public void Draw(float[][] planes, int w, int h, float ytox, float ytob)
         {
+            double maxArea = Math.Min(1024.0 * w * h + 4294967296.0, 4398046511104.0);
+            if (EstimatedArea(ytox, ytob) > maxArea) throw new ImageFormatException("JPEG XL: splines exceed the level 10 area limit");
             foreach (var sp in splines)
             {
                 // chroma from luma with the frame's base correlations
@@ -191,11 +232,14 @@ namespace Aardvark.ImageCodecs.JpegXl
                     float sigma = ContinuousIdct(sp.Sigma, t);
                     float intensity = (float)pts[i].M;
                     if (!(float.IsFinite(sigma) && sigma != 0 && float.IsFinite(1 / sigma))) continue;
-                    float maxColour = 0.01f;
-                    maxColour = Math.Max(maxColour, Math.Abs(c0 * intensity));
-                    maxColour = Math.Max(maxColour, Math.Abs(c1 * intensity));
-                    maxColour = Math.Max(maxColour, Math.Abs(c2 * intensity));
-                    double maxDist = Math.Sqrt(-2 * sigma * sigma * (Math.Log(0.1) * 3 - Math.Log(maxColour)));
+                    // K.4.2 sums over all pixels. The brush is a box of half width sqrt(1/2) blurred by sigma: at distance
+                    // 2 (sqrt(1/8) + z |sigma|) a sample gets less than amplitude * exp(-2 z^2) / 4, kept below 1e-7.
+                    // (A cut-off at a few sigma alone, as libjxl has, loses up to ~0.5 % of the brush, much more where
+                    // sigma is small.)
+                    float maxColour = Math.Max(Math.Abs(c0), Math.Max(Math.Abs(c1), Math.Abs(c2))) * intensity;
+                    double amplitude = maxColour * Math.Abs(sigma);
+                    if (!(amplitude > 4e-7)) continue;
+                    double maxDist = 2 * (0.353553391 + Math.Sqrt(Math.Log(amplitude / 4e-7) / 2) * Math.Abs(sigma));
                     if (!double.IsFinite(maxDist)) continue;
                     var (cx, cy) = pts[i].P;
                     float invSigma = 1 / sigma;
