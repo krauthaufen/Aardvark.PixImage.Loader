@@ -288,6 +288,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                     quantEnc[t] = JxlQuantEncoding.Read(br, t, (table, cols, rows) => ReadRawQuant(br, table, cols, rows));
             }
             numHistoSets = 1 + (int)br.ReadBits(JxlHybridUint.CeilLog2(dims.NumGroups));
+            if (JxlModularChannelDecoder.DebugLog) Console.Error.WriteLine($"HfGlobal histosets {numHistoSets} blockctx {numBlockCtx} lfthr [{string.Join(",", lfThr[0])}] [{string.Join(",", lfThr[1])}] [{string.Join(",", lfThr[2])}] qfthr [{string.Join(",", qfThr)}] map [{string.Join(",", blockCtxMap)}] quant modes [{string.Join(",", Array.ConvertAll(quantEnc, q => q.Mode))}] globalScale {globalScale} quantLf {quantLf}");
             int np = fh.NumPasses;
             orders = new int[]?[np * 13 * 3];
             hfCodes = new JxlEntropyCode[np];
@@ -359,6 +360,9 @@ namespace Aardvark.ImageCodecs.JpegXl
             206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206,
         };
 
+        /// <summary>The LF context nests the channels in the order X, B, Y (Y varies fastest).</summary>
+        static readonly int[] DcPerm = { 0, 2, 1 };
+
         int BlockContext(int c, int ord, int qf, int bx, int by)
         {
             int idx = (c < 2 ? c ^ 1 : 2) * 13 + ord;
@@ -368,8 +372,9 @@ namespace Aardvark.ImageCodecs.JpegXl
             if (lfThr[0].Length + lfThr[1].Length + lfThr[2].Length > 0)
             {
                 int d = 0;
-                for (int cc = 0; cc < 3; cc++)
+                for (int ii = 0; ii < 3; ii++)
                 {
+                    int cc = DcPerm[ii];
                     int v = quantDc![cc][(by >> vs[cc]) * dcw[cc] + (bx >> hs[cc])];
                     int k = 0;
                     foreach (int t in lfThr[cc]) if (v > t) k++;

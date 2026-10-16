@@ -129,7 +129,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                     Neighbours(d, w, x, y, out long W, out long N, out long NW, out long NE, out long NN, out long WW, out long NEE);
                     long wpPred = 0;
                     if (wp != null) wpPred = wp.Predict(x, y, N, W, NE, NW, NN);
-                    long prop9 = W + N - NW;
+                    long prop9 = (int)(W + N - NW);
                     int n = 0;
                     while (prop[n] >= 0)
                     {
@@ -143,7 +143,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                             case 5: pv = Math.Abs(W); break;
                             case 6: pv = N; break;
                             case 7: pv = W; break;
-                            case 8: pv = W - lastProp9; break;
+                            case 8: pv = (int)(W - lastProp9); break;
                             case 9: pv = prop9; break;
                             case 10: pv = W - NW; break;
                             case 11: pv = NW - N; break;
@@ -167,7 +167,8 @@ namespace Aardvark.ImageCodecs.JpegXl
                                     break;
                                 }
                         }
-                        n = pv > val[n] ? left[n] : right[n];
+                        // properties are 32 bit integers
+                        n = (int)pv > val[n] ? left[n] : right[n];
                     }
                     lastProp9 = prop9;
                     long r = JxlBitReader.UnpackSigned(reader.ReadUint(br, lctx[n])) * (long)lmul[n] + loff[n];

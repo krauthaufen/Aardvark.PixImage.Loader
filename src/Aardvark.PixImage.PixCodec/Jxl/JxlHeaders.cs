@@ -358,7 +358,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 b.AlphaChannel = (int)br.ReadU32(Val(0), Val(1), Val(2), BitsOffset(3, 3));
                 if (b.AlphaChannel >= numExtra) throw new ImageFormatException("JPEG XL: blend alpha channel out of range");
             }
-            if (numExtra > 0 && (b.Mode == JxlBlendMode.Blend || b.Mode == JxlBlendMode.AlphaWeightedAdd || b.Mode == JxlBlendMode.Mul))
+            if (numExtra > 0 && (b.Mode == JxlBlendMode.Blend || b.Mode == JxlBlendMode.AlphaWeightedAdd) || b.Mode == JxlBlendMode.Mul)
                 b.Clamp = br.ReadBool();
             if (b.Mode != JxlBlendMode.Replace || !fullFrame) b.Source = (int)br.ReadBits(2);
             return b;

@@ -187,7 +187,7 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         static uint ErrorWeight(uint x, uint maxWeight)
         {
-            int shift = FloorLog2(x + 1) - 5;
+            int shift = 63 - System.Numerics.BitOperations.LeadingZeroCount((ulong)x + 1) - 5;
             if (shift < 0) shift = 0;
             return 4 + ((maxWeight * DivLookup[x >> shift]) >> shift);
         }

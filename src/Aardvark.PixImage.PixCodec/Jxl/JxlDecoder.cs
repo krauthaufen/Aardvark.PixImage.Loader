@@ -10,6 +10,8 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// <summary>Whether the reference slot holds a frame saved before its colour transform.</summary>
         public readonly bool[] ReferencePreCt = new bool[4];
         public readonly JxlFrameImage?[] LfFrames = new JxlFrameImage?[4];
+        /// <summary>Displayed and other frames decoded so far (they seed the noise generator).</summary>
+        public int VisibleFrames, NonVisibleFrames;
     }
 
     /// <summary>A displayed frame: the composited canvas after a frame with a duration (or the last one).</summary>
@@ -112,6 +114,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             if (fh.Type == JxlFrameType.LfFrame)
             {
                 state.LfFrames[fh.LfLevel - 1] = frame;
+                state.NonVisibleFrames++;
                 return null;
             }
             bool canReference = !fh.IsLast && fh.Type != JxlFrameType.LfFrame;
@@ -129,7 +132,8 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
             bool displayed = (fh.Type == JxlFrameType.Regular || fh.Type == JxlFrameType.SkipProgressive)
                              && (fh.IsLast || Header.Animation != null && fh.Duration != 0);
-            if (!displayed) return null;
+            if (!displayed) { state.NonVisibleFrames++; return null; }
+            state.VisibleFrames++;
             return new JxlDisplayedFrame { Canvas = canvas, Duration = fh.Duration, Timecode = fh.Timecode, Name = fh.Name };
         }
 
