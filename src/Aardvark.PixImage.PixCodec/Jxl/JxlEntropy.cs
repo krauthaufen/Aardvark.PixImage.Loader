@@ -431,24 +431,9 @@ namespace Aardvark.ImageCodecs.JpegXl
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public uint ReadUint(int ctx)
         {
-            if ((uint)ctx >= (uint)MapLength) ThrowContext();
-            uint cl = Map[ctx];
-            uint st = State;
-            uint idx = st & (JxlAnsTable.TabSize - 1);
-            uint i = idx >> LogBucket;
-            uint pos = idx & ((1u << LogBucket) - 1);
-            ulong e = Tab[(cl << LogAlpha) + i];
-            bool hi = pos >= ((uint)e & 0xFFF);
-            uint sym = hi ? (uint)(e >> 12) & 0xFF : i;
-            uint off = hi ? ((uint)(e >> 20) & 0xFFF) + pos : pos;
-            uint freq = (uint)(e >> (hi ? 45 : 32)) & 0x1FFF;
-            st = freq * (st >> JxlAnsTable.LogTabSize) + off;
-            if (st < (1u << 16)) st = (st << 16) | Bits.ReadBits(16);
-            State = st;
-            JxlHybridUint* c = Cfg + cl;
-            if (sym < c->Split) return sym;
-            uint v = JxlHybridUint.DecodeLarge(*c, sym, Bits, out var after);
-            Bits = after;
+            uint st = State; ulong buf = Bits.Buf; int nbits = Bits.NBits; byte* p = Bits.P;
+            uint v = Read(ctx, ref st, ref buf, ref nbits, ref p);
+            State = st; Bits.Buf = buf; Bits.NBits = nbits; Bits.P = p;
             return v;
         }
 

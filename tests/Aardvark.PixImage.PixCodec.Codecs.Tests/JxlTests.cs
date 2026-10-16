@@ -137,6 +137,19 @@ public class JxlTests(ITestOutputHelper output)
         AssertEqual(mt, st);
     }
 
+    /// <summary>
+    /// Decode hands the restored tiles of a still XYB image straight to the output conversion; DecodeAnimation goes through
+    /// full frame planes. Both must give the same samples, integer and float.
+    /// </summary>
+    [Theory, MemberData(nameof(Fixtures))]
+    public void TiledOutputMatchesFramePlanes(string file)
+    {
+        var data = File.ReadAllBytes(Fixture(file));
+        if (Jxl.GetInfo(data).FrameCount != 1) return;
+        foreach (var opt in new[] { new JxlDecodeOptions(), new JxlDecodeOptions { ForceFloat = true }, new JxlDecodeOptions { Multithreaded = false } })
+            AssertEqual(Jxl.DecodeAnimation(data, opt).Frames[0].Image, Jxl.Decode(data, opt));
+    }
+
     [Theory, MemberData(nameof(Fixtures))]
     public void ImageCodecRoutesJxl(string file)
     {

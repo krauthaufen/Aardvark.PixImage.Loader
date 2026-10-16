@@ -33,8 +33,8 @@ namespace Aardvark.ImageCodecs.JpegXl
                 }
             }
             int[] passes = f.EpfIters switch { 0 => Array.Empty<int>(), 1 => new[] { 1 }, 2 => new[] { 1, 2 }, _ => new[] { 0, 1, 2 } };
-            var res = JxlFilters.Restore(colour, w, h, f, passes, inv, bx, parallel);
-            for (int c = 0; c < colour.Length; c++) colour[c] = res[c];
+            var res = JxlFilters.Restore(colour, w, h, f, passes, inv, bx, parallel, Sink);
+            for (int c = 0; c < colour.Length; c++) colour[c] = res?[c]!;
         }
 
         float[] Upsample(float[] src, int w, int h, int up, int ow, int oh)

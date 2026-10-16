@@ -36,6 +36,8 @@ namespace Aardvark.ImageCodecs.JpegXl
         int pos;          // byte offset of the next frame
         public bool Done { get; private set; }
         public int FramesDecoded;
+        /// <summary>Supplies a sink for the restored colour of the last frame when it is shown as it is (see CanFuse).</summary>
+        public Func<JxlTileSink?>? SinkFactory;
 
         public JxlDecoder(byte[] codestream, JxlDecodeOptions opt)
         {
@@ -105,6 +107,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 if (IsDisplayed(fh)) { state.VisibleFrames++; state.NonVisibleFrames = 0; }
                 else state.NonVisibleFrames++;
                 var dec = new JxlFrameDecoder(Header, fh, state, Data, sectionsStart, toc, opt.Multithreaded);
+                if (SinkFactory != null && CanFuse(fh)) dec.Sink = SinkFactory();
                 var frame = dec.Decode();
                 JxlProfile.Mark("finish frame");
                 pos = (int)next;
@@ -114,6 +117,16 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
             return null;
         }
+
+        /// <summary>
+        /// Whether the restoration filters of this frame can hand its colour straight to the output: the last, displayed XYB
+        /// frame covering the image, without extra channels, features, upsampling or blending.
+        /// </summary>
+        bool CanFuse(JxlFrameHeader fh)
+            => fh.IsLast && fh.Type == JxlFrameType.Regular && IsDisplayed(fh) && Header.XybEncoded && Header.ExtraChannels.Length == 0
+               && fh.Upsampling == 1 && !fh.Has(JxlFrameHeader.FlagNoise) && !fh.Has(JxlFrameHeader.FlagPatches) && !fh.Has(JxlFrameHeader.FlagSplines)
+               && fh.X0 == 0 && fh.Y0 == 0 && fh.Width == Header.Width && fh.Height == Header.Height && fh.Blending.Mode == JxlBlendMode.Replace
+               && (fh.Filter.Gab || fh.Filter.EpfIters > 0);
 
         bool IsDisplayed(JxlFrameHeader fh)
             => (fh.Type == JxlFrameType.Regular || fh.Type == JxlFrameType.SkipProgressive)

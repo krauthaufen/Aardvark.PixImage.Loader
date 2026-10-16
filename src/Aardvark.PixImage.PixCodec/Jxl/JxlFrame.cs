@@ -5,6 +5,16 @@ using System.Threading.Tasks;
 
 namespace Aardvark.ImageCodecs.JpegXl
 {
+    /// <summary>
+    /// Receives the restored colour of a frame tile by tile instead of full frame planes (the last frame of a still image,
+    /// converted straight to the output).
+    /// </summary>
+    internal abstract unsafe class JxlTileSink
+    {
+        /// <summary>Rows y0 .. y0 + h - 1, columns x0 .. x0 + w - 1 of the three colour planes, at p[c] + row * stride.</summary>
+        public abstract void WriteRows(int x0, int y0, int w, int h, float* p0, float* p1, float* p2, int stride);
+    }
+
     /// <summary>A decoded frame (or reference / LF frame): float planes of the colour and extra channels.</summary>
     internal sealed class JxlFrameImage
     {
@@ -17,6 +27,8 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// <summary>Set when the colour planes are still XYB: the conversion to linear RGB is left to the output stage.</summary>
         public JxlOpsinParams? PendingXyb;
         public float PendingIntensityTarget;
+        /// <summary>Set when the colour went to this sink: the colour planes are then absent.</summary>
+        public JxlTileSink? Sink;
 
         /// <summary>Converts pending XYB colour planes to linear RGB in place.</summary>
         public void EnsureLinear(bool parallel)
@@ -38,6 +50,8 @@ namespace Aardvark.ImageCodecs.JpegXl
         readonly int sectionsStart;
         readonly JxlToc toc;
         readonly bool parallel;
+        /// <summary>Where the restored colour goes instead of planes (only set when the restoration filters run).</summary>
+        public JxlTileSink? Sink;
 
         // modular
         JxlModularGlobal modularGlobal = new();
@@ -88,11 +102,15 @@ namespace Aardvark.ImageCodecs.JpegXl
             DecodeLfGlobal(lfGlobal, maxTree);
             JxlProfile.Mark("LfGlobal");
 
-            // LF groups
-            ForEach(dims.NumLfGroups, toc.Single, i => DecodeLfGroup(SectionReader(toc.LfGroupIndex(i)), i, maxTree));
+            // LF groups; the HF global section (it does not depend on them) alongside
+            var hfGlobal = !fh.Modular && parallel && !toc.Single
+                ? System.Threading.Tasks.Task.Run(() => DecodeHfGlobal(SectionReader(toc.HfGlobalIndex(dims)))) : null;
+            try { ForEach(dims.NumLfGroups, toc.Single, i => DecodeLfGroup(SectionReader(toc.LfGroupIndex(i)), i, maxTree)); }
+            finally { try { hfGlobal?.Wait(); } catch (AggregateException) when (hfGlobal!.IsFaulted) { } }
+            if (hfGlobal != null && hfGlobal.IsFaulted) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(hfGlobal.Exception!.InnerException!).Throw();
             if (!fh.Modular) AfterLfGroups();
             JxlProfile.Mark("LF groups");
-            if (!fh.Modular) DecodeHfGlobal(SectionReader(toc.HfGlobalIndex(dims)));
+            if (!fh.Modular && hfGlobal == null) DecodeHfGlobal(SectionReader(toc.HfGlobalIndex(dims)));
             JxlProfile.Mark("HfGlobal");
             ForEach(dims.NumGroups, toc.Single, g =>
             {
@@ -299,6 +317,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             float[][] colour = fh.Modular ? ModularColourToFloat(chans) : VarDctColour();
             JxlProfile.Mark("to float");
             ApplyRestorationFilters(colour);
+            if (Sink != null) result.Sink = Sink;
             JxlProfile.Mark($"filters gab {fh.Filter.Gab} epf {fh.Filter.EpfIters}");
             if (fh.Upsampling > 1)
                 for (int c = 0; c < colour.Length; c++) colour[c] = Upsample(colour[c], dims.XSize, dims.YSize, fh.Upsampling, dims.Width, dims.Height);
