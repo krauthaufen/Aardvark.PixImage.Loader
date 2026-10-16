@@ -45,7 +45,6 @@ namespace Aardvark.ImageCodecs.JpegXl
                 4 => img.Up4Weights ?? JxlUpsampling.Default4,
                 _ => img.Up8Weights ?? JxlUpsampling.Default8,
             };
-            if (weights.Length == 0) throw new ImageNotSupportedException("JPEG XL: 8x upsampling");
             return JxlUpsampling.Upsample(src, w, h, up, JxlUpsampling.Kernel(up, weights), ow, oh, parallel);
         }
     }

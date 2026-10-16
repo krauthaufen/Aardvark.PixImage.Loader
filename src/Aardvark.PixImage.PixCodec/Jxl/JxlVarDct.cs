@@ -34,6 +34,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         bool[]? firstBlock;
         int[]? qfField;
         byte[]? sharpness;
+        int[]? blockOrigin;       // first block of the varblock covering each block
         int[]? cflX, cflB;        // per 64x64 tile
         int tilesX;
 
@@ -97,6 +98,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             firstBlock = new bool[nb];
             qfField = new int[nb];
             sharpness = new byte[nb];
+            blockOrigin = new int[nb];
             tilesX = (dims.XBlocks + 7) / 8;
             int tilesY = (dims.YBlocks + 7) / 8;
             cflX = new int[tilesX * tilesY];
@@ -191,6 +193,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                             if (strategy[bb] != 255) throw new ImageFormatException("JPEG XL: overlapping varblocks");
                             strategy[bb] = (byte)st;
                             qfField![bb] = qf;
+                            blockOrigin![bb] = b;
                         }
                     firstBlock![b] = true;
                 }
@@ -518,10 +521,12 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         /// <summary>Test hook: receives the transform type of every block (XBlocks x YBlocks).</summary>
         internal static Action<byte[], int, int>? DebugStrategies;
+        internal static Action<byte[], int[], int, int>? DebugBlocks;
 
         float[][] VarDctColour()
         {
             DebugStrategies?.Invoke(strategy!, dims.XBlocks, dims.YBlocks);
+            DebugBlocks?.Invoke(sharpness!, qfField!, dims.XBlocks, dims.YBlocks);
             var r = new float[3][];
             for (int c = 0; c < 3; c++)
             {

@@ -370,7 +370,7 @@ namespace Aardvark.ImageCodecs.JpegXl
     {
         public bool Gab = true;
         public float[] GabWeights = { 0.115169525f, 0.061248592f, 0.115169525f, 0.061248592f, 0.115169525f, 0.061248592f };
-        public int EpfIters = 1;
+        public int EpfIters = 2;
         public float[] EpfSharpLut = { 0, 1 / 7f, 2 / 7f, 3 / 7f, 4 / 7f, 5 / 7f, 6 / 7f, 1 };
         public float[] EpfChannelScale = { 40.0f, 5.0f, 3.5f };
         public float EpfPass1ZeroFlush = 0.45f, EpfPass2ZeroFlush = 0.6f;
