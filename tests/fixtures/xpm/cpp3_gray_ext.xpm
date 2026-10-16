@@ -1,0 +1,19 @@
+/* XPM */
+static char *c[] = {
+/* values */
+"13 6 6 3 2 3 XPMEXT",
+"aaa c gray0",
+"aab c gray13",
+"xyz c gray50",
+"    c gray87",
+".,; c gray100",
+"q-q c #777",
+"xyz   q-q.,;   aaaaaa      xyz   xyzq-q",
+"xyz      .,;         aaaaaaaabaabq-qaaa",
+"   xyzq-qxyzaaaaaa.,;.,;.,;xyz         ",
+"   aaaq-q      .,;aaa   aaa   .,;aabaab",
+"   .,;aaa      xyzaaa.,;.,;aabq-qaabxyz",
+"aabaabxyz   q-qxyz.,;xyz.,;.,;   .,;aaa",
+"XPMEXT ext1 data",
+"XPMENDEXT"
+};

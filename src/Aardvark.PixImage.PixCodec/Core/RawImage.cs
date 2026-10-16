@@ -50,6 +50,20 @@ namespace Aardvark.ImageCodecs
         Qoi,
         Ico,
         Ktx,
+        /// <summary>ZSoft PCX.</summary>
+        Pcx,
+        /// <summary>DCX: multi-page PCX.</summary>
+        Dcx,
+        /// <summary>SGI image (.sgi, .rgb, .rgba, .bw, .int, .inta).</summary>
+        Sgi,
+        /// <summary>Sun Raster (.ras, .sun).</summary>
+        SunRaster,
+        /// <summary>X BitMap (C source).</summary>
+        Xbm,
+        /// <summary>X PixMap (C source).</summary>
+        Xpm,
+        /// <summary>Wireless Bitmap (type 0).</summary>
+        Wbmp,
     }
 
     /// <summary>
@@ -138,7 +152,8 @@ namespace Aardvark.ImageCodecs
         /// <summary>
         /// The transfer function ("gamma") of the decoded colour values: what the file declares (PNG sRGB / gAMA / cICP, JPEG 2000
         /// colour space, _SRGB texture formats, KTX data format descriptor, QOI header), else what the format implies (Linear for
-        /// OpenEXR, Radiance HDR, PFM and float samples; Srgb for JPEG, WebP, GIF, BMP, TGA, PNM, ICO and integer TIFF / PNG
+        /// OpenEXR, Radiance HDR, PFM and float samples; Srgb for JPEG, WebP, GIF, BMP, TGA, PNM, ICO, PCX, SGI, Sun Raster, XBM,
+        /// XPM, WBMP and integer TIFF / PNG
         /// without colour chunks). Unknown when neither says. An ICC profile (<see cref="HasIccProfile"/>) overrides it.
         /// Decoders never convert: use <see cref="ImageOps.SrgbToLinear"/> / <see cref="ImageOps.LinearToSrgb"/>.
         /// </summary>

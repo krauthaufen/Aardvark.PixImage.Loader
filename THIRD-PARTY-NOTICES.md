@@ -83,3 +83,26 @@ Copyright © 2014-2019 The Khronos Group Inc., licensed under the Creative Commo
 ".basis File Format and ETC1S Texture Video Specification" and "UASTC LDR 4x4 Texture Specification"
 (https://github.com/BinomialLLC/basis_universal/wiki) and in Appendix C / D of the KTX 2.0 specification. Only the table
 values were taken; no code of basis_universal was used.
+
+## X.Org rgb.txt - X11 colour names
+
+`src/Aardvark.PixImage.PixCodec/Xpm/X11Colors.cs` contains the colour names and values of X.Org's `rgb.txt`
+(https://gitlab.freedesktop.org/xorg/app/rgb, the table XPM files refer to), converted by `tests/oracle/gen_x11_colors.py`
+(names in lower case without spaces). Only the table was taken.
+
+Copyright 1985, 1989, 1998 The Open Group
+
+Permission to use, copy, modify, distribute, and sell this software and its documentation for any purpose is hereby
+granted without fee, provided that the above copyright notice appear in all copies and that both that copyright
+notice and this permission notice appear in supporting documentation.
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
+Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE OPEN GROUP
+BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Except as contained in this notice, the name of The Open Group shall not be used in advertising or otherwise to
+promote the sale, use or other dealings in this Software without prior written authorization from The Open Group.

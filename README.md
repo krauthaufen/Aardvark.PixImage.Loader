@@ -41,6 +41,12 @@ code living in any `Aardvark.*` namespace.
 | PNM / PAM / PFM | P1..P7, any maxval up to 65535 (scaled to the full range), PAM tuple types, PFM gray / RGB in both byte orders | P1..P7 (plain or binary, bilevel), PFM |
 | QOI | everything (sRGB / linear header) | RGB, RGBA |
 | ICO / CUR | PNG and DIB entries of every bit depth with AND mask or alpha, cursor hotspots | PNG or 32 bit DIB entries, icons and cursors |
+| PCX / DCX | versions 0..5, RLE and uncompressed, 1/2/4/8 bit in 1..4 planes (mono, CGA, EGA, 16 colour, VGA palette), 24 bit (3 planes), 32 bit (4 planes), DCX pages | 1 bit, 8 bit palette (exact or quantized), 24 bit, 32 bit, DCX |
+| SGI | 1..n channels, 8 and 16 bit, verbatim and RLE, 1/2/3 dimensional, DITHERED colour map | 8 and 16 bit, any channel count, RLE or verbatim |
+| Sun Raster | 1/8/24/32 bit, RT_OLD, RT_STANDARD, RT_BYTE_ENCODED, RT_FORMAT_RGB, RGB and raw colour maps | 1 bit, 8 bit gray or colour mapped, 24 bit, 32 bit with alpha, optional RLE |
+| XBM | X10 and X11 C source, hotspot | X10 or X11, hotspot |
+| XPM | XPM 3 and XPM 2, any characters per pixel, #hex and X11 colour names, None, c / g / g4 / m visuals | XPM 3, None for transparent |
+| WBMP | type 0 | type 0 |
 
 Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions.
 LERC encoding is not offered because Esri holds patents on LERC compression.
@@ -79,7 +85,7 @@ in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF or
 is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
 turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the
 stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`,
-`Dds`, `Ktx`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Lerc`, `Jbig`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
+`Dds`, `Ktx`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Lerc`, `Jbig`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data.
 
 Malformed files throw `ImageFormatException`, valid files using an unimplemented feature throw `ImageNotSupportedException`.
@@ -135,7 +141,8 @@ computed in linear light, as is `ResizeOptions.LinearLight` resizing.
 
 `GetInfo` never reads pixel data: files are memory mapped (only the pages holding headers and metadata are read),
 streams are walked by seeking past image chunks (PNG, WebP, JPEG 2000) or by reading just the TIFF directories. GIF
-frame counting and run length coded TGA / BMP walk all data. Metadata comes from EXIF, XMP (also JPEG extended XMP),
+frame counting, run length coded TGA / BMP and PCX (its palette is at the end) walk all data; WBMP, which has no
+signature, is only recognized from the whole file. Metadata comes from EXIF, XMP (also JPEG extended XMP),
 IPTC (JPEG APP13, TIFF), ICC descriptions, JPEG / GIF / JPEG 2000 comments, PNG text chunks (incl. ImageMagick raw
 profiles) and OpenEXR attributes; where several hold a value, EXIF wins over XMP over IPTC. XMP is kept when decoding
 and written back by the JPEG, PNG, TIFF, WebP and JPEG 2000 encoders (its tiff:Orientation follows the applied
@@ -177,7 +184,7 @@ keep their layout: everything stays at its offset, the directories are written i
 otherwise after the block. Others are laid out anew. Limits: TIFF edits concern the first page (IFD0 and its EXIF / GPS
 directories); EXIF in JPEG must fit into one 64 KB segment (drop the thumbnail otherwise); multi-picture (MPF) offsets
 are corrected, AFCP trailers are not; JPEG 2000 codestream comments and raw codestreams (.j2k) are not touched, JPX
-files with fragment tables are refused; BMP and TGA have no standard place for EXIF / XMP, GIF, OpenEXR and DDS are not
+files with fragment tables are refused; BMP, TGA, PCX, SGI, Sun Raster, XBM, XPM and WBMP have no standard place for EXIF / XMP, GIF, OpenEXR and DDS are not
 supported (`ImageNotSupportedException`). `RemoveAll` keeps the ICC profile, resolution and orientation and, in TIFF,
 every structural and GeoTIFF tag.
 

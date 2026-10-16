@@ -10,7 +10,7 @@ repositoryUrl https://github.com/krauthaufen/Aardvark.PixImage.PixCodec
 tags aardvark piximage image codec png jpeg tiff gif exr webp jpeg2000 dds ktx hdr
 readme README.md
 description
-    Pure managed image loading and saving for Aardvark PixImages and plain images: PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA, DDS, KTX, Radiance HDR, PNM, QOI, ICO, with metadata, ICC colour management and image operations. No native code.
+    Pure managed image loading and saving for Aardvark PixImages and plain images: PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA, DDS, KTX, Radiance HDR, PNM, QOI, ICO, PCX, SGI, Sun Raster, XBM, XPM, WBMP, with metadata, ICC colour management and image operations. No native code.
 files
     ../../README.md ==> .
     ../../LICENSE ==> .

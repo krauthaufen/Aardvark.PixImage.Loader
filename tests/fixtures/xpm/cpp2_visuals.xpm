@@ -1,0 +1,16 @@
+/* XPM */
+static char *b[] = {
+/* values */
+"13 6 5 2",
+"ab m white s bg c #102030", /* c */
+"a  s fg g #808080 m black", /* c */
+" a g4 #ffffff m black", /* c */
+".. m red", /* c */
+"#! c navy blue m black g gray50", /* c */
+"a a #!..ab.. aab.. a aa #!",
+"ab#!a #!#!ab#!aba  a..abab",
+"a #!a  aab#!#!a #!a a a ab",
+"#!ab a.. aab#!#!#!aba  aa ",
+"ab#!..ababa #!#!ab#!a a #!",
+"abab..a ..a a  a aabab#!.."
+};

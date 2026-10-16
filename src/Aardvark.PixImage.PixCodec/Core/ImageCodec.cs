@@ -20,10 +20,18 @@ namespace Aardvark.ImageCodecs
             if (Dds.IsMatch(header)) return ImageFormat.Dds;
             if (Ktx.IsMatch(header)) return ImageFormat.Ktx;
             if (Qoi.IsMatch(header)) return ImageFormat.Qoi;
+            if (Sgi.IsMatch(header)) return ImageFormat.Sgi;
+            if (SunRaster.IsMatch(header)) return ImageFormat.SunRaster;
+            if (Pcx.IsDcx(header)) return ImageFormat.Dcx;
             if (Hdr.IsMatch(header)) return ImageFormat.Hdr;
             if (Pfm.IsMatch(header)) return ImageFormat.Pfm;
             if (Pnm.IsMatch(header)) return ImageFormat.Pnm;
             if (Ico.IsMatch(header)) return ImageFormat.Ico;
+            // no signatures, strict plausibility checks
+            if (Pcx.IsMatch(header)) return ImageFormat.Pcx;
+            if (Xbm.IsMatch(header)) return ImageFormat.Xbm;
+            if (Xpm.IsMatch(header)) return ImageFormat.Xpm;
+            if (Wbmp.IsMatch(header)) return ImageFormat.Wbmp;   // only complete files: their length must fit the header
             if (Tga.IsMatch(header)) return ImageFormat.Tga;   // no signature: last
             return ImageFormat.Unknown;
         }
@@ -47,6 +55,13 @@ namespace Aardvark.ImageCodecs
                 ".qoi" => ImageFormat.Qoi,
                 ".ico" or ".cur" => ImageFormat.Ico,
                 ".ktx" or ".ktx2" => ImageFormat.Ktx,
+                ".pcx" or ".pcc" => ImageFormat.Pcx,
+                ".dcx" => ImageFormat.Dcx,
+                ".sgi" or ".rgb" or ".rgba" or ".bw" or ".int" or ".inta" => ImageFormat.Sgi,
+                ".ras" or ".sun" or ".rs" or ".im1" or ".im8" or ".im24" or ".im32" => ImageFormat.SunRaster,
+                ".xbm" or ".bm" => ImageFormat.Xbm,
+                ".xpm" or ".pm" => ImageFormat.Xpm,
+                ".wbmp" or ".wbm" => ImageFormat.Wbmp,
                 _ => ImageFormat.Unknown,
             };
 
@@ -74,6 +89,12 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Qoi => Qoi.GetInfo(data),
             ImageFormat.Ico => Ico.GetInfo(data),
             ImageFormat.Ktx => Ktx.GetInfo(data),
+            ImageFormat.Pcx or ImageFormat.Dcx => Pcx.GetInfo(data),
+            ImageFormat.Sgi => Sgi.GetInfo(data),
+            ImageFormat.SunRaster => SunRaster.GetInfo(data),
+            ImageFormat.Xbm => Xbm.GetInfo(data),
+            ImageFormat.Xpm => Xpm.GetInfo(data),
+            ImageFormat.Wbmp => Wbmp.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -195,6 +216,16 @@ namespace Aardvark.ImageCodecs
             int n = Fill(stream, buf, 0);
             bool eof = n < buf.Length;
             var format = DetectFormat(buf.AsSpan(0, n));
+            if (format == ImageFormat.Unknown && !eof)
+            {
+                // WBMP is only recognized from the complete file
+                var rest = ReadAll(stream);
+                var all = new byte[n + rest.Length];
+                buf.AsSpan(0, n).CopyTo(all);
+                rest.CopyTo(all, n);
+                buf = all; n = all.Length; eof = true;
+                format = DetectFormat(buf);
+            }
             if (format == ImageFormat.Unknown) throw new ImageFormatException("unknown image format");
             if (format == ImageFormat.Tiff && stream.CanSeek)
             {
@@ -202,11 +233,11 @@ namespace Aardvark.ImageCodecs
                 stream.Seek(-n, SeekOrigin.Current);
                 return Tiff.GetInfo(stream);
             }
-            // TIFF directories can be anywhere, GIF frames have to be counted, the TGA footer is at the end and BMP run
-            // codes have to be walked: these need all the data. The others are parsed from a growing prefix; their
+            // TIFF directories can be anywhere, GIF frames have to be counted, the TGA footer and the PCX palette are at the
+            // end and BMP run codes have to be walked: these need all the data. The others are parsed from a growing prefix; their
             // header parsers throw ImageFormatException when the prefix ends inside the headers, which is the signal
             // to read more.
-            bool needAll = format is ImageFormat.Tiff or ImageFormat.Gif or ImageFormat.Tga or ImageFormat.Ico
+            bool needAll = format is ImageFormat.Tiff or ImageFormat.Gif or ImageFormat.Tga or ImageFormat.Ico or ImageFormat.Pcx or ImageFormat.Dcx
                 || format == ImageFormat.Bmp && Bmp.InfoNeedsAllData(buf.AsSpan(0, n));
             while (true)
             {
@@ -274,6 +305,12 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Qoi => Qoi.Decode(data),
             ImageFormat.Ico => Ico.Decode(data),
             ImageFormat.Ktx => Ktx.Decode(data),
+            ImageFormat.Pcx or ImageFormat.Dcx => Pcx.Decode(data),
+            ImageFormat.Sgi => Sgi.Decode(data),
+            ImageFormat.SunRaster => SunRaster.Decode(data),
+            ImageFormat.Xbm => Xbm.Decode(data),
+            ImageFormat.Xpm => Xpm.Decode(data),
+            ImageFormat.Wbmp => Wbmp.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -281,7 +318,7 @@ namespace Aardvark.ImageCodecs
         public static RawImage Decode(string path) => Decode(File.ReadAllBytes(path));
 
         /// <summary>
-        /// Decodes every image in the file: the pages of a TIFF, the frames of an animated GIF, PNG or WebP (each the whole canvas
+        /// Decodes every image in the file: the pages of a TIFF or DCX, the frames of an animated GIF, PNG or WebP (each the whole canvas
         /// as a viewer shows it), the array elements / cube faces of a DDS texture (top mip level), or else the single image.
         /// </summary>
         public static RawImage[] DecodeAll(ReadOnlySpan<byte> data) => ColorTags.Tag(DecodeAllCore(data), data, DetectFormat(data));
@@ -315,6 +352,8 @@ namespace Aardvark.ImageCodecs
                     return Ico.DecodeAll(data);
                 case ImageFormat.Ktx:
                     return Ktx.DecodeAll(data);
+                case ImageFormat.Dcx:
+                    return Pcx.DecodeAll(data);
                 default:
                     return new[] { Decode(data) };
             }
@@ -369,6 +408,13 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Qoi: Qoi.Encode(image, output); break;
                 case ImageFormat.Ico: Ico.Encode(new[] { image }, output); break;
                 case ImageFormat.Ktx: Ktx.Encode(image, output); break;
+                case ImageFormat.Pcx: Pcx.Encode(image, output); break;
+                case ImageFormat.Dcx: Pcx.EncodeDcx(new[] { image }, output); break;
+                case ImageFormat.Sgi: Sgi.Encode(image, output); break;
+                case ImageFormat.SunRaster: SunRaster.Encode(image, output); break;
+                case ImageFormat.Xbm: Xbm.Encode(image, output); break;
+                case ImageFormat.Xpm: Xpm.Encode(image, output); break;
+                case ImageFormat.Wbmp: Wbmp.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }

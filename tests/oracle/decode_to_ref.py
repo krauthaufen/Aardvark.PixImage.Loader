@@ -31,6 +31,8 @@ def decode(path):
         return decode_lerc(path)
     if ext == '.dds' and dds_block_compressed(path):
         return decode_dds(path)
+    if ext in ('.pcx', '.dcx', '.sgi', '.rgb', '.rgba', '.bw', '.ras', '.xbm', '.xpm', '.wbmp'):
+        return decode_legacy(path, ext)
     from PIL import Image
     im = Image.open(path)
     if ext == '.png':
@@ -358,6 +360,47 @@ def decode_dds(path):
     shape = (bh * 4, bw * 4) if ch == 1 else (bh * 4, bw * 4, ch)
     a = imagecodecs.bcn_decode(d[off:off + bw * bh * bb], fmt, shape=shape)
     return a[:h, :w]
+
+
+def decode_legacy(path, ext):
+    """PCX / DCX (first page), SGI, Sun Raster, XBM, XPM, WBMP as RGBA (uint16 for 16 bit SGI), by ImageMagick, except
+    where it disagrees with the format description (see gen_pcx.py, gen_sun.py): 1 bit PCX through Pillow, RLE coded
+    Sun Raster through Pillow when its rows need no padding. Exits with status 77 when no tool here reads the file
+    right: 2 channel SGI (ImageMagick drops the alpha), RLE coded 32 bit Sun Raster or with padded rows, or when
+    ImageMagick is missing."""
+    import shutil
+    import struct
+    from legacy_common import magick, pillow
+    with open(path, 'rb') as f:
+        d = f.read(1024)
+    depth = 8
+    use_pillow = False
+    if ext in ('.pcx', '.dcx'):
+        h = d if ext == '.pcx' else None
+        if h is None:
+            with open(path, 'rb') as f:
+                full = f.read()
+            h = full[struct.unpack_from('<I', full, 4)[0]:]
+        use_pillow = h[3] == 1 and h[65] == 1
+    elif ext in ('.sgi', '.rgb', '.rgba', '.bw'):
+        dim, zs = struct.unpack_from('>H', d, 4)[0], struct.unpack_from('>H', d, 10)[0]
+        if dim == 3 and zs == 2:
+            sys.exit(77)
+        depth = 16 if d[3] == 2 else 8
+    elif ext == '.ras':
+        w, _, bits, _, typ = struct.unpack_from('>5I', d, 4)
+        if typ == 2 and (bits == 32 or (w * bits + 15) // 16 * 16 != w * bits):
+            sys.exit(77)
+        use_pillow = typ == 2
+    if use_pillow:
+        a = pillow(path)
+    else:
+        if shutil.which('magick') is None:
+            sys.exit(77)
+        a = magick(path, 0, depth)
+    if a is None:
+        raise ValueError('the reference tool cannot read the file')
+    return a
 
 
 def decode_lerc(path):
