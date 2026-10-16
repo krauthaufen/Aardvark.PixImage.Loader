@@ -30,6 +30,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// <summary>
         /// In place unscaled IDCT of n vectors (data[k] = coefficient k of every lane). scratch: n vectors.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void Idct(Vector<float>* data, int n, Vector<float>* scratch)
         {
             if (n == 8) { Idct8(data); return; }
@@ -113,6 +114,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         /// <summary><see cref="Idct2D"/> with 8 lane vectors: transposes in 8 x 8 tiles, no row major intermediate.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void Idct2DAvx(float* coef, int rows, int cols, float* outp, int stride, float* tmp, bool transposeOut)
         {
             const float Sqrt2 = 1.41421356237309505f;
@@ -150,6 +152,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// The scaled 2D IDCT (coefficient 0 = mean) of a rows x cols block when both dimensions are multiples of the
         /// vector width; returns false otherwise. tmp: 4 * rows * cols floats.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static bool Idct2D(float* coef, int rows, int cols, float* outp, int stride, float* tmp, bool transposeOut = false)
         {
             int vc = Vector<float>.Count;

@@ -70,6 +70,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             DecodeGeneral(ref reader, tree, wpHeader, channels, index);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void DecodeSingleLeaf<TSym>(ref TSym reader, JxlMaTree tree, JxlChannel ch) where TSym : struct, IJxlSymbols
         {
             int w = ch.W, h = ch.H;
@@ -148,6 +149,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         /// <summary>Weighted predictor trees that split on its maximum error only (lossless effort 3 and many DC images).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void DecodeWpIntervals<TSym>(ref TSym readerRef, JxlMaTree tree, JxlWeightedPredictor wp, int[] d, int w, int h,
             int[] bounds, int[] leaves) where TSym : struct, IJxlSymbols
         {
@@ -185,6 +187,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             readerRef = reader;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void DecodeGeneral<TSym>(ref TSym reader, JxlMaTree tree, JxlWpHeader wpHeader, List<JxlChannel> channels, int index) where TSym : struct, IJxlSymbols
         {
             var ch = channels[index];
@@ -273,6 +276,7 @@ namespace Aardvark.ImageCodecs.JpegXl
 
     internal static class JxlModularTransforms
     {
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void InverseRct(List<JxlChannel> channels, int begin, int rctType)
         {
             int perm = rctType / 7, type = rctType % 7;
@@ -343,6 +347,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             return r;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void InversePalette(JxlChannel pal, JxlChannel idx, JxlChannel[] outs, int nbColours, int nbDeltas, int dPred, int bitDepth, JxlWpHeader wpHeader)
         {
             int w = idx.W, h = idx.H, n = outs.Length;
@@ -417,6 +422,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             return diff;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static JxlChannel UnsqueezeH(JxlChannel avg, JxlChannel res)
         {
             int w = avg.W + res.W, h = avg.H;
@@ -442,6 +448,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             return o;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static JxlChannel UnsqueezeV(JxlChannel avg, JxlChannel res)
         {
             int w = avg.W, h = avg.H + res.H;

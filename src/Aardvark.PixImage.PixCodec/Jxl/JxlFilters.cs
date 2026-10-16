@@ -101,6 +101,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             public float[]? InvSigma;
             public float[] Gab = null!;
 
+            [MethodImpl(MethodImplOptions.AggressiveOptimization)]
             public void RunTile(Region outR, float[] work, int bufPlane)
             {
                 int n = Radius.Length;
@@ -136,6 +137,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
 
             /// <summary>The input planes over a region, mirrored outside the frame (grey input fills all three planes).</summary>
+            [MethodImpl(MethodImplOptions.AggressiveOptimization)]
             void LoadInput(Region r, float* buf, int bufPlane)
             {
                 int ax = Math.Max(r.X0, 0), bx = Math.Min(r.X0 + r.W, W);
@@ -156,6 +158,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
 
             /// <summary>Fills the part of a stage output region outside the frame by mirroring the computed part.</summary>
+            [MethodImpl(MethodImplOptions.AggressiveOptimization)]
             void MirrorFill(Region r, float* buf, int bufPlane)
             {
                 int ax = Math.Max(r.X0, 0), bx = Math.Min(r.X0 + r.W, W);
@@ -179,6 +182,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 }
             }
 
+            [MethodImpl(MethodImplOptions.AggressiveOptimization)]
             void GabStage(Region ri, float* src, Region ro, float* dst, int bufPlane)
             {
                 int ax = Math.Max(ro.X0, 0), bx = Math.Min(ro.X0 + ro.W, W);
@@ -220,6 +224,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             /// from difference images D_o(q) = sum_c scale_c |P_c(q) - P_c(q + o)|, one per distinct offset o, computed once
             /// per tile: neighbour +o reads D_o around the pixel p, neighbour -o reads it around p - o.
             /// </summary>
+            [MethodImpl(MethodImplOptions.AggressiveOptimization)]
             void EpfStage(int pass, Region ri, float* src, Region ro, float* dst, int bufPlane, float* rw)
             {
                 int ax = Math.Max(ro.X0, 0), bx = Math.Min(ro.X0 + ro.W, W);
@@ -271,18 +276,25 @@ namespace Aardvark.ImageCodecs.JpegXl
                     dnext += dw * (qy1 - qy0);
                 }
 
+                fixed (float* pis = invSigma)
                 for (int y = ay; y < by; y++)
                 {
                     bool any = false;
                     bool yBorder = (y & 7) == 0 || (y & 7) == 7;
-                    int brow = (y >> 3) * BlocksX;
-                    for (int i = 0; i < w; i++)
+                    float* brow = pis + (y >> 3) * BlocksX;
+                    // per 8x8 block: the scaled inverse sigma, times the border multiplier on the block's edge columns
+                    for (int bxk = ax >> 3, bxe = (bx - 1) >> 3; bxk <= bxe; bxk++)
                     {
-                        int x = ax + i;
-                        float v = invSigma[brow + (x >> 3)];
-                        if (v < MinSigma) { pinv[i] = -1e30f; continue; }
+                        float v = brow[bxk];
+                        int x0 = Math.Max(bxk << 3, ax), x1 = Math.Min((bxk << 3) + 8, bx);
+                        if (v < MinSigma)
+                        {
+                            for (int x = x0; x < x1; x++) pinv[x - ax] = -1e30f;
+                            continue;
+                        }
                         any = true;
-                        pinv[i] = v * sigmaScale * (yBorder || (x & 7) == 0 || (x & 7) == 7 ? border : 1);
+                        float vi = v * sigmaScale * (yBorder ? border : 1), ve = v * sigmaScale * border;
+                        for (int x = x0; x < x1; x++) pinv[x - ax] = (x & 7) == 0 || (x & 7) == 7 ? ve : vi;
                     }
                     // rows of the three source planes at y, indexed from x = ax
                     float* pa = src + (y - ri.Y0) * pw - ri.X0 + ax, pb = pa + bufPlane, pc = pb + bufPlane;
@@ -294,7 +306,10 @@ namespace Aardvark.ImageCodecs.JpegXl
                         Buffer.MemoryCopy(pc, oc, w * 4L, w * 4L);
                         continue;
                     }
-                    for (int x = 0; x < w; x++) { pwsum[x] = 1; pacc0[x] = pa[x]; pacc1[x] = pb[x]; pacc2[x] = pc[x]; }
+                    new Span<float>(pwsum, w).Fill(1);
+                    Buffer.MemoryCopy(pa, pacc0, w * 4L, w * 4L);
+                    Buffer.MemoryCopy(pb, pacc1, w * 4L, w * 4L);
+                    Buffer.MemoryCopy(pc, pacc2, w * 4L, w * 4L);
                     foreach (var (dx, dy) in nb)
                     {
                         int k = 0;
@@ -318,7 +333,8 @@ namespace Aardvark.ImageCodecs.JpegXl
                             if (patch)
                                 sad += Unsafe.ReadUnaligned<Vector<float>>(dm + xx) + Unsafe.ReadUnaligned<Vector<float>>(dm + xx + 2)
                                      + Unsafe.ReadUnaligned<Vector<float>>(du + xx + 1) + Unsafe.ReadUnaligned<Vector<float>>(dd + xx + 1);
-                            var wt = Vector.Max(Vector<float>.Zero, one + sad * Unsafe.ReadUnaligned<Vector<float>>(pinv + xx));
+                            var wt = one + sad * Unsafe.ReadUnaligned<Vector<float>>(pinv + xx);
+                            wt = Vector.ConditionalSelect(Vector.GreaterThan(wt, Vector<float>.Zero), wt, Vector<float>.Zero);   // max(0, wt): never NaN
                             int q = xx + off;
                             Unsafe.WriteUnaligned(pwsum + xx, Unsafe.ReadUnaligned<Vector<float>>(pwsum + xx) + wt);
                             Unsafe.WriteUnaligned(pacc0 + xx, Unsafe.ReadUnaligned<Vector<float>>(pacc0 + xx) + wt * Unsafe.ReadUnaligned<Vector<float>>(pa + q));
@@ -334,10 +350,21 @@ namespace Aardvark.ImageCodecs.JpegXl
                             pacc0[xx] += wt * pa[q]; pacc1[xx] += wt * pb[q]; pacc2[xx] += wt * pc[q];
                         }
                     }
-                    for (int x = 0; x < w; x++)
                     {
-                        float rr = 1 / pwsum[x];
-                        oa[x] = pacc0[x] * rr; ob[x] = pacc1[x] * rr; oc[x] = pacc2[x] * rr;
+                        int x = 0;
+                        var one = Vector<float>.One;
+                        for (; x + vc <= w; x += vc)
+                        {
+                            var rr = one / Unsafe.ReadUnaligned<Vector<float>>(pwsum + x);
+                            Unsafe.WriteUnaligned(oa + x, Unsafe.ReadUnaligned<Vector<float>>(pacc0 + x) * rr);
+                            Unsafe.WriteUnaligned(ob + x, Unsafe.ReadUnaligned<Vector<float>>(pacc1 + x) * rr);
+                            Unsafe.WriteUnaligned(oc + x, Unsafe.ReadUnaligned<Vector<float>>(pacc2 + x) * rr);
+                        }
+                        for (; x < w; x++)
+                        {
+                            float rr = 1 / pwsum[x];
+                            oa[x] = pacc0[x] * rr; ob[x] = pacc1[x] * rr; oc[x] = pacc2[x] * rr;
+                        }
                     }
                 }
             }

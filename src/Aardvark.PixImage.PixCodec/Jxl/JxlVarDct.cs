@@ -125,6 +125,7 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         float InvGlobalScale => 65536.0f / globalScale;
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void DecodeLfCoefficients(JxlBitReader br, int index)
         {
             int extra = (int)br.ReadBits(2);
@@ -178,6 +179,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void DecodeHfMetadata(JxlBitReader br, int index, long maxTree)
         {
             int gx = index % dims.LfGroupsX, gy = index / dims.LfGroupsX;
@@ -237,6 +239,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         /// <summary>Adaptive smoothing of the LF image (unless the frame disables it), after all LF groups.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void AfterLfGroups()
         {
             if (UsesLfFrame)
@@ -433,6 +436,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             reader.CheckFinalState();
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void HfBlocks<TSym>(ref TSym reader, int pass, int bx0, int by0, int gw, int gh, int[] offsets, int[][] coeffs, int shift, int histOff)
             where TSym : struct, IJxlSymbols
         {
@@ -536,6 +540,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         const int GroupScratchMax = 256 * 256;
         [ThreadStatic] static float[]? groupScratch;
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         void FinishGroupCore(int group, int bx0, int by0, int gw, int gh, int[] offsets, int[][] coeffs, bool xyb, float xm, float bm,
             float[] qb, float qbn, float inv, float* pY, float* pX, float* pB, float* ps, float* pl, float* p0, float* p1, float* p2)
         {

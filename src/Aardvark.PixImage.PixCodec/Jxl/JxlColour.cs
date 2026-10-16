@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Threading.Tasks;
 
 namespace Aardvark.ImageCodecs.JpegXl
@@ -10,6 +11,7 @@ namespace Aardvark.ImageCodecs.JpegXl
     internal static class JxlColour
     {
         /// <summary>In place: XYB planes to linear RGB with sRGB primaries (scaled so that 1.0 is the intensity target).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void XybToLinear(float[] x, float[] y, float[] b, int n, JxlOpsinParams p, float intensityTarget, bool parallel)
         {
             float scale = 255.0f / intensityTarget;
@@ -49,6 +51,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         /// <summary>XYB samples to linear RGB with sRGB primaries (as <see cref="XybToLinear(float[], float[], float[], int, JxlOpsinParams, float, bool)"/>).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void XybToLinear(ReadOnlySpan<float> x, ReadOnlySpan<float> y, ReadOnlySpan<float> b, Span<float> r, Span<float> g, Span<float> bo,
             JxlOpsinParams p, float intensityTarget)
         {
@@ -226,6 +229,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// Linear light to rounded 8 bit sRGB values, the same as <see cref="FromLinear(Span{float}, JxlColourEncoding, float)"/>
         /// followed by rounding and clamping, without evaluating the curve.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static unsafe void LinearToSrgb8(ReadOnlySpan<float> src, Span<byte> dst, int stride)
         {
             var (thr, coarse) = Srgb8Tables;
@@ -271,6 +275,93 @@ namespace Aardvark.ImageCodecs.JpegXl
                 // branch free: one more when v >= thr[b] (the sign bit of v - thr[b] is clear)
                 b += 1 - (int)((uint)BitConverter.SingleToInt32Bits(v - Unsafe.Add(ref t0, b)) >> 31);
                 dst[i * stride] = (byte)b;
+            }
+        }
+
+        /// <summary>
+        /// <see cref="LinearToSrgb8"/> of three planes into interleaved RGB (dst[3 i + c]); AVX2 with byte shuffles for the
+        /// interleaving, the scalar path otherwise.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public static unsafe void LinearToSrgb8x3(ReadOnlySpan<float> r, ReadOnlySpan<float> g, ReadOnlySpan<float> b, Span<byte> dst)
+        {
+            int n = r.Length;
+            if (g.Length < n || b.Length < n || dst.Length < 3L * n) throw new ArgumentException("buffers too small");
+            int i = 0;
+            if (System.Runtime.Intrinsics.X86.Avx2.IsSupported && n >= 16)
+            {
+                var (thr, _) = Srgb8Tables;
+                var ci = Srgb8CoarseInt;
+                var m = Srgb8Shuffles;
+                fixed (float* pr = r, pg = g, pb = b, pt = thr)
+                fixed (int* pc = ci)
+                fixed (byte* pd = dst, pm = m)
+                {
+                    var s0r = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(pm); var s0g = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(pm + 16); var s0b = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(pm + 32);
+                    var s1r = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(pm + 48); var s1g = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(pm + 64); var s1b = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(pm + 80);
+                    var s2r = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(pm + 96); var s2g = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(pm + 112); var s2b = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(pm + 128);
+                    for (; i + 16 <= n; i += 16)
+                    {
+                        var vr = Srgb8x16(pr + i, pc, pt); var vg = Srgb8x16(pg + i, pc, pt); var vb = Srgb8x16(pb + i, pc, pt);
+                        byte* o = pd + 3L * i;
+                        System.Runtime.Intrinsics.X86.Sse2.Store(o, System.Runtime.Intrinsics.X86.Sse2.Or(System.Runtime.Intrinsics.X86.Sse2.Or(
+                            System.Runtime.Intrinsics.X86.Ssse3.Shuffle(vr, s0r), System.Runtime.Intrinsics.X86.Ssse3.Shuffle(vg, s0g)), System.Runtime.Intrinsics.X86.Ssse3.Shuffle(vb, s0b)));
+                        System.Runtime.Intrinsics.X86.Sse2.Store(o + 16, System.Runtime.Intrinsics.X86.Sse2.Or(System.Runtime.Intrinsics.X86.Sse2.Or(
+                            System.Runtime.Intrinsics.X86.Ssse3.Shuffle(vr, s1r), System.Runtime.Intrinsics.X86.Ssse3.Shuffle(vg, s1g)), System.Runtime.Intrinsics.X86.Ssse3.Shuffle(vb, s1b)));
+                        System.Runtime.Intrinsics.X86.Sse2.Store(o + 32, System.Runtime.Intrinsics.X86.Sse2.Or(System.Runtime.Intrinsics.X86.Sse2.Or(
+                            System.Runtime.Intrinsics.X86.Ssse3.Shuffle(vr, s2r), System.Runtime.Intrinsics.X86.Ssse3.Shuffle(vg, s2g)), System.Runtime.Intrinsics.X86.Ssse3.Shuffle(vb, s2b)));
+                    }
+                }
+            }
+            if (i < n)
+            {
+                LinearToSrgb8(r.Slice(i), dst.Slice(3 * i), 3);
+                LinearToSrgb8(g.Slice(i), dst.Slice(3 * i + 1), 3);
+                LinearToSrgb8(b.Slice(i), dst.Slice(3 * i + 2), 3);
+            }
+        }
+
+        /// <summary>16 samples to bytes, as the AVX2 loop of <see cref="LinearToSrgb8"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static unsafe System.Runtime.Intrinsics.Vector128<byte> Srgb8x16(float* p, int* coarse, float* thr)
+        {
+            var lo = Srgb8x8(p, coarse, thr);
+            var hi = Srgb8x8(p + 8, coarse, thr);
+            // int -> short: per 128 bit lane, then put the lanes in order
+            var s = System.Runtime.Intrinsics.X86.Avx2.PackSignedSaturate(lo, hi);
+            s = System.Runtime.Intrinsics.X86.Avx2.Permute4x64(s.AsInt64(), 0xD8).AsInt16();
+            return System.Runtime.Intrinsics.X86.Sse2.PackUnsignedSaturate(s.GetLower(), s.GetUpper());
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static unsafe System.Runtime.Intrinsics.Vector256<int> Srgb8x8(float* p, int* coarse, float* thr)
+        {
+            var v = System.Runtime.Intrinsics.X86.Avx.LoadVector256(p);
+            v = System.Runtime.Intrinsics.X86.Avx.Max(v, System.Runtime.Intrinsics.Vector256<float>.Zero);      // NaN -> 0
+            v = System.Runtime.Intrinsics.X86.Avx.Min(v, System.Runtime.Intrinsics.Vector256.Create(0.99999994f));
+            var k = System.Runtime.Intrinsics.X86.Avx.ConvertToVector256Int32WithTruncation(System.Runtime.Intrinsics.X86.Avx.Multiply(v, System.Runtime.Intrinsics.Vector256.Create((float)Srgb8Cells)));
+            var b = System.Runtime.Intrinsics.X86.Avx2.GatherVector256(coarse, k, 4);
+            var t = System.Runtime.Intrinsics.X86.Avx2.GatherVector256(thr, b, 4);
+            var ge = System.Runtime.Intrinsics.Vector256.AsInt32(System.Runtime.Intrinsics.X86.Avx.CompareGreaterThanOrEqual(v, t));
+            return System.Runtime.Intrinsics.X86.Avx2.Subtract(b, ge);
+        }
+
+        static byte[]? srgb8Shuffles;
+        /// <summary>pshufb masks that interleave 16 R, G and B bytes into 48 RGB bytes (3 outputs x 3 sources).</summary>
+        static byte[] Srgb8Shuffles
+        {
+            get
+            {
+                if (srgb8Shuffles is { } s) return s;
+                var m = new byte[144];
+                for (int o = 0; o < 3; o++)
+                    for (int c = 0; c < 3; c++)
+                        for (int j = 0; j < 16; j++)
+                        {
+                            int pos = 16 * o + j;   // output byte
+                            m[(3 * o + c) * 16 + j] = pos % 3 == c ? (byte)(pos / 3) : (byte)0x80;
+                        }
+                return srgb8Shuffles = m;
             }
         }
 

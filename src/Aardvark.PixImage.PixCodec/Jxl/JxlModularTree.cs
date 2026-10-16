@@ -250,6 +250,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// The loop of JxlModularChannelDecoder.DecodeWpIntervals for the fast ANS reader, with the predictor and the entropy
         /// decoder state in locals: the same arithmetic as <see cref="Predict"/> and <see cref="Update"/>.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public unsafe void DecodeIntervals(ref JxlAnsFast rd, int[] d, int h, int[] bounds, int[] lpred, long[] lmul, long[] loff, int[] lctx)
         {
             var regs = rd.Load();

@@ -42,6 +42,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// 2D inverse DCT of a rows x cols coefficient matrix (row major, rows = vertical frequencies) into
         /// out[y * stride + x]. tmp needs 2 * rows * cols floats.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void Idct2D(float* coef, int rows, int cols, float* outp, int stride, float* tmp)
         {
             if (JxlFastIdct.Idct2D(coef, rows, cols, outp, stride, tmp)) return;
@@ -117,6 +118,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         /// <summary>The LLF coefficients (cy x cx) of a varblock from its DC values dc[by * dcStride + bx].</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void LlfFromDc(float* dc, int dcStride, int cx, int cy, float* llf /* cy x cx row major */)
         {
             // forward scaled DCT: F[k] = (1/n) sum x[i] M[i][k]
@@ -144,6 +146,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         // ------------------------------------------------------------------ special 8x8 transforms
 
         /// <summary>The 2x2 step of the hierarchical DCT2: the top-left s x s of block (stride 8) into out (stride 8).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void Idct2Top(float* block, int s, float* outp)
         {
             float* temp = stackalloc float[64];
@@ -185,6 +188,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// Inverse transform of one varblock. coef: the coefficients in the wide layout (rows = min, cols = max of the block
         /// dimensions); out: the pixels, out[y * stride + x], height 8 * CoveredY, width 8 * CoveredX. scratch: 3 * size floats.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void Inverse(int strategy, float* coef, float* outp, int stride, float* scratch)
         {
             int cx = JxlAcStrategy.CoveredX[strategy], cy = JxlAcStrategy.CoveredY[strategy];
@@ -205,6 +209,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// Inverse DCT of an H x W block from its stored coefficients: wide blocks (W &gt; H) store the vertical frequency
         /// in rows (c[ky * W + kx]), square and tall blocks the horizontal one (c[kx * H + ky]). scratch: 3 H W floats.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static void IdctStored(float* coef, int H, int W, float* outp, int stride, float* scratch)
         {
             if (W > H) { Idct2D(coef, H, W, outp, stride, scratch); return; }
@@ -216,6 +221,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             Idct2D(t, H, W, outp, stride, scratch);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void Identity(float* coef, float* outp, int stride)
         {
             float* dcs = stackalloc float[64];
@@ -244,6 +250,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void Dct2x2(float* coef, float* outp, int stride)
         {
             float* b = stackalloc float[64];
@@ -255,6 +262,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 for (int x = 0; x < 8; x++) outp[y * stride + x] = b[y * 8 + x];
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void Dct4x4(float* coef, float* outp, int stride, float* scratch)
         {
             float* dcs = stackalloc float[64];
@@ -275,6 +283,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         /// <summary>DCT4X8: two 4 rows x 8 columns halves stacked; DCT8X4 (transposed): two 8 x 4 halves side by side.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void Dct4x8(float* coef, float* outp, int stride, float* scratch, bool transposed)
         {
             float* block = stackalloc float[32];
@@ -293,6 +302,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void Afv(float* coef, float* outp, int stride, int kind, float* scratch)
         {
             int afvX = kind & 1, afvY = kind / 2;

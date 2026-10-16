@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.IO;
 using Aardvark.ImageCodecs.JpegXl;
@@ -449,7 +450,8 @@ namespace Aardvark.ImageCodecs
                     if (srgb8)
                     {
                         var d = ((byte[])data).AsSpan(s * nch);
-                        for (int c = 0; c < ncol; c++) JxlColour.LinearToSrgb8(c == 0 ? r : c == 1 ? g : b, d.Slice(c), nch);
+                        if (nch == 3) JxlColour.LinearToSrgb8x3(r, g, b, d);
+                        else for (int c = 0; c < ncol; c++) JxlColour.LinearToSrgb8(c == 0 ? r : c == 1 ? g : b, d.Slice(c), nch);
                         if (a != null) WriteFloats(data, type, ncol, nch, a.AsSpan(s, cnt), maxv, s);
                         continue;
                     }
@@ -618,6 +620,7 @@ namespace Aardvark.ImageCodecs
             return r;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void WriteInts(Array data, SampleType type, int c, int nch, int[] src, int srcBits, int dstBits, int start, int n)
         {
             long maxSrc = (1L << srcBits) - 1, maxDst = (1L << dstBits) - 1;
@@ -641,6 +644,7 @@ namespace Aardvark.ImageCodecs
             => WriteFloats(data, type, c, nch, src.AsSpan(start, n - start), maxv, start);
 
         /// <summary>Writes src as channel c of pixels start, start + 1, ... (rounded and clamped for integer types).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         static void WriteFloats(Array data, SampleType type, int c, int nch, ReadOnlySpan<float> src, int maxv, int start)
         {
             int o = start * nch + c;

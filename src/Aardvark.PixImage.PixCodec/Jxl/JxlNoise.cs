@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Buffers;
 using System.Threading.Tasks;
 
@@ -92,6 +93,7 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// <paramref name="frameSeed"/> (displayed frames so far, counting this one, in the high half; frames since the last
         /// displayed one, counting this one if it is not displayed, in the low half) and the group position.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public void Apply(float[] X, float[] Y, float[] B, int w, int h, int groupDim, ulong frameSeed, float ytox, float ytob, bool parallel)
         {
             int n = w * h;

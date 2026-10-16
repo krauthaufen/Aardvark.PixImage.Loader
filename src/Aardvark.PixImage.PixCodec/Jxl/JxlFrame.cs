@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -334,6 +335,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             => fh.Upsampling == 1 && !fh.Filter.Gab && fh.Filter.EpfIters == 0 && patches == null && splines == null && noise == null
                && dims.XSize == dims.Width && dims.YSize == dims.Height && !img.BitDepth.Float;
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         float[] ToFloat(JxlChannel ch, JxlBitDepth bd)
         {
             var d = ch.Data;
