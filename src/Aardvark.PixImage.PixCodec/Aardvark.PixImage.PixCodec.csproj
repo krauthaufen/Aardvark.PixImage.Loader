@@ -11,6 +11,7 @@
     <None Include="paket.references" />
     <None Include="paket.template" />
     <InternalsVisibleTo Include="Aardvark.PixImage.PixCodec.Codecs.Tests" />
+    <EmbeddedResource Include="Core/Compression/BrotliDictionary.zlib" LogicalName="Aardvark.ImageCodecs.Compression.BrotliDictionary.zlib" />
   </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>

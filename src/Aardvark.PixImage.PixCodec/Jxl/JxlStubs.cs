@@ -11,7 +11,3 @@ namespace Aardvark.ImageCodecs.JpegXl
         void ApplyFeatures(JxlFrameImage f) { }
     }
 }
-namespace Aardvark.ImageCodecs.Compression
-{
-    internal static class Brotli { public static byte[] Decompress(ReadOnlySpan<byte> s, int max) => throw new ImageNotSupportedException("brotli"); }
-}
