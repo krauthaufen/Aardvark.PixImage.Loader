@@ -128,7 +128,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             ForEach(dims.NumGroups, toc.Single, g =>
             {
                 for (int p = 0; p < fh.NumPasses; p++) DecodePassGroup(SectionReader(toc.PassGroupIndex(dims, p, g)), p, g, maxTree);
-                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                long t0 = JxlProfile.On ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 if (!fh.Modular) FinishVarDctGroup(g);
                 if (JxlProfile.On) System.Threading.Interlocked.Add(ref finishTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
             });
@@ -372,7 +372,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             JxlProfile.Mark("to float");
             ApplyRestorationFilters(colour);
             if (Sink != null) result.Sink = Sink;
-            JxlProfile.Mark($"filters gab {fh.Filter.Gab} epf {fh.Filter.EpfIters}");
+            JxlProfile.Mark("filters");
             if (fh.Upsampling > 1)
                 for (int c = 0; c < colour.Length; c++) colour[c] = Upsample(colour[c], dims.XSize, dims.YSize, fh.Upsampling, dims.Width, dims.Height);
             var planes = new float[result.NumColour + img.ExtraChannels.Length][];

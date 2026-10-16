@@ -43,24 +43,6 @@ namespace Aardvark.ImageCodecs.JpegXl
             return (uint)v;
         }
 
-        /// <summary><see cref="Decode"/> for a token of at least Split, reading from a bit state (passed by value and returned).</summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        public static uint DecodeLarge(in JxlHybridUint c, uint token, JxlBitState br, out JxlBitState after)
-        {
-            int SplitExponent = c.SplitExponent, MsbInToken = c.MsbInToken, LsbInToken = c.LsbInToken;
-            uint Split = c.Split;
-            int ml = MsbInToken + LsbInToken;
-            int n = SplitExponent - ml + (int)((token - Split) >> ml);
-            if (n > 31) throw new ImageFormatException("JPEG XL: hybrid uint too large");
-            uint low = token & ((1u << LsbInToken) - 1);
-            token >>= LsbInToken;
-            uint high = (token & ((1u << MsbInToken) - 1)) | (1u << MsbInToken);
-            ulong v = ((((ulong)high << n) | br.ReadBits(n)) << LsbInToken) | low;
-            if (v > uint.MaxValue) throw new ImageFormatException("JPEG XL: hybrid uint too large");
-            after = br;
-            return (uint)v;
-        }
-
         public static int CeilLog2(int x)
         {
             int r = 0;

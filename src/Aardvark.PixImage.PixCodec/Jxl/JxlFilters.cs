@@ -84,7 +84,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 var outR = new Region { X0 = x0, Y0 = y0, W = Math.Min(tw, w - x0), H = Math.Min(th, h - y0) };
                 ctx.RunTile(outR, work, bufPlane);
             }
-            int workLen = 2 * 3 * bufPlane + 9 * (tw + 2 * rtot + 2) + 6 * (tw + 2 * rtot + 8) * (th + 2 * rtot + 8);
+            int workLen = 2 * 3 * bufPlane + (tw + 2 * rtot) + 6 * (tw + 2 * rtot + 8) * (th + 2 * rtot + 8);
             int ntiles = tx * ty;
             if (parallel && ntiles > 1)
                 Parallel.For(0, ntiles, () => ArrayPool<float>.Shared.Rent(workLen), (t, _, work) => { Tile(t, work); return work; },
@@ -254,8 +254,8 @@ namespace Aardvark.ImageCodecs.JpegXl
                 int vc = Vector<float>.Count;
                 int pw = ri.W;
                 var invSigma = InvSigma!;
-                float* pinv = rw, pwsum = rw + w, pacc0 = rw + 2 * w, pacc1 = rw + 3 * w, pacc2 = rw + 4 * w;
-                float* dbase = rw + 9 * (w + 2);
+                float* pinv = rw;   // per row: scaled inverse sigma times the border multiplier, -1e30 where the block is skipped
+                float* dbase = rw + w;
                 var vs0 = new Vector<float>(s0); var vs1 = new Vector<float>(s1); var vs2 = new Vector<float>(s2);
 
                 // difference images over the positions the patches reach: q = p + r and q = p - o, |r| <= pr

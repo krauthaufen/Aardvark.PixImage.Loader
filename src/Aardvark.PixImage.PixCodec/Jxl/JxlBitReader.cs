@@ -9,51 +9,15 @@ namespace Aardvark.ImageCodecs.JpegXl
     /// of the section yields zero bits; <see cref="CheckEnd"/> turns that into an <see cref="ImageFormatException"/>.
     /// </summary>
     /// <summary>
-    /// The state of a <see cref="JxlBitReader"/> as a value (pointer into the pinned codestream) for hot loops; the same
-    /// semantics: bits past the end read as zero, more than 64 bytes past the end throw.
+    /// The state of a <see cref="JxlBitReader"/> as a value (pointer into the pinned codestream) for hot loops (see
+    /// <see cref="JxlAnsFast"/>, which reads with the same semantics: bits past the end read as zero, more than 64 bytes
+    /// past the end throw).
     /// </summary>
     internal unsafe struct JxlBitState
     {
         public byte* P, End;
         public ulong Buf;
         public int NBits;
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public uint ReadBits(int n)
-        {
-            if (NBits < n) Refill();
-            uint v = (uint)(Buf & ((1UL << n) - 1));
-            Buf >>= n;
-            NBits -= n;
-            return v;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void Refill()
-        {
-            if (P + 8 <= End)
-            {
-                Buf |= Unsafe.ReadUnaligned<ulong>(P) << NBits;
-                int take = (63 - NBits) >> 3;
-                P += take;
-                NBits += take << 3;
-            }
-            else this = RefillSlow(this);
-        }
-
-        // by value, so that callers' states are not address exposed (they stay in registers)
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        static JxlBitState RefillSlow(JxlBitState s)
-        {
-            while (s.NBits <= 56)
-            {
-                if (s.P < s.End) s.Buf |= (ulong)*s.P << s.NBits;
-                s.P++;
-                s.NBits += 8;
-                if (s.P > s.End + 64) throw new ImageFormatException("JPEG XL: unexpected end of data");
-            }
-            return s;
-        }
 
         /// <summary>More bits consumed than the section holds.</summary>
         public bool Overrun => (P - End) * 8 > NBits;
