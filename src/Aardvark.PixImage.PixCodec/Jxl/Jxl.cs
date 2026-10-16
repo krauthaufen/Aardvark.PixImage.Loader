@@ -263,10 +263,10 @@ namespace Aardvark.ImageCodecs
             var planes = new float[nch][];
             int[][]? ints = canvas.IntPlanes;
             var p = canvas.Planes;
-            if (ints != null && (opt.ForceFloat || opt.RenderSpotColours && HasSpot(h) || alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated)) ints = null;
+            if (ints != null && (opt.ForceFloat || opt.RenderSpotColours && HasSpot(h) || alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated || BlackChannel(h) >= 0)) ints = null;
             if (ints == null)
             {
-                var col = ColourPlanes(h, canvas, meta, opt);
+                var col = CmykToSrgb(h, canvas, meta, opt) ?? ColourPlanes(h, canvas, meta, opt);
                 if (opt.RenderSpotColours && HasSpot(h)) col = RenderSpot(h, canvas, col, n);
                 for (int c = 0; c < ncol; c++) planes[c] = col[c];
                 if (alpha >= 0)
@@ -301,6 +301,49 @@ namespace Aardvark.ImageCodecs
             var img = new RawImage(w, hh, color, data, nch, meta);
             if (opt.ApplyOrientation && h.Orientation > 1) img = ImageOps.ApplyOrientation(img, h.Orientation);
             return img;
+        }
+
+        static int BlackChannel(JxlImageHeader h)
+        {
+            for (int i = 0; i < h.ExtraChannels.Length; i++) if (h.ExtraChannels[i].Type == JxlExtraChannelType.Black) return i;
+            return -1;
+        }
+
+        /// <summary>
+        /// CMYK (three colour channels plus a black extra channel under a CMYK ICC profile, all stored as 1 - ink): converted
+        /// to sRGB through the profile, since RawImage has no CMYK colour model. Null when the image is not CMYK.
+        /// </summary>
+        static float[][]? CmykToSrgb(JxlImageHeader h, JxlFrameImage canvas, ImageMetadata meta, JxlDecodeOptions opt)
+        {
+            int k = BlackChannel(h);
+            if (k < 0 || h.Icc == null || h.Colour.IsGray || h.XybEncoded) return null;
+            IccTransform t;
+            try
+            {
+                var src = IccProfile.Parse(h.Icc);
+                if (src.Channels != 4) return null;
+                t = new IccTransform(src, IccProfile.Srgb, IccRenderingIntent.RelativeColorimetric);
+            }
+            catch (Exception e) when (e is ImageFormatException or ImageNotSupportedException) { return null; }
+            int n = canvas.Width * canvas.Height;
+            var p = canvas.Planes;
+            var kp = p[canvas.NumColour + k];
+            var col = new[] { new float[n], new float[n], new float[n] };
+            JxlColour.Chunked(n, opt.Multithreaded, (s, e) =>
+            {
+                int cnt = e - s;
+                var inp = new float[cnt * 4];
+                var outp = new float[cnt * 3];
+                for (int i = 0; i < cnt; i++)
+                {
+                    inp[4 * i] = 1 - p[0][s + i]; inp[4 * i + 1] = 1 - p[1][s + i]; inp[4 * i + 2] = 1 - p[2][s + i]; inp[4 * i + 3] = 1 - kp[s + i];
+                }
+                t.Transform(inp, outp);
+                for (int i = 0; i < cnt; i++) { col[0][s + i] = outp[3 * i]; col[1][s + i] = outp[3 * i + 1]; col[2][s + i] = outp[3 * i + 2]; }
+            });
+            meta.IccProfile = null;
+            meta.Transfer = TransferFunction.Srgb;
+            return col;
         }
 
         /// <summary>The colour planes in the output colour space (XYB converted to the header's encoding or ICC profile).</summary>
