@@ -19,7 +19,7 @@ runs:
     - name: Look up downloads
       if: inputs.mode == 'fetch'
       id: lookup
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         key: ${{ steps.key.outputs.key }}
         enableCrossOsArchive: true
@@ -60,7 +60,7 @@ runs:
 
     - name: Save downloads
       if: inputs.mode == 'fetch' && steps.lookup.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v6
       with:
         key: ${{ steps.key.outputs.key }}
         enableCrossOsArchive: true
@@ -75,7 +75,7 @@ runs:
 
     - name: Restore downloads
       if: inputs.mode == 'restore'
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         key: ${{ steps.key.outputs.key }}
         enableCrossOsArchive: true

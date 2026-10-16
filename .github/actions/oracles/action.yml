@@ -6,7 +6,7 @@ runs:
   using: composite
   steps:
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.13'
         cache: pip
@@ -18,7 +18,7 @@ runs:
 
     - name: Restore tools
       id: tools
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         path: .tmp/ci-tools
         key: ${{ runner.os }}-oracles-v1-${{ hashFiles('tests/oracle/ci/*', 'tests/oracle/exr_oracle.cpp') }}
@@ -48,7 +48,7 @@ runs:
 
     - name: Netpbm (Windows, Cygwin)
       if: runner.os == 'Windows'
-      uses: cygwin/cygwin-install-action@v4
+      uses: cygwin/cygwin-install-action@v6
       with:
         packages: netpbm
         add-to-path: false
@@ -69,7 +69,7 @@ runs:
 
     - name: Save tools
       if: steps.tools.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v6
       with:
         path: .tmp/ci-tools
         key: ${{ steps.tools.outputs.cache-primary-key }}
