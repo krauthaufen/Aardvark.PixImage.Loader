@@ -258,8 +258,111 @@ namespace Aardvark.ImageCodecs.CineonImpl
                 continuous = l.Bits == 16 ? !(endsR && !endsC) : endsC && !endsR;
             }
 
+            var img = RawImage.Create(l.W, l.H, l.Color, l.Type, l.N);
+            if (l.Interleave == 0 && l.CellBits != 0 && !continuous) Lines(src, h.BigEndian, l, eol, fpl, img);
+            else Generic(src, h.BigEndian, l, eol, eoc, fpl, continuous, img);
+            var m = img.Metadata = new ImageMetadata();
+            m.Transfer = Transfer(h, out double g);
+            m.Gamma = g;
+            m.Orientation = ExifOrientation(h.Orientation);
+            return o.ApplyOrientation && m.Orientation >= 2 ? ImageOps.ApplyOrientation(img) : img;
+        }
+
+
+        /// <summary>Pixel interleaved cells, every line starting on a new cell: unpacked a line at a time.</summary>
+        static void Lines(ReadOnlySpan<byte> src, bool be, Layout l, long eol, long fpl, RawImage img)
+        {
+            int cb = l.CellBits / 8, k = l.PerCell;
+            long cells = (fpl + k - 1) / k, lineBytes = cells * cb, stride = lineBytes + eol;
+            if (cells * k > int.MaxValue / 2) throw new ImageNotSupportedException("Cineon: lines too long");
+            long need = stride * (l.H - 1) + lineBytes;
+            if (need > src.Length)
+            {
+                if (need - src.Length >= cb) throw new ImageFormatException("Cineon: image data is truncated");
+                var padded = new byte[need];   // the last cell cut short
+                src.CopyTo(padded);
+                src = padded;
+            }
+            var line = new uint[cells * k];
+            for (int y = 0; y < l.H; y++)
+            {
+                Unpack(src.Slice((int)(stride * y), (int)lineBytes), be, l, line);
+                StoreLine(line, l, img, y);
+            }
+        }
+
+        static void Unpack(ReadOnlySpan<byte> row, bool be, Layout l, uint[] dst)
+        {
+            int cb = l.CellBits / 8, k = l.PerCell, bits = l.Bits, cells = dst.Length / k;
+            if (cb == 4 && k == 3 && bits == 10 && l.Left)
+            {
+                for (int c = 0, o = 0; c < cells; c++, o += 3)
+                {
+                    uint v = be ? BinaryPrimitives.ReadUInt32BigEndian(row.Slice(4 * c)) : BinaryPrimitives.ReadUInt32LittleEndian(row.Slice(4 * c));
+                    dst[o] = v >> 22 & 1023; dst[o + 1] = v >> 12 & 1023; dst[o + 2] = v >> 2 & 1023;
+                }
+                return;
+            }
+            uint mask = bits == 32 ? uint.MaxValue : (1u << bits) - 1;
+            for (int c = 0, o = 0; c < cells; c++)
+            {
+                uint v = cb == 4 ? (be ? BinaryPrimitives.ReadUInt32BigEndian(row.Slice(4 * c)) : BinaryPrimitives.ReadUInt32LittleEndian(row.Slice(4 * c)))
+                    : cb == 2 ? (be ? BinaryPrimitives.ReadUInt16BigEndian(row.Slice(2 * c)) : BinaryPrimitives.ReadUInt16LittleEndian(row.Slice(2 * c)))
+                    : row[c];
+                for (int j = 0; j < k; j++) dst[o++] = v >> (l.Left ? l.CellBits - (j + 1) * bits : (k - 1 - j) * bits) & mask;
+            }
+        }
+
+        static void StoreLine(uint[] v, Layout l, RawImage img, int y)
+        {
+            int n = l.N, w = l.W, bits = l.Bits, sh = 32 - bits;
+            long o0 = (long)y * w * n;
+            var ord = l.Order;
+            bool direct = true;
+            for (int c = 0; c < n; c++) direct &= ord[c] == c;
+            int len = w * n;
+            switch (l.Type)
+            {
+                case SampleType.UInt16:
+                    {
+                        var d = img.GetData<ushort>().AsSpan((int)o0, len);
+                        if (direct) for (int i = 0; i < len; i++) d[i] = (ushort)v[i];
+                        else for (int i = 0; i < len; i += n) for (int c = 0; c < n; c++) d[i + c] = (ushort)v[i + ord[c]];
+                        return;
+                    }
+                case SampleType.UInt8:
+                    {
+                        var d = img.GetData<byte>().AsSpan((int)o0, len);
+                        uint max = (1u << bits) - 1;
+                        bool stretch = bits is 1 or 2 or 4;
+                        for (int i = 0; i < len; i += n)
+                            for (int c = 0; c < n; c++) { uint s = v[i + ord[c]]; d[i + c] = (byte)(stretch ? s * 255 / max : s); }
+                        return;
+                    }
+                default:
+                    for (int i = 0; i < len; i += n)
+                        for (int c = 0; c < n; c++)
+                        {
+                            uint s = v[i + ord[c]];
+                            long at = o0 + i + c;
+                            switch (l.Type)
+                            {
+                                case SampleType.UInt32: ((uint[])img.Data)[at] = s; break;
+                                case SampleType.Int8: ((sbyte[])img.Data)[at] = (sbyte)((int)s << sh >> sh); break;
+                                case SampleType.Int16: ((short[])img.Data)[at] = (short)((int)s << sh >> sh); break;
+                                default: ((int[])img.Data)[at] = (int)s; break;
+                            }
+                        }
+                    return;
+            }
+        }
+
+        /// <summary>Everything else: bit fields, line / channel interleave, lines running on across line ends.</summary>
+        static void Generic(ReadOnlySpan<byte> src, bool be, Layout l, long eol, long eoc, long fpl, bool continuous, RawImage img)
+        {
+            long samples = (long)l.W * l.H * l.N;
             var vals = new uint[samples];
-            var r = new Reader(src, h.BigEndian, l);
+            var r = new Reader(src, be, l);
             if (l.Interleave == 0)
             {
                 for (int y = 0; y < l.H; y++)
@@ -284,14 +387,7 @@ namespace Aardvark.ImageCodecs.CineonImpl
                     if (l.Interleave == 2) r.Pos += l.CellBits == 0 ? 8 * eoc : eoc;
                 }
             }
-
-            var img = RawImage.Create(l.W, l.H, l.Color, l.Type, l.N);
             Store(vals, l, img);
-            var m = img.Metadata = new ImageMetadata();
-            m.Transfer = Transfer(h, out double g);
-            m.Gamma = g;
-            m.Orientation = ExifOrientation(h.Orientation);
-            return o.ApplyOrientation && m.Orientation >= 2 ? ImageOps.ApplyOrientation(img) : img;
         }
 
         static void Store(uint[] v, Layout l, RawImage img)
@@ -413,34 +509,43 @@ namespace Aardvark.ImageCodecs.CineonImpl
             output.Write(head);
 
             uint max = (1u << bits) - 1;
+            // the samples at the target depth: UInt16 as they are (checked to fit), UInt8 scaled through a table
+            ushort[] fields;
+            if (img.SampleType == SampleType.UInt16)
+            {
+                fields = img.GetData<ushort>();
+                foreach (var v in fields)
+                    if (v > max) throw new ArgumentException($"Cineon: sample value {v} does not fit {bits} bits (UInt16 samples are written as they are)");
+            }
+            else
+            {
+                var lut = new ushort[256];
+                for (int v = 0; v < 256; v++) lut[v] = (ushort)(bits == 8 ? v : bits == 16 ? v * 257 : (v * (int)max + 127) / 255);
+                var src = img.GetData<byte>();
+                fields = new ushort[src.Length];
+                for (int k = 0; k < src.Length; k++) fields[k] = lut[src[k]];
+            }
             long lineFields = continuous ? fpl * h : fpl;
             var row = new byte[Math.Min((lineFields + perCell - 1) / perCell * 4, 1 << 16)];
             for (int y = 0; y < (continuous ? 1 : h); y++)
             {
-                long b = (long)y * fpl;
+                var fl = fields.AsSpan((int)((long)y * fpl), (int)lineFields);
                 int k = 0;
-                for (long i = 0; i < lineFields; i += perCell, k += 4)
+                for (int i = 0; i < fl.Length; i += perCell, k += 4)
                 {
                     if (k == row.Length) { output.Write(row); k = 0; }
-                    uint cell = 0;
-                    for (int j = 0; j < perCell; j++)
-                    {
-                        uint v = 0;
-                        if (i + j < lineFields)
+                    uint cell;
+                    if (i + perCell <= fl.Length)
+                        cell = perCell switch
                         {
-                            long at = b + i + j;
-                            if (img.SampleType == SampleType.UInt8)
-                            {
-                                uint s = ((byte[])img.Data)[at];
-                                v = bits == 8 ? s : bits == 16 ? s * 257 : (s * max + 127) / 255;
-                            }
-                            else
-                            {
-                                v = ((ushort[])img.Data)[at];
-                                if (v > max) throw new ArgumentException($"Cineon: sample value {v} does not fit {bits} bits (UInt16 samples are written as they are)");
-                            }
-                        }
-                        cell |= v << (32 - (j + 1) * bits);
+                            3 => (uint)fl[i] << 22 | (uint)fl[i + 1] << 12 | (uint)fl[i + 2] << 2,
+                            2 => (uint)fl[i] << 16 | fl[i + 1],
+                            _ => (uint)fl[i] << 24 | (uint)fl[i + 1] << 16 | (uint)fl[i + 2] << 8 | fl[i + 3],
+                        };
+                    else
+                    {
+                        cell = 0;
+                        for (int t = 0; i + t < fl.Length; t++) cell |= (uint)fl[i + t] << (32 - (t + 1) * bits);
                     }
                     if (be) BinaryPrimitives.WriteUInt32BigEndian(row.AsSpan(k), cell); else BinaryPrimitives.WriteUInt32LittleEndian(row.AsSpan(k), cell);
                 }

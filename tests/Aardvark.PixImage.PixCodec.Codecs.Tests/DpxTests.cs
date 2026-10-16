@@ -83,6 +83,7 @@ public class DpxTests
             Assert.Equal(code >= 4 ? (3, 5) : (5, 3), (info.Width, info.Height));
             Assert.Equal(code, Dpx.GetHeader(data).Orientation);
             Assert.Equal(1, Dpx.Decode(data).Metadata!.Orientation);
+            Assert.Equal(TransferFunction.Linear, Dpx.Decode(data).Metadata!.Transfer);   // kept when turned upright
             var o = new DpxDecodeOptions { ApplyOrientation = false };
             var raw = Dpx.Decode(data, o);
             AssertEqual(stored, raw);

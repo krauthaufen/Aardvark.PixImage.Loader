@@ -124,7 +124,8 @@ namespace Aardvark.ImageCodecs
 
         public static byte[] Encode(RawImage image, DpxEncodeOptions? options = null)
         {
-            var ms = new MemoryStream();
+            ArgumentNullException.ThrowIfNull(image);
+            var ms = new MemoryStream((int)Math.Min(int.MaxValue / 2, 8192 + (long)image.Width * image.Height * image.Channels * RawImage.BytesPerSample(image.SampleType)));
             Encode(image, ms, options);
             return ms.ToArray();
         }

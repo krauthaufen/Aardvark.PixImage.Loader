@@ -135,9 +135,11 @@ namespace Aardvark.ImageCodecs
     /// 0..255 as TIFF does), up to 16 bit as UInt16, 32 bit as UInt32 (Int8 / Int16 / Int32 when signed). Printing density is
     /// logarithmic: <see cref="ImageInfo.Transfer"/> is Unknown for it (and for B&amp;W), Gamma 0.45 for CCIR XA/11 video.</para>
     /// <para>8 bit pixel interleaved data is read with four samples per 32-bit cell, as ImageMagick writes and every reader expects,
-    /// although the specification would put one pixel per cell for packing code 5. Lines start on a new cell; files written
-    /// without that (OpenImageIO's reading) are recognised by their size.</para>
-    /// <para>Encoding: Gray and Rgb at 10 (default), 8 or 16 bit, pixel interleaved, packing 5 (32-bit cells, left justified).</para>
+    /// although the specification would put one pixel per cell for packing code 5. Lines start on a new cell, except 16 bit
+    /// data, which runs on across line ends (as ImageMagick writes it and both ImageMagick and OpenImageIO read it); a file that
+    /// ends exactly where the other layout ends is read that way (OpenImageIO's 8 bit reading).</para>
+    /// <para>Encoding: Gray and Rgb at 10 (default), 8 or 16 bit, pixel interleaved, packing 5 (32-bit cells, left justified),
+    /// in those line layouts.</para>
     /// </summary>
     public static class Cineon
     {
@@ -160,7 +162,8 @@ namespace Aardvark.ImageCodecs
 
         public static byte[] Encode(RawImage image, CineonEncodeOptions? options = null)
         {
-            var ms = new MemoryStream();
+            ArgumentNullException.ThrowIfNull(image);
+            var ms = new MemoryStream((int)Math.Min(int.MaxValue / 2, 2048 + (long)image.Width * image.Height * image.Channels * 2));
             Encode(image, ms, options);
             return ms.ToArray();
         }

@@ -1,6 +1,7 @@
 using Aardvark.Data;
 using Aardvark.Base;
 using Xunit;
+using Aardvark.ImageCodecs;
 
 namespace PixCodecTests;
 
@@ -146,6 +147,50 @@ public class LoaderTests
             AssertSame(img, PixCodec.Load<byte>(path));
         }
         finally { File.Delete(path); }
+    }
+
+    [Theory]
+    [InlineData(Col.Format.Gray), InlineData(Col.Format.RGB), InlineData(Col.Format.RGBA), InlineData(Col.Format.BGR)]
+    public void DpxAndCineon(Col.Format format)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"pixcodec-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            // DPX keeps 8 bit, 16 bit and float images as they are
+            var b = Make(format, 23, 9, i => (byte)(i * 11 + 1));
+            var u = Make(format, 23, 9, i => (ushort)(i * 2311 + 7));
+            var f = Make(format, 23, 9, i => (float)Math.Sin(i) * 3);
+            var p = Path.Combine(dir, "x.dpx");
+            PixCodec.Save(b, p);
+            AssertSame(b.ToImageLayout().ToPixImage<byte>(format == Col.Format.BGR ? Col.Format.RGB : format), PixCodec.Load<byte>(p));
+            PixCodec.Save(u, p);
+            AssertSame(u.ToPixImage<ushort>(format == Col.Format.BGR ? Col.Format.RGB : format), PixCodec.Load<ushort>(p));
+            PixCodec.Save(f, p);
+            AssertSame(f.ToPixImage<float>(format == Col.Format.BGR ? Col.Format.RGB : format), PixCodec.Load<float>(p));
+            Assert.Equal(ImageFormat.Dpx, PixCodec.GetInfo(p).Format);
+            Assert.Equal(new V2i(23, 9), Loader.GetInfoFromFile(p).Size);
+            using (var ms = new MemoryStream())
+            {
+                PixCodec.SaveDpx(u, ms, new DpxEncodeOptions { BitDepth = 16, BigEndian = false });
+                ms.Position = 0;
+                AssertSame(u.ToPixImage<ushort>(format == Col.Format.BGR ? Col.Format.RGB : format), (PixImage<ushort>)Loader.LoadFromStream(ms));
+            }
+
+            // Cineon: gray or RGB (alpha dropped), 8 bit as 10 bit (0..1023 in ushort), 16 bit as it is
+            var c = Path.Combine(dir, "x.cin");
+            PixCodec.Save(b, c);
+            var back = PixCodec.Load<ushort>(c);
+            bool gray = format == Col.Format.Gray;
+            Assert.Equal(gray ? Col.Format.Gray : Col.Format.RGB, back.Format);
+            var expected = b.ToPixImage<byte>(gray ? Col.Format.Gray : Col.Format.RGB).ToImageLayout().Volume.CopyToImage().Data;
+            var got = back.Volume.Data;
+            for (int i = 0; i < expected.Length; i++) Assert.Equal((expected[i] * 1023 + 127) / 255, got[i]);
+            PixCodec.Save(u, c);
+            AssertSame(u.ToPixImage<ushort>(gray ? Col.Format.Gray : Col.Format.RGB), PixCodec.Load<ushort>(c));
+            Assert.Equal(ImageFormat.Cineon, PixCodec.GetInfo(c).Format);
+        }
+        finally { Directory.Delete(dir, true); }
     }
 
     [Fact]

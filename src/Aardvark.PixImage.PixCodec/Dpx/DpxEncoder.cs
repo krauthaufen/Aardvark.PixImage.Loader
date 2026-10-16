@@ -192,19 +192,42 @@ namespace Aardvark.ImageCodecs.DpxImpl
             if (userData != null) userData.CopyTo(head, 2048);
             output.Write(head);
 
-            // pixel data, line by line
-            var row = new byte[stride];
-            var vals = isFloat ? null : new ushort[n];
+            // pixel data: bands of lines, on several threads for large images
             int max = (1 << Math.Min(bits, 16)) - 1;
-            for (int y = 0; y < h; y++)
+            void Rows(int y0, int y1, Span<byte> dst)
             {
-                if (isFloat) FloatRow(img, y, (int)n, bits, be, row);
-                else
+                var vals = isFloat ? null : new ushort[n];
+                for (int y = y0; y < y1; y++)
                 {
-                    Values(img, y, (int)n, bits, max, vals!);
-                    Pack(vals!, bits, packing, be, ch == 1, row);
+                    var row = dst.Slice((int)((y - y0) * stride), (int)stride);
+                    if (isFloat) FloatRow(img, y, (int)n, bits, be, row);
+                    else
+                    {
+                        Values(img, y, (int)n, bits, max, vals!);
+                        Pack(vals!, bits, packing, be, ch == 1, row);
+                    }
                 }
-                output.Write(row);
+            }
+            int bandRows = (int)Math.Clamp((1 << 22) / Math.Max(stride, 1), 1, h);   // about 4 MB per band
+            int bands = (h + bandRows - 1) / bandRows;
+            var bufs = new byte[Math.Min(bands, Math.Max(1, Environment.ProcessorCount))][];
+            for (int b0 = 0; b0 < bands; b0 += bufs.Length)
+            {
+                int count = Math.Min(bufs.Length, bands - b0);
+                void Band(int k)
+                {
+                    int y0 = (b0 + k) * bandRows, y1 = Math.Min(h, y0 + bandRows);
+                    var buf = bufs[k] ??= new byte[bandRows * stride];
+                    buf.AsSpan(0, (int)((y1 - y0) * stride)).Clear();
+                    Rows(y0, y1, buf);
+                }
+                if (count > 1 && !OperatingSystem.IsBrowser()) System.Threading.Tasks.Parallel.For(0, count, Band);
+                else for (int k = 0; k < count; k++) Band(k);
+                for (int k = 0; k < count; k++)
+                {
+                    int y0 = (b0 + k) * bandRows, y1 = Math.Min(h, y0 + bandRows);
+                    output.Write(bufs[k], 0, (int)((y1 - y0) * stride));
+                }
             }
         }
 
@@ -252,7 +275,7 @@ namespace Aardvark.ImageCodecs.DpxImpl
             }
         }
 
-        static void Pack(ushort[] v, int bits, DpxPacking packing, bool be, bool lowFirst, byte[] row)
+        static void Pack(ushort[] v, int bits, DpxPacking packing, bool be, bool lowFirst, Span<byte> row)
         {
             int n = v.Length;
             switch (bits)
@@ -267,7 +290,7 @@ namespace Aardvark.ImageCodecs.DpxImpl
                         for (int i = 0; i < n; i++)
                         {
                             ushort u = (ushort)(v[i] << sh);
-                            if (be) BinaryPrimitives.WriteUInt16BigEndian(row.AsSpan(2 * i), u); else BinaryPrimitives.WriteUInt16LittleEndian(row.AsSpan(2 * i), u);
+                            if (be) BinaryPrimitives.WriteUInt16BigEndian(row.Slice(2 * i), u); else BinaryPrimitives.WriteUInt16LittleEndian(row.Slice(2 * i), u);
                         }
                         return;
                     }
@@ -281,7 +304,7 @@ namespace Aardvark.ImageCodecs.DpxImpl
                             uint w = (uint)v[i] << s0;
                             if (i + 1 < n) w |= (uint)v[i + 1] << (t0 - 10);
                             if (i + 2 < n) w |= (uint)v[i + 2] << s2;
-                            if (be) BinaryPrimitives.WriteUInt32BigEndian(row.AsSpan(k), w); else BinaryPrimitives.WriteUInt32LittleEndian(row.AsSpan(k), w);
+                            if (be) BinaryPrimitives.WriteUInt32BigEndian(row.Slice(k), w); else BinaryPrimitives.WriteUInt32LittleEndian(row.Slice(k), w);
                         }
                         return;
                     }
@@ -306,12 +329,12 @@ namespace Aardvark.ImageCodecs.DpxImpl
             }
         }
 
-        static void Put(uint w, bool be, byte[] row, int k)
+        static void Put(uint w, bool be, Span<byte> row, int k)
         {
-            if (be) BinaryPrimitives.WriteUInt32BigEndian(row.AsSpan(k), w); else BinaryPrimitives.WriteUInt32LittleEndian(row.AsSpan(k), w);
+            if (be) BinaryPrimitives.WriteUInt32BigEndian(row.Slice(k), w); else BinaryPrimitives.WriteUInt32LittleEndian(row.Slice(k), w);
         }
 
-        static void FloatRow(RawImage img, int y, int n, int bits, bool be, byte[] row)
+        static void FloatRow(RawImage img, int y, int n, int bits, bool be, Span<byte> row)
         {
             if (img.SampleType == SampleType.Float32)
             {
@@ -331,9 +354,9 @@ namespace Aardvark.ImageCodecs.DpxImpl
             }
         }
 
-        static void Put64(ulong w, bool be, byte[] row, int k)
+        static void Put64(ulong w, bool be, Span<byte> row, int k)
         {
-            if (be) BinaryPrimitives.WriteUInt64BigEndian(row.AsSpan(k), w); else BinaryPrimitives.WriteUInt64LittleEndian(row.AsSpan(k), w);
+            if (be) BinaryPrimitives.WriteUInt64BigEndian(row.Slice(k), w); else BinaryPrimitives.WriteUInt64LittleEndian(row.Slice(k), w);
         }
     }
 }
