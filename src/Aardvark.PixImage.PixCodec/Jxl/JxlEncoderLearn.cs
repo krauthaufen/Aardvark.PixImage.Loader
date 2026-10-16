@@ -185,15 +185,15 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
             // tokens of the residuals per predictor
             var tok = new byte[npr][]; var nbits = new byte[npr][];
-            for (int k = 0; k < npr; k++)
+            System.Threading.Tasks.Parallel.For(0, npr, k =>
             {
-                tok[k] = new byte[n]; nbits[k] = new byte[n];
-                for (int i = 0; i < n; i++) Tokenize(s.Res[i * npr + k], out tok[k][i], out nbits[k][i]);
-            }
+                var tk = tok[k] = new byte[n]; var nk = nbits[k] = new byte[n];
+                for (int i = 0; i < n; i++) Tokenize(s.Res[i * npr + k], out tk[i], out nk[i]);
+            });
             // quantized properties
             var thr = new int[np][];
             var bucket = new byte[np][];
-            for (int k = 0; k < np; k++)
+            System.Threading.Tasks.Parallel.For(0, np, k =>
             {
                 int stride = Math.Max(1, n / 20000);
                 var vals = new int[(n + stride - 1) / stride];
@@ -209,7 +209,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                     bk[i] = (byte)lo;
                 }
                 bucket[k] = bk;
-            }
+            });
             JxlProfile.Mark("learn: quantize");
             var idx = new int[n];
             for (int i = 0; i < n; i++) idx[i] = i;

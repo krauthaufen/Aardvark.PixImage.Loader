@@ -11,16 +11,11 @@ namespace Aardvark.ImageCodecs.JpegXl
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static uint Pack(long v, long pred) => JxlBitWriter.PackSigned(unchecked((int)(v - pred)));
 
-        static readonly int DebugPath = int.TryParse(Environment.GetEnvironmentVariable("PIXCODEC_JXL_PATH"), out var v) ? v : 0;
-
         public static void EncodeChannel(List<JxlChannel> channels, int index, JxlSpecTree t, JxlWpHeader wph, JxlTokens tok)
         {
             var ch = channels[index];
             if (ch.W == 0 || ch.H == 0) return;
             tok.Reserve(ch.W * ch.H);
-            if (DebugPath == 1) { General(channels, index, t, wph, tok); return; }
-            if (DebugPath == 2 && !t.UsesWp && TwoPropLut(ch, t, tok)) return;
-            if (DebugPath == 2) { General(channels, index, t, wph, tok); return; }
             if (t.IsSingleLeaf && t.Pred[0] != 6) { SingleLeaf(ch, t.Pred[0], t.Ctx[0], tok); return; }
             if (t.UsesWp && t.OnlyProperty(15, out var bounds, out var leaves)) { WpIntervals(ch, t, wph, bounds, leaves, tok); return; }
             if (!t.UsesWp && TwoPropLut(ch, t, tok)) return;

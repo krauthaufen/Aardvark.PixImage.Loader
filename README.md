@@ -36,7 +36,7 @@ code living in any `Aardvark.*` namespace.
 | LERC | LERC1 and LERC2 v2..v6 (bands, depth, masks, no-data, lossless float) | decode only |
 | JBIG1 | the whole of T.82 (layers, all stripe orders, bit planes) | single layer, 1..8 bit planes |
 | JPEG 2000 | Part 1 and HTJ2K (.j2k / .jph codestreams, JP2 / JPH container), 1..38 bit, region / reduced resolution / layer limited decode | Part 1 and HTJ2K, lossless and lossy (up to 16 bit), target bitrate, tiles, progression orders |
-| JPEG XL | ISO/IEC 18181-1 codestreams and the 18181-2 container: Modular (every predictor incl. the weighted one, MA trees, RCT, palette and delta palette, squeeze) and VarDCT (every transform up to 256x256, AFV, chroma from luma, custom quantization tables), ANS / prefix codes with LZ77, groups, passes, LF frames, patches, splines, noise, Gaborish, EPF, upsampling, XYB, extra channels (alpha incl. premultiplied, depth, spot colours rendered, CMYK through its profile to sRGB), blending, layers and animation, JPEG recompressions (as pixels), 1..32 bit integer, half and float; EXIF / XMP / JUMBF boxes incl. Brotli compressed ones | decode only |
+| JPEG XL | ISO/IEC 18181-1 codestreams and the 18181-2 container: Modular (every predictor incl. the weighted one, MA trees, RCT, palette and delta palette, squeeze) and VarDCT (every transform up to 256x256, AFV, chroma from luma, custom quantization tables), ANS / prefix codes with LZ77, groups, passes, LF frames, patches, splines, noise, Gaborish, EPF, upsampling, XYB, extra channels (alpha incl. premultiplied, depth, spot colours rendered, CMYK through its profile to sRGB), blending, layers and animation, JPEG recompressions (as pixels), 1..32 bit integer, half and float; EXIF / XMP / JUMBF boxes incl. Brotli compressed ones. Encode: lossless modular (8 / 16 bit, half, float; RCT, palettes, learned MA trees, weighted predictor, LZ77, effort 1..9) and lossy VarDCT in XYB (distance / quality like cjxl, DCT 4x4 .. 64x64, chroma from luma, Gaborish, EPF), alpha, ICC, EXIF / XMP boxes, orientation, animation | decode, encode |
 | KTX / KTX2 | KTX 1.1 and 2.0: 1D, 2D, 3D, cube map and array textures, mip chains; every uncompressed Vulkan / OpenGL format with 8..64 bit components and the packed ones; BC1..BC7, ETC1 / ETC2 / EAC, ASTC (LDR and HDR, all 2D and 3D footprints), Basis Universal ETC1S (BasisLZ), UASTC LDR 4x4 and UASTC HDR 4x4; Zstandard and zlib supercompression; KTX 1 big endian files and orientation | KTX 2 with a full data format descriptor (passes `ktx validate`): uncompressed 8/16/32 bit int, half and float, BC1..BC7, ETC2 / EAC, ASTC (LDR and HDR, every 2D footprint), or Basis Universal ETC1S (BasisLZ, codebooks shared by all images, quality 1..255) and UASTC LDR 4x4; mip chains (given or computed), cube maps, arrays, volumes with 3D mip chains; Zstandard or zlib supercompression |
 | Radiance HDR | RGBE and XYZE, new and old RLE and flat scanlines, all eight scan orders, EXPOSURE / PRIMARIES | RLE RGBE from float (or 8/16 bit converted to linear light) |
 | PNM / PAM / PFM | P1..P7, any maxval up to 65535 (scaled to the full range), PAM tuple types, PFM gray / RGB in both byte orders | P1..P7 (plain or binary, bilevel), PFM |
@@ -60,7 +60,7 @@ code living in any `Aardvark.*` namespace.
 | DPX | SMPTE 268M 1.0 / 2.0, both byte orders, 1/8/10/12/16 bit int and 32/64 bit float, packed / filled method A / B, RLE, several image elements, luma, R/G/B/A/depth, RGB, RGBA, ABGR, Cb Y Cr (Y) 4:2:2 / 4:4:4 (+ alpha) to RGB, user defined 2..8 components, orientation, padding, all header fields (time code, film, television) | gray, RGB, RGBA, 2..8 components at 8, 10, 12, 16 bit and 32/64 bit float, packed / filled A / B, either byte order, header fields |
 | Cineon | Kodak 4.5 draft: 1..16 and 32 bit, all packings, pixel / line / channel interleave, both byte orders, orientation, header fields | gray, RGB at 8, 10 (default for 8 bit images), 16 bit |
 
-Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, JPEG XL encoding, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions,
+Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, lossless JPEG recompression into JPEG XL (jbrd), lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions,
 PVRTC2, YUV and Basis Universal PVR formats, writing 3D ASTC footprints, ANI frames that are raw bitmaps (no AF_ICON),
 FITS HCOMPRESS_1 tiles (the convention does not specify its bit stream), FITS tables and random groups, NRRD's block type,
 NIfTI float128 / complex256, ASCII MetaImage data.
@@ -126,6 +126,17 @@ onto the colour (`RenderSpotColours = false` keeps them out). `Jxl.DecodeExtraCh
 JUMBF. Groups and colour conversion run in parallel (`Multithreaded = false` for one thread). On 8 cores a 13 MP photo
 takes about 0.13 s (lossy, distance 1) and 0.5 s (lossless, effort 3), libjxl 0.08 s and 0.29 s; on one thread 0.5 s and
 2.4 s, libjxl 0.3 s and 1.6 s.
+
+`Jxl.Encode` (also `ImageCodec.Encode`, `PixCodec.Save` / `SaveJxl` for `.jxl`) writes lossy VarDCT by default
+(`Distance = 1`, or `Quality` with cjxl's -q mapping) and lossless modular with `Lossless = true` (or distance 0 /
+quality 100); `Effort` 1..9 trades speed for size like cjxl -e (default 7). Lossless output decodes bit exactly with
+libjxl; on a 12 MP photo it is 10 % smaller than cjxl at effort 1, 1.4 % at 3 and 2.4 % at 7. Lossy output at effort 7
+needs about 4 % fewer bytes than cjxl -e 7 for the same SSIMULACRA2 score (at effort 3 about 4 % more than cjxl -e 3),
+and 16 .. 32 % fewer than our JPEG encoder. Alpha is stored losslessly, ICC profiles, EXIF / XMP boxes (in the container,
+used only when needed), orientation and intensity target are kept; `Jxl.EncodeAnimation` writes animations. Timings on
+a 12 MP photo, 8 threads / 1 thread (busy machine): lossless effort 1 / 3 / 7 0.57 / 0.88 / 3.9 s and 1.7 / 3.5 / 11.5 s
+(cjxl 0.14 / 1.4 / 3.6 s and 0.11 / 2.1 / 13.5 s), lossy effort 3 / 7 0.77 / 2.2 s and 2.2 / 10 s (cjxl 0.63 / 1.5 s and
+0.45 / 4.5 s).
 
 ### Volumes and scientific images
 

@@ -58,6 +58,31 @@ namespace Aardvark.ImageCodecs.JpegXl
             return r;
         }
 
+        static readonly float[][,] InvDequantTables = BuildInv();
+
+        static float[][,] BuildInv()
+        {
+            var r = new float[17][,];
+            for (int t = 0; t < 17; t++)
+            {
+                var d = DequantTables[t];
+                var m = new float[3, d.GetLength(1)];
+                for (int c = 0; c < 3; c++) for (int i = 0; i < m.GetLength(1); i++) m[c, i] = 1 / d[c, i];
+                r[t] = m;
+            }
+            return r;
+        }
+
+        static readonly float[] RateTable = BuildRate();
+
+        static float[] BuildRate()
+        {
+            var r = new float[64];
+            r[0] = 0.25f;
+            for (int a = 1; a < 64; a++) r[a] = 3.2f + 2.0f * MathF.Log2(a);
+            return r;
+        }
+
         /// <summary>The first CoveredX * CoveredY entries of the natural order are the LLF positions (not coded).</summary>
         static readonly bool[][] LlfMask = BuildLlf();
 
@@ -106,23 +131,8 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         static int EpfFor(float d) => d < 0.6f ? 0 : d < 1.6f ? 1 : d < 4.5f ? 2 : 3;
 
-        static float? Env(string n) => float.TryParse(Environment.GetEnvironmentVariable("PIXCODEC_JXL_" + n), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
-
-        static void DebugOverrides()
-        {
-            if (Env("STEP") is float a) StepPerDistance = a;
-            if (Env("LF1") is float b) LfStep1 = b;
-            if (Env("LFEXP") is float c) LfExponent = c;
-            if (Env("AQ") is float d) AqStrength = d;
-            if (Env("AQOFF") is float e) AqOffset = e;
-            if (Env("DZ") is float g) Deadzone = g;
-            if (Env("LAMBDA") is float h) Lambda = h;
-            if (Env("SHARP") is float i) SharpnessDefault = (int)i;
-        }
-
         public static void EncodeFrame(JxlBitWriter cs, RawImage img, JxlImageHeader h, JxlFrameHeader fh, JxlEncodeOptions opt)
         {
-            DebugOverrides();
             float d = Math.Max(0.05f, opt.EffectiveDistance);
             var f = new Frame { H = h, Fh = fh, Distance = d, Effort = opt.Effort, Parallel = opt.Multithreaded };
             fh.Modular = false;
@@ -150,14 +160,16 @@ namespace Aardvark.ImageCodecs.JpegXl
             if (tf == TransferFunction.Pq) scale = 10000f / h.ToneMapping.IntensityTarget;
             else if (tf == TransferFunction.Hlg) scale = 1000f / h.ToneMapping.IntensityTarget;
             var planes = JxlEncColour.LinearPlanes(img, tf, img.Metadata?.Gamma ?? 0, icc, f.Pw, f.Ph, 1 / scale, f.Parallel);
+            JxlProfile.Mark("vardct linear");
             JxlEncColour.ToXyb(planes[0], planes[1], planes[2], f.Parallel);
+            JxlProfile.Mark("vardct xyb");
             if (gab) InverseGaborish(planes, f, dims.XSize, dims.YSize);
             f.Xyb = planes;
             JxlProfile.Mark("vardct colour");
 
             ChooseQuantizer(f);
             AdaptiveQuantization(f);
-            ChooseStrategies(f, Env("FORCE") is float fs ? (int)fs : opt.ForceStrategy);
+            ChooseStrategies(f, opt.ForceStrategy);
             JxlProfile.Mark("vardct aq + strategies");
             QuantizeLf(f, ComputeDc(f));
             JxlProfile.Mark("vardct lf");
@@ -176,46 +188,41 @@ namespace Aardvark.ImageCodecs.JpegXl
         static void InverseGaborish(float[][] planes, Frame f, int w, int h)
         {
             var gw = f.Fh.Filter.GabWeights;
-            int iters = f.Effort <= 2 ? 2 : 3;
-            System.Threading.Tasks.Parallel.For(0, 3, new ParallelOptions { MaxDegreeOfParallelism = f.Parallel ? 3 : 1 }, c =>
+            int iters = f.Effort < 7 ? 2 : 3;
+            int n = w * h, pw = f.Pw;
+            var orig = new float[n]; var x = new float[n]; var x2 = new float[n];
+            for (int c = 0; c < 3; c++)
             {
                 var p = planes[c];
-                var orig = new float[w * h];
-                for (int y = 0; y < h; y++) Array.Copy(p, y * f.Pw, orig, y * w, w);
-                var x = (float[])orig.Clone();
+                float norm = 1 / (1 + 4 * gw[2 * c] + 4 * gw[2 * c + 1]);
+                float c0 = norm, c1 = gw[2 * c] * norm, c2 = gw[2 * c + 1] * norm;
+                for (int y = 0; y < h; y++) Array.Copy(p, y * pw, orig, y * w, w);
+                Array.Copy(orig, x, n);
                 for (int it = 0; it < iters; it++)
                 {
-                    var g = Gaborish(x, w, h, gw[2 * c], gw[2 * c + 1], f.Parallel);
-                    for (int i = 0; i < x.Length; i++) x[i] += orig[i] - g[i];
+                    var src = x; var dst = x2;
+                    void Row(int y)
+                    {
+                        int ru = Math.Max(0, y - 1) * w, rm = y * w, rd = Math.Min(h - 1, y + 1) * w;
+                        for (int xx = 0; xx < w; xx++)
+                        {
+                            int xl = xx > 0 ? xx - 1 : 0, xr = xx + 1 < w ? xx + 1 : w - 1;
+                            float side = src[ru + xx] + src[rd + xx] + src[rm + xl] + src[rm + xr];
+                            float corner = src[ru + xl] + src[ru + xr] + src[rd + xl] + src[rd + xr];
+                            float g = src[rm + xx] * c0 + side * c1 + corner * c2;
+                            dst[rm + xx] = src[rm + xx] + orig[rm + xx] - g;
+                        }
+                    }
+                    if (f.Parallel && h >= 64) Parallel.For(0, h, Row); else for (int y = 0; y < h; y++) Row(y);
+                    (x, x2) = (x2, x);
                 }
                 for (int y = 0; y < h; y++)
                 {
-                    Array.Copy(x, y * w, p, y * f.Pw, w);
-                    for (int xx = w; xx < f.Pw; xx++) p[y * f.Pw + xx] = x[y * w + w - 1];
+                    Array.Copy(x, y * w, p, y * pw, w);
+                    for (int xx = w; xx < pw; xx++) p[y * pw + xx] = x[y * w + w - 1];
                 }
-                for (int y = h; y < f.Ph; y++) Array.Copy(p, (h - 1) * f.Pw, p, y * f.Pw, f.Pw);
-            });
-        }
-
-        /// <summary>The decoder's Gaborish smoothing (3x3, borders mirrored: the edge sample repeats).</summary>
-        static float[] Gaborish(float[] src, int w, int h, float w1, float w2, bool parallel)
-        {
-            var o = new float[src.Length];
-            float norm = 1 / (1 + 4 * w1 + 4 * w2);
-            float c0 = norm, c1 = w1 * norm, c2 = w2 * norm;
-            void Row(int y)
-            {
-                int ru = Math.Max(0, y - 1) * w, rm = y * w, rd = Math.Min(h - 1, y + 1) * w;
-                for (int x = 0; x < w; x++)
-                {
-                    int xl = x > 0 ? x - 1 : 0, xr = x + 1 < w ? x + 1 : w - 1;
-                    float side = src[ru + x] + src[rd + x] + src[rm + xl] + src[rm + xr];
-                    float corner = src[ru + xl] + src[ru + xr] + src[rd + xl] + src[rd + xr];
-                    o[rm + x] = src[rm + x] * c0 + side * c1 + corner * c2;
-                }
+                for (int y = h; y < f.Ph; y++) Array.Copy(p, (h - 1) * pw, p, y * pw, pw);
             }
-            if (parallel && h >= 64) Parallel.For(0, h, Row); else for (int y = 0; y < h; y++) Row(y);
-            return o;
         }
 
         // ------------------------------------------------------------------ quantizer and LF
@@ -440,12 +447,13 @@ namespace Aardvark.ImageCodecs.JpegXl
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
         static float Rate(int q)
         {
-            if (q == 0) return 0.25f;
             int a = q < 0 ? -q : q;
-            return 3.2f + 2.0f * MathF.Log2(a);
+            return a < 64 ? RateTable[a] : 3.2f + 2.0f * MathF.Log2(a);
         }
 
         internal static float Lambda = 9f;
+        /// <summary>The smaller transforms are only tried on blocks whose 8x8 DCT costs more than this.</summary>
+        internal static float SmallGate = 150f;
 
         /// <summary>
         /// Cost (rate + lambda * distortion in units of the quantization steps) of coding the region of the varblock at
@@ -464,6 +472,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             float* coef = buf, yrec = buf + size, scratch = buf + 2 * size;
             int table = JxlAcStrategy.QuantTable[st];
             var dm = DequantTables[table];
+            var idm = InvDequantTables[table];
             var llf = LlfMask[st];
             // average quant field of the covered blocks
             float qf = 0;
@@ -477,19 +486,19 @@ namespace Aardvark.ImageCodecs.JpegXl
                 fixed (float* src = f.Xyb[c])
                     JxlEncDct.Forward(st, src + (long)by * 8 * f.Pw + bx * 8, f.Pw, coef, scratch);
                 float m = mulBase * (c == 0 ? f.XQm : c == 2 ? f.BQm : 1);
+                float im = 1 / m;
                 float bias1 = f.QuantBias[c], bn = f.QuantBiasNum;
                 for (int k = 0; k < size; k++)
                 {
                     if (llf[k]) { if (c == 1) yrec[k] = 0; continue; }
                     float v = coef[k];
                     if (c == 2) v -= yrec[k];
-                    float step = m * dm[c, k];
-                    float inv = 1 / step;
+                    float inv = idm[c, k] * im;
                     int q = Quantize(v, inv, bias1, bn, Deadzone);
                     float rec = Dequant(q, bias1, bn);
                     float e = v * inv - rec;
                     cost += Rate(q) + Lambda * e * e;
-                    if (c == 1) yrec[k] = rec * step;
+                    if (c == 1) yrec[k] = rec * m * dm[c, k];
                 }
             }
             return cost;
@@ -551,7 +560,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                             if (bx >= bw || by >= bh) continue;
                             float best = Cost(f, JxlAcStrategy.Dct8, bx, by, pb);
                             byte bs = JxlAcStrategy.Dct8;
-                            if (small)
+                            if (small && best > SmallGate)
                                 foreach (int st in new[] { JxlAcStrategy.Dct4x4, JxlAcStrategy.Dct4x8, JxlAcStrategy.Dct8x4 })
                                 {
                                     float c = Cost(f, st, bx, by, pb);
@@ -774,8 +783,10 @@ namespace Aardvark.ImageCodecs.JpegXl
             var lp = JxlLosslessParams.For(Math.Min(f.Effort, 7));
             if (lp.FixedTree == 0)
             {
-                // the modular parts of a lossy frame are small: a quicker tree
+                // the modular parts of a lossy frame (1/64 of the pixels and the block data) are small: sample more of
+                // them, but not too many
                 lp.Tree.SampleFraction = Math.Min(1.0, lp.Tree.SampleFraction * 4);
+                lp.Tree.MaxSamples = Math.Min(lp.Tree.MaxSamples, 120_000);
             }
             var streams = new JxlModularStreams();
             // extra channels (alpha) as modular channels: global part and groups, as in lossless frames

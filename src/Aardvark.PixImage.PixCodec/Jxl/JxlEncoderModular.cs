@@ -298,23 +298,8 @@ namespace Aardvark.ImageCodecs.JpegXl
                     p.ClusterEffort = 4; p.MaxClusters = 256;
                     break;
             }
-            DebugOverrides(p);
             return p;
         }
 
-        static void DebugOverrides(JxlLosslessParams p)
-        {
-            static double? D(string n) => double.TryParse(Environment.GetEnvironmentVariable("PIXCODEC_JXL_" + n), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
-            if (D("PEN") is double a) p.Tree.SplitPenalty = a;
-            if (D("LEAVES") is double b) p.Tree.MaxLeaves = (int)b;
-            if (D("FRAC") is double c) p.Tree.SampleFraction = c;
-            if (D("MAXS") is double d) p.Tree.MaxSamples = (int)d;
-            if (D("Q") is double e) p.Tree.Quantiles = (int)e;
-            if (D("MINLEAF") is double f) p.Tree.MinLeafSamples = (int)f;
-            if (D("CL") is double g) p.MaxClusters = (int)g;
-            if (D("LZ") is double h) p.Lz77 = h > 0;
-            if (D("PB") is double i) p.TryPaletteBoth = i > 0;
-            if (D("PAL") is double j) p.PaletteMaxColours = (int)j;
-        }
     }
 }

@@ -30,8 +30,9 @@ namespace Aardvark.ImageCodecs
         /// Speed versus size, 1 (fastest) .. 9 (smallest), like cjxl -e. Default 7. Lossless: 1 and 2 use the clamped gradient
         /// predictor with a fixed context tree, 3 the weighted predictor with a fixed tree, from 4 on the context tree is
         /// learned from samples, with more predictors, properties and samples the higher the effort; 8 and 9 add LZ77.
-        /// Lossy: 1 .. 3 code everything with 8x8 DCTs, from 4 on larger and smaller transforms are chosen per block, and 7+
-        /// adds chroma from luma per tile and a finer adaptive quantization search.
+        /// Lossy: 1 .. 3 code everything with 8x8 DCTs (3 adds chroma from luma per 64x64 tile), from 4 on 16x16 and 32x32
+        /// regions take the cheapest of the large and the split transforms, 5 adds DCT4x4 / 4x8 / 8x4 for busy blocks and
+        /// 7 adds 64x64 transforms and a third inverse Gaborish iteration; 8 and 9 code like 7.
         /// </summary>
         public int Effort { get; set; } = 7;
 

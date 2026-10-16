@@ -78,6 +78,22 @@ namespace Aardvark.ImageCodecs.JpegXl
             bool isFloat = img.SampleType is SampleType.Float16 or SampleType.Float32;
             void Row(int y)
             {
+                if (lut8 != null)
+                {
+                    // the common case: 8 bit samples through the table
+                    var d8 = (byte[])img.Data;
+                    int o = y * pw, s0 = y * w * nc;
+                    var p0 = planes[0]; var p1 = planes[1]; var p2 = planes[2];
+                    for (int x = 0; x < w; x++, s0 += nc)
+                    {
+                        float r = lut8[d8[s0]];
+                        p0[o + x] = r;
+                        p1[o + x] = ncol == 1 ? r : lut8[d8[s0 + 1]];
+                        p2[o + x] = ncol == 1 ? r : lut8[d8[s0 + 2]];
+                    }
+                    for (int c = 0; c < 3; c++) for (int x = w; x < pw; x++) planes[c][o + x] = planes[c][o + w - 1];
+                    return;
+                }
                 var row = new float[w * 3];
                 for (int x = 0; x < w; x++)
                 {
@@ -130,6 +146,19 @@ namespace Aardvark.ImageCodecs.JpegXl
             return planes;
         }
 
+        /// <summary>Cube root (bit trick start, three Newton steps: relative error below 1e-7), negative inputs mirrored.</summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        static float Cbrt(float v)
+        {
+            float a = MathF.Abs(v);
+            if (a < 1e-30f) return 0;
+            float y = BitConverter.Int32BitsToSingle(BitConverter.SingleToInt32Bits(a) / 3 + 709921077);
+            y = (2 * y + a / (y * y)) * (1 / 3f);
+            y = (2 * y + a / (y * y)) * (1 / 3f);
+            y = (2 * y + a / (y * y)) * (1 / 3f);
+            return v < 0 ? -y : y;
+        }
+
         /// <summary>In place: linear sRGB to X, Y, B.</summary>
         public static void ToXyb(float[] r, float[] g, float[] b, bool parallel)
         {
@@ -144,7 +173,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                     float l = m[0] * R + m[1] * G + m[2] * B + Bias;
                     float mm = m[3] * R + m[4] * G + m[5] * B + Bias;
                     float sv = m[6] * R + m[7] * G + m[8] * B + Bias;
-                    float lc = MathF.Cbrt(l) - CbrtBias, mc = MathF.Cbrt(mm) - CbrtBias, sc = MathF.Cbrt(sv) - CbrtBias;
+                    float lc = Cbrt(l) - CbrtBias, mc = Cbrt(mm) - CbrtBias, sc = Cbrt(sv) - CbrtBias;
                     r[i] = (lc - mc) * 0.5f;
                     g[i] = (lc + mc) * 0.5f;
                     b[i] = sc;
