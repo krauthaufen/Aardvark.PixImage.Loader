@@ -50,6 +50,10 @@ namespace Aardvark.ImageCodecs
         Qoi,
         Ico,
         Ktx,
+        Icns,
+        Ani,
+        Astc,
+        Pvr,
     }
 
     /// <summary>

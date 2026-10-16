@@ -19,6 +19,10 @@ namespace Aardvark.ImageCodecs
             if (Bmp.IsMatch(header)) return ImageFormat.Bmp;
             if (Dds.IsMatch(header)) return ImageFormat.Dds;
             if (Ktx.IsMatch(header)) return ImageFormat.Ktx;
+            if (Icns.IsMatch(header)) return ImageFormat.Icns;
+            if (Ani.IsMatch(header)) return ImageFormat.Ani;
+            if (Astc.IsMatch(header)) return ImageFormat.Astc;
+            if (Pvr.IsMatch(header)) return ImageFormat.Pvr;
             if (Qoi.IsMatch(header)) return ImageFormat.Qoi;
             if (Hdr.IsMatch(header)) return ImageFormat.Hdr;
             if (Pfm.IsMatch(header)) return ImageFormat.Pfm;
@@ -47,6 +51,10 @@ namespace Aardvark.ImageCodecs
                 ".qoi" => ImageFormat.Qoi,
                 ".ico" or ".cur" => ImageFormat.Ico,
                 ".ktx" or ".ktx2" => ImageFormat.Ktx,
+                ".icns" => ImageFormat.Icns,
+                ".ani" => ImageFormat.Ani,
+                ".astc" => ImageFormat.Astc,
+                ".pvr" => ImageFormat.Pvr,
                 _ => ImageFormat.Unknown,
             };
 
@@ -74,6 +82,10 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Qoi => Qoi.GetInfo(data),
             ImageFormat.Ico => Ico.GetInfo(data),
             ImageFormat.Ktx => Ktx.GetInfo(data),
+            ImageFormat.Icns => Icns.GetInfo(data),
+            ImageFormat.Ani => Ani.GetInfo(data),
+            ImageFormat.Astc => Astc.GetInfo(data),
+            ImageFormat.Pvr => Pvr.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -206,7 +218,7 @@ namespace Aardvark.ImageCodecs
             // codes have to be walked: these need all the data. The others are parsed from a growing prefix; their
             // header parsers throw ImageFormatException when the prefix ends inside the headers, which is the signal
             // to read more.
-            bool needAll = format is ImageFormat.Tiff or ImageFormat.Gif or ImageFormat.Tga or ImageFormat.Ico
+            bool needAll = format is ImageFormat.Tiff or ImageFormat.Gif or ImageFormat.Tga or ImageFormat.Ico or ImageFormat.Icns or ImageFormat.Ani or ImageFormat.Astc
                 || format == ImageFormat.Bmp && Bmp.InfoNeedsAllData(buf.AsSpan(0, n));
             while (true)
             {
@@ -274,6 +286,10 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Qoi => Qoi.Decode(data),
             ImageFormat.Ico => Ico.Decode(data),
             ImageFormat.Ktx => Ktx.Decode(data),
+            ImageFormat.Icns => Icns.Decode(data),
+            ImageFormat.Ani => Ani.Decode(data),
+            ImageFormat.Astc => Astc.Decode(data),
+            ImageFormat.Pvr => Pvr.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -315,6 +331,14 @@ namespace Aardvark.ImageCodecs
                     return Ico.DecodeAll(data);
                 case ImageFormat.Ktx:
                     return Ktx.DecodeAll(data);
+                case ImageFormat.Icns:
+                    return Icns.DecodeAll(data);
+                case ImageFormat.Ani:
+                    return Ani.DecodeAll(data);
+                case ImageFormat.Astc:
+                    return Astc.DecodeVolume(data);
+                case ImageFormat.Pvr:
+                    return Pvr.DecodeAll(data);
                 default:
                     return new[] { Decode(data) };
             }
@@ -335,6 +359,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Dds => Dds.DecodeMipmaps(data),
             ImageFormat.Exr => Exr.DecodeMipmaps(data),
             ImageFormat.Ktx => Ktx.DecodeMipmaps(data),
+            ImageFormat.Pvr => Pvr.DecodeMipmaps(data),
             _ => new[] { Decode(data) },
         };
 
@@ -369,6 +394,10 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Qoi: Qoi.Encode(image, output); break;
                 case ImageFormat.Ico: Ico.Encode(new[] { image }, output); break;
                 case ImageFormat.Ktx: Ktx.Encode(image, output); break;
+                case ImageFormat.Icns: Icns.Encode(new[] { image }, output); break;
+                case ImageFormat.Ani: Ani.Encode(new[] { new AniInputFrame(image) }, output); break;
+                case ImageFormat.Astc: Astc.Encode(image, output); break;
+                case ImageFormat.Pvr: Pvr.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }
