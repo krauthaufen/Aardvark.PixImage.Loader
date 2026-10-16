@@ -322,7 +322,7 @@ namespace Aardvark.ImageCodecs
             {
                 var dst = IccProfile.Parse(h.Icc);
                 if (dst.Channels != ncol) return null;
-                t = new IccTransform(IccProfile.LinearSrgb, dst, IccRenderingIntent.RelativeColorimetric);
+                t = new IccTransform(ncol == 1 ? IccProfile.GrayLinear : IccProfile.LinearSrgb, dst, IccRenderingIntent.RelativeColorimetric);
             }
             catch (Exception e) when (e is ImageFormatException or ImageNotSupportedException) { return null; }
             var col = new float[ncol][];
@@ -330,9 +330,12 @@ namespace Aardvark.ImageCodecs
             JxlColour.Chunked(n, opt.Multithreaded, (s, e) =>
             {
                 int cnt = e - s;
-                var inp = new float[cnt * 3];
+                var inp = new float[cnt * ncol];
                 var outp = new float[cnt * ncol];
-                for (int i = 0; i < cnt; i++) { inp[3 * i] = p[0][s + i]; inp[3 * i + 1] = p[1][s + i]; inp[3 * i + 2] = p[2][s + i]; }
+                if (ncol == 1)
+                    for (int i = 0; i < cnt; i++) inp[i] = 0.2126f * p[0][s + i] + 0.7152f * p[1][s + i] + 0.0722f * p[2][s + i];
+                else
+                    for (int i = 0; i < cnt; i++) { inp[3 * i] = p[0][s + i]; inp[3 * i + 1] = p[1][s + i]; inp[3 * i + 2] = p[2][s + i]; }
                 t.Transform(inp, outp);
                 for (int i = 0; i < cnt; i++)
                     for (int c = 0; c < ncol; c++) col[c][s + i] = outp[i * ncol + c];

@@ -253,11 +253,11 @@ namespace Aardvark.ImageCodecs.JpegXl
                         stride = VarInt(enc, ref cpos, cend);
                         if (stride < (ulong)width) throw new ImageFormatException("JPEG XL: bad ICC stride");
                     }
-                    if (stride * 4 >= (ulong)o.Count + 1 && stride > (ulong)o.Count) { }
+                    if (o.Count == 0 || (ulong)((o.Count - 1) >> 2) < stride) throw new ImageFormatException("JPEG XL: bad ICC prediction stride");
                     ulong num = VarInt(enc, ref cpos, cend);
                     if (num > (ulong)(end - pos) || stride > int.MaxValue) throw new ImageFormatException("JPEG XL: truncated ICC data");
                     byte[] shuffled;
-                    if ((flags & 32) != 0 && width > 1) shuffled = Unshuffle(enc, pos, (int)num, width);
+                    if (width > 1) shuffled = Unshuffle(enc, pos, (int)num, width);
                     else { shuffled = new byte[num]; Array.Copy(enc, pos, shuffled, 0, (int)num); }
                     pos += (int)num;
                     int start = o.Count;
