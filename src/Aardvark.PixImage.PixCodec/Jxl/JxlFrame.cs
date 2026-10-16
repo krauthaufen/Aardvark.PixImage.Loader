@@ -74,6 +74,7 @@ namespace Aardvark.ImageCodecs.JpegXl
 
             // LF groups
             ForEach(dims.NumLfGroups, toc.Single, i => DecodeLfGroup(SectionReader(toc.LfGroupIndex(i)), i, maxTree));
+            if (!fh.Modular) AfterLfGroups();
             if (!fh.Modular) DecodeHfGlobal(SectionReader(toc.HfGlobalIndex(dims)));
             ForEach(dims.NumGroups, toc.Single, g =>
             {

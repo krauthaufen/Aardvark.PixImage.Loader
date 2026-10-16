@@ -122,6 +122,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             JxlModularGlobal? global, int groupDim, long maxTreeNodes, bool allocate, out JxlModularHeader header)
         {
             var img = new JxlModularImage(channels, bitDepth);
+            if (channels.Count == 0) { header = img.Header; return img; }   // nothing coded, not even the header
             header = img.Header = JxlModularHeader.Read(br);
             br.CheckEnd();
             foreach (var t in header.Transforms) img.ApplyMeta(t);

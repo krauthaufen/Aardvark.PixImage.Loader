@@ -28,6 +28,9 @@ namespace Aardvark.ImageCodecs
         /// </summary>
         public bool RenderSpotColours { get; set; } = true;
 
+        /// <summary>Test hook: return Float32 samples whatever the header says.</summary>
+        internal bool ForceFloat { get; set; }
+
         internal static readonly JxlDecodeOptions Default = new();
     }
 
@@ -232,13 +235,14 @@ namespace Aardvark.ImageCodecs
         static RawImage Output(JxlImageHeader h, JxlFrameImage canvas, ImageMetadata meta, JxlDecodeOptions opt)
         {
             var (color, nch, type) = OutputFormat(h);
+            if (opt.ForceFloat) type = SampleType.Float32;
             int w = canvas.Width, hh = canvas.Height, n = w * hh;
             int ncol = h.Colour.IsGray ? 1 : 3;
             int alpha = h.AlphaChannel;
             var planes = new float[nch][];
             int[][]? ints = canvas.IntPlanes;
             var p = canvas.Planes;
-            if (ints != null && (opt.RenderSpotColours && HasSpot(h) || alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated)) ints = null;
+            if (ints != null && (opt.ForceFloat || opt.RenderSpotColours && HasSpot(h) || alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated)) ints = null;
             if (ints == null)
             {
                 // colour planes in the output colour space
