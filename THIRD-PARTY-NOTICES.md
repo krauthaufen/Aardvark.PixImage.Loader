@@ -106,3 +106,21 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SO
 
 Except as contained in this notice, the name of The Open Group shall not be used in advertising or otherwise to
 promote the sale, use or other dealings in this Software without prior written authorization from The Open Group.
+
+## Mac OS system colour tables (ICNS 4 and 8 bit icons)
+
+`src/Aardvark.PixImage.PixCodec/Icns/Icns.cs` (`MacPalettes`) holds the default colour tables of the Mac OS ('clut'
+resources 4 and 8) that the 4 and 8 bit icon types index: the 16 colours as 16 bit RGB values and the rule that builds the
+256 colour table (the 6 x 6 x 6 cube from white without black, ten step ramps of red, green, blue and gray, black last).
+Source: Apple, Inside Macintosh: Imaging With QuickDraw (1994), chapter 4 "Color QuickDraw" (Table 4-4 lists the shared
+colours of the 16 colour table) and Plate 1 / the default colour tables; the 8 bit table was checked against macOS's own
+decoding (sips) of an icl8 element. Only the colour values were taken.
+
+## PVRTC and PVR container
+
+`src/Aardvark.PixImage.PixCodec/Pvr/` is written from the Khronos Data Format Specification 1.3, section 24 (PVRTC,
+derived from Imagination's PVRTC Texture Compression User Guide) and Imagination's PVR File Format Specification
+(https://docs.imgtec.com/specifications/pvr-file-format-specification). No tables were taken. Where the decoding of
+Imagination's PVRTexTool differs from the text (PVRTC1 2 bpp interpolated mode weights), the tool's results were followed;
+PVRTexTool was only run.
+

@@ -12,7 +12,7 @@ namespace Aardvark.ImageCodecs
         public static TransferFunction Implied(ImageFormat format, SampleType type, ColorModel color)
             => format == ImageFormat.Unknown ? TransferFunction.Unknown
              : format is ImageFormat.Exr or ImageFormat.Hdr or ImageFormat.Pfm || IsFloat(type) ? TransferFunction.Linear
-             : format is ImageFormat.Dds or ImageFormat.Nrrd or ImageFormat.Nifti or ImageFormat.MetaImage or ImageFormat.Fits ? TransferFunction.Unknown
+             : format is ImageFormat.Dds or ImageFormat.Astc or ImageFormat.Pvr or ImageFormat.Nrrd or ImageFormat.Nifti or ImageFormat.MetaImage or ImageFormat.Fits ? TransferFunction.Unknown
              : Implied(type, color);
 
         public static TransferFunction Implied(SampleType type, ColorModel color)
@@ -33,6 +33,10 @@ namespace Aardvark.ImageCodecs
                 // scientific data: values are measurements, not colours (float samples are reported linear)
                 case ImageFormat.Nrrd: case ImageFormat.Nifti: case ImageFormat.MetaImage: case ImageFormat.Fits:
                     return IsFloat(info.SampleType) ? TransferFunction.Linear : TransferFunction.Unknown;
+                case ImageFormat.Astc: return IsFloat(info.SampleType) ? TransferFunction.Linear : TransferFunction.Unknown;
+                case ImageFormat.Pvr:
+                    try { return Pvr.GetTextureInfo(data).Transfer; }
+                    catch (Exception e) when (e is ImageFormatException or ImageNotSupportedException) { return TransferFunction.Unknown; }
                 case ImageFormat.Dds:
                     {
                         try

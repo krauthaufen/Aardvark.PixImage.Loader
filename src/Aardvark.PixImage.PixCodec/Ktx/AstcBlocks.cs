@@ -62,6 +62,42 @@ namespace Aardvark.ImageCodecs
             for (int i = 0; i < n; i++) rgba[i] = (float)BitConverter.UInt16BitsToHalf(h[i]);
         }
 
+        /// <summary>
+        /// Whether a block needs the HDR profile: an HDR void extent, or a partition with an HDR colour endpoint mode (2, 3,
+        /// 7, 11, 14, 15). Illegal blocks count as LDR.
+        /// </summary>
+        public static bool IsHdr(ReadOnlySpan<byte> block, bool is3D)
+        {
+            ulong lo = BinaryPrimitives.ReadUInt64LittleEndian(block), hi = BinaryPrimitives.ReadUInt64LittleEndian(block.Slice(8));
+            int bm = (int)lo & 0x7FF;
+            if ((bm & 0x1FF) == 0x1FC) return (lo >> 9 & 1) != 0;
+            int mi = (is3D ? Modes3D : Modes2D)[bm];
+            if (mi < 0) return false;
+            int gw = mi & 15, gh = mi >> 4 & 15, gd = mi >> 8 & 15, wq = mi >> 12 & 15;
+            bool dual = (mi >> 16 & 1) != 0;
+            int parts = ((int)(lo >> 11) & 3) + 1;
+            int weightCount = gw * gh * gd * (dual ? 2 : 1);
+            if (weightCount > 64) return false;
+            int weightBits = IseBits(wq, weightCount);
+            if (weightBits < 24 || weightBits > 96) return false;
+            Span<int> cem = stackalloc int[4];
+            if (parts == 1) cem[0] = (int)(lo >> 13) & 15;
+            else
+            {
+                int sel = (int)(lo >> 23) & 3;
+                if (sel == 0) for (int i = 0; i < parts; i++) cem[i] = (int)(lo >> 25) & 15;
+                else
+                {
+                    int extra = 3 * parts - 4;
+                    int field = (int)(lo >> 25) & 15 | Read(lo, hi, 128 - weightBits - extra, extra, 128) << 4;
+                    for (int i = 0; i < parts; i++) cem[i] = (sel - 1 + (field >> i & 1)) << 2 | field >> (parts + 2 * i) & 3;
+                }
+            }
+            for (int i = 0; i < parts; i++)
+                if (cem[i] is 2 or 3 or 7 or 11 or 14 or 15) return true;
+            return false;
+        }
+
         // ------------------------------------------------------------------ quantization ranges
 
         // All ranges used by ASTC, ascending: maximum value, trits / quints, and the number of plain bits.

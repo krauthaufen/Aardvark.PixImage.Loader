@@ -10,7 +10,7 @@ namespace Aardvark.ImageCodecs.KtxImpl
 {
     internal static class KtxWriter
     {
-        static bool ResolveSrgb(RawImage img, KtxEncodeOptions opt)
+        internal static bool ResolveSrgb(RawImage img, KtxEncodeOptions opt)
             => opt.Srgb ?? (img.Metadata?.Transfer switch
             {
                 TransferFunction.Srgb => true,
@@ -36,7 +36,7 @@ namespace Aardvark.ImageCodecs.KtxImpl
         /// <summary>[layer][face][mip] from per layer face lists.</summary>
         public static IReadOnlyList<IReadOnlyList<IReadOnlyList<RawImage>>> Layers(IReadOnlyList<IReadOnlyList<RawImage>>[] layers) => layers;
 
-        sealed class Target
+        internal sealed class Target
         {
             public int Vk;
             public int Channels;               // stored channels (images may be expanded)
@@ -51,7 +51,7 @@ namespace Aardvark.ImageCodecs.KtxImpl
             public int BlockBytes => Format?.BlockBytes ?? (Bc == TextureCompression.Etc1s ? 8 : 16);
         }
 
-        static Target Choose(RawImage img, KtxEncodeOptions opt)
+        internal static Target Choose(RawImage img, KtxEncodeOptions opt)
         {
             if (img.Channels > 4) throw new ImageNotSupportedException("KTX: at most four channels can be written");
             bool srgb = ResolveSrgb(img, opt);
@@ -261,7 +261,7 @@ namespace Aardvark.ImageCodecs.KtxImpl
         };
 
         /// <summary>The stored bytes of one image.</summary>
-        static byte[] Image(RawImage img, Target t, KtxEncodeOptions opt)
+        internal static byte[] Image(RawImage img, Target t, KtxEncodeOptions opt)
         {
             if (t.Bc == TextureCompression.Uastc)
                 return UastcEncoder.EncodeImage(ToRgba8(img), img.Width, img.Height, Effort(opt.Quality), opt.MaxDegreeOfParallelism);
@@ -360,9 +360,34 @@ namespace Aardvark.ImageCodecs.KtxImpl
         public static void WriteVolume(Stream output, IReadOnlyList<RawImage> slices, KtxEncodeOptions opt)
         {
             var first = slices[0];
+            var chain = VolumeChain(slices, opt);
+            var t = Choose(first, opt);
+            if (t.Bc == TextureCompression.Etc1s)
+            {
+                var all = new List<RawImage>();
+                var lof = new List<int>();
+                for (int m = 0; m < chain.Count; m++) foreach (var s in chain[m]) { all.Add(s); lof.Add(m); }
+                var (sgd, lv) = Etc1s(all, lof, chain.Count, t, opt);
+                Emit(output, t, first.Width, first.Height, slices.Count, 0, 1, lv, KtxTextureKind.Texture3D, opt, sgd);
+                return;
+            }
+            var levels = new byte[chain.Count][];
+            for (int m = 0; m < chain.Count; m++)
+            {
+                var ms = new MemoryStream();
+                foreach (var s in chain[m]) ms.Write(Image(s, t, opt));
+                levels[m] = ms.ToArray();
+            }
+            Emit(output, t, first.Width, first.Height, slices.Count, 0, 1, levels, KtxTextureKind.Texture3D, opt);
+        }
+
+        /// <summary>The slices, followed by a computed 3D mip chain (2 x 2 x 2 box filter) when the options ask for one.</summary>
+        internal static List<IReadOnlyList<RawImage>> VolumeChain(IReadOnlyList<RawImage> slices, KtxEncodeOptions opt)
+        {
+            var first = slices[0];
             foreach (var s in slices)
                 if (s.Width != first.Width || s.Height != first.Height || s.SampleType != first.SampleType || s.Color != first.Color || s.Channels != first.Channels)
-                    throw new ArgumentException("KTX: all slices need the same size, sample type and colour model");
+                    throw new ArgumentException("all slices need the same size, sample type and colour model");
             var chain = new List<IReadOnlyList<RawImage>> { slices };
             if (opt.GenerateMipmaps)
             {
@@ -382,24 +407,7 @@ namespace Aardvark.ImageCodecs.KtxImpl
                     cur = next; w = nw; h = nh; d = nd;
                 }
             }
-            var t = Choose(first, opt);
-            if (t.Bc == TextureCompression.Etc1s)
-            {
-                var all = new List<RawImage>();
-                var lof = new List<int>();
-                for (int m = 0; m < chain.Count; m++) foreach (var s in chain[m]) { all.Add(s); lof.Add(m); }
-                var (sgd, lv) = Etc1s(all, lof, chain.Count, t, opt);
-                Emit(output, t, first.Width, first.Height, slices.Count, 0, 1, lv, KtxTextureKind.Texture3D, opt, sgd);
-                return;
-            }
-            var levels = new byte[chain.Count][];
-            for (int m = 0; m < chain.Count; m++)
-            {
-                var ms = new MemoryStream();
-                foreach (var s in chain[m]) ms.Write(Image(s, t, opt));
-                levels[m] = ms.ToArray();
-            }
-            Emit(output, t, first.Width, first.Height, slices.Count, 0, 1, levels, KtxTextureKind.Texture3D, opt);
+            return chain;
         }
 
         /// <summary>Sample-wise mean of two images (in linear light for sRGB data).</summary>

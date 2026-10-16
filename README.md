@@ -40,7 +40,11 @@ code living in any `Aardvark.*` namespace.
 | Radiance HDR | RGBE and XYZE, new and old RLE and flat scanlines, all eight scan orders, EXPOSURE / PRIMARIES | RLE RGBE from float (or 8/16 bit converted to linear light) |
 | PNM / PAM / PFM | P1..P7, any maxval up to 65535 (scaled to the full range), PAM tuple types, PFM gray / RGB in both byte orders | P1..P7 (plain or binary, bilevel), PFM |
 | QOI | everything (sRGB / linear header) | RGB, RGBA |
-| ICO / CUR | PNG and DIB entries of every bit depth with AND mask or alpha, cursor hotspots | PNG or 32 bit DIB entries, icons and cursors |
+| ICO / CUR | PNG and DIB entries of every bit depth with AND mask or alpha, cursor hotspots | PNG or 32 bit DIB entries, icons and cursors (with hotspots) |
+| ANI | animated cursors / icons: anih, rate, seq, LIST fram of ICO / CUR frames, INFO title and artist; steps with durations (jiffies) and hotspots | animated cursors and icons, shared frames through seq, per step durations |
+| ICNS | every element type: 1 bit (ICON, ICN#, ics#, icm#, ich#), 4 / 8 bit with the Mac OS palettes, 24 bit RLE (is32, il32, ih32, it32) with 8 bit or 1 bit masks, ARGB (ic04, ic05, icsb), PNG and JPEG 2000 (icp4..icp6, ic07..ic14) | ARGB (16, 32) and PNG elements as iconutil writes them, optionally the RLE types with masks |
+| PVR | PVR v3 and legacy v2: 2D, volume, cube map and array textures, mip chains, orientation and cube order metadata; every uncompressed channel layout (r, g, b, a, l, i, x of 1..32 bits, integer / normalized / float), PVRTC1 2 and 4 bpp, ETC1, ETC2 / EAC, BC1..BC7, ASTC (LDR / HDR, 2D and 3D footprints), RGB9E5, 1 bpp | uncompressed, BC1..BC7, ETC2 / EAC, ASTC, given or computed mip chains, cube maps, arrays, volumes |
+| ASTC (.astc) | astcenc's container: 2D and 3D footprints, images and volumes, LDR / sRGB / HDR (found from the blocks or chosen) | 2D footprints from 4x4 to 12x12, LDR and HDR, volumes slice by slice |
 | PCX / DCX | versions 0..5, RLE and uncompressed, 1/2/4/8 bit in 1..4 planes (mono, CGA, EGA, 16 colour, VGA palette), 24 bit (3 planes), 32 bit (4 planes), DCX pages | 1 bit, 8 bit palette (exact or quantized), 24 bit, 32 bit, DCX |
 | SGI | 1..n channels, 8 and 16 bit, verbatim and RLE, 1/2/3 dimensional, DITHERED colour map | 8 and 16 bit, any channel count, RLE or verbatim |
 | Sun Raster | 1/8/24/32 bit, RT_OLD, RT_STANDARD, RT_BYTE_ENCODED, RT_FORMAT_RGB, RGB and raw colour maps | 1 bit, 8 bit gray or colour mapped, 24 bit, 32 bit with alpha, optional RLE |
@@ -53,6 +57,7 @@ code living in any `Aardvark.*` namespace.
 | FITS | primary array, IMAGE extensions, tile compressed images (RICE_1, GZIP_1, GZIP_2, PLIO_1, NOCOMPRESS; quantized floats with NO_DITHER / SUBTRACTIVE_DITHER_1 / 2), BITPIX 8 / 16 / 32 / 64 / -32 / -64, BSCALE / BZERO (unsigned conventions exact), BLANK, CONTINUE, linear WCS, .fits.gz | primary image of every BITPIX (unsigned via BZERO), optionally RICE_1 / GZIP_1 / GZIP_2 tile compressed, WCS from the metadata |
 
 Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions,
+PVRTC2, YUV and Basis Universal PVR formats, writing 3D ASTC footprints, ANI frames that are raw bitmaps (no AF_ICON),
 FITS HCOMPRESS_1 tiles (the convention does not specify its bit stream), FITS tables and random groups, NRRD's block type,
 NIfTI float128 / complex256, ASCII MetaImage data.
 LERC encoding is not offered because Esri holds patents on LERC compression.
@@ -76,7 +81,7 @@ PhotoMetadata m = info.Metadata!;                   // or ImageCodec.ReadMetadat
 // m.Title, Description, Artist, Copyright, Keywords, Rating, City, ...; m.Panorama (GPano)
 // raw: m.Exif (every tag), m.Xmp (every property), m.Iptc, m.Comments, m.Text (PNG), m.ExrAttributes, m.Thumbnail
 if (ImageCodec.TryGetInfo(path, out var i)) { /* ... */ }
-RawImage[] levels = ImageCodec.DecodeMipmaps("tex.dds");   // stored mip levels (DDS, KTX, OpenEXR), else just the image
+RawImage[] levels = ImageCodec.DecodeMipmaps("tex.dds");   // stored mip levels (DDS, KTX, PVR, OpenEXR), else just the image
 KtxTexture kt = Ktx.DecodeTexture(bytes);               // kt.GetImage(mip, layer, face, slice), kt.Format, kt.KeyValues
 Ktx.Encode(img, stream, new KtxEncodeOptions { Compression = TextureCompression.BC7, GenerateMipmaps = true });
 Ktx.EncodeVolume(slices, stream, new KtxEncodeOptions { GenerateMipmaps = true });   // 3D texture with a 3D mip chain
@@ -84,6 +89,13 @@ Ktx.Encode(img, stream, new KtxEncodeOptions { Compression = TextureCompression.
 DdsTexture tex = Dds.DecodeTexture(bytes);              // every surface: tex.GetImage(mip, item, face, slice)
 Dds.Encode(img, stream, new DdsEncodeOptions { Compression = DdsCompression.BC7, Mipmaps = DdsMipmaps.Generate });
 Dds.EncodeVolume(slices, stream, new DdsEncodeOptions { Compression = DdsCompression.BC4 });   // 3D texture
+PvrTexture pt = Pvr.DecodeTexture(bytes);               // pt.GetImage(mip, surface, face, slice), pt.Format ("PVRTC1_4", "r5g6b5", ...)
+Pvr.EncodeCube(faces, stream, new PvrEncodeOptions { Compression = TextureCompression.Etc2, GenerateMipmaps = true });
+RawImage[] slices3 = Astc.DecodeVolume(astcBytes);      // .astc files; AstcDecodeOptions.Profile: Auto, Ldr, LdrSrgb, Hdr
+Astc.Encode(img, stream, new AstcEncodeOptions { BlockWidth = 6, BlockHeight = 6 });
+AniAnimation ani = Ani.DecodeAnimation(bytes);          // ani.Steps[i].Image, .Jiffies, .DelayMs, .HotspotX / Y
+Ani.Encode(new[] { new AniInputFrame(a, 6, 3, 4), new AniInputFrame(b, 6, 3, 4) }, stream);
+Icns.Encode(new[] { img16, img32, img128, img512 }, stream);   // Icns.ReadEntries / DecodeAll for every element
 ```
 
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
@@ -91,7 +103,7 @@ in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF or
 is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
 turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the
 stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`,
-`Dds`, `Ktx`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Lerc`, `Jbig`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
+`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data.
 
 Malformed files throw `ImageFormatException`, valid files using an unimplemented feature throw `ImageNotSupportedException`.
@@ -145,7 +157,7 @@ Decoders never convert colour values: an 8 bit JPEG gives the stored sRGB values
 `ImageInfo.Transfer` (and `ImageMetadata.Transfer` of decoded images) says what they are: what the file declares (PNG sRGB,
 gAMA and cICP chunks, _SRGB texture formats, the KTX data format descriptor, the QOI header) or else what the format implies
 (`Linear` for OpenEXR, Radiance HDR, PFM and float samples; `Srgb` for 8 / 16 bit colour; `Unknown` for DDS without an
-_SRGB format and for non-colour data). `Gamma` is a pure power law (`ImageMetadata.Gamma`), `Pq` and `Hlg` are the HDR
+_SRGB format, PVR in the linear colour space, LDR .astc files and non-colour data). `Gamma` is a pure power law (`ImageMetadata.Gamma`), `Pq` and `Hlg` are the HDR
 video curves. An ICC profile (`HasIccProfile`, `ImageMetadata.IccProfile`) overrides them; decoders keep it, the colour
 management below applies it.
 
@@ -271,7 +283,8 @@ var w     = ImageOps.WarpPerspective(img, 800, 600, homography, new WarpOptions 
   one thread).
 
 `ImageCodec.DecodeAll` returns every page of a TIFF, every frame of an animated GIF, PNG or WebP, every layer / face of a
-DDS or KTX texture (every slice of a KTX volume) and every image of an icon.
+DDS, KTX or PVR texture (every slice of a KTX / PVR / .astc volume), every image of an ICO / ICNS icon and every step of
+an animated cursor.
 
 ## Aardvark
 
@@ -297,19 +310,20 @@ ImageInfo info     = PixCodec.GetInfo("dem.tif");
 PixCodec.Save(img, "out.webp");
 PixImage p = rawImage.ToPixImage();   RawImage r = pixImage.ToRawImage();
 PixImageMipMap mm  = PixCodec.LoadMipmap("tex.dds");                     // also PixImageMipMap.Load (IPixMipmapLoader)
-PixCube cube       = PixCodec.LoadCube("sky.dds");                        // DDS cube map, every side with its mip chain
+PixCube cube       = PixCodec.LoadCube("sky.dds");                        // DDS, KTX or PVR cube map, every side with its mip chain
 PixCodec.SaveDds(cube, stream);
 PixCodec.SaveDds(volume, stream, new DdsEncodeOptions { Compression = DdsCompression.BC1 });   // PixVolume
 PixCodec.SaveKtx(cube, stream, new KtxEncodeOptions { Compression = TextureCompression.BC7 });
-PixVolume vol      = PixCodec.LoadVolume("ct.ktx2");                      // DDS or KTX volume texture, or NRRD / NIfTI / MHA / FITS
+PixVolume vol      = PixCodec.LoadVolume("ct.ktx2");                      // DDS, KTX, PVR or .astc volume, or NRRD / NIfTI / MHA / FITS
 PixVolume ct       = PixCodec.LoadVolume("ct.nrrd", out PhysicalMetadata? meta);   // + spacing, origin, direction, header
 PixVolume<float> t = PixCodec.LoadVolume<float>("fmri.nii.gz", frame: 7);  // one volume of a 4D series, converted
 PixImage sky       = PixCodec.Load("m31.fits", out var wcs);             // 2D, top row first, with the FITS keywords
 PixCodec.SaveVolume(ct, "ct.nii.gz", meta);                              // .nrrd .nhdr .nii .nii.gz .mha .mhd .fits .dds .ktx2
 RawVolume rv = ct.ToRawVolume(meta);  PixVolume pv = rv.ToPixVolume();
+PixCodec.SavePvr(volume, stream);  PixCodec.SaveAstc(volume, stream);  PixCodec.SaveIcns(images, stream);  PixCodec.SaveAni(steps, stream);
 PixCodec.WriteMetadata("a.jpg", "a.jpg", new MetadataEdit { Gps = new GpsEdit { Latitude = 47.07, Longitude = 15.44 } });
 PixImage srgb      = PixCodec.LoadSrgb("adobe-rgb.jpg");                 // converted through the embedded ICC profile
-PixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .qoi .ktx2 .nrrd .nii .mha .fits too
+PixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .ani .icns .qoi .ktx2 .pvr .astc .nrrd .nii .mha .fits too
 ```
 
 `PixImage.Save` of Aardvark.Base only accepts the file extensions Aardvark.Base knows; `PixCodec.Save` takes every format
@@ -342,7 +356,10 @@ encoders are checked by decoding their output with the same reference tools. Run
 `python3` with Pillow, numpy, tifffile, imagecodecs, opencv and OpenEXR; without python they are skipped. Some extra
 checks use tools fetched by `tests/oracle/gen_png.py --fetch-tools`. Written KTX files are checked with KTX-Software's
 `ktx validate` when `ktx` is on the PATH or `PIXCODEC_KTX` points to it; ETC1S / UASTC files written by PixCodec are also decoded by basisu
-(`PIXCODEC_BASISU` or `basisu` on the PATH) and compared with PixCodec's decoders. ICC colour conversions are checked
+(`PIXCODEC_BASISU` or `basisu` on the PATH) and compared with PixCodec's decoders. PVR fixtures come from Imagination's
+PVRTexToolCLI (`tests/oracle/gen_pvr.py`, which runs it locally or on a Windows machine over ssh) and its own decodes; .astc
+fixtures and the live checks of written .astc files use ARM's astcenc (`ASTCENC`); ICNS fixtures are cross checked with
+Pillow and, for the ARGB elements, macOS (`iconutil` / `sips` over ssh, `ICNS_MAC_HOST`). ICC colour conversions are checked
 against LittleCMS 2 float transforms (`tests/oracle/gen_icc.py` runs liblcms2 through ctypes) on profiles LittleCMS made
 itself, on PixCodec's own profiles read back by LittleCMS, and on the ICC's sRGB v4 and the CC0 Compact-ICC-Profiles of
 the test-data repository.

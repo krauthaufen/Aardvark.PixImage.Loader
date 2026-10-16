@@ -72,6 +72,10 @@ namespace Aardvark.ImageCodecs
         MetaImage,
         /// <summary>FITS (.fits, .fit, .fts).</summary>
         Fits,
+        Icns,
+        Ani,
+        Astc,
+        Pvr,
     }
 
     /// <summary>
@@ -177,7 +181,7 @@ namespace Aardvark.ImageCodecs
         }
         readonly TransferFunction transfer;
 
-        /// <summary>Whether the file is an animation (GIF, APNG, WebP) rather than a still image or a set of pages.</summary>
+        /// <summary>Whether the file is an animation (GIF, APNG, WebP, ANI) rather than a still image or a set of pages.</summary>
         public bool IsAnimated { get; init; }
 
         /// <summary>
