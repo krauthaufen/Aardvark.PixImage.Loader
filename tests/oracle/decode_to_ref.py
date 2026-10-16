@@ -25,6 +25,8 @@ def decode(path):
             return imagecodecs.jpeg8_decode(f.read())
     if ext == '.webp':
         return decode_webp(path)
+    if ext == '.jxl':
+        return decode_jxl(path)
     if ext in ('.jp2', '.j2k', '.j2c', '.jph', '.jhc'):
         return decode_jp2(path)
     if ext == '.lerc':
@@ -224,6 +226,19 @@ def decode_tiff(path):
         if pg.planarconfig == 2 and pg.samplesperpixel > 1:
             a = np.moveaxis(a, 0, -1)
         return a
+
+
+def decode_jxl(path):
+    """libjxl through imagecodecs (samples as stored: uint8 / uint16 / float16 / float32, orientation not applied);
+    exit status 77 when imagecodecs has no JPEG XL."""
+    try:
+        import imagecodecs
+        if not imagecodecs.JPEGXL.available:
+            sys.exit(77)
+    except (ImportError, AttributeError):
+        sys.exit(77)
+    with open(path, 'rb') as f:
+        return imagecodecs.jpegxl_decode(f.read())
 
 
 def decode_webp(path):

@@ -7,7 +7,7 @@ using Aardvark.ImageCodecs;
 namespace Aardvark.Data
 {
     /// <summary>
-    /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, JPEG XL (decode), BMP, TGA,
+    /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, JPEG XL, BMP, TGA,
     /// DDS, KTX, PVR, ASTC, Radiance HDR, PNM / PFM, QOI, ICO / CUR / ANI, ICNS, PCX / DCX, SGI, Sun Raster, XBM, XPM, WBMP, DPX, Cineon, JPEG-LS,
     /// and the volume formats NRRD, NIfTI, MetaImage, FITS).
     /// Register with <see cref="PixCodec.Init"/> (done automatically by Aardvark.Init()).
@@ -719,6 +719,12 @@ namespace Aardvark.Data
                 ImageCodec.Encode(PixCodecLoader.ToRawImage(image), path);
                 return;
             }
+            if (saveParams == null && codec == ImageFormat.Jxl)
+            {
+                using var fj = File.Create(path);
+                SaveJxl(image, fj);
+                return;
+            }
             if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.Pvr or ImageFormat.Astc or ImageFormat.Icns or ImageFormat.Ani or ImageFormat.Dcx or ImageFormat.Dpx or ImageFormat.Cineon or ImageFormat.JpegLs)
             {
                 using var fs = File.Create(path);
@@ -742,6 +748,24 @@ namespace Aardvark.Data
             }
             var p = saveParams ?? new PixSaveParams(FileFormat(path));
             Loader.SaveToFile(path, image, p);
+        }
+
+        /// <summary>
+        /// Saves as JPEG XL (lossy distance 1 by default; <see cref="JxlEncodeOptions.Lossless"/> for exact storage). 8 bit,
+        /// 16 bit and float images keep their sample type; other types are written as float.
+        /// </summary>
+        public static void SaveJxl(PixImage image, Stream stream, JxlEncodeOptions? options = null)
+        {
+            var t = image.PixFormat.Type;
+            if (t != typeof(byte) && t != typeof(ushort) && t != typeof(float)) image = image.ToPixImage<float>();
+            Jxl.Encode(PixCodecLoader.ToRawImage(image), stream, options);
+        }
+
+        /// <inheritdoc cref="SaveJxl(PixImage, Stream, JxlEncodeOptions?)"/>
+        public static void SaveJxl(PixImage image, string path, JxlEncodeOptions? options = null)
+        {
+            using var fs = File.Create(path);
+            SaveJxl(image, fs, options);
         }
 
         /// <summary>

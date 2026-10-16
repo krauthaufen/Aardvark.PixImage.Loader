@@ -95,7 +95,7 @@ namespace Aardvark.ImageCodecs
     /// bit (UInt32) integer or float (Float16 / Float32) as the header's bit depth says, in the colour space the header
     /// describes (XYB is converted to it); alpha is returned unpremultiplied.
     /// </summary>
-    public static class Jxl
+    public static partial class Jxl
     {
         public static bool IsMatch(ReadOnlySpan<byte> header) => JxlContainer.IsMatch(header);
 
