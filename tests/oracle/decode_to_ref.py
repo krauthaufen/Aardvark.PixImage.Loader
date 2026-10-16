@@ -230,7 +230,7 @@ def decode_tiff(path):
 
 def decode_jxl(path):
     """libjxl through imagecodecs (samples as stored: uint8 / uint16 / float16 / float32, orientation not applied);
-    exit status 77 when imagecodecs has no JPEG XL."""
+    the frames of an animation stacked vertically. Exit status 77 when imagecodecs has no JPEG XL."""
     try:
         import imagecodecs
         if not imagecodecs.JPEGXL.available:
@@ -238,7 +238,10 @@ def decode_jxl(path):
     except (ImportError, AttributeError):
         sys.exit(77)
     with open(path, 'rb') as f:
-        return imagecodecs.jpegxl_decode(f.read())
+        a = imagecodecs.jpegxl_decode(f.read(), keeporientation=True)
+    if a.ndim == 4:
+        a = a.reshape(a.shape[0] * a.shape[1], a.shape[2], a.shape[3])
+    return a
 
 
 def decode_webp(path):

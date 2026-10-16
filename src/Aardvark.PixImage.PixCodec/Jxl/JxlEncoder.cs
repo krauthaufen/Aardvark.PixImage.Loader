@@ -213,11 +213,15 @@ namespace Aardvark.ImageCodecs.JpegXl
             byte[]? xmp = opt.KeepMetadata ? meta?.Xmp : null;
             if (exif is { Length: 0 }) exif = null;
             if (xmp is { Length: 0 }) xmp = null;
-            if (exif == null && xmp == null && !opt.ForceContainer) return codestream;
-            if (exif != null && h.Orientation >= 1) exif = ExifTags.WithOrientation(exif, h.Orientation);
+            bool level10 = NeedsLevel10(h);
+            if (exif == null && xmp == null && !opt.ForceContainer && !level10) return codestream;
+            // the codestream orientation is authoritative; the EXIF / XMP copies say the same
+            if (exif != null) exif = ExifTags.WithOrientation(exif, h.Orientation);
+            if (xmp != null) xmp = ExifTags.XmpWithOrientation(xmp, h.Orientation);
             var ms = new MemoryStream(codestream.Length + 1024);
             ms.Write(JxlContainer.Signature);
             WriteBox(ms, "ftyp", new byte[] { (byte)'j', (byte)'x', (byte)'l', (byte)' ', 0, 0, 0, 0, (byte)'j', (byte)'x', (byte)'l', (byte)' ' });
+            if (level10) WriteBox(ms, "jxll", new byte[] { 10 });
             if (exif != null)
             {
                 var b = new byte[4 + exif.Length];
@@ -227,6 +231,18 @@ namespace Aardvark.ImageCodecs.JpegXl
             if (xmp != null) WriteBox(ms, "xml ", xmp);
             WriteBox(ms, "jxlc", codestream);
             return ms.ToArray();
+        }
+
+        /// <summary>
+        /// Whether the codestream exceeds the limits of level 5 (ISO/IEC 18181-2): more than 16 bits per sample, more than
+        /// 2^28 pixels or 2^18 per side, an ICC profile above 4 MB. It then needs a jxll box declaring level 10.
+        /// </summary>
+        static bool NeedsLevel10(JxlImageHeader h)
+        {
+            if (h.BitDepth.Bits > 16) return true;
+            foreach (var e in h.ExtraChannels) if (e.BitDepth.Bits > 16) return true;
+            if ((long)h.Width * h.Height > 1L << 28 || h.Width > 1 << 18 || h.Height > 1 << 18) return true;
+            return h.Icc != null && h.Icc.Length > 1 << 22;
         }
 
         static void WriteBox(Stream s, string type, byte[] body)

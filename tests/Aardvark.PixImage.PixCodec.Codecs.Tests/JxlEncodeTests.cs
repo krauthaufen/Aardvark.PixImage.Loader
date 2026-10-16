@@ -70,7 +70,7 @@ public class JxlEncodeTests(ITestOutputHelper output)
                     yield return new object[] { c, t, e };
     }
 
-    static void AssertExact(RawImage expected, RawImage actual)
+    internal static void AssertExact(RawImage expected, RawImage actual)
     {
         Assert.Equal((expected.Width, expected.Height, expected.Channels, expected.SampleType, expected.Color),
             (actual.Width, actual.Height, actual.Channels, actual.SampleType, actual.Color));
@@ -108,7 +108,7 @@ public class JxlEncodeTests(ITestOutputHelper output)
         }
     }
 
-    static void AssertSameSamples(RawImage expected, RawImage reference)
+    internal static void AssertSameSamples(RawImage expected, RawImage reference)
     {
         Assert.Equal((expected.Width, expected.Height, expected.Channels, expected.SampleType), (reference.Width, reference.Height, reference.Channels, reference.SampleType));
         switch (expected.SampleType)
@@ -270,7 +270,7 @@ public class JxlEncodeTests(ITestOutputHelper output)
     // ------------------------------------------------------------------ lossy
 
     /// <summary>PSNR of the colour channels (alpha left out) on a 0..1 scale.</summary>
-    static double ColourPsnr(RawImage a, RawImage b)
+    internal static double ColourPsnr(RawImage a, RawImage b)
     {
         Assert.Equal((a.Width, a.Height, a.Channels), (b.Width, b.Height, b.Channels));
         var x = ToDoubles(a); var y = ToDoubles(b);
