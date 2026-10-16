@@ -174,8 +174,9 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
             if ((ulong)o.Count == osize) return o.ToArray();
 
-            // tag list
-            ulong numTags = VarInt(enc, ref cpos, cend + 1 > end ? end : cend);
+            // tag list (none when the command stream is already used up); the start predicted for a tag is the previous
+            // tag's start plus its size, after the three tags of an XYZ triple too (18181-1:2024 E.4.4)
+            ulong numTags = cpos < cend ? VarInt(enc, ref cpos, cend) : 0;
             if (numTags != 0)
             {
                 numTags--;
@@ -221,7 +222,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                     {
                         AppendTag(o, "gXYZ"); AppendU32(o, tagStart + tagSize); AppendU32(o, tagSize);
                         AppendTag(o, "bXYZ"); AppendU32(o, tagStart + tagSize * 2); AppendU32(o, tagSize);
-                        prevStart = tagStart + tagSize * 2;
+                        //EXPERIMENT prevStart = tagStart + tagSize * 2;
                     }
                 }
             }

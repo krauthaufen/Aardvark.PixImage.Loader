@@ -7,27 +7,30 @@ namespace Aardvark.ImageCodecs.JpegXl
     /// <summary>Lossless modular frames: transforms (palette, channel palettes, RCT), MA tree, groups and sections.</summary>
     internal static class JxlLosslessEncoder
     {
-        public static void EncodeFrame(JxlBitWriter cs, List<JxlChannel> chans, JxlImageHeader h, JxlFrameHeader fh, JxlLosslessParams lp, bool parallel)
+        /// <param name="features">writes the patches / splines / noise that start LfGlobal, for the flags of
+        /// <paramref name="fh"/> (only tests use it)</param>
+        public static void EncodeFrame(JxlBitWriter cs, List<JxlChannel> chans, JxlImageHeader h, JxlFrameHeader fh, JxlLosslessParams lp, bool parallel,
+            Action<JxlBitWriter>? features = null)
         {
             if (lp.TryPaletteBoth && lp.PaletteMaxColours > 0)
             {
                 // encode with and without palette (on copies of the channel list) and keep the smaller frame
                 var a = new JxlBitWriter(); var b = new JxlBitWriter();
                 var copy = new List<JxlChannel>(chans);
-                Encode(a, copy, h, fh, lp, parallel, allowPalette: true, out bool usedPalette);
+                Encode(a, copy, h, fh, lp, parallel, allowPalette: true, features, out bool usedPalette);
                 if (usedPalette)
                 {
-                    Encode(b, new List<JxlChannel>(chans), h, fh, lp, parallel, allowPalette: false, out _);
+                    Encode(b, new List<JxlChannel>(chans), h, fh, lp, parallel, allowPalette: false, features, out _);
                     cs.Append(b.BitLength < a.BitLength ? b : a);
                 }
                 else cs.Append(a);
                 return;
             }
-            Encode(cs, chans, h, fh, lp, parallel, allowPalette: true, out _);
+            Encode(cs, chans, h, fh, lp, parallel, allowPalette: true, features, out _);
         }
 
         static void Encode(JxlBitWriter cs, List<JxlChannel> chans, JxlImageHeader h, JxlFrameHeader fh, JxlLosslessParams lp, bool parallel,
-            bool allowPalette, out bool usedPalette)
+            bool allowPalette, Action<JxlBitWriter>? features, out bool usedPalette)
         {
             int nColour = h.Colour.IsGray ? 1 : 3;
             bool smallInts = !h.BitDepth.Float && h.BitDepth.Bits <= 16;
@@ -102,6 +105,7 @@ namespace Aardvark.ImageCodecs.JpegXl
 
             // sections
             var lfGlobal = new JxlBitWriter(1 << 12);
+            features?.Invoke(lfGlobal);
             lfGlobal.WriteBool(true);   // default LF channel dequantization
             streams.WriteGlobal(lfGlobal);
             streams.WriteStream(lfGlobal, 0, transforms, alwaysHeader: true);
