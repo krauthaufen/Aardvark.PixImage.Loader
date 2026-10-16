@@ -266,4 +266,175 @@ public class JxlEncodeTests(ITestOutputHelper output)
         Assert.Equal(ColorModel.GrayAlpha, back.Color);
         Assert.Equal((byte[])two.Data, (byte[])back.Data);
     }
+
+    // ------------------------------------------------------------------ lossy
+
+    /// <summary>PSNR of the colour channels (alpha left out) on a 0..1 scale.</summary>
+    static double ColourPsnr(RawImage a, RawImage b)
+    {
+        Assert.Equal((a.Width, a.Height, a.Channels), (b.Width, b.Height, b.Channels));
+        var x = ToDoubles(a); var y = ToDoubles(b);
+        double sa = a.SampleType switch { SampleType.UInt8 => 255, SampleType.UInt16 => 65535, _ => 1 };
+        double sb = b.SampleType switch { SampleType.UInt8 => 255, SampleType.UInt16 => 65535, _ => 1 };
+        int nc = a.Channels;
+        bool alpha = a.Color is ColorModel.GrayAlpha or ColorModel.Rgba;
+        double se = 0; long n = 0;
+        for (int i = 0; i < x.Length; i++)
+        {
+            if (alpha && i % nc == nc - 1) continue;
+            double d = Math.Clamp(x[i] / sa, 0, 1) - Math.Clamp(y[i] / sb, 0, 1);
+            se += d * d; n++;
+        }
+        return se == 0 ? 99 : 10 * Math.Log10(n / se);
+    }
+
+    /// <summary>
+    /// Quality against the source at fixed thresholds. libjxl reaches 38.0 / 36.8 / 34.9 dB (cjxl -e 3) and
+    /// 38.4 / 37.8 / 36.6 dB (-e 7) on this content (smooth gradients with 4 % noise) at distance 1 / 2 / 4; the
+    /// thresholds allow 2 dB less than its effort 3.
+    /// </summary>
+    [Theory]
+    [InlineData(1.0, 36.0)]
+    [InlineData(2.0, 34.8)]
+    [InlineData(4.0, 32.9)]
+    public void LossyQualityAgainstSource(double distance, double minPsnr)
+    {
+        var img = Synthetic(300, 170, ColorModel.Rgb, SampleType.UInt8, 0, 1);
+        foreach (int effort in new[] { 3, 7 })
+        {
+            var enc = Jxl.Encode(img, new JxlEncodeOptions { Distance = (float)distance, Effort = effort });
+            var dec = Jxl.Decode(enc);
+            double psnr = ColourPsnr(img, dec);
+            output.WriteLine($"d {distance} e{effort}: {enc.Length} bytes, {psnr:F2} dB");
+            Assert.True(psnr >= minPsnr, $"PSNR {psnr:F2} below {minPsnr}");
+            Assert.True(enc.Length < img.Width * img.Height * 3 / 4, "lossy output should be far below the raw size");
+            if (Libjxl(enc) is { } r)
+            {
+                // libjxl decodes the same stream to (nearly) the same pixels
+                Assert.True(MaxDiff(dec, r) <= 1, $"libjxl differs by {MaxDiff(dec, r)}");
+            }
+        }
+    }
+
+    [Fact]
+    public void LossyDistanceTradesSizeForQuality()
+    {
+        var img = Synthetic(256, 256, ColorModel.Rgb, SampleType.UInt8, 4, 2);
+        double lastPsnr = double.MaxValue;
+        int lastSize = int.MaxValue;
+        foreach (float d in new[] { 0.5f, 1, 2, 4, 8 })
+        {
+            var enc = Jxl.Encode(img, new JxlEncodeOptions { Distance = d });
+            double p = ColourPsnr(img, Jxl.Decode(enc));
+            output.WriteLine($"d {d}: {enc.Length} bytes {p:F2} dB");
+            Assert.True(enc.Length < lastSize && p < lastPsnr + 0.2);
+            lastSize = enc.Length; lastPsnr = p;
+        }
+        // the quality knob maps like cjxl -q
+        Assert.Equal(Jxl.Encode(img, new JxlEncodeOptions { Distance = 1 }), Jxl.Encode(img, new JxlEncodeOptions { Quality = 90 }));
+    }
+
+    public static IEnumerable<object[]> LossyCases()
+    {
+        foreach (var c in Colors)
+            foreach (var t in Types)
+                foreach (int e in new[] { 1, 3, 5, 7, 9 })
+                    yield return new object[] { c, t, e };
+    }
+
+    /// <summary>
+    /// Every colour model, sample type and effort: decodes with the sample type and colour model of the source, alpha
+    /// exactly, colour within 1.6 % RMS (36 dB: libjxl reaches 38.4 dB at distance 1 on this content, see
+    /// LossyQualityAgainstSource).
+    /// </summary>
+    [Theory, MemberData(nameof(LossyCases))]
+    public void LossyRoundTrips(ColorModel color, SampleType type, int effort)
+    {
+        var img = Synthetic(300, 170, color, type, 0, effort);
+        var enc = Jxl.Encode(img, new JxlEncodeOptions { Distance = 1, Effort = effort });
+        var dec = Jxl.Decode(enc);
+        Assert.Equal((img.Width, img.Height, img.Channels, img.SampleType, img.Color), (dec.Width, dec.Height, dec.Channels, dec.SampleType, dec.Color));
+        // float samples of this content range over -0.5 .. 2.5: compare on that scale
+        double range = type is SampleType.Float16 ? 1.5 : type is SampleType.Float32 ? 3 : 1;
+        var x = ToDoubles(img); var y = ToDoubles(dec);
+        double scale = type switch { SampleType.UInt8 => 255, SampleType.UInt16 => 65535, _ => 1 };
+        int nc = img.Channels;
+        bool alpha = color is ColorModel.GrayAlpha or ColorModel.Rgba;
+        double se = 0; long n = 0;
+        for (int i = 0; i < x.Length; i++)
+        {
+            if (alpha && i % nc == nc - 1) { Assert.Equal(x[i], y[i]); continue; }
+            double d = (x[i] - y[i]) / scale / range;
+            se += d * d; n++;
+        }
+        double rms = Math.Sqrt(se / n);
+        output.WriteLine($"{enc.Length} bytes, rms {rms:F4}");
+        Assert.True(rms < 0.016, $"rms error {rms:F4}");
+        if (effort == 7 && Libjxl(enc) is { } r) Assert.Equal((dec.Width, dec.Height, dec.Channels), (r.Width, r.Height, r.Channels));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
+    [InlineData(9)]
+    [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
+    [InlineData(13)]
+    [InlineData(18)]
+    [InlineData(19)]
+    [InlineData(20)]
+    public void LossyTransformsReconstruct(int strategy)
+    {
+        // every transform the encoder can choose, forced everywhere, at a very small distance: near exact (on smooth
+        // content; the quantization of the large transforms is coarse at the highest frequencies by design)
+        var img = Synthetic(200, 136, ColorModel.Rgb, SampleType.UInt8, 4, 5);
+        var enc = Jxl.Encode(img, new JxlEncodeOptions { Distance = 0.1f, ForceStrategy = strategy });
+        double p = ColourPsnr(img, Jxl.Decode(enc));
+        output.WriteLine($"strategy {strategy}: {enc.Length} bytes {p:F2} dB");
+        Assert.True(p > 44, $"PSNR {p:F2}");
+        if (Libjxl(enc) is { } r) Assert.True(ColourPsnr(img, r) > 44);
+    }
+
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(7, 300)]
+    [InlineData(300, 7)]
+    [InlineData(260, 260)]
+    [InlineData(2100, 20)]
+    public void LossyOddSizes(int w, int h)
+    {
+        foreach (int effort in new[] { 1, 7 })
+        {
+            var img = Synthetic(w, h, ColorModel.Rgba, SampleType.UInt8, 0, w * h);
+            var enc = Jxl.Encode(img, new JxlEncodeOptions { Distance = 1, Effort = effort });
+            var dec = Jxl.Decode(enc);
+            Assert.Equal((w, h, 4), (dec.Width, dec.Height, dec.Channels));
+            if (w * h > 1) Assert.True(ColourPsnr(img, dec) > 30);
+            if (effort == 7 && Libjxl(enc) is { } r) Assert.Equal((w, h, 4), (r.Width, r.Height, r.Channels));
+        }
+    }
+
+    [Fact]
+    public void LossyIsBetterThanJpegAtEqualSize()
+    {
+        // at about the same file size the JPEG XL output has the higher PSNR (smooth content)
+        var img = Synthetic(320, 240, ColorModel.Rgb, SampleType.UInt8, 4, 9);
+        var ms = new MemoryStream();
+        Jpeg.Encode(img, ms, new JpegEncodeOptions { Quality = 85 });
+        var jpg = ms.ToArray();
+        double pj = ColourPsnr(img, Jpeg.Decode(jpg));
+        // search the distance giving a file no larger than the JPEG
+        float d = 1;
+        byte[] enc = Jxl.Encode(img, new JxlEncodeOptions { Distance = d });
+        while (enc.Length > jpg.Length && d < 20) { d *= 1.25f; enc = Jxl.Encode(img, new JxlEncodeOptions { Distance = d }); }
+        double px = ColourPsnr(img, Jxl.Decode(enc));
+        output.WriteLine($"JPEG q85 {jpg.Length} bytes {pj:F2} dB, JPEG XL d{d:F2} {enc.Length} bytes {px:F2} dB");
+        Assert.True(enc.Length <= jpg.Length && px > pj, "JPEG XL should beat JPEG at equal size");
+    }
 }

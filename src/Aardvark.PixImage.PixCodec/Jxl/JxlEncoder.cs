@@ -109,6 +109,16 @@ namespace Aardvark.ImageCodecs.JpegXl
             if (alpha) h.ExtraChannels = new[] { new JxlExtraChannel { Type = JxlExtraChannelType.Alpha, BitDepth = bd } };
             h.Colour = ColourOf(img, meta, gray);
             if (h.Colour.WantIcc) h.Icc = meta!.IccProfile;
+            if (h.Colour.WantIcc && !lossless)
+            {
+                // lossy frames are coded from linear sRGB: the profile has to be usable for the conversion
+                try { _ = new IccTransform(IccProfile.Parse(h.Icc!), gray ? IccProfile.GrayLinear : IccProfile.LinearSrgb, IccRenderingIntent.RelativeColorimetric); }
+                catch (Exception e) when (e is ImageFormatException or ImageNotSupportedException or ArgumentException)
+                {
+                    h.Icc = null;
+                    h.Colour = ColourOf(img, null, gray);
+                }
+            }
             if (!lossless && opt.IntensityTarget > 0) h.ToneMapping.IntensityTarget = opt.IntensityTarget;
             return h;
         }

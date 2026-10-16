@@ -66,11 +66,40 @@ public class JxlLoaderTests
     }
 
     [Fact]
-    public void SavingIsNotOffered()
+    public void SaveRoundTrips()
     {
-        var img = new PixImage<byte>(Col.Format.RGB, new V2i(4, 4));
+        var img = new PixImage<byte>(Col.Format.RGBA, new V2i(37, 21));
+        var vol = img.Volume;
+        for (int y = 0; y < 21; y++)
+            for (int x = 0; x < 37; x++)
+                for (int c = 0; c < 4; c++) vol[x, y, c] = (byte)(c == 3 ? 200 + x % 50 : (x * 5 + y * 3 + c * 40) % 256);
         var path = Path.Combine(Path.GetTempPath(), $"pixcodec-{Guid.NewGuid():N}.jxl");
-        try { Assert.ThrowsAny<Exception>(() => PixCodec.Save(img, path)); }
+        try
+        {
+            // default: lossy (distance 1), alpha stays exact
+            PixCodec.Save(img, path);
+            var back = PixCodec.Load(path);
+            Assert.Equal(img.Size, back.Size);
+            Assert.Equal(Col.Format.RGBA, back.Format);
+            var a = Samples<byte>(img); var b = Samples<byte>(back);
+            double err = 0;
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (i % 4 == 3) Assert.Equal(a[i], b[i]);
+                else err += Math.Abs(a[i] - b[i]);
+            }
+            Assert.True(err / (a.Length * 3 / 4) < 6, $"mean error {err / (a.Length * 3 / 4)}");
+            // lossless through SaveJxl
+            using (var fs = File.Create(path)) PixCodec.SaveJxl(img, fs, new JxlEncodeOptions { Lossless = true });
+            Assert.Equal(a, Samples<byte>(PixCodec.Load(path)));
+            // other sample types are written as float
+            var f = new PixImage<double>(Col.Format.Gray, new V2i(5, 3));
+            for (int y = 0; y < 3; y++) for (int x = 0; x < 5; x++) f.Volume[x, y, 0] = x * 0.125 + y * 0.25;
+            PixCodec.SaveJxl(f, path, new JxlEncodeOptions { Lossless = true });
+            var fb = PixCodec.Load(path);
+            Assert.Equal(typeof(float), fb.PixFormat.Type);
+            Assert.Equal(new[] { 0f, 0.125f, 0.25f, 0.375f, 0.5f }, Samples<float>(fb).Take(5));
+        }
         finally { File.Delete(path); }
     }
 }

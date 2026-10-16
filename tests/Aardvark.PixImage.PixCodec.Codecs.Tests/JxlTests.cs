@@ -160,7 +160,8 @@ public class JxlTests(ITestOutputHelper output)
         var viaStream = ImageCodec.GetInfo(s);
         Assert.Equal((info.Width, info.Height, info.Channels, info.FrameCount), (viaStream.Width, viaStream.Height, viaStream.Channels, viaStream.FrameCount));
         AssertEqual(Jxl.Decode(data), ImageCodec.Decode(data));
-        Assert.Throws<ImageNotSupportedException>(() => ImageCodec.Encode(RawImage.Create(4, 4, ColorModel.Rgb, SampleType.UInt8), ImageFormat.Jxl));
+        var encoded = ImageCodec.Encode(RawImage.Create(4, 4, ColorModel.Rgb, SampleType.UInt8), ImageFormat.Jxl);
+        Assert.Equal((4, 4), (Jxl.Decode(encoded).Width, Jxl.Decode(encoded).Height));
     }
 
     // ------------------------------------------------------------------ header information

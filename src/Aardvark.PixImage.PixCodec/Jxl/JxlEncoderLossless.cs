@@ -148,7 +148,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             return t.AddSplit(prop, thr[mid], left, right);
         }
 
-        static JxlEncTree FixedTree(int channels, JxlBitDepth bd, bool wp)
+        internal static JxlEncTree FixedTree(int channels, JxlBitDepth bd, bool wp)
         {
             var t = new JxlEncTree();
             int s = bd.Float ? 1 : 1 << Math.Max(0, bd.Bits - 8);
