@@ -10,6 +10,29 @@ namespace Aardvark.ImageCodecs.Tests;
 /// </summary>
 public static class ExrOracle
 {
+    /// <summary>
+    /// The reference library's decode of a DWA file, or its RGBA (luminance / chroma) interface, against ours: bit exact on
+    /// x64. Elsewhere (macOS arm64) the reference library's float arithmetic rounds differently - our decoder still matches
+    /// the x64 references of the fixtures bit for bit (ExrDecodeTests) - so up to 4 half float steps are allowed there.
+    /// </summary>
+    public static void AssertMatchesLossy(RawImage reference, RawImage ours)
+    {
+        if (System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64)
+        {
+            TestUtil.AssertEqual(reference, ours);
+            return;
+        }
+        TestUtil.MaxDiff(reference, ours);  // geometry and sample type
+        var e = TestUtil.ToDoubles(reference); var a = TestUtil.ToDoubles(ours);
+        for (int i = 0; i < e.Length; i++)
+        {
+            if (e[i] == a[i] || double.IsNaN(e[i]) && double.IsNaN(a[i])) continue;
+            double m = Math.Max(Math.Abs(e[i]), Math.Abs(a[i]));
+            double step = m < 6.103515625e-05 ? Math.ScaleB(1, -24) : Math.ScaleB(1, Math.ILogB(m) - 10);   // half float spacing at m
+            Assert.True(Math.Abs(e[i] - a[i]) <= 4 * step, $"sample {i}: reference {e[i]}, ours {a[i]}");
+        }
+    }
+
     public static RawImage? Decode(byte[] encoded, string extension)
     {
         if (!TestUtil.PythonAvailable) return null;

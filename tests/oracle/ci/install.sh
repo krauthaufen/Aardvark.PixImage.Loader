@@ -27,9 +27,12 @@ EXIFTOOL=13.59
 BASISU=v2_50
 ZSTD=1.5.7
 
-apt_get() { sudo apt-get install -y --no-install-recommends "$@" > /dev/null; }
+APT_UPDATED=0
+apt_get() {
+  [ $APT_UPDATED = 1 ] || { sudo apt-get update -qq; APT_UPDATED=1; }
+  sudo apt-get install -y --no-install-recommends "$@" > /dev/null
+}
 brew_get() { HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install --quiet "$@" > /dev/null; }
-[ "$OS" = Linux ] && sudo apt-get update -qq
 
 for t in "${want[@]}"; do
   echo "== $t"

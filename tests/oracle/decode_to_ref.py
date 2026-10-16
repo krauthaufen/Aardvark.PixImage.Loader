@@ -208,6 +208,8 @@ def decode_tiff(path):
     page = int(m.group(1)) if m else 0
     with tifffile.TiffFile(path) as t:
         pg = t.pages[page]
+        if pg.bitspersample == 1 and int(pg.compression) == 34661:
+            return tiff_jbig(t, pg)
         if pg.bitspersample == 1:
             # libtiff, via ImageMagick (Pillow 11 cannot open big endian BigTIFF, OpenCV stumbles over other pages)
             import subprocess
@@ -231,6 +233,30 @@ def decode_tiff(path):
         if pg.planarconfig == 2 and pg.samplesperpixel > 1:
             a = np.moveaxis(a, 0, -1)
         return a
+
+
+def tiff_jbig(tif, pg):
+    """A JBIG compressed bilevel TIFF page as displayed (0 / 255), by jbigkit (what libtiff uses; ImageMagick builds
+    without it exist): every strip or tile is a BIE of its own."""
+    import gen_jbig
+    tool = os.path.join(gen_jbig.TOOLS, 'jbgtopbm')
+    if not os.path.exists(tool) and not os.path.exists(tool + '.exe'):
+        missing('jbigkit', f'jbigkit\'s jbgtopbm ({tool}; set PIXCODEC_JBIGKIT to its pbmtools folder)')
+    w, h = pg.imagewidth, pg.imagelength
+    tw, th = (pg.tilewidth, pg.tilelength) if pg.is_tiled else (w, pg.rowsperstrip)
+    across = (w + tw - 1) // tw
+    out = np.zeros((h, w), np.uint8)
+    fh = tif.filehandle
+    for i, (off, n) in enumerate(zip(pg.dataoffsets, pg.databytecounts)):
+        fh.seek(off)
+        blob = np.frombuffer(fh.read(n), np.uint8)
+        if pg.fillorder == 1:   # libtiff bit-reverses JBIG streams of FillOrder 1 (its native order), so do the files
+            blob = np.packbits(np.unpackbits(blob, bitorder='little'))
+        a = gen_jbig.decode(blob.tobytes())      # PBM: 1 = black -> 0
+        y0, x0 = i // across * th, i % across * tw
+        hh, ww = min(a.shape[0], h - y0), min(a.shape[1], w - x0)
+        out[y0:y0 + hh, x0:x0 + ww] = a[:hh, :ww]
+    return out if pg.photometric == 0 else 255 - out     # MinIsWhite: a 1 bit is black; MinIsBlack: white
 
 
 def decode_jxl(path):
@@ -393,15 +419,37 @@ def decode_dds(path):
     return a[:h, :w]
 
 
+def netpbm_gray(tool, path):
+    """A gray image through a Netpbm converter (PGM / PBM on stdout) as RGBA."""
+    import shutil
+    import subprocess
+    import tempfile
+    from gen_jbig import read_pnm
+    if shutil.which(tool) is None:
+        missing('netpbm', f'Netpbm ({tool}) on the PATH')
+    r = subprocess.run([tool, path], capture_output=True)
+    if r.returncode != 0:
+        raise ValueError(f'{tool} cannot read the file: ' + r.stderr.decode(errors='replace'))
+    with tempfile.TemporaryDirectory() as t:
+        p = os.path.join(t, 'o.pnm')
+        with open(p, 'wb') as f:
+            f.write(r.stdout)
+        g = read_pnm(p)
+    return np.stack([g, g, g, np.full_like(g, np.iinfo(g.dtype).max)], -1)
+
+
 def decode_legacy(path, ext):
     """PCX / DCX (first page), SGI, Sun Raster, XBM, XPM, WBMP as RGBA (uint16 for 16 bit SGI), by ImageMagick, except
     where it disagrees with the format description (see gen_pcx.py, gen_sun.py): 1 bit PCX through Pillow, RLE coded
-    Sun Raster through Pillow when its rows need no padding. Exits with status 77 when no tool here reads the file
+    Sun Raster through Pillow when its rows need no padding, WBMP and 16 bit gray SGI through Netpbm (ImageMagick 7.1.2
+    gets them wrong). Exits with status 77 when no tool here reads the file
     right: 2 channel SGI (ImageMagick drops the alpha), RLE coded 32 bit Sun Raster or with padded rows, or when
     ImageMagick is missing."""
     import shutil
     import struct
     from legacy_common import magick, pillow
+    if ext == '.wbmp':
+        return netpbm_gray('wbmptopbm', path)      # (ImageMagick 7.1.2 rejects some valid files: "insufficient image data")
     with open(path, 'rb') as f:
         d = f.read(1024)
     depth = 8
@@ -418,6 +466,8 @@ def decode_legacy(path, ext):
         if dim == 3 and zs == 2:
             unverifiable('2 channel SGI: ImageMagick drops the alpha')
         depth = 16 if d[3] == 2 else 8
+        if depth == 16 and (dim < 3 or zs == 1):
+            return netpbm_gray('sgitopnm', path)   # (ImageMagick 7.1.2 is off by one on 16 bit gray samples)
     elif ext == '.ras':
         w, _, bits, _, typ = struct.unpack_from('>5I', d, 4)
         if typ == 2 and (bits == 32 or (w * bits + 15) // 16 * 16 != w * bits):

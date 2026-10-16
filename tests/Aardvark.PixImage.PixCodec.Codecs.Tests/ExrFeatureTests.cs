@@ -174,7 +174,7 @@ public class ExrFeatureTests
             if (oracle != null) TestUtil.AssertEqual(oracle, Exr.DecodeChannels(data, names));
             // ... and its RGBA interface converts them to the same RGB (needs the C++ helper)
             var rgba = RunOracle(data, "rgba {in} {out}");
-            if (rgba != null) TestUtil.AssertEqual(alpha ? rgba : DropAlpha(rgba), Exr.Decode(data, new ExrDecodeOptions { HalfAsFloat = false }));
+            if (rgba != null) ExrOracle.AssertMatchesLossy(alpha ? rgba : DropAlpha(rgba), Exr.Decode(data, new ExrDecodeOptions { HalfAsFloat = false }));
         }
         // default rounding as the reference library: coarser, still close
         var g = new RawImage(w, h, ColorModel.Rgb, Pattern(w, h, 3, 4, true));
@@ -197,7 +197,7 @@ public class ExrFeatureTests
         Assert.Equal(a, b);
         TestUtil.AssertEqual(Exr.Decode(a, new ExrDecodeOptions { Parallel = false }), Exr.Decode(a));
         var rgba = RunOracle(a, "rgba {in} {out}");
-        if (rgba != null) TestUtil.AssertEqual(rgba, Exr.Decode(a, new ExrDecodeOptions { HalfAsFloat = false }));
+        if (rgba != null) ExrOracle.AssertMatchesLossy(rgba, Exr.Decode(a, new ExrDecodeOptions { HalfAsFloat = false }));
     }
 
     [Fact]
@@ -534,7 +534,8 @@ public class ExrFeatureTests
 
             // level 0 through the reference library
             var oracle = ExrOracle.Decode(data, ".exr");
-            if (oracle != null) TestUtil.AssertEqual(oracle, back);
+            if (oracle != null && lossy) ExrOracle.AssertMatchesLossy(oracle, back);
+            else if (oracle != null) TestUtil.AssertEqual(oracle, back);
 
             // generated levels: box filtered, sizes rounded down
             var cur = f; int cw = w, ch = h;
@@ -562,7 +563,8 @@ public class ExrFeatureTests
                 else Assert.True(TestUtil.MaxDiff(e, level) < 0.25);
                 // every level through the reference library (needs the C++ helper)
                 var refLevel = RunOracle(data, $"level {{in}} 0 {lx} {ly} {{out}} R G B A");
-                if (refLevel != null) TestUtil.AssertEqual(refLevel, level);
+                if (refLevel != null && lossy) ExrOracle.AssertMatchesLossy(refLevel, level);
+                else if (refLevel != null) TestUtil.AssertEqual(refLevel, level);
             }
         }
     }

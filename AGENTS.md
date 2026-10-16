@@ -76,9 +76,25 @@ to run the net8.0 tests.
 
 - Decoders are checked against reference decoders through the `.ref` sidecars that `tests/oracle/gen_*.py` writes;
   encoders by decoding their output with the reference tools. Tests whose tool or python package is missing skip
-  themselves.
+  themselves (or check less).
 - Third-party test files are in https://github.com/krauthaufen/Aardvark.PixImage.PixCodec.TestData. Tests find it via
-  `PIXCODEC_TESTDATA` or as `../Aardvark.PixImage.PixCodec.TestData`, and skip without it.
+  `PIXCODEC_TESTDATA` or as `../Aardvark.PixImage.PixCodec.TestData`, and skip without it. Some files there are
+  downloaded, not committed: `fetch/*.sh` there and `tests/oracle/fetch_*.py`.
+- `PIXCODEC_REQUIRE_ORACLES=1` turns every such skip into a failure that names the missing tool, package or file;
+  CI runs with it. `PIXCODEC_ORACLE_EXEMPT` (comma separated gate names, e.g. `pamtopnm,python:lerc`) exempts gates
+  a platform cannot provide. Every new oracle gate must go through `Oracles.Have` / `Oracles.Missing`,
+  `TestUtil.PythonAvailable`, `MiscFormatTests.ToolAvailable`, `TestUtil.CannotVerify` (exit status 77 of an oracle
+  script: `pxref.missing(name)` for a missing tool, `pxref.unverifiable(why)` for a file no reference can read) or
+  `[TestDataFact]` / `[TestDataTheory]`.
+- Oracle locations: python (`python3`, else `python`) with `tests/oracle/requirements.txt`; the volume oracles use
+  `PIXCODEC_PYTHON` or `.tmp/venv` if present. Tools on the PATH: `magick` (ImageMagick 7), `zstd`, `7z`, `ffmpeg`,
+  `pamtopnm` / `pngtopam` (netpbm), `pngcheck`, `cjxl` / `djxl`. By variable: `ASTCENC`, `PIXCODEC_KTX`, `PIXCODEC_BASISU`,
+  `EXIFTOOL`, `EXR_ORACLE` (`tests/oracle/exr_oracle.cpp`), `PIXCODEC_JBIGKIT` (jbigkit's pbmtools folder),
+  `PIXCODEC_ISO_JPEG` (the ISO libjpeg's `jpeg`).
+- CI (`.github/workflows/build.yml`, and the test step of `publish.yml`): the `testdata` job fetches the downloaded test
+  data on Linux once and caches it for all OSes (`.github/actions/testdata`, keyed on the fetch scripts);
+  `.github/actions/oracles` installs the python packages, `tests/oracle/ci/install.sh` the released tools and
+  `tests/oracle/ci/build.sh` the ones built from source (Windows: in MSYS2; netpbm from Cygwin), cached per OS.
 - Every change gets a regression test. Run the suite on both frameworks; CI also runs Windows and macOS (ARM64), which
   have caught bugs that x64 Linux does not show.
 
