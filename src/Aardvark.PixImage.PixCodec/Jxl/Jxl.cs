@@ -64,6 +64,31 @@ namespace Aardvark.ImageCodecs
         public IReadOnlyList<JxlFrame> Frames { get; internal set; } = Array.Empty<JxlFrame>();
     }
 
+    /// <summary>What a JPEG XL extra channel holds (ISO/IEC 18181-1 ExtraChannelType).</summary>
+    public enum JxlExtraChannelKind { Alpha, Depth, SpotColour, SelectionMask, Black, Cfa, Thermal, NonOptional, Optional }
+
+    /// <summary>One extra channel of a JPEG XL image as decoded (<see cref="Jxl.DecodeExtraChannels"/>).</summary>
+    public sealed class JxlExtraChannelImage
+    {
+        public JxlExtraChannelKind Kind { get; internal set; }
+        public string Name { get; internal set; } = "";
+        /// <summary>Bits per sample as stored.</summary>
+        public int BitsPerSample { get; internal set; }
+        /// <summary>Whether the samples are floating point in the file.</summary>
+        public bool IsFloat { get; internal set; }
+        /// <summary>For alpha: the colour is premultiplied by it in the file (<see cref="Jxl.Decode"/> returns straight alpha).</summary>
+        public bool AlphaPremultiplied { get; internal set; }
+        /// <summary>For spot colours: linear RGB and solidity of the ink; null otherwise.</summary>
+        public float[]? SpotColour { get; internal set; }
+        /// <summary>Upsampling of the channel relative to the image (1, 2, 4 or 8); the image here has the full size.</summary>
+        public int Upsampling { get; internal set; } = 1;
+        /// <summary>
+        /// The samples as a one channel Float32 image of the image's size (orientation applied as for Decode): integer
+        /// channels scaled to 0..1, float channels as stored.
+        /// </summary>
+        public RawImage Image { get; internal set; } = null!;
+    }
+
     /// <summary>
     /// JPEG XL (ISO/IEC 18181-1 codestream, 18181-2 container) decoder: VarDCT and modular coding, all entropy coding
     /// modes, filters, image features, extra channels, frames and animation. Output is 8 / 16 bit (UInt8 / UInt16), 17 to 31
@@ -244,6 +269,50 @@ namespace Aardvark.ImageCodecs
             return r;
         }
 
+        /// <summary>
+        /// Every extra channel of the image (for an animation: of the first frame), alpha included, as decoded: depth,
+        /// thermal, selection masks, spot colours, the black channel of CMYK and so on, which <see cref="Decode"/> does not
+        /// return (it returns colour and straight alpha).
+        /// </summary>
+        public static IReadOnlyList<JxlExtraChannelImage> DecodeExtraChannels(ReadOnlySpan<byte> data, JxlDecodeOptions? options = null)
+        {
+            try { return DecodeExtraChannelsCore(data, options); }
+            catch (Exception e) when (IsCorruption(e)) { throw Corrupt(e); }
+        }
+
+        static IReadOnlyList<JxlExtraChannelImage> DecodeExtraChannelsCore(ReadOnlySpan<byte> data, JxlDecodeOptions? options)
+        {
+            var opt = options ?? JxlDecodeOptions.Default;
+            var c = JxlContainer.Parse(data);
+            var dec = new JxlDecoder(c.Codestream(data), opt);
+            var h = dec.Header;
+            var f = dec.Next() ?? throw new ImageFormatException("JPEG XL: no displayed frame");
+            var canvas = f.Canvas;
+            var list = new List<JxlExtraChannelImage>();
+            for (int i = 0; i < h.ExtraChannels.Length; i++)
+            {
+                var ec = h.ExtraChannels[i];
+                var plane = (float[])canvas.Planes[canvas.NumColour + i].Clone();
+                var img = new RawImage(canvas.Width, canvas.Height, ColorModel.Gray, plane, 1, new ImageMetadata { Orientation = h.Orientation });
+                if (opt.ApplyOrientation && h.Orientation > 1) img = ImageOps.ApplyOrientation(img, h.Orientation);
+                list.Add(new JxlExtraChannelImage
+                {
+                    Kind = ec.Type switch
+                    {
+                        JxlExtraChannelType.Alpha => JxlExtraChannelKind.Alpha, JxlExtraChannelType.Depth => JxlExtraChannelKind.Depth,
+                        JxlExtraChannelType.SpotColour => JxlExtraChannelKind.SpotColour, JxlExtraChannelType.SelectionMask => JxlExtraChannelKind.SelectionMask,
+                        JxlExtraChannelType.Black => JxlExtraChannelKind.Black, JxlExtraChannelType.Cfa => JxlExtraChannelKind.Cfa,
+                        JxlExtraChannelType.Thermal => JxlExtraChannelKind.Thermal, JxlExtraChannelType.NonOptional => JxlExtraChannelKind.NonOptional,
+                        _ => JxlExtraChannelKind.Optional,
+                    },
+                    Name = ec.Name, BitsPerSample = ec.BitDepth.Bits, IsFloat = ec.BitDepth.Float, AlphaPremultiplied = ec.AlphaAssociated,
+                    SpotColour = ec.Type == JxlExtraChannelType.SpotColour ? new[] { ec.SpotRed, ec.SpotGreen, ec.SpotBlue, ec.SpotSolidity } : null,
+                    Upsampling = 1 << ec.DimShift, Image = img,
+                });
+            }
+            return list;
+        }
+
         /// <summary>EXIF (TIFF structure), XMP and JUMBF of the container, Brotli compressed boxes included.</summary>
         public static (byte[]? Exif, byte[]? Xmp, byte[]? Jumbf) GetMetadataBoxes(ReadOnlySpan<byte> data)
         {
@@ -299,6 +368,8 @@ namespace Aardvark.ImageCodecs
             int[][]? ints = canvas.IntPlanes;
             var p = canvas.Planes;
             if (ints != null && (opt.ForceFloat || opt.RenderSpotColours && HasSpot(h) || alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated || BlackChannel(h) >= 0)) ints = null;
+            if (ints == null && h.XybEncoded && !(h.Colour.WantIcc && h.Icc != null) && !(opt.RenderSpotColours && HasSpot(h)))
+                return FusedXybOutput(h, canvas, meta, opt, color, nch, type);
             if (ints == null)
             {
                 var col = CmykToSrgb(h, canvas, meta, opt) ?? ColourPlanes(h, canvas, meta, opt);
@@ -336,6 +407,64 @@ namespace Aardvark.ImageCodecs
                     else WriteFloats(data, type, c, nch, planes[c], maxv, s0, e0);
                 }
             });
+            var img = new RawImage(w, hh, color, data, nch, meta);
+            if (opt.ApplyOrientation && h.Orientation > 1) img = ImageOps.ApplyOrientation(img, h.Orientation);
+            return img;
+        }
+
+        /// <summary>
+        /// XYB images to an enumerated encoding: primaries, transfer function, unpremultiplication and quantization in one
+        /// pass over small blocks (no full size intermediate planes).
+        /// </summary>
+        static RawImage FusedXybOutput(JxlImageHeader h, JxlFrameImage canvas, ImageMetadata meta, JxlDecodeOptions opt, ColorModel color, int nch, SampleType type)
+        {
+            int w = canvas.Width, hh = canvas.Height, n = w * hh;
+            int ncol = h.Colour.IsGray ? 1 : 3;
+            int alpha = h.AlphaChannel;
+            var p = canvas.Planes;
+            float[]? a = alpha >= 0 ? p[canvas.NumColour + alpha] : null;
+            bool premul = alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated;
+            var matrix = !h.Colour.WantIcc && JxlColour.NeedsPrimaryConversion(h.Colour) ? JxlColour.SrgbToTargetMatrix(h.Colour) : null;
+            var ce = h.Colour.WantIcc ? new JxlColourEncoding() : h.Colour;
+            float it = h.ToneMapping.IntensityTarget;
+            Array data = RawImage.CreateArray(type, checked(n * nch));
+            int maxv = h.BitDepth.Float ? 0 : (int)Math.Min((1L << h.BitDepth.Bits) - 1, int.MaxValue);
+            const int Block = 4096;
+            bool srgb8 = type == SampleType.UInt8 && ce.Transfer == JxlTransfer.Srgb && !premul;
+            JxlColour.Chunked(n, opt.Multithreaded, (s0, e0) =>
+            {
+                var buf = new float[3 * Block];
+                for (int s = s0; s < e0; s += Block)
+                {
+                    int cnt = Math.Min(Block, e0 - s);
+                    var r = buf.AsSpan(0, cnt); var g = buf.AsSpan(Block, cnt); var b = buf.AsSpan(2 * Block, cnt);
+                    p[0].AsSpan(s, cnt).CopyTo(r); p[1].AsSpan(s, cnt).CopyTo(g); p[2].AsSpan(s, cnt).CopyTo(b);
+                    if (matrix != null) JxlColour.ApplyMatrix(r, g, b, matrix);
+                    if (ncol == 1)
+                        for (int i = 0; i < cnt; i++) r[i] = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i];
+                    if (srgb8)
+                    {
+                        var d = ((byte[])data).AsSpan(s * nch);
+                        for (int c = 0; c < ncol; c++) JxlColour.LinearToSrgb8(c == 0 ? r : c == 1 ? g : b, d.Slice(c), nch);
+                        if (a != null) WriteFloats(data, type, ncol, nch, a.AsSpan(s, cnt), maxv, s);
+                        continue;
+                    }
+                    if (ncol == 1) JxlColour.FromLinear(r, ce, it);
+                    else
+                    {
+                        JxlColour.FromLinear(r, ce, it); JxlColour.FromLinear(g, ce, it); JxlColour.FromLinear(b, ce, it);
+                    }
+                    for (int c = 0; c < ncol; c++)
+                    {
+                        var col = c == 0 ? r : c == 1 ? g : b;
+                        if (premul)
+                            for (int i = 0; i < cnt; i++) { float av = a![s + i]; col[i] = av > 0 ? col[i] / av : 0; }
+                        WriteFloats(data, type, c, nch, col, maxv, s);
+                    }
+                    if (a != null) WriteFloats(data, type, ncol, nch, a.AsSpan(s, cnt), maxv, s);
+                }
+            });
+            if (h.Colour.WantIcc) meta.IccProfile = null;   // converted to sRGB
             var img = new RawImage(w, hh, color, data, nch, meta);
             if (opt.ApplyOrientation && h.Orientation > 1) img = ImageOps.ApplyOrientation(img, h.Orientation);
             return img;
@@ -505,48 +634,55 @@ namespace Aardvark.ImageCodecs
         }
 
         static void WriteFloats(Array data, SampleType type, int c, int nch, float[] src, int maxv, int start, int n)
+            => WriteFloats(data, type, c, nch, src.AsSpan(start, n - start), maxv, start);
+
+        /// <summary>Writes src as channel c of pixels start, start + 1, ... (rounded and clamped for integer types).</summary>
+        static void WriteFloats(Array data, SampleType type, int c, int nch, ReadOnlySpan<float> src, int maxv, int start)
         {
+            int o = start * nch + c;
             switch (type)
             {
                 case SampleType.Float32:
                     {
-                        var d = (float[])data;
-                        for (int i = start; i < n; i++) d[i * nch + c] = src[i];
+                        var d = ((float[])data).AsSpan(o);
+                        for (int i = 0; i < src.Length; i++) d[i * nch] = src[i];
                         break;
                     }
                 case SampleType.Float16:
                     {
-                        var d = (Half[])data;
-                        for (int i = start; i < n; i++) d[i * nch + c] = (Half)src[i];
+                        var d = ((Half[])data).AsSpan(o);
+                        for (int i = 0; i < src.Length; i++) d[i * nch] = (Half)src[i];
                         break;
                     }
                 case SampleType.UInt8:
                     {
-                        var d = (byte[])data;
-                        for (int i = start; i < n; i++)
+                        var d = ((byte[])data).AsSpan(o);
+                        float mf = maxv;
+                        for (int i = 0; i < src.Length; i++)
                         {
-                            float v = src[i] * maxv;
-                            d[i * nch + c] = (byte)(v <= 0 ? 0 : v >= maxv ? maxv : (int)(v + 0.5f));
+                            float v = src[i] * mf;
+                            d[i * nch] = (byte)(v <= 0 ? 0 : v >= mf ? maxv : (int)(v + 0.5f));
                         }
                         break;
                     }
                 case SampleType.UInt16:
                     {
-                        var d = (ushort[])data;
-                        for (int i = start; i < n; i++)
+                        var d = ((ushort[])data).AsSpan(o);
+                        float mf = maxv;
+                        for (int i = 0; i < src.Length; i++)
                         {
-                            float v = src[i] * maxv;
-                            d[i * nch + c] = (ushort)(v <= 0 ? 0 : v >= maxv ? maxv : (int)(v + 0.5f));
+                            float v = src[i] * mf;
+                            d[i * nch] = (ushort)(v <= 0 ? 0 : v >= mf ? maxv : (int)(v + 0.5f));
                         }
                         break;
                     }
                 default:
                     {
-                        var d = (uint[])data;
-                        for (int i = start; i < n; i++)
+                        var d = ((uint[])data).AsSpan(o);
+                        for (int i = 0; i < src.Length; i++)
                         {
                             double v = (double)src[i] * maxv;
-                            d[i * nch + c] = (uint)(v <= 0 ? 0 : v >= maxv ? maxv : (long)(v + 0.5));
+                            d[i * nch] = (uint)(v <= 0 ? 0 : v >= maxv ? maxv : (long)(v + 0.5));
                         }
                         break;
                     }

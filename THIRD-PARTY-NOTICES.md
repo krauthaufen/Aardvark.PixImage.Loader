@@ -83,3 +83,25 @@ Copyright © 2014-2019 The Khronos Group Inc., licensed under the Creative Commo
 ".basis File Format and ETC1S Texture Video Specification" and "UASTC LDR 4x4 Texture Specification"
 (https://github.com/BinomialLLC/basis_universal/wiki) and in Appendix C / D of the KTX 2.0 specification. Only the table
 values were taken; no code of basis_universal was used.
+
+## ISO/IEC 18181-1 (JPEG XL) - default parameter tables
+
+`src/Aardvark.PixImage.PixCodec/Jxl` contains the default parameters that ISO/IEC 18181-1:2024 "JPEG XL image coding
+system - Part 1: Core coding system" defines as part of the bitstream: the default dequantization table parameters of
+the 17 quantization tables (`JxlQuantTables.cs`), the AFV basis (`JxlTransforms.cs`), the default 2x / 4x / 8x
+upsampling weights (`JxlUpsampling.cs`), the delta palette (`JxlModularDecode.cs`), the 120 special LZ77 distances
+(`JxlEntropy.cs`), the ICC tag / type string tables of the ICC compression (`JxlIcc.cs`), the default weighted predictor,
+opsin inverse, noise and spline constants, and the AC strategy shapes and orders (`JxlAcStrategy.cs`). They are data
+that every conforming decoder must use; the code is written independently. The 8x upsampling weights were recovered
+from the output of libjxl (run as an oracle) by least squares and agree with the standard's values to float precision.
+
+## RFC 7932 (Brotli) - static dictionary and transforms
+
+`src/Aardvark.PixImage.PixCodec/Core/Compression/BrotliDictionary.zlib` holds the 122,784 byte static dictionary of
+RFC 7932 "Brotli Compressed Data Format" (Appendix A), extracted from the RFC text by script and checked against the
+CRC-32 the RFC gives; `BrotliDecoder.cs` contains the 121 word transforms of Appendix B and the context lookup tables of
+section 7.1. The decoder is written from the RFC's prose.
+
+RFC 7932: Copyright (c) 2016 IETF Trust and the persons identified as the document authors (J. Alakuijala, Z. Szabadka).
+Code components extracted from the RFC are available under the Simplified BSD License as described in section 4.e of
+the Trust Legal Provisions (https://trustee.ietf.org/license-info).

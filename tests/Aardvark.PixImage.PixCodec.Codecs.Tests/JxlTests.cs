@@ -233,6 +233,38 @@ public class JxlTests(ITestOutputHelper output)
         Assert.Null(Jxl.Decode(File.ReadAllBytes(Fixture("jxl/vd_e1.jxl"))).Metadata?.IccProfile);
     }
 
+    [Fact]
+    public void ExtraChannelsAreReturned()
+    {
+        var data = File.ReadAllBytes(Fixture("jxl/ll_rgba.jxl"));
+        var img = Jxl.Decode(data);
+        var ecs = Jxl.DecodeExtraChannels(data);
+        var a = Assert.Single(ecs);
+        Assert.Equal((JxlExtraChannelKind.Alpha, 8, false, false), (a.Kind, a.BitsPerSample, a.IsFloat, a.AlphaPremultiplied));
+        Assert.Equal((img.Width, img.Height, 1, SampleType.Float32), (a.Image.Width, a.Image.Height, a.Image.Channels, a.Image.SampleType));
+        var px = (byte[])img.Data; var ap = (float[])a.Image.Data;
+        for (int i = 0; i < ap.Length; i++) Assert.Equal(px[i * 4 + 3], (int)Math.Round(ap[i] * 255));
+        Assert.Empty(Jxl.DecodeExtraChannels(File.ReadAllBytes(Fixture("jxl/vd_e1.jxl"))));
+        Assert.True(Jxl.DecodeExtraChannels(File.ReadAllBytes(Fixture("jxl/ll_premultiplied.jxl")))[0].AlphaPremultiplied);
+    }
+
+    [TestDataFact]
+    public void SpotAndBlackChannelsAreReturned()
+    {
+        string C(string n) => Path.Combine(TestDataDir!, "downloads", "jxl-conformance", n, "input.jxl");
+        if (!File.Exists(C("spot"))) return;
+        var spot = Jxl.DecodeExtraChannels(File.ReadAllBytes(C("spot")));
+        var s = spot.First(e => e.Kind == JxlExtraChannelKind.SpotColour);
+        Assert.Equal(2, spot.Count(e => e.Kind == JxlExtraChannelKind.SpotColour));
+        Assert.NotNull(s.SpotColour);
+        Assert.Contains(Jxl.DecodeExtraChannels(File.ReadAllBytes(C("cmyk_layers"))), e => e.Kind == JxlExtraChannelKind.Black);
+        // CMYK comes back as sRGB without the CMYK profile
+        var cmyk = Jxl.Decode(File.ReadAllBytes(C("cmyk_layers")));
+        Assert.Equal((ColorModel.Rgba, TransferFunction.Srgb), (cmyk.Color, cmyk.Metadata?.Transfer));
+        Assert.Null(cmyk.Metadata?.IccProfile);
+        Assert.False(Jxl.GetInfo(File.ReadAllBytes(C("cmyk_layers"))).HasIccProfile);
+    }
+
     // ------------------------------------------------------------------ metadata boxes
 
     [Theory]

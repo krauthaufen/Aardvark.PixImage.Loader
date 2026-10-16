@@ -1,5 +1,7 @@
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
 namespace Aardvark.ImageCodecs.JpegXl
@@ -138,6 +140,78 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
         }
 
+        const int Srgb8Cells = 1 << 12;
+        static (float[] thr, byte[] coarse)? srgb8;
+
+        /// <summary>
+        /// Linear light to 8 bit sRGB, rounded: thr[b] is the linear value from which the output is b + 1, coarse[k] the
+        /// output at k / 4096 (at most one threshold lies within a cell: the curve rises by at most 0.81 steps per cell).
+        /// </summary>
+        static (float[] thr, byte[] coarse) Srgb8Tables
+        {
+            get
+            {
+                if (srgb8 is { } t) return t;
+                var thr = new float[256];
+                for (int b = 0; b < 255; b++)
+                {
+                    double e = (b + 0.5) / 255;
+                    double lin = e <= 0.04045 ? e / 12.92 : Math.Pow((e + 0.055) / 1.055, 2.4);
+                    float f = (float)lin;
+                    // the first float whose (interpolated) encoding rounds up
+                    while (f > 0 && SrgbInterp(BitDecrement(f)) * 255 + 0.5f >= b + 1) f = BitDecrement(f);
+                    while (SrgbInterp(f) * 255 + 0.5f < b + 1) f = BitIncrement(f);
+                    thr[b] = f;
+                }
+                thr[255] = float.PositiveInfinity;
+                var coarse = new byte[Srgb8Cells + 1];
+                int k0 = 0;
+                for (int k = 0; k <= Srgb8Cells; k++)
+                {
+                    float v = (float)k / Srgb8Cells;
+                    while (k0 < 255 && v >= thr[k0]) k0++;
+                    coarse[k] = (byte)k0;
+                }
+                srgb8 = (thr, coarse);
+                return (thr, coarse);
+            }
+        }
+
+        static float BitDecrement(float f) => MathF.BitDecrement(f);
+        static float BitIncrement(float f) => MathF.BitIncrement(f);
+
+        static float SrgbInterp(float v)
+        {
+            if (v < 0) return -SrgbFromLinear(-v);
+            if (v >= 1) return SrgbFromLinear(v);
+            var lut = SrgbLut;
+            float f = v * SrgbLutSize;
+            int k = (int)f;
+            return lut[k] + (lut[k + 1] - lut[k]) * (f - k);
+        }
+
+        /// <summary>
+        /// Linear light to rounded 8 bit sRGB values, the same as <see cref="FromLinear(Span{float}, JxlColourEncoding, float)"/>
+        /// followed by rounding and clamping, without evaluating the curve.
+        /// </summary>
+        public static void LinearToSrgb8(ReadOnlySpan<float> src, Span<byte> dst, int stride)
+        {
+            var (thr, coarse) = Srgb8Tables;
+            ref float t0 = ref MemoryMarshal.GetArrayDataReference(thr);
+            ref byte c0 = ref MemoryMarshal.GetArrayDataReference(coarse);
+            const float Below1 = 0.99999994f;
+            for (int i = 0; i < src.Length; i++)
+            {
+                float v = src[i];
+                v = v > 0 ? v : 0;            // also NaN
+                v = v < Below1 ? v : Below1;
+                int b = Unsafe.Add(ref c0, (int)(v * Srgb8Cells));
+                // branch free: one more when v >= thr[b] (the sign bit of v - thr[b] is clear)
+                b += 1 - (int)((uint)BitConverter.SingleToInt32Bits(v - Unsafe.Add(ref t0, b)) >> 31);
+                dst[i * stride] = (byte)b;
+            }
+        }
+
         public static float SrgbFromLinear(float v)
         {
             if (v <= 0.0031308f) return v * 12.92f;
@@ -170,52 +244,54 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// <summary>Applies the encoding transfer function to linear values in place (sign preserving for out of range values).</summary>
         public static void FromLinear(float[] p, int n, JxlColourEncoding ce, float intensityTarget, bool parallel)
         {
+            if (ce.Transfer is JxlTransfer.Linear or not (JxlTransfer.Srgb or JxlTransfer.Bt709 or JxlTransfer.Pq or JxlTransfer.Hlg or JxlTransfer.Dci or JxlTransfer.Gamma)) return;
+            Chunked(n, parallel, (s, e) => FromLinear(p.AsSpan(s, e - s), ce, intensityTarget));
+        }
+
+        /// <summary>Linear light to the encoding's transfer function, in place (negative values mirrored).</summary>
+        public static void FromLinear(Span<float> p, JxlColourEncoding ce, float intensityTarget)
+        {
             switch (ce.Transfer)
             {
-                case JxlTransfer.Linear: return;
                 case JxlTransfer.Srgb:
                     {
                         var lut = SrgbLut;
-                        Chunked(n, parallel, (s, e) =>
+                        for (int i = 0; i < p.Length; i++)
                         {
-                            for (int i = s; i < e; i++)
+                            float v = p[i];
+                            if (v >= 0 && v < 1)
                             {
-                                float v = p[i];
-                                if (v >= 0 && v < 1)
-                                {
-                                    float f = v * SrgbLutSize;
-                                    int k = (int)f;
-                                    p[i] = lut[k] + (lut[k + 1] - lut[k]) * (f - k);
-                                }
-                                else p[i] = v < 0 ? -SrgbFromLinear(-v) : SrgbFromLinear(v);
+                                float f = v * SrgbLutSize;
+                                int k = (int)f;
+                                p[i] = lut[k] + (lut[k + 1] - lut[k]) * (f - k);
                             }
-                        });
+                            else p[i] = v < 0 ? -SrgbFromLinear(-v) : SrgbFromLinear(v);
+                        }
                         return;
                     }
                 case JxlTransfer.Bt709:
-                    Chunked(n, parallel, (s, e) => { for (int i = s; i < e; i++) { float v = p[i]; p[i] = v < 0 ? -Bt709FromLinear(-v) : Bt709FromLinear(v); } });
+                    for (int i = 0; i < p.Length; i++) { float v = p[i]; p[i] = v < 0 ? -Bt709FromLinear(-v) : Bt709FromLinear(v); }
                     return;
                 case JxlTransfer.Pq:
                     {
                         float sc = intensityTarget / 10000f;
-                        Chunked(n, parallel, (s, e) => { for (int i = s; i < e; i++) { float v = p[i] * sc; p[i] = v < 0 ? -PqFromLinear(-v) : PqFromLinear(v); } });
+                        for (int i = 0; i < p.Length; i++) { float v = p[i] * sc; p[i] = v < 0 ? -PqFromLinear(-v) : PqFromLinear(v); }
                         return;
                     }
                 case JxlTransfer.Hlg:
-                    Chunked(n, parallel, (s, e) => { for (int i = s; i < e; i++) { float v = p[i]; p[i] = v < 0 ? -HlgFromLinear(-v) : HlgFromLinear(v); } });
+                    for (int i = 0; i < p.Length; i++) { float v = p[i]; p[i] = v < 0 ? -HlgFromLinear(-v) : HlgFromLinear(v); }
                     return;
                 case JxlTransfer.Dci:
-                    Chunked(n, parallel, (s, e) => { for (int i = s; i < e; i++) { float v = p[i]; p[i] = v < 0 ? -MathF.Pow(-v, 1 / 2.6f) : MathF.Pow(v, 1 / 2.6f); } });
+                    for (int i = 0; i < p.Length; i++) { float v = p[i]; p[i] = v < 0 ? -MathF.Pow(-v, 1 / 2.6f) : MathF.Pow(v, 1 / 2.6f); }
                     return;
                 case JxlTransfer.Gamma:
                     {
                         float g = (float)ce.Gamma;
-                        Chunked(n, parallel, (s, e) => { for (int i = s; i < e; i++) { float v = p[i]; p[i] = v < 0 ? -MathF.Pow(-v, g) : MathF.Pow(v, g); } });
+                        for (int i = 0; i < p.Length; i++) { float v = p[i]; p[i] = v < 0 ? -MathF.Pow(-v, g) : MathF.Pow(v, g); }
                         return;
                     }
                 default:
-                    // unknown: leave linear
-                    return;
+                    return;   // linear or unknown: leave linear
             }
         }
 
@@ -313,9 +389,11 @@ namespace Aardvark.ImageCodecs.JpegXl
             return f;
         }
 
-        public static void ApplyMatrix(float[] r, float[] g, float[] b, int n, float[] m)
+        public static void ApplyMatrix(float[] r, float[] g, float[] b, int n, float[] m) => ApplyMatrix(r.AsSpan(0, n), g.AsSpan(0, n), b.AsSpan(0, n), m);
+
+        public static void ApplyMatrix(Span<float> r, Span<float> g, Span<float> b, float[] m)
         {
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < r.Length; i++)
             {
                 float x = r[i], y = g[i], z = b[i];
                 r[i] = m[0] * x + m[1] * y + m[2] * z;
