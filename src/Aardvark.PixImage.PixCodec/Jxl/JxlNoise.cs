@@ -77,13 +77,15 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
         }
 
-        float Strength(float x)
+        /// <summary>The LUT interpolated at 6 x (from 7 on: the last entry), clamped to [0, 1] (18181-1:2024 K.5.2).</summary>
+        internal float Strength(float x)
         {
             float s = x * 6;
-            if (s < 0) s = 0;
-            if (s > 6.999999f) s = 6.999999f;
-            int f = (int)s;
-            float frac = s - f;
+            int f;
+            float frac;
+            if (!(s > 0)) { f = 0; frac = 0; }   // also NaN
+            else if (s >= 7) { f = 6; frac = 1; }
+            else { f = (int)s; frac = s - f; }
             float v = Lut[f] + (Lut[f + 1] - Lut[f]) * frac;
             return v < 0 ? 0 : v > 1 ? 1 : v;
         }

@@ -181,6 +181,354 @@ public class JxlSpecTests(ITestOutputHelper output)
         AssertClose(d, "patches, depth + alpha", 1e-4);
     }
 
+    // ------------------------------------------------------------------ Annex M limits
+
+    /// <summary>
+    /// Table M.1: a local MA tree may have 1024 + (samples of its stream) nodes, more than the global tree limit for small
+    /// frames. A 64 x 64 grey frame whose GlobalModular stream has its own tree of 2047 nodes.
+    /// </summary>
+    [Fact]
+    public void LocalTreeMayExceedTheGlobalLimit()
+    {
+        const int W = 64, H = 64;
+        var h = new JxlImageHeader { Width = W, Height = H, XybEncoded = false, Colour = new JxlColourEncoding { ColourSpace = JxlColourSpace.Grey } };
+        var cs = new JxlBitWriter();
+        JxlHeaderWriter.WriteImageHeader(cs, h);
+        cs.ZeroPadToByte();
+        var fh = new JxlFrameHeader { Modular = true, Width = W, Height = H, Filter = new JxlRestorationFilter { Gab = false, EpfIters = 0 } };
+        var tree = new JxlEncTree();
+        int Build(int depth, int lo, int hi, int lo2, int hi2)
+        {
+            if (depth == 10) return tree.AddLeaf(depth % 3 == 0 ? 5 : 1);
+            bool onX = (depth & 1) == 0;
+            int a = onX ? lo : lo2, b = onX ? hi : hi2, mid = (a + b) / 2;
+            int left = onX ? Build(depth + 1, mid + 1, hi, lo2, hi2) : Build(depth + 1, lo, hi, mid + 1, hi2);
+            int right = onX ? Build(depth + 1, lo, mid, lo2, hi2) : Build(depth + 1, lo, hi, lo2, mid);
+            return tree.AddSplit(onX ? 3 : 2, mid, left, right);   // properties 3 = x, 2 = y; left when above
+        }
+        tree = tree.Finish(Build(0, 0, W - 1, 0, H - 1));
+        Assert.Equal(2047, tree.Prop.Count);
+        var chans = new List<JxlChannel> { new JxlChannel(W, H, 0, 0) };
+        for (int i = 0; i < W * H; i++) chans[0].Data[i] = (int)(Rand(4, i % W, i / W) * 255);
+        var tok = new JxlTokens();
+        JxlModularTokenizer.EncodeChannel(chans, 0, tree.Specialize(0, 0), JxlWpHeader.Default, tok);
+        var code = new JxlEntropyEncoder(tree.NumLeaves) { MaxClusters = 8 };
+        code.Build(new[] { tok }, false);
+        var lf = new JxlBitWriter();
+        lf.WriteBool(true);    // default LF dequantization
+        lf.WriteBool(false);   // no global tree
+        JxlTransformEnc.WriteHeader(lf, Array.Empty<JxlTransformEnc>(), globalTree: false);
+        tree.Write(lf);
+        code.WriteCode(lf);
+        code.WriteTokens(lf, tok);
+        JxlLosslessEncoder.WriteFrame(cs, fh, h, new List<byte[]> { lf.ToArray() });
+        var data = cs.ToArray();
+
+        var img = Jxl.Decode(data);
+        Assert.Equal(chans[0].Data, ((byte[])img.Data).Select(b => (int)b));
+        var lib = JxlEncodeTests.Libjxl(data);
+        if (lib != null) Assert.Equal((byte[])img.Data, (byte[])lib.Data);
+    }
+
+    /// <summary>Table M.1: at most min(2^24, frame pixels / 16) patches (we allow at least 4096).</summary>
+    [Fact]
+    public void TooManyPatchesAreRejected()
+    {
+        byte[] Dictionary(int n)
+        {
+            var w = new JxlBitWriter();
+            var t = new Tokens(10);
+            t.Add(0, n);
+            for (int i = 0; i < n; i++)
+            {
+                t.Add(1, 0); t.Add(3, 0); t.Add(3, 0); t.Add(2, 0); t.Add(2, 0); t.Add(7, 0); t.Add(4, 0); t.Add(4, 0); t.Add(5, 1);
+            }
+            t.WriteTo(w);
+            w.ZeroPadToByte();
+            return w.ToArray();
+        }
+        Assert.Equal(4096, JxlPatches.Read(new JxlBitReader(Dictionary(4096)), 0, 64 * 64).Items.Count);
+        Assert.Throws<ImageFormatException>(() => JxlPatches.Read(new JxlBitReader(Dictionary(4097)), 0, 64 * 64));
+        Assert.Equal(5000, JxlPatches.Read(new JxlBitReader(Dictionary(5000)), 0, 300 * 300).Items.Count);
+    }
+
+    /// <summary>
+    /// K.4.1 / Table M.1: splines whose estimated area exceeds min(1024 w h + 2^32, 2^42) are beyond level 10 and are
+    /// rejected before they are drawn (libjxl rejects them too).
+    /// </summary>
+    [Fact]
+    public void SplineAreaBeyondLevel10IsRejected()
+    {
+        const int W = 64, H = 48;
+        byte[] Stream(int sigma)
+        {
+            var s = new Stream(W, H);
+            var f = s.NewFrame(W, H);
+            f.IsLast = true; f.Flags = JxlFrameHeader.FlagSplines;
+            s.Frame(f, Planes(W, H, 3, 1), bw =>
+            {
+                var t = new Tokens(6);
+                t.Add(2, 0); t.Add(1, 4); t.Add(1, 4); t.AddSigned(0, 0);
+                t.Add(3, 2);
+                foreach (int d in new[] { 25, 10, 0, 15 }) t.AddSigned(4, d);
+                for (int c = 0; c < 4; c++)
+                    for (int k = 0; k < 32; k++) t.AddSigned(5, c == 3 ? sigma : k == 0 ? 10 : 0);
+                t.WriteTo(bw);
+            });
+            return s.ToArray();
+        }
+        // 32 sigma weights of 3000^2, colour log 5, Manhattan distance 85: 1.2e11 > 1024 * 64 * 48 + 2^32; sigma 30 is far below
+        Jxl.Decode(Stream(30));
+        var big = Stream(3000);
+        Assert.Throws<ImageFormatException>(() => Jxl.Decode(big));
+        if (PythonAvailable)
+        {
+            var tmp = Path.Combine(FixtureDir, "_tmp");
+            Directory.CreateDirectory(tmp);
+            var f = Path.Combine(tmp, Guid.NewGuid().ToString("N") + ".jxl");
+            try
+            {
+                File.WriteAllBytes(f, big);
+                var (exit, text) = RunPython($"decode_to_ref.py \"{f}\" \"{f}.ref\"");
+                if (!CannotVerify(exit, text)) Assert.NotEqual(0, exit);
+            }
+            finally { File.Delete(f); File.Delete(f + ".ref"); }
+        }
+    }
+
+    // ------------------------------------------------------------------ K.5 noise
+
+    static readonly int[] NoiseLut = { 80, 150, 260, 330, 420, 610, 700, 1010 };
+
+    static void WriteNoise(JxlBitWriter w) { foreach (int v in NoiseLut) w.Write(10, (uint)v); }
+
+    /// <summary>
+    /// K.5: noise generated per group from seeds made of the visible / invisible frame counts and the group position,
+    /// high-pass filtered over the whole frame, scaled by the LUT at the sample's intensity. Several groups, frames that
+    /// are not shown before the shown one, a reference frame, upsampling.
+    /// </summary>
+    [Theory]
+    [InlineData(300, 280, 1, false)]
+    [InlineData(300, 280, 2, false)]
+    [InlineData(200, 136, 1, true)]
+    [InlineData(300, 280, 2, true)]
+    public void NoiseMatchesLibjxl(int w, int h, int upsampling, bool frames)
+    {
+        var s = new Stream(w, h);
+        int cw = (w + upsampling - 1) / upsampling, ch = (h + upsampling - 1) / upsampling;
+        if (frames)
+        {
+            var r = s.NewFrame(w, h);
+            r.Type = JxlFrameType.ReferenceOnly; r.IsLast = false; r.SaveAsReference = 2;
+            s.Frame(r, Planes(w, h, 3, 5));
+            var a = s.NewFrame(w, h);   // composited, not shown: invisible
+            a.IsLast = false; a.Flags = JxlFrameHeader.FlagNoise; a.Upsampling = upsampling;
+            s.Frame(a, Planes(cw, ch, 3, 9), WriteNoise);
+            var b = s.NewFrame(w, h);
+            b.IsLast = true; b.Flags = JxlFrameHeader.FlagNoise; b.Blending = new JxlBlendingInfo { Mode = JxlBlendMode.Add };
+            s.Frame(b, Enumerable.Range(0, 3).Select(c => new Plane(w, h, (x, y) => 0.1f * Rand(c, x, y))).ToArray(), WriteNoise);
+        }
+        else
+        {
+            var f = s.NewFrame(w, h);
+            f.IsLast = true; f.Flags = JxlFrameHeader.FlagNoise; f.Upsampling = upsampling;
+            // intensities across the whole LUT range: (G + R) / 2 and (G - R) / 2 up to 7 / 6 and beyond
+            s.Frame(f, new[]
+            {
+                new Plane(cw, ch, (x, y) => 0.3f * Rand(1, x, y)),
+                new Plane(cw, ch, (x, y) => 2.6f * x / cw),
+                new Plane(cw, ch, (x, y) => Rand(3, x, y)),
+            }, WriteNoise);
+        }
+        AssertClose(s.ToArray(), $"noise {w}x{h} up {upsampling}{(frames ? " frames" : "")}", 2e-5);
+    }
+
+    /// <summary>K.5.2: the strength is LUT[6] .. LUT[7] interpolated up to 7, LUT[7] from there on, LUT[0] below 0.</summary>
+    [Fact]
+    public void NoiseStrengthEnds()
+    {
+        var n = new JxlNoise();
+        for (int i = 0; i < 8; i++) n.Lut[i] = (i + 1) / 10f;
+        Assert.Equal(0.8f, n.Strength(7 / 6f), 6);
+        Assert.Equal(0.8f, n.Strength(5), 6);
+        Assert.Equal(0.75f, n.Strength(6.5f / 6), 6);
+        Assert.Equal(0.1f, n.Strength(-1), 6);
+        Assert.Equal(0.1f, n.Strength(float.NaN), 6);
+    }
+
+    // ------------------------------------------------------------------ K.4 splines
+
+    /// <summary>Splines (K.4.1 coding, K.4.2 Catmull-Rom with the Gaussian brush) on a modular frame.</summary>
+    static void WriteSplines(JxlBitWriter w, int quantAdjust, (int x, int y)[][] splines, int seed)
+    {
+        var t = new Tokens(6);
+        t.Add(2, splines.Length - 1);
+        for (int i = 0; i < splines.Length; i++)
+        {
+            var p = splines[i][0];
+            if (i == 0) { t.Add(1, p.x); t.Add(1, p.y); }
+            else { t.AddSigned(1, p.x - splines[i - 1][0].x); t.AddSigned(1, p.y - splines[i - 1][0].y); }
+        }
+        t.AddSigned(0, quantAdjust);
+        var rng = new Random(seed);
+        foreach (var sp in splines)
+        {
+            t.Add(3, sp.Length - 1);
+            int dx = 0, dy = 0;
+            for (int j = 1; j < sp.Length; j++)
+            {
+                int ndx = sp[j].x - sp[j - 1].x, ndy = sp[j].y - sp[j - 1].y;
+                t.AddSigned(4, ndx - dx); t.AddSigned(4, ndy - dy);
+                dx = ndx; dy = ndy;
+            }
+            for (int c = 0; c < 4; c++)
+                for (int k = 0; k < 32; k++)
+                {
+                    int v = k == 0 ? (c == 3 ? 6 : 14 + 3 * c) : k < 6 ? rng.Next(-4, 5) : 0;
+                    t.AddSigned(5, v);
+                }
+        }
+        t.WriteTo(w);
+    }
+
+    /// <summary>
+    /// Splines (K.4.1 coding, K.4.2 rendering) against K.4.2 taken literally. libjxl parses the same splines but cuts the
+    /// brush off at a few sigma; it differs from the literal rendering by up to ~0.07 here (where sigma gets small along
+    /// the third spline), we by ~2e-6.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(5)]
+    [InlineData(-6)]
+    public void SplinesFollowK42(int quantAdjust)
+    {
+        const int W = 96, H = 80;
+        var s = new Stream(W, H);
+        var f = s.NewFrame(W, H);
+        f.IsLast = true; f.Flags = JxlFrameHeader.FlagSplines;
+        var splines = new[]
+        {
+            new[] { (10, 12), (40, 20), (70, 60), (85, 30) },
+            new[] { (50, 70) },
+            new[] { (5, 70), (30, 50), (31, 52), (60, 75), (90, 70) },
+        };
+        var planes = Enumerable.Range(0, 3).Select(c => new Plane(W, H, (x, y) => 0.2f + 0.3f * Rand(c, x, y))).ToArray();
+        s.Frame(f, planes, bw => WriteSplines(bw, quantAdjust, splines, 3));
+        var refPlanes = planes.Select(p => p.V.Select(v => (double)v).ToArray()).ToArray();
+        SplinesReference(refPlanes, W, H, quantAdjust, splines, 3);
+        var (ours, lib, nc) = DecodeBoth(s.ToArray(), "splines");
+        double mo = 0, ml = 0;
+        for (int i = 0; i < ours.Length; i++)
+        {
+            double r = refPlanes[i % 3][i / 3];
+            mo = Math.Max(mo, Math.Abs(ours[i] - r));
+            if (lib != null) ml = Math.Max(ml, Math.Abs(lib[i] - r));
+        }
+        output.WriteLine($"splines qa {quantAdjust}: largest difference to K.4.2 taken literally: ours {mo:g3}, libjxl {ml:g3}");
+        Assert.True(mo < 2e-5, $"ours {mo}");
+        Assert.True(ml < 0.1, $"libjxl {ml}");
+    }
+
+    static double Erf(double x)
+    {
+        // series for small |x|, continued fraction for erfc otherwise (double precision)
+        double ax = Math.Abs(x);
+        if (ax < 2.5)
+        {
+            double sum = ax, term = ax, x2 = ax * ax;
+            for (int n = 1; n < 200; n++) { term *= -x2 / n; double add = term / (2 * n + 1); sum += add; if (Math.Abs(add) < 1e-17) break; }
+            return Math.Sign(x) * 2 / Math.Sqrt(Math.PI) * sum;
+        }
+        double f = 0;
+        for (int n = 60; n >= 1; n--) f = n / 2.0 / (ax + f);
+        double erfc = Math.Exp(-ax * ax) / Math.Sqrt(Math.PI) / (ax + f);
+        return Math.Sign(x) * (1 - erfc);
+    }
+
+    /// <summary>The spline rendering of K.4.2 taken literally (all pixels, double precision), added to the planes.</summary>
+    static void SplinesReference(double[][] planes, int w, int h, int quantAdjust, (int x, int y)[][] splines, int seed, double corrB = 1)
+    {
+        double qa = quantAdjust >= 0 ? 1 + quantAdjust / 8.0 : 1 / (1 - quantAdjust / 8.0);
+        var rng = new Random(seed);
+        double[] mul = { 0.0042, 0.075, 0.07, 0.3333 };
+        foreach (var sp in splines)
+        {
+            var q = new double[4][];
+            for (int c = 0; c < 4; c++)
+            {
+                q[c] = new double[32];
+                for (int k = 0; k < 32; k++) q[c][k] = k == 0 ? (c == 3 ? 6 : 14 + 3 * c) : k < 6 ? rng.Next(-4, 5) : 0;
+            }
+            var dct = new double[4][];
+            for (int c = 0; c < 4; c++) { dct[c] = new double[32]; for (int k = 0; k < 32; k++) dct[c][k] = q[c][k] * mul[c] / qa; }
+            for (int k = 0; k < 32; k++) dct[2][k] += corrB * dct[1][k];   // base correlations of a modular frame: x 0, b 1
+            double Idct(double[] d, double t) { double r = d[0]; for (int k = 1; k < 32; k++) r += Math.Sqrt(2) * d[k] * Math.Cos(k * (Math.PI / 32) * (t + 0.5)); return r; }
+            var S = sp.Select(p => ((double)p.x, (double)p.y)).ToList();
+            var up = new List<(double x, double y)>();
+            if (S.Count == 1) up.Add(S[0]);
+            else
+            {
+                var ext = new List<(double x, double y)> { (2 * S[0].Item1 - S[1].Item1, 2 * S[0].Item2 - S[1].Item2) };
+                ext.AddRange(S);
+                ext.Add((2 * S[^1].Item1 - S[^2].Item1, 2 * S[^1].Item2 - S[^2].Item2));
+                for (int i = 0; i + 3 < ext.Count; i++)
+                {
+                    var pp = ext.GetRange(i, 4);
+                    up.Add(pp[1]);
+                    var t = new double[4];
+                    for (int k = 1; k < 4; k++) t[k] = t[k - 1] + Math.Pow(Math.Pow(pp[k].x - pp[k - 1].x, 2) + Math.Pow(pp[k].y - pp[k - 1].y, 2), 0.25);
+                    for (int step = 1; step < 16; step++)
+                    {
+                        double knot = t[1] + step / 16.0 * (t[2] - t[1]);
+                        var A = new (double x, double y)[3];
+                        for (int k = 0; k < 3; k++) { double f = (knot - t[k]) / (t[k + 1] - t[k]); A[k] = (pp[k].x + f * (pp[k + 1].x - pp[k].x), pp[k].y + f * (pp[k + 1].y - pp[k].y)); }
+                        var B = new (double x, double y)[2];
+                        for (int k = 0; k < 2; k++) { double f = (knot - t[k]) / (t[k + 2] - t[k]); B[k] = (A[k].x + f * (A[k + 1].x - A[k].x), A[k].y + f * (A[k + 1].y - A[k].y)); }
+                        double g = (knot - t[1]) / (t[2] - t[1]);
+                        up.Add((B[0].x + g * (B[1].x - B[0].x), B[0].y + g * (B[1].y - B[0].y)));
+                    }
+                }
+                up.Add(S[^1]);
+            }
+            var all = new List<((double x, double y) p, double len)>();
+            var cur = up[0]; int next = 0;
+            all.Add((cur, 1));
+            while (next < up.Count)
+            {
+                var prev = cur; double len = 0;
+                while (true)
+                {
+                    if (next == up.Count) { all.Add((prev, len)); break; }
+                    double toNext = Math.Sqrt(Math.Pow(up[next].x - prev.x, 2) + Math.Pow(up[next].y - prev.y, 2));
+                    if (len + toNext >= 1)
+                    {
+                        double f = (1 - len) / toNext;
+                        cur = (prev.x + f * (up[next].x - prev.x), prev.y + f * (up[next].y - prev.y));
+                        all.Add((cur, 1));
+                        break;
+                    }
+                    len += toNext; prev = up[next]; ++next;
+                }
+            }
+            double arc = all.Count - 2 + all[^1].len;
+            if (!(arc > 0)) continue;   // a single point: K.4.2 divides by zero, nothing is drawn
+            for (int i = 0; i < all.Count; i++)
+            {
+                double a = Math.Min(1.0, i / arc);
+                var (p, d) = all[i];
+                double sigma = Idct(dct[3], 31 * a);
+                var v = Enumerable.Range(0, 3).Select(c => Idct(dct[c], 31 * a)).ToArray();
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        double dist = Math.Sqrt((x - p.x) * (x - p.x) + (y - p.y) * (y - p.y));
+                        double fac = Erf((dist / 2 + Math.Sqrt(1 / 8.0)) / sigma) - Erf((dist / 2 - Math.Sqrt(1 / 8.0)) / sigma);
+                        for (int c = 0; c < 3; c++) planes[c][y * w + x] += v[c] * d * sigma * fac * fac / 4;
+                    }
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ fixtures of gen_jxl_spec.py
 
     static byte[] SpecFixture(string name) => File.ReadAllBytes(Path.Combine(FixtureDir, "jxl-spec", name));
@@ -209,3 +557,4 @@ public class JxlSpecTests(ITestOutputHelper output)
         Assert.True(m < 5e-4, $"{m}");
     }
 }
+
