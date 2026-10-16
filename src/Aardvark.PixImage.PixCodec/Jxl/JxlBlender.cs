@@ -16,12 +16,10 @@ namespace Aardvark.ImageCodecs.JpegXl
         public static JxlFrameImage Blend(JxlImageHeader img, JxlFrameHeader fh, JxlFrameImage frame, JxlDecoderState state)
         {
             int W = img.Width, H = img.Height;
+            if (IsPassthrough(img, fh, frame)) return frame;
             int nch = frame.Planes.Length;
             int nc = frame.NumColour;
-            bool allReplace = fh.Blending.Mode == JxlBlendMode.Replace;
-            for (int e = 0; e < fh.EcBlending.Length; e++) allReplace &= fh.EcBlending[e].Mode == JxlBlendMode.Replace;
             int x0 = fh.X0, y0 = fh.Y0;
-            if (allReplace && x0 == 0 && y0 == 0 && frame.Width == W && frame.Height == H) return frame;
 
             var canvas = new JxlFrameImage { Width = W, Height = H, NumColour = nc, Planes = new float[nch][] };
             // overlap of the frame with the canvas

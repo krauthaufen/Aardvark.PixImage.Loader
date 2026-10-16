@@ -377,13 +377,13 @@ namespace Aardvark.ImageCodecs
             int alpha = h.AlphaChannel;
             var planes = new float[nch][];
             int[][]? ints = canvas.IntPlanes;
-            var p = canvas.Planes;
             if (ints != null && (opt.ForceFloat || opt.RenderSpotColours && HasSpot(h) || alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated || BlackChannel(h) >= 0)) ints = null;
             if (ints == null && h.XybEncoded && !(h.Colour.WantIcc && h.Icc != null) && !(opt.RenderSpotColours && HasSpot(h)))
                 return FusedXybOutput(h, canvas, meta, opt, color, nch, type);
             canvas.EnsureLinear(opt.Multithreaded);
             if (ints == null)
             {
+                var p = canvas.Planes;
                 var col = CmykToSrgb(h, canvas, meta, opt) ?? ColourPlanes(h, canvas, meta, opt);
                 if (opt.RenderSpotColours && HasSpot(h)) col = RenderSpot(h, canvas, col, n);
                 for (int c = 0; c < ncol; c++) planes[c] = col[c];

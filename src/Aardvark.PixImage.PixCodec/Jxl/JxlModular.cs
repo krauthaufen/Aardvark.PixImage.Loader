@@ -286,7 +286,7 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         // ------------------------------------------------------------------ inverse transforms
 
-        public void Undo()
+        public void Undo(bool parallel = false)
         {
             var tr = Header.Transforms;
             for (int i = tr.Length - 1; i >= 0; i--)
@@ -294,7 +294,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 var t = tr[i];
                 switch (t.Kind)
                 {
-                    case JxlTransformKind.Rct: JxlModularTransforms.InverseRct(Channels, t.BeginC, t.RctType); break;
+                    case JxlTransformKind.Rct: JxlModularTransforms.InverseRct(Channels, t.BeginC, t.RctType, parallel); break;
                     case JxlTransformKind.Palette: UndoPalette(t, i); break;
                     default: UndoSqueeze(squeezeUsed[i]); break;
                 }

@@ -277,21 +277,33 @@ namespace Aardvark.ImageCodecs.JpegXl
     internal static class JxlModularTransforms
     {
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        public static void InverseRct(List<JxlChannel> channels, int begin, int rctType)
+        public static void InverseRct(List<JxlChannel> channels, int begin, int rctType, bool parallel = false)
         {
             int perm = rctType / 7, type = rctType % 7;
             var c0 = channels[begin].Data; var c1 = channels[begin + 1].Data; var c2 = channels[begin + 2].Data;
             int n = c0.Length;
+            if (type != 0) JxlColour.Chunked(n, parallel, (s, e) => Rct(c0, c1, c2, type, s, e));
+            if (perm == 0) return;
+            // the forward transform read its inputs as (ch[p0], ch[p1], ch[p2]); put them back
+            var a = channels[begin]; var b = channels[begin + 1]; var c = channels[begin + 2];
+            var arr = new JxlChannel[3];
+            int p0 = perm % 3, p1 = (perm + 1 + perm / 3) % 3, p2 = (perm + 2 - perm / 3) % 3;
+            arr[p0] = a; arr[p1] = b; arr[p2] = c;
+            channels[begin] = arr[0]; channels[begin + 1] = arr[1]; channels[begin + 2] = arr[2];
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        static void Rct(int[] c0, int[] c1, int[] c2, int type, int s, int e)
+        {
             switch (type)
             {
-                case 0: break;
-                case 1: for (int i = 0; i < n; i++) c2[i] += c0[i]; break;
-                case 2: for (int i = 0; i < n; i++) c1[i] += c0[i]; break;
-                case 3: for (int i = 0; i < n; i++) { c1[i] += c0[i]; c2[i] += c0[i]; } break;
-                case 4: for (int i = 0; i < n; i++) c1[i] += (int)(((long)c0[i] + c2[i]) >> 1); break;
-                case 5: for (int i = 0; i < n; i++) { c1[i] += c0[i] + (c2[i] >> 1); c2[i] += c0[i]; } break;
+                case 1: for (int i = s; i < e; i++) c2[i] += c0[i]; break;
+                case 2: for (int i = s; i < e; i++) c1[i] += c0[i]; break;
+                case 3: for (int i = s; i < e; i++) { c1[i] += c0[i]; c2[i] += c0[i]; } break;
+                case 4: for (int i = s; i < e; i++) c1[i] += (int)(((long)c0[i] + c2[i]) >> 1); break;
+                case 5: for (int i = s; i < e; i++) { c1[i] += c0[i] + (c2[i] >> 1); c2[i] += c0[i]; } break;
                 default:
-                    for (int i = 0; i < n; i++)
+                    for (int i = s; i < e; i++)
                     {
                         int Y = c0[i], Co = c1[i], Cg = c2[i];
                         int tmp = Y - (Cg >> 1);
@@ -302,13 +314,6 @@ namespace Aardvark.ImageCodecs.JpegXl
                     }
                     break;
             }
-            if (perm == 0) return;
-            // the forward transform read its inputs as (ch[p0], ch[p1], ch[p2]); put them back
-            var a = channels[begin]; var b = channels[begin + 1]; var c = channels[begin + 2];
-            var arr = new JxlChannel[3];
-            int p0 = perm % 3, p1 = (perm + 1 + perm / 3) % 3, p2 = (perm + 2 - perm / 3) % 3;
-            arr[p0] = a; arr[p1] = b; arr[p2] = c;
-            channels[begin] = arr[0]; channels[begin + 1] = arr[1]; channels[begin + 2] = arr[2];
         }
 
         static readonly short[] DeltaPalette =
