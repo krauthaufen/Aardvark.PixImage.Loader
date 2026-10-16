@@ -218,13 +218,19 @@ namespace Aardvark.ImageCodecs
             var format = DetectFormat(buf.AsSpan(0, n));
             if (format == ImageFormat.Unknown && !eof)
             {
-                // WBMP is only recognized from the complete file
-                var rest = ReadAll(stream);
-                var all = new byte[n + rest.Length];
-                buf.AsSpan(0, n).CopyTo(all);
-                rest.CopyTo(all, n);
-                buf = all; n = all.Length; eof = true;
-                format = DetectFormat(buf);
+                // WBMP is only recognized from the complete file; give up on streams too long for a plausible one
+                // (a WBMP header starts with two zero bytes) instead of reading arbitrary data to the end
+                if (buf[0] != 0 || buf[1] != 0) throw new ImageFormatException("unknown image format");
+                const int maxWbmp = 64 << 20;
+                while (!eof && buf.Length < maxWbmp)
+                {
+                    Array.Resize(ref buf, Math.Min(buf.Length * 4, maxWbmp));
+                    int got = Fill(stream, buf, n);
+                    eof = n + got < buf.Length;
+                    n += got;
+                }
+                if (!eof) throw new ImageFormatException("unknown image format");
+                format = DetectFormat(buf.AsSpan(0, n));
             }
             if (format == ImageFormat.Unknown) throw new ImageFormatException("unknown image format");
             if (format == ImageFormat.Tiff && stream.CanSeek)
