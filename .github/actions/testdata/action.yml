@@ -2,7 +2,7 @@ name: Downloaded test data
 description: >
   The third-party test files that are fetched rather than committed (TestData/fetch/*.sh, tests/oracle/fetch_*.py),
   through a cache shared by all operating systems. mode "fetch" downloads them and writes their references when the
-  cache has none (in a debian:trixie container: python 3, curl, git, zstd, libtiff 4.7 - the references of libtiff's
+  cache has none (in a debian:trixie container: python 3, curl, git, zstd, ImageMagick, libtiff 4.7 - the references of libtiff's
   sample pictures depend on the libtiff version); mode "restore" restores them into testdata/ and fails without them.
 inputs:
   mode:
@@ -44,8 +44,11 @@ runs:
         . .tmp/venv-fetch/bin/activate
         python -m pip install -q -r tests/oracle/requirements.txt
         python -c "import ctypes; ctypes.CDLL('libtiff.so.6')"
-        bash tests/oracle/ci/install.sh magick
-        export PATH="$(pwd)/.tmp/ci-tools/magick/bin:$PATH"
+        if ! command -v magick > /dev/null; then
+          bash tests/oracle/ci/install.sh magick
+          export PATH="$(pwd)/.tmp/ci-tools/magick/bin:$PATH"
+        fi
+        magick -version | head -1
         for f in testdata/fetch/*.sh; do sh "$f"; done
         cd tests/oracle
         python fetch_tiff_samples.py
