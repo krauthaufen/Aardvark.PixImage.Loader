@@ -1063,7 +1063,7 @@ def read_meta(path):
     if r.returncode == 0 and r.stdout.strip():
         m['time'] = r.stdout.strip()
     r = subprocess.run(['pngtopam', '-verbose', path], capture_output=True)
-    err = r.stderr.decode('latin-1')
+    err = r.stderr.decode('latin-1').replace('\r\n', '\n')
     bk = re.search(r'background \{index, gray, red, green, blue\} = \{(\d+), (\d+), (\d+), (\d+), (\d+)\}', err)
     if bk and 'bKGD chunk: present' in err:
         m['bkgd'] = [int(x) for x in bk.groups()]
@@ -1083,7 +1083,7 @@ def read_chunks(path):
     pngcheck, exiftool = tool('pngcheck'), tool('exiftool')
     if pngcheck:
         m['tools'].append('pngcheck')
-        out = subprocess.run(pngcheck + ['-vp', path], capture_output=True).stdout.decode('latin-1')
+        out = subprocess.run(pngcheck + ['-vp', path], capture_output=True).stdout.decode('latin-1').replace('\r\n', '\n')
         blocks = re.split(r'\n  chunk ', out)
         num = r'([-+0-9.eE]+)'
         for b in blocks[1:]:
@@ -1098,8 +1098,9 @@ def read_chunks(path):
                     r'^\s+\d+:\s+\(\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\).*freq = (\d+)', b, re.M)]
                 m.setdefault('splt', []).append({'name': head.group(2).rstrip('\r'), 'depth': int(head.group(1)), 'entries': entries})
             elif name == 'oFFs':
-                x, y, unit = re.search(r': (\d+)x(\d+) (\w+) offset', b).groups()
-                m['offs'] = [int(x), int(y), unit]     # pngcheck prints the signed positions as unsigned
+                x, y, unit = re.search(r': (-?\d+)x(-?\d+) (\w+) offset', b).groups()
+                # pngcheck prints the signed positions as unsigned (as signed where long has 32 bits: Windows)
+                m['offs'] = [int(x) & 0xFFFFFFFF, int(y) & 0xFFFFFFFF, unit]
             elif name == 'pCAL':
                 m['pcal'] = {'type': int(re.search(r'equation type (\d+)', b).group(1)),
                              'name': re.search(r'calibration name = (.*)', b).group(1),

@@ -2,14 +2,13 @@
 # Installs the command line oracles the tests run (CI, GitHub Actions runners: Linux x64, macOS arm64, Windows x64 under
 # Git bash). Downloads go to $1 (default .tmp/ci-tools); they are kept when present, so that directory can be cached.
 # Tells later steps where things are through $GITHUB_ENV / $GITHUB_PATH.
-#   install.sh [tool ...]    tools: magick astcenc ktx libjxl exiftool basisu zstd 7z ffmpeg netpbm (default: all)
+#   install.sh [tool ...]    tools: magick astcenc ktx libjxl exiftool basisu charls zstd 7z ffmpeg netpbm (default: all)
 set -euo pipefail
 
 TOOLS="${CI_TOOLS:-$(pwd)/.tmp/ci-tools}"
 mkdir -p "$TOOLS"
 TOOLS="$(cd "$TOOLS" && pwd)"
-want=("$@")
-[ ${#want[@]} -eq 0 ] && want=(magick astcenc ktx libjxl exiftool basisu zstd 7z ffmpeg netpbm)
+if [ $# -eq 0 ]; then want=(magick astcenc ktx libjxl exiftool basisu charls zstd 7z ffmpeg netpbm); else want=("$@"); fi
 
 OS="${RUNNER_OS:-$(uname -s)}"
 case "$OS" in Linux) OS=Linux ;; Darwin|macOS) OS=macOS ;; *) OS=Windows ;; esac
@@ -26,6 +25,7 @@ JXL=0.12.0
 EXIFTOOL=13.59
 BASISU=v2_50
 ZSTD=1.5.7
+CHARLS=2.4.4
 
 APT_UPDATED=0
 apt_get() {
@@ -121,6 +121,20 @@ for t in "${want[@]}"; do
       exe="$(find "$d" -type f \( -name basisu -o -name basisu.exe \) -path '*bin*' | head -1)"
     fi
     set_env PIXCODEC_BASISU "$exe" ;;
+
+  charls:Linux|charls:macOS) ;;   # (imagecodecs' wheels carry libcharls; tests/oracle/charls.py finds it)
+  charls:Windows)
+    # imagecodecs links CharLS statically on Windows: the same version as a DLL of its own for tests/oracle/charls.py
+    d="$TOOLS/charls"
+    dll="$(find "$d" -type f -iname 'charls*.dll' 2>/dev/null | head -1 || true)"
+    if [ -z "$dll" ]; then
+      fetch "https://github.com/team-charls/charls/archive/refs/tags/$CHARLS.tar.gz" "$TOOLS/charls.tar.gz"
+      mkdir -p "$d" && tar -xzf "$TOOLS/charls.tar.gz" -C "$d" --strip-components=1
+      cmake -S "$d" -B "$d/build" -DBUILD_SHARED_LIBS=ON -DCHARLS_BUILD_TESTS=OFF -DCHARLS_BUILD_SAMPLES=OFF -DCHARLS_BUILD_FUZZ_TEST=OFF > /dev/null
+      cmake --build "$d/build" --config Release --parallel 4 > /dev/null
+      dll="$(find "$d" -type f -iname 'charls*.dll' | head -1)"
+    fi
+    set_env PIXCODEC_CHARLS "$dll" ;;
 
   zstd:Linux) command -v zstd > /dev/null || apt_get zstd ;;
   zstd:macOS) command -v zstd > /dev/null || brew_get zstd ;;

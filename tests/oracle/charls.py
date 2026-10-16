@@ -16,14 +16,18 @@ def find():
     global _lib
     if _lib is not None:
         return _lib
-    try:
-        import imagecodecs
-    except ImportError:
-        return None
-    base = os.path.dirname(imagecodecs.__file__)
-    cands = sorted(glob.glob(os.path.join(base, '..', 'imagecodecs.libs', 'libcharls*.so*'))) + \
-        sorted(glob.glob(os.path.join(base, '..', 'imagecodecs.libs', 'charls*.dll'))) + \
-        sorted(glob.glob(os.path.join(base, '.dylibs', 'libcharls*.dylib')))
+    env = os.environ.get('PIXCODEC_CHARLS')     # a CharLS shared library of its own (imagecodecs links it statically on Windows)
+    if env:
+        cands = [env]
+    else:
+        try:
+            import imagecodecs
+        except ImportError:
+            return None
+        base = os.path.dirname(imagecodecs.__file__)
+        cands = sorted(glob.glob(os.path.join(base, '..', 'imagecodecs.libs', 'libcharls*.so*'))) + \
+            sorted(glob.glob(os.path.join(base, '..', 'imagecodecs.libs', 'charls*.dll'))) + \
+            sorted(glob.glob(os.path.join(base, '.dylibs', 'libcharls*.dylib')))
     if not cands:
         return None
     lib = ctypes.CDLL(cands[0])

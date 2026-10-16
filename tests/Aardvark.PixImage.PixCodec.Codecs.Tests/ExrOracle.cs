@@ -12,12 +12,13 @@ public static class ExrOracle
 {
     /// <summary>
     /// The reference library's decode of a DWA file, or its RGBA (luminance / chroma) interface, against ours: bit exact on
-    /// x64. Elsewhere (macOS arm64) the reference library's float arithmetic rounds differently - our decoder still matches
-    /// the x64 references of the fixtures bit for bit (ExrDecodeTests) - so up to 4 half float steps are allowed there.
+    /// Linux x64, where the fixture references were made. Elsewhere the reference library's float arithmetic rounds
+    /// differently (Windows x64: MSVC builds, macOS arm64) - our decoder still matches the fixture references bit for bit
+    /// there (ExrDecodeTests) - so up to 4 half float steps are allowed.
     /// </summary>
     public static void AssertMatchesLossy(RawImage reference, RawImage ours)
     {
-        if (System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64)
+        if (OperatingSystem.IsLinux() && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64)
         {
             TestUtil.AssertEqual(reference, ours);
             return;
