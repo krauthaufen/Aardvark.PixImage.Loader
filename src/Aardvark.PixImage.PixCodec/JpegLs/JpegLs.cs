@@ -70,12 +70,15 @@ namespace Aardvark.ImageCodecs
     /// <para>Decoding: 2..16 bit samples, 1..255 components, all interleave modes, NEAR &gt; 0, preset coding parameters
     /// (LSE 1), mapping tables (LSE 2 / 3: palettes), oversize dimensions (LSE 4), restart markers, DNL, SPIFF headers
     /// (resolution), HP colour transforms (APP8 "mrfx", HP1..HP3), subsampled components (upsampled by replication to the
-    /// full size). Samples are returned as coded: UInt8 up to 8 bits, else UInt16 (e.g. 0..4095 for 12 bits). Files that end
-    /// early decode as far as the data goes. Not supported: the ISO 14495-2 extensions (SOF57, arithmetic coding, LSE ids
-    /// 5 and up) and point transforms.</para>
+    /// full size). Palettes with 3 / 4 byte entries on a single component give Rgb / Rgba. Samples are returned as coded:
+    /// UInt8 up to 8 bits, else UInt16 (e.g. 0..4095 for 12 bits). Files that end early decode as far as the data goes.
+    /// Not supported: the ISO 14495-2 extensions (SOF57, LSE ids 5 and up) and point transforms. JPEG-LS has no TIFF
+    /// compression code.</para>
     /// <para>Encoding: UInt8 / UInt16 images with 1..255 channels, lossless or near-lossless, any interleave mode, any bit
-    /// depth 2..16, preset parameters, HP colour transforms, restart intervals, optional SPIFF header. The scan data equals
-    /// CharLS's for the same parameters.</para>
+    /// depth 2..16, preset parameters, HP colour transforms, restart intervals, optional SPIFF header. The output equals
+    /// CharLS's byte for byte for the same parameters (including the LSE segment CharLS writes for more than 12 bits).
+    /// A MAXVAL below 2^bits - 1 is coded as T.87 says (RANGE and the prediction clamp follow MAXVAL); CharLS 2.4 reads
+    /// such files differently.</para>
     /// </summary>
     public static unsafe class JpegLs
     {
