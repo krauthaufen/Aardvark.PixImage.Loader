@@ -88,9 +88,10 @@ to run the net8.0 tests.
   `[TestDataFact]` / `[TestDataTheory]`.
 - Oracle locations: python (`python3`, else `python`) with `tests/oracle/requirements.txt`; the volume oracles use
   `PIXCODEC_PYTHON` or `.tmp/venv` if present. Tools on the PATH: `magick` (ImageMagick 7), `zstd`, `7z`, `ffmpeg`,
-  `pamtopnm` / `pngtopam` (netpbm), `pngcheck`, `cjxl` / `djxl`. By variable: `ASTCENC`, `PIXCODEC_KTX`, `PIXCODEC_BASISU`,
-  `EXIFTOOL`, `EXR_ORACLE` (`tests/oracle/exr_oracle.cpp`), `PIXCODEC_JBIGKIT` (jbigkit's pbmtools folder),
-  `PIXCODEC_ISO_JPEG` (the ISO libjpeg's `jpeg`).
+  netpbm (`pamtopnm`, `pngtopam`, `sgitopnm`, `wbmptopbm`), `pngcheck`, `cjxl` / `djxl`. By variable: `ASTCENC`,
+  `PIXCODEC_KTX`, `PIXCODEC_BASISU`, `EXIFTOOL`, `EXR_ORACLE` (`tests/oracle/exr_oracle.cpp`), `PIXCODEC_JBIGKIT` (jbigkit's
+  pbmtools folder), `PIXCODEC_ISO_JPEG` (the ISO libjpeg's `jpeg`), `PIXCODEC_CHARLS` (a CharLS library, where imagecodecs
+  has none of its own: Windows).
 - CI (`.github/workflows/build.yml`, and the test step of `publish.yml`): the `testdata` job fetches the downloaded test
   data on Linux once and caches it for all OSes (`.github/actions/testdata`, keyed on the fetch scripts);
   `.github/actions/oracles` installs the python packages, `tests/oracle/ci/install.sh` the released tools and
