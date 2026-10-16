@@ -63,21 +63,40 @@ namespace Aardvark.ImageCodecs.PvrImpl
             int pw = ww * bw, ph = wh * 4;
             int ow = Math.Min(w, pw), oh = Math.Min(h, ph);
             var o8 = new byte[(long)w * h * 4];
+            // per column: the two words to the left / right and the weight of the right one
+            int hx = bw / 2, sh = twoBpp ? 3 : 2;
+            var cx0 = new int[ow]; var cx1 = new int[ow]; var cxr = new int[ow];
+            for (int x = 0; x < ow; x++)
+            {
+                int xl = (x - hx) >> sh;
+                cxr[x] = x - hx - xl * bw;
+                cx0[x] = (xl % ww + ww) % ww; cx1[x] = (cx0[x] + 1) % ww;
+            }
             Parallel.For(0, oh, y =>
             {
-                Span<int> a = stackalloc int[4];
-                Span<int> b = stackalloc int[4];
+                int yl = (y - 2) >> 2, yr = y - 2 - yl * 4;
+                int y0 = (yl % wh + wh) % wh, y1 = (y0 + 1) % wh;
+                int r0 = y0 * ww, r1 = y1 * ww;
                 for (int x = 0; x < ow; x++)
                 {
-                    Upscale(colA, ww, wh, x, y, twoBpp, a);
-                    Upscale(colB, ww, wh, x, y, twoBpp, b);
+                    int xr = cxr[x];
+                    int w00 = (bw - xr) * (4 - yr), w10 = xr * (4 - yr), w01 = (bw - xr) * yr, w11 = xr * yr;
+                    int i00 = (r0 + cx0[x]) * 4, i10 = (r0 + cx1[x]) * 4, i01 = (r1 + cx0[x]) * 4, i11 = (r1 + cx1[x]) * 4;
                     int weight = twoBpp ? Weight2(mod, flagM, ww, wh, x, y, out bool punch) : Weight4(mod, flagM, ww, x, y, out punch);
                     long p = ((long)y * w + x) * 4;
-                    for (int c = 0; c < 4; c++) o8[p + c] = (byte)((a[c] * (8 - weight) + b[c] * weight) >> 3);
+                    for (int c = 0; c < 4; c++)
+                    {
+                        int va = colA[i00 + c] * w00 + colA[i10 + c] * w10 + colA[i01 + c] * w01 + colA[i11 + c] * w11;
+                        int vb = colB[i00 + c] * w00 + colB[i10 + c] * w10 + colB[i01 + c] * w01 + colB[i11 + c] * w11;
+                        // 5.4 (4 bpp) / 5.5 (2 bpp) fixed point colour, 4.4 / 4.5 alpha, to 8 bits
+                        int ea, eb;
+                        if (!twoBpp) { ea = c < 3 ? (va >> 1) + (va >> 6) : va + (va >> 4); eb = c < 3 ? (vb >> 1) + (vb >> 6) : vb + (vb >> 4); }
+                        else { ea = c < 3 ? (va >> 2) + (va >> 7) : (va >> 1) + (va >> 5); eb = c < 3 ? (vb >> 2) + (vb >> 7) : (vb >> 1) + (vb >> 5); }
+                        o8[p + c] = (byte)((ea * (8 - weight) + eb * weight) >> 3);
+                    }
                     if (punch) o8[p + 3] = 0;
                 }
             });
-            // texels beyond the stored grid (images smaller than a word's area never are; kept for safety)
             return o8;
         }
 
@@ -103,23 +122,6 @@ namespace Aardvark.ImageCodecs.PvrImpl
             {
                 o[3] = ((int)(v >> 12) & 7) << 1;
                 o[0] = Rep5From4((int)(v >> 8) & 15); o[1] = Rep5From4((int)(v >> 4) & 15); o[2] = Rep5From3((int)(v >> 1) & 7);
-            }
-        }
-
-        /// <summary>Bilinear upscale of one low resolution image to 8 bit RGBA at texel (x, y).</summary>
-        static void Upscale(int[] col, int ww, int wh, int x, int y, bool twoBpp, Span<int> o)
-        {
-            int bw = twoBpp ? 8 : 4, hx = bw / 2;
-            int xl = (x - hx) >> (twoBpp ? 3 : 2), yl = (y - 2) >> 2;   // floor division
-            int xr = x - hx - xl * bw, yr = y - 2 - yl * 4;
-            int x0 = (xl % ww + ww) % ww, x1 = (x0 + 1) % ww, y0 = (yl % wh + wh) % wh, y1 = (y0 + 1) % wh;
-            int w00 = (bw - xr) * (4 - yr), w10 = xr * (4 - yr), w01 = (bw - xr) * yr, w11 = xr * yr;
-            int i00 = (y0 * ww + x0) * 4, i10 = (y0 * ww + x1) * 4, i01 = (y1 * ww + x0) * 4, i11 = (y1 * ww + x1) * 4;
-            for (int c = 0; c < 4; c++)
-            {
-                int v = col[i00 + c] * w00 + col[i10 + c] * w10 + col[i01 + c] * w01 + col[i11 + c] * w11;
-                if (!twoBpp) o[c] = c < 3 ? (v >> 1) + (v >> 6) : v + (v >> 4);
-                else o[c] = c < 3 ? (v >> 2) + (v >> 7) : (v >> 1) + (v >> 5);
             }
         }
 

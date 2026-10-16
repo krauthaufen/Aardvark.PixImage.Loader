@@ -511,12 +511,15 @@ namespace Aardvark.ImageCodecs.PvrImpl
                 if (whole)
                 {
                     // whole samples in another order (bgra8, argb16, ...) or with dropped channels: copy them over
-                    for (long k = 0; k < n; k++)
+                    for (int c = 0; c < nc; c++)
                     {
-                        var px = src.Slice((int)(k * pixelBytes), pixelBytes);
-                        var o = dst.Slice((int)(k * ch * bps), ch * bps);
-                        for (int c = 0; c < nc; c++)
-                            if (idx[c] >= 0) px.Slice(c * bps, bps).CopyTo(o.Slice(idx[c] * bps));
+                        int o = idx[c];
+                        if (o < 0) continue;
+                        int si = c * bps, di = o * bps, os = ch * bps;
+                        if (bps == 1)
+                            for (long k = 0; k < n; k++) dst[(int)(k * os + di)] = src[(int)(k * pixelBytes + si)];
+                        else
+                            for (long k = 0; k < n; k++) src.Slice((int)(k * pixelBytes + si), bps).CopyTo(dst.Slice((int)(k * os + di)));
                     }
                     return img;
                 }
@@ -525,6 +528,37 @@ namespace Aardvark.ImageCodecs.PvrImpl
             if (aligned) { int s = 0; for (int c = 0; c < nc; c++) { shifts[c] = s; s += p.Bits[c]; } }
             else { int s = Total(p.Bits); for (int c = 0; c < nc; c++) { s -= p.Bits[c]; shifts[c] = s; } }
             bool flt = p.IsFloat, signed = p.IsSigned, norm = p.IsNormalized;
+            if (!flt && !signed && pixelBytes is 1 or 2 or 4 && bps <= 2)
+            {
+                // packed unsigned fields in an 8, 16 or 32 bit word (565, 4444, 1555, 10:10:10:2, ...): per field tables
+                var tables = new ushort[nc][];
+                for (int c = 0; c < nc; c++)
+                {
+                    int b = p.Bits[c];
+                    if (b > 16 || idx[c] < 0) continue;
+                    var t = tables[c] = new ushort[1 << b];
+                    ulong max = (1UL << b) - 1, omax = (1UL << outBits) - 1;
+                    for (int v = 0; v < t.Length; v++) t[v] = norm && b < outBits ? (ushort)(((ulong)v * omax + max / 2) / max) : (ushort)v;
+                }
+                bool ok = true;
+                for (int c = 0; c < nc; c++) ok &= idx[c] < 0 || tables[c] != null;
+                if (ok)
+                {
+                    var o16 = bps == 2 ? System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ushort>(dst) : default;
+                    for (long k = 0; k < n; k++)
+                    {
+                        int at = (int)(k * pixelBytes);
+                        uint v = pixelBytes switch { 1 => src[at], 2 => BinaryPrimitives.ReadUInt16LittleEndian(src.Slice(at)), _ => BinaryPrimitives.ReadUInt32LittleEndian(src.Slice(at)) };
+                        for (int c = 0; c < nc; c++)
+                        {
+                            if (idx[c] < 0) continue;
+                            ushort r = tables[c][v >> shifts[c] & (uint)(tables[c].Length - 1)];
+                            if (bps == 1) dst[(int)(k * ch + idx[c])] = (byte)r; else o16[(int)(k * ch + idx[c])] = r;
+                        }
+                    }
+                    return img;
+                }
+            }
             Span<byte> word = stackalloc byte[16];
             for (long k = 0; k < n; k++)
             {
