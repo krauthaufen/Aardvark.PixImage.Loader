@@ -569,7 +569,6 @@ namespace Aardvark.Data
             var fmt = gray ? Col.Format.Gray : Col.Format.RGB;
             if (image.PixFormat.Type == typeof(byte)) image = image.ToPixImage<byte>().ToPixImage<byte>(fmt);
             else image = image.ToPixImage<ushort>().ToPixImage<ushort>(fmt);
-            options ??= new CineonEncodeOptions { BitDepth = image.PixFormat.Type == typeof(byte) ? 10 : 16 };
             Cineon.Encode(PixCodecLoader.ToRawImage(image), stream, options);
         }
 

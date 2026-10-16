@@ -432,7 +432,9 @@ public class DpxTests
         var b = RandomInt(3, 2, ColorModel.Rgb, SampleType.UInt8, 1, 255);
         var d = Cineon.Decode(Cineon.Encode(b)).GetData<ushort>();
         for (int i = 0; i < d.Length; i++) Assert.Equal((b.GetData<byte>()[i] * 1023 + 127) / 255, d[i]);
-        Assert.Throws<ArgumentException>(() => Cineon.Encode(RandomInt(3, 2, ColorModel.Rgb, SampleType.UInt16, 1, 65535)));
+        Assert.Throws<ArgumentException>(() => Cineon.Encode(RandomInt(3, 2, ColorModel.Rgb, SampleType.UInt16, 1, 65535), new CineonEncodeOptions { BitDepth = 10 }));
+        Assert.Equal(16, Cineon.GetInfo(Cineon.Encode(RandomInt(3, 2, ColorModel.Rgb, SampleType.UInt16, 1, 65535))).BitsPerSample);
+        Assert.Equal(10, Cineon.GetInfo(Cineon.Encode(b)).BitsPerSample);
         Assert.Throws<ArgumentException>(() => Cineon.Encode(RandomInt(3, 2, ColorModel.Rgba, SampleType.UInt8, 1, 255)));
         Assert.Throws<ArgumentException>(() => Cineon.Encode(b, new CineonEncodeOptions { BitDepth = 12 }));
         // header fields are carried

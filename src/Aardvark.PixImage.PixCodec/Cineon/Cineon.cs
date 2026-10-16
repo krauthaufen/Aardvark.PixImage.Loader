@@ -107,10 +107,11 @@ namespace Aardvark.ImageCodecs
     public sealed class CineonEncodeOptions
     {
         /// <summary>
-        /// Bits per sample: 10 (default, the classic log encoding), 8 or 16. UInt8 samples are scaled to deeper depths, UInt16 samples
-        /// are written as they are and have to fit (a 10 bit file takes UInt16 values 0..1023, what the decoder returns).
+        /// Bits per sample: 10 (the classic log encoding), 8 or 16. Null (the default) writes UInt8 images as 10 bit (scaled) and
+        /// UInt16 images as 16 bit. UInt8 samples are scaled to deeper depths, UInt16 samples are written as they are and have to
+        /// fit: a decoded 10 bit file (UInt16 0..1023) is written back as 10 bit with BitDepth = 10.
         /// </summary>
-        public int BitDepth { get; set; } = 10;
+        public int? BitDepth { get; set; }
 
         /// <summary>Byte order. Default: most significant byte first, the form of the specification.</summary>
         public bool BigEndian { get; set; } = true;
@@ -138,7 +139,7 @@ namespace Aardvark.ImageCodecs
     /// although the specification would put one pixel per cell for packing code 5. Lines start on a new cell, except 16 bit
     /// data, which runs on across line ends (as ImageMagick writes it and both ImageMagick and OpenImageIO read it); a file that
     /// ends exactly where the other layout ends is read that way (OpenImageIO's 8 bit reading).</para>
-    /// <para>Encoding: Gray and Rgb at 10 (default), 8 or 16 bit, pixel interleaved, packing 5 (32-bit cells, left justified),
+    /// <para>Encoding: Gray and Rgb at 10 (default for UInt8), 8 or 16 bit (default for UInt16), pixel interleaved, packing 5 (32-bit cells, left justified),
     /// in those line layouts.</para>
     /// </summary>
     public static class Cineon

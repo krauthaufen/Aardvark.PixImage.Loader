@@ -35,7 +35,7 @@ namespace Aardvark.ImageCodecs
         /// Bits per component: 8, 10, 12, 16 (integer), 32 or 64 (float). Null (the default) takes it from the sample type: 8 for
         /// UInt8, 16 for UInt16, 32 for Float16 / Float32, 64 for Float64. UInt8 samples are scaled to deeper integer depths;
         /// UInt16 samples are written as they are and have to fit (a 10 bit file takes UInt16 values 0..1023, which is what the
-        /// decoder returns).
+        /// decoder returns: write a decoded 10 bit image back with BitDepth = 10).
         /// </summary>
         public int? BitDepth { get; set; }
 

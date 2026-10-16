@@ -423,7 +423,7 @@ namespace Aardvark.ImageCodecs.CineonImpl
                 throw new ArgumentException($"Cineon: cannot write {img.Color} images (Gray and Rgb; Cineon has no alpha channel)");
             if (img.SampleType is not (SampleType.UInt8 or SampleType.UInt16))
                 throw new ArgumentException($"Cineon: cannot write {img.SampleType} samples (UInt8 and UInt16)");
-            int bits = o.BitDepth;
+            int bits = o.BitDepth ?? (img.SampleType == SampleType.UInt8 ? 10 : 16);
             if (bits is not (8 or 10 or 16)) throw new ArgumentException($"Cineon: cannot write {bits} bit samples (8, 10, 16)");
             if (o.RgbDesignator is not (1 or 4)) throw new ArgumentException("Cineon: RgbDesignator is 1 (printing density) or 4 (CCIR XA/11)");
             int n = img.Channels, w = img.Width, h = img.Height;
