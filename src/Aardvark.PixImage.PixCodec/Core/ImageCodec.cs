@@ -10,6 +10,7 @@ namespace Aardvark.ImageCodecs
         public static ImageFormat DetectFormat(ReadOnlySpan<byte> header)
         {
             if (Png.IsMatch(header)) return ImageFormat.Png;
+            if (JpegLs.IsMatch(header)) return ImageFormat.JpegLs;   // FF D8 like JPEG: look for its SOF55 first
             if (Jpeg.IsMatch(header)) return ImageFormat.Jpeg;
             if (Gif.IsMatch(header)) return ImageFormat.Gif;
             if (Tiff.IsMatch(header)) return ImageFormat.Tiff;
@@ -47,6 +48,7 @@ namespace Aardvark.ImageCodecs
                 ".qoi" => ImageFormat.Qoi,
                 ".ico" or ".cur" => ImageFormat.Ico,
                 ".ktx" or ".ktx2" => ImageFormat.Ktx,
+                ".jls" => ImageFormat.JpegLs,
                 _ => ImageFormat.Unknown,
             };
 
@@ -74,6 +76,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Qoi => Qoi.GetInfo(data),
             ImageFormat.Ico => Ico.GetInfo(data),
             ImageFormat.Ktx => Ktx.GetInfo(data),
+            ImageFormat.JpegLs => JpegLs.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -274,6 +277,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Qoi => Qoi.Decode(data),
             ImageFormat.Ico => Ico.Decode(data),
             ImageFormat.Ktx => Ktx.Decode(data),
+            ImageFormat.JpegLs => JpegLs.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -369,6 +373,7 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Qoi: Qoi.Encode(image, output); break;
                 case ImageFormat.Ico: Ico.Encode(new[] { image }, output); break;
                 case ImageFormat.Ktx: Ktx.Encode(image, output); break;
+                case ImageFormat.JpegLs: JpegLs.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }

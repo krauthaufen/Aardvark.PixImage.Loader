@@ -201,6 +201,8 @@ namespace Aardvark.ImageCodecs.JpegImpl
                         ReadFrame(m, p, n);
                         if (headerOnly && Height != 0) { SetupGeometry(); return; }
                         break;
+                    case 0xF7: case 0xF9:
+                        throw new ImageNotSupportedException("JPEG-LS frame (SOF55 / SOF57): decode it with JpegLs (ImageCodec does that automatically)");
                     case 0xDE:
                         ReadHierarchy(p, n);
                         if (headerOnly && Height != 0) { InstallFinalGeometry(); return; }

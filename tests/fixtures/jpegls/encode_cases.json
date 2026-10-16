@@ -1,0 +1,390 @@
+[
+ {
+  "name": "gray8_pattern",
+  "bits": 8,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray16_pattern",
+  "bits": 16,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_pattern_ilv0",
+  "bits": 8,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_pattern_ilv1",
+  "bits": 8,
+  "near": 0,
+  "ilv": 1,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_pattern_ilv2",
+  "bits": 8,
+  "near": 0,
+  "ilv": 2,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray8_noise",
+  "bits": 8,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray16_noise",
+  "bits": 16,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_noise_ilv0",
+  "bits": 8,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_noise_ilv1",
+  "bits": 8,
+  "near": 0,
+  "ilv": 1,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_noise_ilv2",
+  "bits": 8,
+  "near": 0,
+  "ilv": 2,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray8_flat",
+  "bits": 8,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray16_flat",
+  "bits": 16,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_flat_ilv0",
+  "bits": 8,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_flat_ilv1",
+  "bits": 8,
+  "near": 0,
+  "ilv": 1,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_flat_ilv2",
+  "bits": 8,
+  "near": 0,
+  "ilv": 2,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray8_mixed",
+  "bits": 8,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray16_mixed",
+  "bits": 16,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_mixed_ilv0",
+  "bits": 8,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_mixed_ilv1",
+  "bits": 8,
+  "near": 0,
+  "ilv": 1,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_mixed_ilv2",
+  "bits": 8,
+  "near": 0,
+  "ilv": 2,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray2",
+  "bits": 2,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray5",
+  "bits": 5,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray10",
+  "bits": 10,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray12",
+  "bits": 12,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray14",
+  "bits": 14,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray8_near1",
+  "bits": 8,
+  "near": 1,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_near1_ilv2",
+  "bits": 8,
+  "near": 1,
+  "ilv": 2,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb12_near1_ilv1",
+  "bits": 12,
+  "near": 1,
+  "ilv": 1,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray8_near3",
+  "bits": 8,
+  "near": 3,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_near3_ilv2",
+  "bits": 8,
+  "near": 3,
+  "ilv": 2,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb12_near3_ilv1",
+  "bits": 12,
+  "near": 3,
+  "ilv": 1,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray8_near9",
+  "bits": 8,
+  "near": 9,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_near9_ilv2",
+  "bits": 8,
+  "near": 9,
+  "ilv": 2,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb12_near9_ilv1",
+  "bits": 12,
+  "near": 9,
+  "ilv": 1,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "gray16_near40",
+  "bits": 16,
+  "near": 40,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgb8_hp1",
+  "bits": 8,
+  "near": 0,
+  "ilv": 2,
+  "tf": 1,
+  "preset": null
+ },
+ {
+  "name": "rgb16_hp1_ilv1",
+  "bits": 16,
+  "near": 0,
+  "ilv": 1,
+  "tf": 1,
+  "preset": null
+ },
+ {
+  "name": "rgb8_hp2",
+  "bits": 8,
+  "near": 0,
+  "ilv": 2,
+  "tf": 2,
+  "preset": null
+ },
+ {
+  "name": "rgb16_hp2_ilv1",
+  "bits": 16,
+  "near": 0,
+  "ilv": 1,
+  "tf": 2,
+  "preset": null
+ },
+ {
+  "name": "rgb8_hp3",
+  "bits": 8,
+  "near": 0,
+  "ilv": 2,
+  "tf": 3,
+  "preset": null
+ },
+ {
+  "name": "rgb16_hp3_ilv1",
+  "bits": 16,
+  "near": 0,
+  "ilv": 1,
+  "tf": 3,
+  "preset": null
+ },
+ {
+  "name": "rgba8_ilv2",
+  "bits": 8,
+  "near": 0,
+  "ilv": 2,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "rgba8_ilv1",
+  "bits": 8,
+  "near": 0,
+  "ilv": 1,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "preset_gray8",
+  "bits": 8,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": [
+   0,
+   4,
+   9,
+   30,
+   10
+  ]
+ },
+ {
+  "name": "preset_gray8_near2",
+  "bits": 8,
+  "near": 2,
+  "ilv": 0,
+  "tf": 0,
+  "preset": [
+   0,
+   5,
+   11,
+   30,
+   32
+  ]
+ },
+ {
+  "name": "wide_flat",
+  "bits": 8,
+  "near": 0,
+  "ilv": 0,
+  "tf": 0,
+  "preset": null
+ },
+ {
+  "name": "tiny_rgb",
+  "bits": 8,
+  "near": 0,
+  "ilv": 2,
+  "tf": 0,
+  "preset": null
+ }
+]

@@ -50,6 +50,7 @@ namespace Aardvark.ImageCodecs
         Qoi,
         Ico,
         Ktx,
+        JpegLs,
     }
 
     /// <summary>

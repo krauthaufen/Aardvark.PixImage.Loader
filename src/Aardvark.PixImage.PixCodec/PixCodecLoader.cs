@@ -8,7 +8,7 @@ namespace Aardvark.Data
 {
     /// <summary>
     /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA,
-    /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO).
+    /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO, JPEG-LS).
     /// Register with <see cref="PixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
     public sealed class PixCodecLoader : IPixMipmapLoader
@@ -532,10 +532,12 @@ namespace Aardvark.Data
         {
             // formats without a PixFileFormat
             var codec = ImageCodec.FormatFromExtension(path);
-            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx)
+            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.JpegLs)
             {
                 using var fs = File.Create(path);
                 if (codec == ImageFormat.Qoi) Qoi.Encode(PixCodecLoader.ToRawImage(image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>()), fs);
+                else if (codec == ImageFormat.JpegLs)
+                    JpegLs.Encode(PixCodecLoader.ToRawImage(image.PixFormat.Type == typeof(byte) || image.PixFormat.Type == typeof(ushort) ? image : image.ToPixImage<byte>()), fs);
                 else Ktx.Encode(PixCodecLoader.ToRawImage(image), fs);
                 return;
             }

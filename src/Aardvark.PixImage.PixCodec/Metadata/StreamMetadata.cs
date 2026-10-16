@@ -18,10 +18,10 @@ namespace Aardvark.ImageCodecs
         public static byte[] Collect(Stream s, long start, ImageFormat format, byte[] prefix)
         {
             if (!s.CanSeek)
-                return format == ImageFormat.Jpeg ? JpegForward(s, prefix) : prefix;
+                return format is ImageFormat.Jpeg or ImageFormat.JpegLs ? JpegForward(s, prefix) : prefix;
             switch (format)
             {
-                case ImageFormat.Jpeg: s.Position = start + prefix.Length; return JpegForward(s, prefix);
+                case ImageFormat.Jpeg: case ImageFormat.JpegLs: s.Position = start + prefix.Length; return JpegForward(s, prefix);
                 case ImageFormat.Png: return Chunks(s, start, 8, png: true);
                 case ImageFormat.Webp: return Chunks(s, start, 12, png: false);
                 case ImageFormat.Jp2: return Boxes(s, start, prefix);
