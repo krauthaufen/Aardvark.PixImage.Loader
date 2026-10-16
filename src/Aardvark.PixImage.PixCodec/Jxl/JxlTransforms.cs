@@ -40,10 +40,11 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         /// <summary>
         /// 2D inverse DCT of a rows x cols coefficient matrix (row major, rows = vertical frequencies) into
-        /// out[y * stride + x]. tmp needs rows * cols floats.
+        /// out[y * stride + x]. tmp needs 2 * rows * cols floats.
         /// </summary>
         public static void Idct2D(float* coef, int rows, int cols, float* outp, int stride, float* tmp)
         {
+            if (JxlFastIdct.Idct2D(coef, rows, cols, outp, stride, tmp)) return;
             var mr = idct[Log2(rows)];
             var mc = idct[Log2(cols)];
             int vc = Vector<float>.Count;
@@ -74,21 +75,42 @@ namespace Aardvark.ImageCodecs.JpegXl
                             tmp[y * cols + x] = acc;
                         }
                 }
-                // horizontal: out[y][x] = sum_kx M_cols[x][kx] * tmp[y][kx]
+                // horizontal, on the transpose: v[x][y] = sum_kx M_cols[x][kx] * tmp[y][kx], vectorized over y
+                float* u = tmp + rows * cols;
                 for (int y = 0; y < rows; y++)
+                    for (int x = 0; x < cols; x++) u[x * rows + y] = tmp[y * cols + x];
+                if (rows % vc == 0)
                 {
-                    float* trow = tmp + y * cols;
-                    float* orow = outp + y * stride;
+                    float* v = tmp;   // reuse
                     for (int x = 0; x < cols; x++)
                     {
                         float* mrow = pmc + x * cols;
-                        int k = 0;
-                        var acc = Vector<float>.Zero;
-                        for (; k + vc <= cols; k += vc)
-                            acc += Unsafe.ReadUnaligned<Vector<float>>(mrow + k) * Unsafe.ReadUnaligned<Vector<float>>(trow + k);
-                        float s = Vector.Sum(acc);
-                        for (; k < cols; k++) s += mrow[k] * trow[k];
-                        orow[x] = s;
+                        for (int y = 0; y < rows; y += vc)
+                        {
+                            var acc = Vector<float>.Zero;
+                            for (int k = 0; k < cols; k++)
+                                acc += new Vector<float>(mrow[k]) * Unsafe.ReadUnaligned<Vector<float>>(u + k * rows + y);
+                            Unsafe.WriteUnaligned(v + x * rows + y, acc);
+                        }
+                    }
+                    for (int y = 0; y < rows; y++)
+                    {
+                        float* orow = outp + y * stride;
+                        for (int x = 0; x < cols; x++) orow[x] = v[x * rows + y];
+                    }
+                }
+                else
+                {
+                    for (int y = 0; y < rows; y++)
+                    {
+                        float* orow = outp + y * stride;
+                        for (int x = 0; x < cols; x++)
+                        {
+                            float* mrow = pmc + x * cols;
+                            float s = 0;
+                            for (int k = 0; k < cols; k++) s += mrow[k] * u[k * rows + y];
+                            orow[x] = s;
+                        }
                     }
                 }
             }
@@ -161,7 +183,7 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         /// <summary>
         /// Inverse transform of one varblock. coef: the coefficients in the wide layout (rows = min, cols = max of the block
-        /// dimensions); out: the pixels, out[y * stride + x], height 8 * CoveredY, width 8 * CoveredX. scratch: 2 * size floats.
+        /// dimensions); out: the pixels, out[y * stride + x], height 8 * CoveredY, width 8 * CoveredX. scratch: 3 * size floats.
         /// </summary>
         public static void Inverse(int strategy, float* coef, float* outp, int stride, float* scratch)
         {
@@ -181,12 +203,14 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         /// <summary>
         /// Inverse DCT of an H x W block from its stored coefficients: wide blocks (W &gt; H) store the vertical frequency
-        /// in rows (c[ky * W + kx]), square and tall blocks the horizontal one (c[kx * H + ky]). scratch: 2 H W floats.
+        /// in rows (c[ky * W + kx]), square and tall blocks the horizontal one (c[kx * H + ky]). scratch: 3 H W floats.
         /// </summary>
         public static void IdctStored(float* coef, int H, int W, float* outp, int stride, float* scratch)
         {
             if (W > H) { Idct2D(coef, H, W, outp, stride, scratch); return; }
-            float* t = scratch + H * W;
+            // the stored matrix is the transpose: transform it as it is and write the result transposed
+            if (JxlFastIdct.Idct2D(coef, W, H, outp, stride, scratch, transposeOut: true)) return;
+            float* t = scratch + 2 * H * W;
             for (int ky = 0; ky < H; ky++)
                 for (int kx = 0; kx < W; kx++) t[ky * W + kx] = coef[kx * H + ky];
             Idct2D(t, H, W, outp, stride, scratch);

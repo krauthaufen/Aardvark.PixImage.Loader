@@ -17,7 +17,23 @@ namespace Aardvark.ImageCodecs.JpegXl
             float c0 = MathF.Cbrt(b0), c1 = MathF.Cbrt(b1), c2 = MathF.Cbrt(b2);
             void Range(int s, int e)
             {
-                for (int i = s; i < e; i++)
+                int vc = Vector<float>.Count;
+                var vm = new Vector<float>[9];
+                for (int k = 0; k < 9; k++) vm[k] = new Vector<float>(m[k]);
+                Vector<float> vc0 = new(c0), vc1 = new(c1), vc2 = new(c2), vb0 = new(b0), vb1 = new(b1), vb2 = new(b2);
+                var sx = System.Runtime.InteropServices.MemoryMarshal.Cast<float, Vector<float>>(x.AsSpan(s, (e - s) / vc * vc));
+                var sy = System.Runtime.InteropServices.MemoryMarshal.Cast<float, Vector<float>>(y.AsSpan(s, (e - s) / vc * vc));
+                var sb = System.Runtime.InteropServices.MemoryMarshal.Cast<float, Vector<float>>(b.AsSpan(s, (e - s) / vc * vc));
+                for (int k = 0; k < sx.Length; k++)
+                {
+                    var xx = sx[k]; var yy = sy[k]; var bb = sb[k];
+                    var lg = yy + xx - vc0; var mg = yy - xx - vc1; var sg = bb - vc2;
+                    var l = lg * lg * lg + vb0; var mm = mg * mg * mg + vb1; var ss = sg * sg * sg + vb2;
+                    sx[k] = vm[0] * l + vm[1] * mm + vm[2] * ss;
+                    sy[k] = vm[3] * l + vm[4] * mm + vm[5] * ss;
+                    sb[k] = vm[6] * l + vm[7] * mm + vm[8] * ss;
+                }
+                for (int i = s + sx.Length * vc; i < e; i++)
                 {
                     float xx = x[i], yy = y[i], bb = b[i];
                     float lg = yy + xx - c0, mg = yy - xx - c1, sg = bb - c2;
@@ -103,6 +119,25 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         // ------------------------------------------------------------------ transfer functions (linear -> encoded)
 
+        const int SrgbLutSize = 1 << 16;
+        static float[]? srgbLut;
+
+        /// <summary>The sRGB curve sampled on [0, 1] for linear interpolation (error below 1e-7).</summary>
+        static float[] SrgbLut
+        {
+            get
+            {
+                if (srgbLut != null) return srgbLut;
+                var t = new float[SrgbLutSize + 2];
+                for (int i = 0; i < t.Length; i++)
+                {
+                    double v = (double)i / SrgbLutSize;
+                    t[i] = (float)(v <= 0.0031308 ? v * 12.92 : 1.055 * Math.Pow(v, 1 / 2.4) - 0.055);
+                }
+                return srgbLut = t;
+            }
+        }
+
         public static float SrgbFromLinear(float v)
         {
             if (v <= 0.0031308f) return v * 12.92f;
@@ -139,8 +174,24 @@ namespace Aardvark.ImageCodecs.JpegXl
             {
                 case JxlTransfer.Linear: return;
                 case JxlTransfer.Srgb:
-                    Chunked(n, parallel, (s, e) => { for (int i = s; i < e; i++) { float v = p[i]; p[i] = v < 0 ? -SrgbFromLinear(-v) : SrgbFromLinear(v); } });
-                    return;
+                    {
+                        var lut = SrgbLut;
+                        Chunked(n, parallel, (s, e) =>
+                        {
+                            for (int i = s; i < e; i++)
+                            {
+                                float v = p[i];
+                                if (v >= 0 && v < 1)
+                                {
+                                    float f = v * SrgbLutSize;
+                                    int k = (int)f;
+                                    p[i] = lut[k] + (lut[k + 1] - lut[k]) * (f - k);
+                                }
+                                else p[i] = v < 0 ? -SrgbFromLinear(-v) : SrgbFromLinear(v);
+                            }
+                        });
+                        return;
+                    }
                 case JxlTransfer.Bt709:
                     Chunked(n, parallel, (s, e) => { for (int i = s; i < e; i++) { float v = p[i]; p[i] = v < 0 ? -Bt709FromLinear(-v) : Bt709FromLinear(v); } });
                     return;

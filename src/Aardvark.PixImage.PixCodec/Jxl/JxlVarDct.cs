@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using static Aardvark.ImageCodecs.JpegXl.JxlBitReader;
 
 namespace Aardvark.ImageCodecs.JpegXl
@@ -495,15 +496,29 @@ namespace Aardvark.ImageCodecs.JpegXl
             var qb = img.Opsin.QuantBias;
             float qbn = img.Opsin.QuantBiasNumerator;
             float inv = InvGlobalScale;
-            const int Max = 256 * 256;
-            var cY = new float[Max]; var cX = new float[Max]; var cB = new float[Max];
-            var scratch = new float[2 * Max];
-            var llf = new float[32 * 32];
-            fixed (float* pY = cY, pX = cX, pB = cB, ps = scratch, pl = llf)
+            var buf = groupScratch ??= new float[7 * GroupScratchMax + 32 * 32];
+            fixed (float* pbuf = buf)
             fixed (float* p0 = planes![0], p1 = planes[1], p2 = planes[2])
             {
-                float*[] outs = { p0, p1, p2 };
-                float*[] cbuf = { pX, pY, pB };
+                float* pY = pbuf, pX = pbuf + GroupScratchMax, pB = pbuf + 2 * GroupScratchMax, ps = pbuf + 3 * GroupScratchMax, pl = pbuf + 7 * GroupScratchMax;
+                FinishGroupCore(group, bx0, by0, gw, gh, offsets, coeffs, xyb, xm, bm, qb, qbn, inv, pY, pX, pB, ps, pl, p0, p1, p2);
+            }
+            groupCoeffs[group] = null!;
+        }
+
+        const int GroupScratchMax = 256 * 256;
+        [ThreadStatic] static float[]? groupScratch;
+
+        void FinishGroupCore(int group, int bx0, int by0, int gw, int gh, int[] offsets, int[][] coeffs, bool xyb, float xm, float bm,
+            float[] qb, float qbn, float inv, float* pY, float* pX, float* pB, float* ps, float* pl, float* p0, float* p1, float* p2)
+        {
+            int vc = Vector<float>.Count;
+            float** outs = stackalloc float*[3];
+            float** cbuf = stackalloc float*[3];
+            outs[0] = p0; outs[1] = p1; outs[2] = p2;
+            cbuf[0] = pX; cbuf[1] = pY; cbuf[2] = pB;
+            bool* present = stackalloc bool[3];
+            {
                 for (int y = 0; y < gh; y++)
                     for (int x = 0; x < gw; x++)
                     {
@@ -518,7 +533,6 @@ namespace Aardvark.ImageCodecs.JpegXl
                         int tile = ((by0 + y) / 8) * tilesX + (bx0 + x) / 8;
                         float rx = baseCorrX + cflX![tile] / (float)colourFactor;
                         float rb = baseCorrB + cflB![tile] / (float)colourFactor;
-                        bool[] present = new bool[3];
                         for (int c = 0; c < 3; c++)
                             present[c] = (x & ((1 << hs[c]) - 1)) == 0 && (y & ((1 << vs[c]) - 1)) == 0;
                         for (int c = 0; c < 3; c++)
@@ -529,14 +543,33 @@ namespace Aardvark.ImageCodecs.JpegXl
                             float m = mul * (c == 0 ? xm : c == 2 ? bm : 1);
                             float* d = cbuf[c];
                             float bias = qb[c];
-                            for (int k = 0; k < size; k++)
+                            fixed (int* pq0 = q)
+                            fixed (float* pdm = dm)
                             {
-                                int v = q[off + k];
-                                float fv;
-                                if (v == 0) fv = 0;
-                                else if (v == 1 || v == -1) fv = v * bias;
-                                else fv = v - qbn / v;
-                                d[k] = fv * m * dm[k];
+                                int* pq = pq0 + off;
+                                int k = 0;
+                                var vm = new Vector<float>(m);
+                                var vbias = new Vector<float>(bias);
+                                var vqbn = new Vector<float>(qbn);
+                                var one = Vector<float>.One;
+                                for (; k + vc <= size; k += vc)
+                                {
+                                    var vi = Unsafe.ReadUnaligned<Vector<int>>(pq + k);
+                                    var vf = Vector.ConvertToSingle(vi);
+                                    var r = vf - vqbn / vf;
+                                    r = Vector.ConditionalSelect(Vector.Equals(Vector.Abs(vf), one), vf * vbias, r);
+                                    r = Vector.ConditionalSelect(Vector.Equals(vi, Vector<int>.Zero), Vector<float>.Zero, r);
+                                    Unsafe.WriteUnaligned(d + k, r * vm * Unsafe.ReadUnaligned<Vector<float>>(pdm + k));
+                                }
+                                for (; k < size; k++)
+                                {
+                                    int v = pq[k];
+                                    float fv;
+                                    if (v == 0) fv = 0;
+                                    else if (v == 1 || v == -1) fv = v * bias;
+                                    else fv = v - qbn / v;
+                                    d[k] = fv * m * pdm[k];
+                                }
                             }
                         }
                         if (Is444)
@@ -568,7 +601,6 @@ namespace Aardvark.ImageCodecs.JpegXl
                         }
                     }
             }
-            groupCoeffs[group] = null!;
         }
 
         /// <summary>Test hook: receives the transform type of every block (XBlocks x YBlocks).</summary>

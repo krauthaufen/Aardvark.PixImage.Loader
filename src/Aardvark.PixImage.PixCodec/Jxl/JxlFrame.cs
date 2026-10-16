@@ -66,6 +66,8 @@ namespace Aardvark.ImageCodecs.JpegXl
             return single;
         }
 
+        long finishTicks;
+
         public JxlFrameImage Decode()
         {
             long maxTree = Math.Min(1L << 22, 1024L + (long)dims.XSize * dims.YSize * (3 + img.ExtraChannels.Length) / 16);
@@ -83,10 +85,13 @@ namespace Aardvark.ImageCodecs.JpegXl
             ForEach(dims.NumGroups, toc.Single, g =>
             {
                 for (int p = 0; p < fh.NumPasses; p++) DecodePassGroup(SectionReader(toc.PassGroupIndex(dims, p, g)), p, g, maxTree);
+                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (!fh.Modular) FinishVarDctGroup(g);
+                if (JxlProfile.On) System.Threading.Interlocked.Add(ref finishTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
             });
             single?.CheckEnd();
             JxlProfile.Mark("pass groups");
+            if (JxlProfile.On) Console.Error.WriteLine($"    of which dequant + IDCT {finishTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ms");
             return Finish();
         }
 
