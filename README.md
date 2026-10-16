@@ -36,7 +36,7 @@ code living in any `Aardvark.*` namespace.
 | LERC | LERC1 and LERC2 v2..v6 (bands, depth, masks, no-data, lossless float) | decode only |
 | JBIG1 | the whole of T.82 (layers, all stripe orders, bit planes) | single layer, 1..8 bit planes |
 | JPEG 2000 | Part 1 and HTJ2K (.j2k / .jph codestreams, JP2 / JPH container), 1..38 bit, region / reduced resolution / layer limited decode | Part 1 and HTJ2K, lossless and lossy (up to 16 bit), target bitrate, tiles, progression orders |
-| JPEG XL | ISO/IEC 18181-1 codestreams and the 18181-2 container: Modular (every predictor incl. the weighted one, MA trees, RCT, palette and delta palette, squeeze) and VarDCT (every transform up to 256x256, AFV, chroma from luma, custom quantization tables), ANS / prefix codes with LZ77, groups, passes, LF frames, patches, splines, noise, Gaborish, EPF, upsampling, XYB, extra channels (alpha incl. premultiplied, depth, spot colours rendered, CMYK through its profile to sRGB), blending, layers and animation, JPEG recompressions (as pixels), 1..32 bit integer, half and float; EXIF / XMP / JUMBF boxes incl. Brotli compressed ones. Encode: lossless modular (8 / 16 bit, half, float; RCT, palettes, learned MA trees, weighted predictor, LZ77, effort 1..9) and lossy VarDCT in XYB (distance / quality like cjxl, DCT 4x4 .. 64x64, chroma from luma, Gaborish, EPF), alpha, ICC, EXIF / XMP boxes, orientation, animation | decode, encode |
+| JPEG XL | ISO/IEC 18181-1 codestreams and the 18181-2 container: Modular (every predictor incl. the weighted one, MA trees, RCT, palette and delta palette, squeeze) and VarDCT (every transform up to 256x256, AFV, chroma from luma, custom quantization tables), ANS / prefix codes with LZ77, groups, passes, LF frames, patches, splines, noise, Gaborish, EPF, upsampling, XYB, extra channels (alpha incl. premultiplied, depth, spot colours rendered, CMYK through its profile to sRGB), blending, layers and animation, JPEG recompressions (as pixels), 1..32 bit integer, half and float; EXIF / XMP / JUMBF boxes incl. Brotli compressed ones, HDR gain map boxes (18181-2:2026). Encode: lossless modular (8 / 16 bit, half, float; RCT, palettes, learned MA trees, weighted predictor, LZ77, effort 1..9) and lossy VarDCT in XYB (distance / quality like cjxl, DCT 4x4 .. 64x64, chroma from luma, Gaborish, EPF), alpha, ICC, EXIF / XMP boxes, orientation, animation | decode, encode |
 | KTX / KTX2 | KTX 1.1 and 2.0: 1D, 2D, 3D, cube map and array textures, mip chains; every uncompressed Vulkan / OpenGL format with 8..64 bit components and the packed ones; BC1..BC7, ETC1 / ETC2 / EAC, ASTC (LDR and HDR, all 2D and 3D footprints), Basis Universal ETC1S (BasisLZ), UASTC LDR 4x4 and UASTC HDR 4x4; Zstandard and zlib supercompression; KTX 1 big endian files and orientation | KTX 2 with a full data format descriptor (passes `ktx validate`): uncompressed 8/16/32 bit int, half and float, BC1..BC7, ETC2 / EAC, ASTC (LDR and HDR, every 2D footprint), or Basis Universal ETC1S (BasisLZ, codebooks shared by all images, quality 1..255) and UASTC LDR 4x4; mip chains (given or computed), cube maps, arrays, volumes with 3D mip chains; Zstandard or zlib supercompression |
 | Radiance HDR | RGBE and XYZE, new and old RLE and flat scanlines, all eight scan orders, EXPOSURE / PRIMARIES | RLE RGBE from float (or 8/16 bit converted to linear light) |
 | PNM / PAM / PFM | P1..P7, any maxval up to 65535 (scaled to the full range), PAM tuple types, PFM gray / RGB in both byte orders | P1..P7 (plain or binary, bilevel), PFM |
@@ -123,7 +123,8 @@ says. Premultiplied alpha is returned straight. CMYK images (three colour channe
 CMYK profile) are converted to sRGB through the profile, since `RawImage` has no CMYK model; spot colours are rendered
 onto the colour (`RenderSpotColours = false` keeps them out). `Jxl.DecodeExtraChannels` returns every extra channel
 (depth, thermal, selection masks, spot colours, black, ...) with its type and name. `Jxl.DecodeAnimation` gives every displayed frame with durations, `Jxl.GetMetadataBoxes` the raw EXIF / XMP /
-JUMBF. Groups and colour conversion run in parallel (`Multithreaded = false` for one thread). On 8 cores a 13 MP photo
+JUMBF, `Jxl.GetGainMap` the HDR gain map of an 18181-2:2026 `jhgm` box (ISO 21496-1 metadata, the alternate image's
+colour space, the gain map image; `PhotoMetadata.HasGainMap` tells it is there). Groups and colour conversion run in parallel (`Multithreaded = false` for one thread). On 8 cores a 13 MP photo
 takes about 0.13 s (lossy, distance 1) and 0.5 s (lossless, effort 3), libjxl 0.08 s and 0.29 s; on one thread 0.5 s and
 2.4 s, libjxl 0.3 s and 1.6 s.
 
@@ -133,7 +134,8 @@ quality 100); `Effort` 1..9 trades speed for size like cjxl -e (default 7). Loss
 libjxl; on a 12 MP photo it is 10 % smaller than cjxl at effort 1, 1.4 % at 3 and 2.4 % at 7. Lossy output at effort 7
 needs about 4 % fewer bytes than cjxl -e 7 for the same SSIMULACRA2 score (at effort 3 about 4 % more than cjxl -e 3),
 and 16 .. 32 % fewer than our JPEG encoder. Alpha is stored losslessly, ICC profiles, EXIF / XMP boxes (in the container,
-used only when needed), orientation and intensity target are kept; `Jxl.EncodeAnimation` writes animations. Timings on
+used only when needed; a `jxll` box declares level 10 when the image goes beyond level 5 of 18181-1 Annex M, e.g. 16 bit
+lossless), orientation and intensity target are kept; `Jxl.EncodeAnimation` writes animations. Timings on
 a 12 MP photo, 8 threads / 1 thread (busy machine): lossless effort 1 / 3 / 7 0.57 / 0.88 / 3.9 s and 1.7 / 3.5 / 11.5 s
 (cjxl 0.14 / 1.4 / 3.6 s and 0.11 / 2.1 / 13.5 s), lossy effort 3 / 7 0.77 / 2.2 s and 2.2 / 10 s (cjxl 0.63 / 1.5 s and
 0.45 / 4.5 s).

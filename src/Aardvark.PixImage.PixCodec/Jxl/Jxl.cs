@@ -191,18 +191,20 @@ namespace Aardvark.ImageCodecs
             return (color, RawImage.ChannelCount(color), t);
         }
 
-        static TransferFunction TransferOf(JxlImageHeader h, out double gamma)
+        static TransferFunction TransferOf(JxlImageHeader h, out double gamma) => TransferOf(h.Colour, out gamma);
+
+        internal static TransferFunction TransferOf(JxlColourEncoding ce, out double gamma)
         {
             gamma = 0;
-            if (h.Colour.WantIcc) return TransferFunction.Unknown;
-            switch (h.Colour.Transfer)
+            if (ce.WantIcc) return TransferFunction.Unknown;
+            switch (ce.Transfer)
             {
                 case JxlTransfer.Srgb: return TransferFunction.Srgb;
                 case JxlTransfer.Linear: return TransferFunction.Linear;
                 case JxlTransfer.Pq: return TransferFunction.Pq;
                 case JxlTransfer.Hlg: return TransferFunction.Hlg;
                 case JxlTransfer.Dci: gamma = 1 / 2.6; return TransferFunction.Gamma;
-                case JxlTransfer.Gamma: gamma = h.Colour.Gamma; return TransferFunction.Gamma;
+                case JxlTransfer.Gamma: gamma = ce.Gamma; return TransferFunction.Gamma;
                 default: return TransferFunction.Unknown;
             }
         }
@@ -321,6 +323,19 @@ namespace Aardvark.ImageCodecs
                 });
             }
             return list;
+        }
+
+        /// <summary>
+        /// The HDR gain map of the file (ISO/IEC 18181-2:2026 jhgm box, Brotli compressed or not), or null when there is
+        /// none (or its version is unknown).
+        /// </summary>
+        public static JxlGainMap? GetGainMap(ReadOnlySpan<byte> data)
+        {
+            var c = JxlContainer.Parse(data);
+            if (!c.IsContainer) return null;
+            var boxes = c.Metadata(data, "jhgm");
+            try { return boxes.Count > 0 ? JxlGainMap.Parse(boxes[0]) : null; }
+            catch (Exception e) when (IsCorruption(e)) { throw Corrupt(e); }
         }
 
         /// <summary>EXIF (TIFF structure), XMP and JUMBF of the container, Brotli compressed boxes included.</summary>
@@ -474,6 +489,7 @@ namespace Aardvark.ImageCodecs
             readonly bool srgb8, premul;
             readonly JxlOpsinParams? xyb;
             readonly float xybIntensity;
+            readonly float[]? hlgWeights;
 
             public XybOutputWriter(JxlImageHeader h, int w, int hh, int nch, SampleType type, JxlOpsinParams? xyb, float xybIntensity)
             {
@@ -484,6 +500,7 @@ namespace Aardvark.ImageCodecs
                 matrix = !h.Colour.WantIcc && JxlColour.NeedsPrimaryConversion(h.Colour) ? JxlColour.SrgbToTargetMatrix(h.Colour) : null;
                 ce = h.Colour.WantIcc ? new JxlColourEncoding() : h.Colour;
                 it = h.ToneMapping.IntensityTarget;
+                if (ce.Transfer == JxlTransfer.Hlg && !ce.IsGray) hlgWeights = JxlColour.LuminanceWeights(ce);
                 Data = RawImage.CreateArray(type, checked(w * hh * nch));
                 maxv = h.BitDepth.Float ? 0 : (int)Math.Min((1L << h.BitDepth.Bits) - 1, int.MaxValue);
                 srgb8 = type == SampleType.UInt8 && ce.Transfer == JxlTransfer.Srgb && !premul;
@@ -508,6 +525,7 @@ namespace Aardvark.ImageCodecs
                     if (!a.IsEmpty) WriteFloats(data, type, ncol, nch, a, maxv, s);
                     return;
                 }
+                if (ce.Transfer == JxlTransfer.Hlg) JxlColour.HlgInverseOotf(r, g, b, ncol == 1 ? null : hlgWeights, JxlColour.HlgGamma(it));
                 if (ncol == 1) JxlColour.FromLinear(r, ce, it);
                 else
                 {
@@ -615,11 +633,14 @@ namespace Aardvark.ImageCodecs
                     // grey: the luminance of the (achromatic) linear RGB
                     var gr = new float[n];
                     for (int i = 0; i < n; i++) gr[i] = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i];
+                    if (ce.Transfer == JxlTransfer.Hlg) JxlColour.HlgInverseOotf(gr, gr, gr, null, JxlColour.HlgGamma(h.ToneMapping.IntensityTarget));
                     JxlColour.FromLinear(gr, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
                     col[0] = gr;
                 }
                 else
                 {
+                    if (ce.Transfer == JxlTransfer.Hlg)
+                        JxlColour.HlgInverseOotf(r, g, b, JxlColour.LuminanceWeights(ce), JxlColour.HlgGamma(h.ToneMapping.IntensityTarget));
                     JxlColour.FromLinear(r, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
                     JxlColour.FromLinear(g, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);
                     JxlColour.FromLinear(b, n, ce, h.ToneMapping.IntensityTarget, opt.Multithreaded);

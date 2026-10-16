@@ -131,8 +131,20 @@ public class JxlEncodeMetadataTests(ITestOutputHelper output)
         var c = JxlContainer.Parse(enc);
         Assert.True(c.IsContainer);
         Assert.Equal(10, c.Level);
-        var half = Jxl.Encode(Synthetic(16, 16, ColorModel.Rgb, SampleType.Float16, 0), new JxlEncodeOptions { Lossless = true });
-        Assert.False(JxlContainer.Parse(half).IsContainer);
+        // level 5 also needs modular_16bit_buffers (18181-1:2024 Table M.1), which samples above 12 bits coded in modular
+        // mode rule out: lossless 16 bit integers and half floats, 16 bit alpha in lossy files (libjxl agrees)
+        int Level(SampleType t, ColorModel cm, bool lossless)
+        {
+            var e = Jxl.Encode(Synthetic(16, 16, cm, t, 0), new JxlEncodeOptions { Lossless = lossless });
+            var p = JxlContainer.Parse(e);
+            return p.IsContainer ? p.Level : 5;
+        }
+        Assert.Equal(10, Level(SampleType.Float16, ColorModel.Rgb, true));
+        Assert.Equal(10, Level(SampleType.UInt16, ColorModel.Rgb, true));
+        Assert.Equal(10, Level(SampleType.UInt16, ColorModel.Rgba, false));
+        Assert.Equal(5, Level(SampleType.UInt16, ColorModel.Rgb, false));
+        Assert.Equal(5, Level(SampleType.UInt8, ColorModel.Rgba, true));
+        Assert.Equal(5, Level(SampleType.UInt8, ColorModel.Rgba, false));
     }
 
     [Theory]

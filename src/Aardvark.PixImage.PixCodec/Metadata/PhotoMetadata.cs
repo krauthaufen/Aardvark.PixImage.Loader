@@ -195,7 +195,7 @@ namespace Aardvark.ImageCodecs
         public CameraPose? Pose { get; internal set; }
         public PanoramaInfo? Panorama { get; internal set; }
 
-        /// <summary>Whether the file carries an HDR gain map description (XMP hdrgm).</summary>
+        /// <summary>Whether the file carries an HDR gain map description (XMP hdrgm, or a JPEG XL jhgm box).</summary>
         public bool HasGainMap { get; internal set; }
 
         public override string ToString()

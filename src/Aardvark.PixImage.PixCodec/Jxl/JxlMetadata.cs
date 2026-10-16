@@ -18,6 +18,8 @@ namespace Aardvark.ImageCodecs.JpegXl
                     if (t != null) { b.Exif ??= t; break; }
                 }
                 foreach (var x in c.Metadata(d, "xml ")) b.Xmp.Add(x);
+                foreach (var box in c.Boxes)
+                    if (box.Type == "jhgm" || box.Type == "brob" && box.Length >= 4 && d.Slice(box.Offset, 4).SequenceEqual("jhgm"u8)) b.GainMap = true;
             }
             try
             {

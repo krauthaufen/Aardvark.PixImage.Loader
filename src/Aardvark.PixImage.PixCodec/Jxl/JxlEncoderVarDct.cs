@@ -117,6 +117,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             public float[] DcStep = new float[3];
             public int[][] QDc = null!;            // quantized LF per block, channels X, Y, B
             public float[][] Dc = null!;           // dequantized LF (no smoothing)
+            public Action<JxlBitWriter>? DequantMatrices;
             public int[] Qf = null!;               // quant field per block (1..256)
             public byte[] Strategy = null!;        // per block (255 = covered by an earlier block of the varblock)
             public byte[] Sharp = null!;
@@ -139,6 +140,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             fh.XQmScale = 3; fh.BQmScale = 2;
             f.XQm = MathF.Pow(0.8f, fh.XQmScale - 2); f.BQm = MathF.Pow(0.8f, fh.BQmScale - 2);
             bool gab = opt.Gaborish ?? true;
+            f.DequantMatrices = opt.DequantMatrices;
             fh.Filter = new JxlRestorationFilter { Gab = gab, EpfIters = opt.EpfIterations ?? EpfFor(d) };
             f.QuantBias = h.Opsin.QuantBias; f.QuantBiasNum = h.Opsin.QuantBiasNumerator;
             var dims = f.Dims = JxlFrameDims.Of(fh);
@@ -156,10 +158,21 @@ namespace Aardvark.ImageCodecs.JpegXl
                 bool gray = h.Colour.IsGray;
                 icc = new IccTransform(src, gray ? IccProfile.GrayLinear : IccProfile.LinearSrgb, IccRenderingIntent.RelativeColorimetric);
             }
-            float scale = 255f / h.ToneMapping.IntensityTarget;
-            if (tf == TransferFunction.Pq) scale = 10000f / h.ToneMapping.IntensityTarget;
-            else if (tf == TransferFunction.Hlg) scale = 1000f / h.ToneMapping.IntensityTarget;
-            var planes = JxlEncColour.LinearPlanes(img, tf, img.Metadata?.Gamma ?? 0, icc, f.Pw, f.Ph, 1 / scale, f.Parallel);
+            // XYB holds linear light in units of 255 nits (the decoder scales by 255 / intensity target, L.2.2): samples
+            // whose 1.0 is the intensity target (SDR, and HLG after its OOTF) are scaled by it / 255, PQ (1.0 = 10000 nits)
+            // by 10000 / 255
+            float it = h.ToneMapping.IntensityTarget;
+            float mul = tf == TransferFunction.Pq && icc == null ? 10000f / 255 : it / 255;
+            var planes = JxlEncColour.LinearPlanes(img, tf, img.Metadata?.Gamma ?? 0, icc, f.Pw, f.Ph, mul, f.Parallel);
+            if (icc == null && !h.Colour.WantIcc)
+            {
+                // HLG is scene light: the OOTF makes it display light (18181-1:2024 Table E.6, NOTE 4), as the decoder undoes
+                if (tf == TransferFunction.Hlg)
+                    JxlEncColour.HlgOotf(planes, h.Colour.IsGray ? null : JxlColour.LuminanceWeights(h.Colour), JxlColour.HlgGamma(it), mul);
+                // XYB starts from linear sRGB
+                if (JxlColour.NeedsPrimaryConversion(h.Colour))
+                    JxlColour.ApplyMatrix(planes[0], planes[1], planes[2], planes[0].Length, JxlColour.TargetToSrgbMatrix(h.Colour));
+            }
             JxlProfile.Mark("vardct linear");
             JxlEncColour.ToXyb(planes[0], planes[1], planes[2], f.Parallel);
             JxlProfile.Mark("vardct xyb");
@@ -888,7 +901,8 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
             void HfGlobal(JxlBitWriter w)
             {
-                w.WriteBool(true);   // default dequantization matrices
+                w.WriteBool(f.DequantMatrices == null);   // default dequantization matrices
+                f.DequantMatrices?.Invoke(w);
                 w.Write(JxlHybridUint.CeilLog2(dims.NumGroups), 0);   // one histogram set
                 w.WriteU32(0, Val(0x5F), Val(0x13), Val(0), Bits(13));   // natural coefficient orders
                 hf.WriteCode(w);

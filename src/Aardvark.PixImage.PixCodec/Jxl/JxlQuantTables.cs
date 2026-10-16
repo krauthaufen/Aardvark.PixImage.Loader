@@ -153,6 +153,12 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         /// <summary>Reads the encoding of quantization table <paramref name="table"/>. RAW tables need the modular decoder.</summary>
+        /// <summary>The Hornuss, DCT2, DCT4, DCT4x8 and AFV encodings describe any of the 8 x 8 tables (18181-1:2024 Table I.5).</summary>
+        static void Check8x8(int table)
+        {
+            if (table is not (0 or 1 or 2 or 3 or 9 or 10)) throw new ImageFormatException("JPEG XL: 8x8 quantization encoding for a larger table");
+        }
+
         public static JxlQuantEncoding Read(JxlBitReader br, int table, Func<int, int, int, int[][]> readRaw)
         {
             int mode = (int)br.ReadBits(3);
@@ -161,19 +167,19 @@ namespace Aardvark.ImageCodecs.JpegXl
             {
                 case Library: return Default(table);
                 case Id:
-                    if (table != 1) throw new ImageFormatException("JPEG XL: identity quantization for a DCT table");
+                    Check8x8(table);
                     q.Params = ReadParams(br, 3, true); break;
                 case Dct2:
-                    if (table != 2) throw new ImageFormatException("JPEG XL: DCT2 quantization for another table");
+                    Check8x8(table);
                     q.Params = ReadParams(br, 6, true); break;
                 case Dct4:
-                    if (table != 3) throw new ImageFormatException("JPEG XL: DCT4 quantization for another table");
+                    Check8x8(table);
                     q.Params = ReadParams(br, 2, false); q.Bands = ReadDctParams(br); break;
                 case Dct4x8:
-                    if (table != 9) throw new ImageFormatException("JPEG XL: DCT4X8 quantization for another table");
+                    Check8x8(table);
                     q.Params = ReadParams(br, 1, false); q.Bands = ReadDctParams(br); break;
                 case Afv:
-                    if (table != 10) throw new ImageFormatException("JPEG XL: AFV quantization for another table");
+                    Check8x8(table);
                     q.Params = ReadParams(br, 9, false);
                     for (int c = 0; c < 3; c++) for (int i = 0; i < 6; i++) q.Params[c][i] *= 64;
                     q.Bands = ReadDctParams(br); q.Bands4x4 = ReadDctParams(br);

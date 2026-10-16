@@ -156,7 +156,10 @@ namespace Aardvark.ImageCodecs.JpegXl
             else
             {
                 if (!any) return;   // nothing coded, not even the tree
-                tree = JxlMaTree.Read(br, maxTreeNodes);
+                // a local tree may have 1024 + (samples of the stream) nodes, up to 2^20 (18181-1:2024 Table M.1)
+                long samples = 0;
+                for (int i = 0; i < end; i++) samples += (long)Channels[i].W * Channels[i].H;
+                tree = JxlMaTree.Read(br, Math.Max(maxTreeNodes, Math.Min(1L << 20, 1024 + samples)));
                 code = JxlEntropyCode.Read(br, tree.NumLeaves);
             }
             if (!any) return;

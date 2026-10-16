@@ -44,7 +44,7 @@ namespace Aardvark.ImageCodecs
 
         /// <summary>
         /// Lossy only: luminance in nits of the brightest value (intensity target of the header); 0 = default (255 for
-        /// SDR). Float images with values above 1 should set it (e.g. 10000 for PQ like ranges).
+        /// SDR, 10000 for PQ, 1000 for HLG images). Linear float images with values above 1 should set it.
         /// </summary>
         public float IntensityTarget { get; set; }
 
@@ -60,6 +60,8 @@ namespace Aardvark.ImageCodecs
         /// <summary>Lossy only: test hooks for the restoration filters (null = automatic).</summary>
         internal bool? Gaborish { get; set; }
         internal int? EpfIterations { get; set; }
+        /// <summary>Test hook: writes custom dequantization matrix encodings (after the "not all default" bit).</summary>
+        internal Action<JxlBitWriter>? DequantMatrices { get; set; }
 
         /// <summary>The distance that will be used (0 = lossless).</summary>
         public float EffectiveDistance

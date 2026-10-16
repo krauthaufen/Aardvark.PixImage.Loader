@@ -374,8 +374,9 @@ namespace Aardvark.ImageCodecs.JpegXl
             idx = idx * (qfThr.Length + 1) + qi;
             if (lfThr[0].Length + lfThr[1].Length + lfThr[2].Length > 0)
             {
+                // with an LF frame there are no quantized LF values: they count as below every threshold (18181-1:2024 G.2.2)
                 int d = 0;
-                for (int ii = 0; ii < 3; ii++)
+                for (int ii = 0; ii < 3 && !UsesLfFrame; ii++)
                 {
                     int cc = DcPerm[ii];
                     int v = quantDc![cc][(by >> vs[cc]) * dcw[cc] + (bx >> hs[cc])];

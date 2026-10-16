@@ -30,6 +30,7 @@ namespace Aardvark.ImageCodecs
             m.ExrAttributes = b.ExrAttributes;
             m.Thumbnail = m.Exif?.Thumbnail;
             Fill(m);
+            m.HasGainMap |= b.GainMap;
             return m;
         }
 

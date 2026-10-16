@@ -407,6 +407,37 @@ namespace Aardvark.ImageCodecs.JpegXl
             return a * MathF.Log(12 * v - b) + c;
         }
 
+        /// <summary>The exponent of the HLG OOTF for a peak display luminance (18181-1:2024 Table E.6, NOTE 4).</summary>
+        public static float HlgGamma(float intensityTarget) => (float)(1.2 * Math.Pow(1.111, Math.Log2(intensityTarget / 1000.0)));
+
+        /// <summary>
+        /// The luminance weights of linear RGB in the encoding's primaries and white point (the Y row of its RGB to XYZ
+        /// matrix).
+        /// </summary>
+        public static float[] LuminanceWeights(JxlColourEncoding ce)
+        {
+            var m = RgbToXyz(PrimariesXy(ce).r, PrimariesXy(ce).g, PrimariesXy(ce).b, WhiteXy(ce));
+            return new[] { (float)m[3], (float)m[4], (float)m[5] };
+        }
+
+        /// <summary>
+        /// Display referred linear light (XYB decodes to it) to the scene light HLG encodes: the inverse of the HLG OOTF,
+        /// scene = display * Yd^((1 - gamma) / gamma) with Yd the display luminance (18181-1:2024 Table E.6, NOTE 4; libjxl
+        /// does the same). For grey only the luminance plane is given.
+        /// </summary>
+        public static void HlgInverseOotf(Span<float> r, Span<float> g, Span<float> b, float[]? weights, float gamma)
+        {
+            if (gamma == 1) return;
+            float e = (1 - gamma) / gamma;
+            for (int i = 0; i < r.Length; i++)
+            {
+                float yd = weights == null ? r[i] : weights[0] * r[i] + weights[1] * g[i] + weights[2] * b[i];
+                float f = yd > 0 ? MathF.Pow(yd, e) : 0;
+                r[i] *= f;
+                if (weights != null) { g[i] *= f; b[i] *= f; }
+            }
+        }
+
         /// <summary>Applies the encoding transfer function to linear values in place (sign preserving for out of range values).</summary>
         public static void FromLinear(float[] p, int n, JxlColourEncoding ce, float intensityTarget, bool parallel)
         {
@@ -553,6 +584,14 @@ namespace Aardvark.ImageCodecs.JpegXl
             var f = new float[9];
             for (int i = 0; i < 9; i++) f[i] = (float)m[i];
             return f;
+        }
+
+        /// <summary>3x3 matrix from linear RGB in the encoding's primaries and white point to linear sRGB (D65).</summary>
+        public static float[] TargetToSrgbMatrix(JxlColourEncoding ce)
+        {
+            var m = SrgbToTargetMatrix(ce);
+            var inv = Inverse3(Array.ConvertAll(m, v => (double)v));
+            return Array.ConvertAll(inv, v => (float)v);
         }
 
         public static void ApplyMatrix(float[] r, float[] g, float[] b, int n, float[] m) => ApplyMatrix(r.AsSpan(0, n), g.AsSpan(0, n), b.AsSpan(0, n), m);
