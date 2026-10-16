@@ -170,7 +170,9 @@ namespace Aardvark.ImageCodecs
             var dec = new JxlDecoder(c.Codestream(data), opt);
             var f = dec.Next() ?? throw new ImageFormatException("JPEG XL: no displayed frame");
             var meta = Metadata(c, data, dec.Header);
-            return Output(dec.Header, f.Canvas, meta, opt);
+            var outImg = Output(dec.Header, f.Canvas, meta, opt);
+            JxlProfile.Mark("output");
+            return outImg;
         }
 
         public static RawImage Decode(Stream stream, JxlDecodeOptions? options = null) => Decode(ImageCodec.ReadAll(stream), options);

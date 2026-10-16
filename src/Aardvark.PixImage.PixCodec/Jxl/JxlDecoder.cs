@@ -101,6 +101,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 if (++FramesDecoded > 1 << 16) throw new ImageNotSupportedException("JPEG XL: too many frames");
                 var dec = new JxlFrameDecoder(Header, fh, state, Data, sectionsStart, toc, opt.Multithreaded);
                 var frame = dec.Decode();
+                JxlProfile.Mark("finish frame");
                 pos = (int)next;
                 if (fh.IsLast) Done = true;
                 var shown = Process(fh, frame);
@@ -124,6 +125,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 state.ReferencePreCt[fh.SaveAsReference] = true;
             }
             var post = ColourTransform(frame);
+            JxlProfile.Mark("XYB to linear");
             var canvas = JxlBlender.Blend(Header, fh, post, state);
             if (!fh.SaveBeforeColourTransform && canReference)
             {

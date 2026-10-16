@@ -69,19 +69,24 @@ namespace Aardvark.ImageCodecs.JpegXl
         public JxlFrameImage Decode()
         {
             long maxTree = Math.Min(1L << 22, 1024L + (long)dims.XSize * dims.YSize * (3 + img.ExtraChannels.Length) / 16);
+            JxlProfile.Reset();
             var lfGlobal = SectionReader(toc.LfGlobalIndex);
             DecodeLfGlobal(lfGlobal, maxTree);
+            JxlProfile.Mark("LfGlobal");
 
             // LF groups
             ForEach(dims.NumLfGroups, toc.Single, i => DecodeLfGroup(SectionReader(toc.LfGroupIndex(i)), i, maxTree));
             if (!fh.Modular) AfterLfGroups();
+            JxlProfile.Mark("LF groups");
             if (!fh.Modular) DecodeHfGlobal(SectionReader(toc.HfGlobalIndex(dims)));
+            JxlProfile.Mark("HfGlobal");
             ForEach(dims.NumGroups, toc.Single, g =>
             {
                 for (int p = 0; p < fh.NumPasses; p++) DecodePassGroup(SectionReader(toc.PassGroupIndex(dims, p, g)), p, g, maxTree);
                 if (!fh.Modular) FinishVarDctGroup(g);
             });
             single?.CheckEnd();
+            JxlProfile.Mark("pass groups");
             return Finish();
         }
 
@@ -273,8 +278,11 @@ namespace Aardvark.ImageCodecs.JpegXl
             result.NumColour = img.XybEncoded || fh.Type == JxlFrameType.LfFrame || !img.Colour.IsGray ? 3 : 1;
 
             // colour at the coded resolution, filtered, then upsampled
+            JxlProfile.Mark("modular undo");
             float[][] colour = fh.Modular ? ModularColourToFloat(chans) : VarDctColour();
+            JxlProfile.Mark("to float");
             ApplyRestorationFilters(colour);
+            JxlProfile.Mark("filters"); 
             if (fh.Upsampling > 1)
                 for (int c = 0; c < colour.Length; c++) colour[c] = Upsample(colour[c], dims.XSize, dims.YSize, fh.Upsampling, dims.Width, dims.Height);
             var planes = new float[result.NumColour + img.ExtraChannels.Length][];
