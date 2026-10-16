@@ -148,6 +148,42 @@ public class LoaderTests
         finally { File.Delete(path); }
     }
 
+    [Theory]
+    [InlineData(Col.Format.Gray), InlineData(Col.Format.RGB), InlineData(Col.Format.RGBA), InlineData(Col.Format.GrayAlpha)]
+    public void LegacyFormats(Col.Format format)
+    {
+        // lossless for these: PCX, SGI, Sun Raster and XPM keep every colour model (gray + alpha comes back as RGBA from PCX
+        // and Sun Raster); XPM has binary alpha only
+        var img = Make(format, 23, 9, i => (byte)(i * 11 + 1));
+        var rgbaOf = format == Col.Format.GrayAlpha ? img.ToFormat(Col.Format.RGBA) : img;
+        AssertSame(rgbaOf, RoundTrip<byte>(img, new PixSaveParams(PixFileFormat.Pcx)));
+        AssertSame(img, RoundTrip<byte>(img, new PixSaveParams(PixFileFormat.Sgi)));
+        AssertSame(rgbaOf, RoundTrip<byte>(img, new PixSaveParams(PixFileFormat.Ras)));
+        var binary = Make(format, 23, 9, i => (byte)(i % 4 == 3 ? 0 : i * 11 + 1));
+        if (format is Col.Format.RGBA or Col.Format.GrayAlpha)
+            binary = Make(format, 23, 9, i => format == Col.Format.RGBA ? (i / 4 % 3 == 0 ? (byte)0 : i % 4 == 3 ? (byte)255 : (byte)(i * 11 + 1))
+                                                                   : (i / 2 % 3 == 0 ? (byte)0 : i % 2 == 1 ? (byte)255 : (byte)(i * 11 + 1)));
+        AssertSame(binary, RoundTrip<byte>(binary, new PixSaveParams(PixFileFormat.Xpm)));
+        // 16 bit SGI
+        var wide = Make(format, 23, 9, i => (ushort)(i * 2777));
+        AssertSame(wide, RoundTrip<ushort>(wide, new PixSaveParams(PixFileFormat.Sgi)));
+        // black and white formats
+        var bw = Make(Col.Format.Gray, 23, 9, i => (byte)(i % 3 == 0 ? 255 : 0));
+        AssertSame(bw, RoundTrip<byte>(bw, new PixSaveParams(PixFileFormat.Xbm)));
+        AssertSame(bw, RoundTrip<byte>(bw, new PixSaveParams(PixFileFormat.Wbmp)));
+        foreach (var ext in new[] { ".pcx", ".dcx", ".sgi", ".rgb", ".ras", ".xbm", ".xpm", ".wbmp" })
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"pixcodec-{Guid.NewGuid():N}{ext}");
+            try
+            {
+                PixCodec.Save(bw, path);
+                AssertSame(bw, PixCodec.Load<byte>(path));
+                Assert.Equal(bw.Size, PixCodec.Loader.GetInfoFromFile(path).Size);
+            }
+            finally { File.Delete(path); }
+        }
+    }
+
     [Fact]
     public void Gif()
     {

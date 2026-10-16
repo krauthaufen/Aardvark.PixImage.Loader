@@ -8,7 +8,7 @@ namespace Aardvark.Data
 {
     /// <summary>
     /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA,
-    /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO).
+    /// DDS, KTX, Radiance HDR, PNM / PFM, QOI, ICO, PCX / DCX, SGI, Sun Raster, XBM, XPM, WBMP).
     /// Register with <see cref="PixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
     public sealed class PixCodecLoader : IPixMipmapLoader
@@ -109,6 +109,24 @@ namespace Aardvark.Data
                     }
                 case PixFileFormat.Ico:
                     Ico.Encode(new[] { ToRawImage(image, Target.Byte) }, stream);
+                    break;
+                case PixFileFormat.Pcx:
+                    Pcx.Encode(ToRawImage(image, Target.Byte), stream);
+                    break;
+                case PixFileFormat.Sgi:
+                    Sgi.Encode(ToRawImage(image, Target.ByteOrUShort), stream);
+                    break;
+                case PixFileFormat.Ras:
+                    SunRaster.Encode(ToRawImage(image, Target.Byte), stream);
+                    break;
+                case PixFileFormat.Xbm:
+                    Xbm.Encode(ToRawImage(image, Target.Byte), stream);
+                    break;
+                case PixFileFormat.Xpm:
+                    Xpm.Encode(ToRawImage(image, Target.Byte), stream);
+                    break;
+                case PixFileFormat.Wbmp:
+                    Wbmp.Encode(ToRawImage(image, Target.Byte), stream);
                     break;
                 case PixFileFormat.Tiff:
                     Tiff.Encode(ToRawImage(image, Target.Native), stream, new TiffEncodeOptions
@@ -532,10 +550,12 @@ namespace Aardvark.Data
         {
             // formats without a PixFileFormat
             var codec = ImageCodec.FormatFromExtension(path);
-            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx)
+            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.Dcx)
             {
                 using var fs = File.Create(path);
-                if (codec == ImageFormat.Qoi) Qoi.Encode(PixCodecLoader.ToRawImage(image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>()), fs);
+                var bytes = image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>();
+                if (codec == ImageFormat.Qoi) Qoi.Encode(PixCodecLoader.ToRawImage(bytes), fs);
+                else if (codec == ImageFormat.Dcx) Pcx.EncodeDcx(new[] { PixCodecLoader.ToRawImage(bytes) }, fs);
                 else Ktx.Encode(PixCodecLoader.ToRawImage(image), fs);
                 return;
             }
@@ -563,6 +583,12 @@ namespace Aardvark.Data
             ImageFormat.Pfm => PixFileFormat.Pfm,
             ImageFormat.Pnm => Path.GetExtension(path).ToLowerInvariant() switch { ".pbm" => PixFileFormat.Pbm, ".pgm" => PixFileFormat.Pgm, _ => PixFileFormat.Ppm },
             ImageFormat.Ico => PixFileFormat.Ico,
+            ImageFormat.Pcx => PixFileFormat.Pcx,
+            ImageFormat.Sgi => PixFileFormat.Sgi,
+            ImageFormat.SunRaster => PixFileFormat.Ras,
+            ImageFormat.Xbm => PixFileFormat.Xbm,
+            ImageFormat.Xpm => PixFileFormat.Xpm,
+            ImageFormat.Wbmp => PixFileFormat.Wbmp,
             _ => throw new ArgumentException($"cannot infer the image format from '{path}'"),
         };
 

@@ -1,0 +1,14 @@
+/* XPM */
+static char *d[] = {
+/* values */
+"13 6 3 1",
+"a c #000000",
+"b c #ffffff",
+"c c none",
+"cacbaccbbbcca",
+"baccbcbbbbbba",
+"bcbcbccbabccc",
+"aacbacccaccca",
+"abccacacaccba",
+"ccbacbcabbcaa"
+};

@@ -112,7 +112,8 @@ namespace Aardvark.ImageCodecs
         public static ImageNotSupportedException Unsupported(ImageFormat f) => new(f switch
         {
             ImageFormat.Unknown => "unknown image format",
-            ImageFormat.Bmp or ImageFormat.Tga => $"{f}: the format has no standard place for EXIF / XMP metadata",
+            ImageFormat.Bmp or ImageFormat.Tga or ImageFormat.Pcx or ImageFormat.Dcx or ImageFormat.Sgi or ImageFormat.SunRaster
+                or ImageFormat.Xbm or ImageFormat.Xpm or ImageFormat.Wbmp => $"{f}: the format has no standard place for EXIF / XMP metadata",
             _ => $"{f}: writing metadata into existing files is not supported for this format",
         });
 

@@ -37,7 +37,7 @@ to run the net8.0 tests.
 | Path | Contents |
 |------|----------|
 | `src/Aardvark.PixImage.PixCodec/Core` | `RawImage`, `ImageCodec` (format detection, `Decode`, `GetInfo`), managed zlib / zstd / xz |
-| `src/Aardvark.PixImage.PixCodec/<Format>` | one folder per format: `Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Jbig`, `Bmp`, `Tga`, `Dds`, `Ktx`, `Hdr`, `Pnm`, `Qoi`, `Ico`, `Lerc` |
+| `src/Aardvark.PixImage.PixCodec/<Format>` | one folder per format: `Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Jbig`, `Bmp`, `Tga`, `Dds`, `Ktx`, `Hdr`, `Pnm`, `Qoi`, `Ico`, `Lerc`, `Pcx` (+ DCX), `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp` |
 | `src/Aardvark.PixImage.PixCodec/Metadata` | EXIF / XMP / IPTC / GPS reading without decoding pixels, lossless metadata writing |
 | `src/Aardvark.PixImage.PixCodec/Color` | ICC profiles and colour management |
 | `src/Aardvark.PixImage.PixCodec/Processing` | `ImageOps`: resize filters, warps, orientation, transfer functions |
