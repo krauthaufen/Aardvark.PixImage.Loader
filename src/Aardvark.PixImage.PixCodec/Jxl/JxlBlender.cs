@@ -5,6 +5,14 @@ namespace Aardvark.ImageCodecs.JpegXl
     /// <summary>Frame blending onto the canvas (reference frames as backgrounds).</summary>
     internal static class JxlBlender
     {
+        /// <summary>Whether Blend returns the frame itself (every channel replaces the whole canvas).</summary>
+        public static bool IsPassthrough(JxlImageHeader img, JxlFrameHeader fh, JxlFrameImage frame)
+        {
+            bool allReplace = fh.Blending.Mode == JxlBlendMode.Replace;
+            for (int e = 0; e < fh.EcBlending.Length; e++) allReplace &= fh.EcBlending[e].Mode == JxlBlendMode.Replace;
+            return allReplace && fh.X0 == 0 && fh.Y0 == 0 && frame.Width == img.Width && frame.Height == img.Height;
+        }
+
         public static JxlFrameImage Blend(JxlImageHeader img, JxlFrameHeader fh, JxlFrameImage frame, JxlDecoderState state)
         {
             int W = img.Width, H = img.Height;

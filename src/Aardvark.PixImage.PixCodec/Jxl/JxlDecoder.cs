@@ -132,7 +132,16 @@ namespace Aardvark.ImageCodecs.JpegXl
                 state.References[fh.SaveAsReference] = frame;
                 state.ReferencePreCt[fh.SaveAsReference] = true;
             }
-            var post = ColourTransform(frame);
+            // the last frame shown as it is: XYB is converted to linear RGB by the output stage, block by block
+            bool defer = fh.IsLast && Header.XybEncoded && frame.Planes.Length >= 3 && IsDisplayed(fh) && JxlBlender.IsPassthrough(Header, fh, frame);
+            JxlFrameImage post;
+            if (defer)
+            {
+                frame.PendingXyb = Header.Opsin;
+                frame.PendingIntensityTarget = Header.ToneMapping.IntensityTarget;
+                post = frame;
+            }
+            else post = ColourTransform(frame);
             JxlProfile.Mark("XYB to linear");
             var canvas = JxlBlender.Blend(Header, fh, post, state);
             if (!fh.SaveBeforeColourTransform && canReference)

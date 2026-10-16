@@ -48,6 +48,38 @@ namespace Aardvark.ImageCodecs.JpegXl
             Chunked(n, parallel, Range);
         }
 
+        /// <summary>XYB samples to linear RGB with sRGB primaries (as <see cref="XybToLinear(float[], float[], float[], int, JxlOpsinParams, float, bool)"/>).</summary>
+        public static void XybToLinear(ReadOnlySpan<float> x, ReadOnlySpan<float> y, ReadOnlySpan<float> b, Span<float> r, Span<float> g, Span<float> bo,
+            JxlOpsinParams p, float intensityTarget)
+        {
+            float scale = 255.0f / intensityTarget;
+            Span<float> m = stackalloc float[9];
+            for (int i = 0; i < 9; i++) m[i] = p.InvMat[i] * scale;
+            float b0 = p.OpsinBias[0], b1 = p.OpsinBias[1], b2 = p.OpsinBias[2];
+            float c0 = MathF.Cbrt(b0), c1 = MathF.Cbrt(b1), c2 = MathF.Cbrt(b2);
+            int n = x.Length, vc = Vector<float>.Count, k = 0;
+            Vector<float> m0 = new(m[0]), m1 = new(m[1]), m2 = new(m[2]), m3 = new(m[3]), m4 = new(m[4]), m5 = new(m[5]), m6 = new(m[6]), m7 = new(m[7]), m8 = new(m[8]);
+            Vector<float> vc0 = new(c0), vc1 = new(c1), vc2 = new(c2), vb0 = new(b0), vb1 = new(b1), vb2 = new(b2);
+            for (; k + vc <= n; k += vc)
+            {
+                var xx = new Vector<float>(x.Slice(k)); var yy = new Vector<float>(y.Slice(k)); var bb = new Vector<float>(b.Slice(k));
+                var lg = yy + xx - vc0; var mg = yy - xx - vc1; var sg = bb - vc2;
+                var l = lg * lg * lg + vb0; var mm = mg * mg * mg + vb1; var ss = sg * sg * sg + vb2;
+                (m0 * l + m1 * mm + m2 * ss).CopyTo(r.Slice(k));
+                (m3 * l + m4 * mm + m5 * ss).CopyTo(g.Slice(k));
+                (m6 * l + m7 * mm + m8 * ss).CopyTo(bo.Slice(k));
+            }
+            for (; k < n; k++)
+            {
+                float xx = x[k], yy = y[k], bb = b[k];
+                float lg = yy + xx - c0, mg = yy - xx - c1, sg = bb - c2;
+                float l = lg * lg * lg + b0, mm = mg * mg * mg + b1, ss = sg * sg * sg + b2;
+                r[k] = m[0] * l + m[1] * mm + m[2] * ss;
+                g[k] = m[3] * l + m[4] * mm + m[5] * ss;
+                bo[k] = m[6] * l + m[7] * mm + m[8] * ss;
+            }
+        }
+
         public static void Chunked(int n, bool parallel, Action<int, int> range)
         {
             const int Chunk = 1 << 16;

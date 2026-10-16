@@ -13,6 +13,17 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// <summary>Exact integer samples of a lossless modular frame (colour + extra), when no float stage touched them.</summary>
         public int[][]? IntPlanes;
         public int NumColour;
+        /// <summary>Set when the colour planes are still XYB: the conversion to linear RGB is left to the output stage.</summary>
+        public JxlOpsinParams? PendingXyb;
+        public float PendingIntensityTarget;
+
+        /// <summary>Converts pending XYB colour planes to linear RGB in place.</summary>
+        public void EnsureLinear(bool parallel)
+        {
+            if (PendingXyb == null) return;
+            JxlColour.XybToLinear(Planes[0], Planes[1], Planes[2], Width * Height, PendingXyb, PendingIntensityTarget, parallel);
+            PendingXyb = null;
+        }
     }
 
     /// <summary>Decodes one frame: sections, modular and VarDCT data, filters, features and colour conversion.</summary>
@@ -287,7 +298,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             float[][] colour = fh.Modular ? ModularColourToFloat(chans) : VarDctColour();
             JxlProfile.Mark("to float");
             ApplyRestorationFilters(colour);
-            JxlProfile.Mark("filters"); 
+            JxlProfile.Mark($"filters gab {fh.Filter.Gab} epf {fh.Filter.EpfIters}");
             if (fh.Upsampling > 1)
                 for (int c = 0; c < colour.Length; c++) colour[c] = Upsample(colour[c], dims.XSize, dims.YSize, fh.Upsampling, dims.Width, dims.Height);
             var planes = new float[result.NumColour + img.ExtraChannels.Length][];

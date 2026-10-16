@@ -343,6 +343,7 @@ namespace Aardvark.ImageCodecs
         /// <summary>Test hook output: Float32, colour channels then every extra channel as decoded (spot colours not rendered).</summary>
         static RawImage OutputAll(JxlImageHeader h, JxlFrameImage canvas, ImageMetadata meta, JxlDecodeOptions opt)
         {
+            canvas.EnsureLinear(opt.Multithreaded);
             var col = ColourPlanes(h, canvas, meta, opt);
             int ne = h.ExtraChannels.Length, nch = col.Length + ne, n = canvas.Width * canvas.Height;
             var data = new float[(long)n * nch];
@@ -370,6 +371,7 @@ namespace Aardvark.ImageCodecs
             if (ints != null && (opt.ForceFloat || opt.RenderSpotColours && HasSpot(h) || alpha >= 0 && h.ExtraChannels[alpha].AlphaAssociated || BlackChannel(h) >= 0)) ints = null;
             if (ints == null && h.XybEncoded && !(h.Colour.WantIcc && h.Icc != null) && !(opt.RenderSpotColours && HasSpot(h)))
                 return FusedXybOutput(h, canvas, meta, opt, color, nch, type);
+            canvas.EnsureLinear(opt.Multithreaded);
             if (ints == null)
             {
                 var col = CmykToSrgb(h, canvas, meta, opt) ?? ColourPlanes(h, canvas, meta, opt);
@@ -430,6 +432,7 @@ namespace Aardvark.ImageCodecs
             Array data = RawImage.CreateArray(type, checked(n * nch));
             int maxv = h.BitDepth.Float ? 0 : (int)Math.Min((1L << h.BitDepth.Bits) - 1, int.MaxValue);
             const int Block = 4096;
+            var xyb = canvas.PendingXyb;
             bool srgb8 = type == SampleType.UInt8 && ce.Transfer == JxlTransfer.Srgb && !premul;
             JxlColour.Chunked(n, opt.Multithreaded, (s0, e0) =>
             {
@@ -438,7 +441,8 @@ namespace Aardvark.ImageCodecs
                 {
                     int cnt = Math.Min(Block, e0 - s);
                     var r = buf.AsSpan(0, cnt); var g = buf.AsSpan(Block, cnt); var b = buf.AsSpan(2 * Block, cnt);
-                    p[0].AsSpan(s, cnt).CopyTo(r); p[1].AsSpan(s, cnt).CopyTo(g); p[2].AsSpan(s, cnt).CopyTo(b);
+                    if (xyb != null) JxlColour.XybToLinear(p[0].AsSpan(s, cnt), p[1].AsSpan(s, cnt), p[2].AsSpan(s, cnt), r, g, b, xyb, canvas.PendingIntensityTarget);
+                    else { p[0].AsSpan(s, cnt).CopyTo(r); p[1].AsSpan(s, cnt).CopyTo(g); p[2].AsSpan(s, cnt).CopyTo(b); }
                     if (matrix != null) JxlColour.ApplyMatrix(r, g, b, matrix);
                     if (ncol == 1)
                         for (int i = 0; i < cnt; i++) r[i] = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i];
