@@ -83,3 +83,21 @@ Copyright © 2014-2019 The Khronos Group Inc., licensed under the Creative Commo
 ".basis File Format and ETC1S Texture Video Specification" and "UASTC LDR 4x4 Texture Specification"
 (https://github.com/BinomialLLC/basis_universal/wiki) and in Appendix C / D of the KTX 2.0 specification. Only the table
 values were taken; no code of basis_universal was used.
+
+## Mac OS system colour tables (ICNS 4 and 8 bit icons)
+
+`src/Aardvark.PixImage.PixCodec/Icns/Icns.cs` (`MacPalettes`) holds the default colour tables of the Mac OS ('clut'
+resources 4 and 8) that the 4 and 8 bit icon types index: the 16 colours as 16 bit RGB values and the rule that builds the
+256 colour table (the 6 x 6 x 6 cube from white without black, ten step ramps of red, green, blue and gray, black last).
+Source: Apple, Inside Macintosh: Imaging With QuickDraw (1994), chapter 4 "Color QuickDraw" (Table 4-4 lists the shared
+colours of the 16 colour table) and Plate 1 / the default colour tables; the 8 bit table was checked against macOS's own
+decoding (sips) of an icl8 element. Only the colour values were taken.
+
+## PVRTC and PVR container
+
+`src/Aardvark.PixImage.PixCodec/Pvr/` is written from the Khronos Data Format Specification 1.3, section 24 (PVRTC,
+derived from Imagination's PVRTC Texture Compression User Guide) and Imagination's PVR File Format Specification
+(https://docs.imgtec.com/specifications/pvr-file-format-specification). No tables were taken. Where the decoding of
+Imagination's PVRTexTool differs from the text (PVRTC1 2 bpp interpolated mode weights), the tool's results were followed;
+PVRTexTool was only run.
+
