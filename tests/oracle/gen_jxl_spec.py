@@ -3,15 +3,19 @@ conformance files and gen_jxl.py's fixtures do not reach, with libjxl's decodes 
 
   * icc_xyz_shared.jxl: an ICC profile whose tag list has an rXYZ / gXYZ / bXYZ run followed by a tag sharing gXYZ's
     data, so the tag start after the run is predicted (18181-1:2024 E.4.4); the profile is icc_xyz_shared.icc.
-  * lf_frame_e*.jxl: VarDCT frames whose LF comes from an LF frame (cjxl --progressive_dc), which also use LF
-    thresholds in the block context (G.2.2).
+  * lf_frame_e*.jxl: VarDCT frames whose LF comes from an LF frame (cjxl --progressive_dc).
+  * hlg_*.jxl: XYB images whose colour encoding has the HLG transfer function, with sRGB / BT.2100 primaries, grey,
+    and a 4000 nit intensity target: decoders apply the inverse HLG OOTF (18181-1:2024 Table E.6, NOTE 4). References
+    from libjxl through imagecodecs (djxl's PFM output of hlg_4000 is broken).
 
 usage: python3 gen_jxl_spec.py (cjxl / djxl from PATH or .tmp/libjxl/tools)
 """
 import json
 import os
+import shutil
 import struct
 import numpy as np
+import imagecodecs
 from PIL import Image, ImageCms
 from gen_jxl import cjxl, djxl_float, photo, save_png, TMP
 from pxref import write_ref
@@ -49,6 +53,7 @@ def icc_xyz_shared():
         table += struct.pack('>4sII', t, o, len(tags[t]))
     p = bytearray(b[:128]) + table + body
     p[0:4] = struct.pack('>I', len(p))
+    p[24:36] = bytes(12)   # creation date: keep the file reproducible
     p[84:100] = bytes(16)
     return bytes(p)
 
@@ -69,6 +74,20 @@ def main():
     for e in (7, 9):
         cjxl(t('lf.png'), o(f'lf_frame_e{e}.jxl'), f'-d 2 -e {e} --progressive_dc=1')
         finish(o(f'lf_frame_e{e}.jxl'), {'lossless': False})
+    rng = np.random.default_rng(1)
+    hdr = (rng.random((48, 64, 3)) * 0.9 + 0.05).astype(np.float32)
+    def hlg(name, data, info=None):
+        write_ref(o(name) + '.ref', imagecodecs.jpegxl_decode(data).astype(np.float32))
+        open(o(name), 'wb').write(data)
+        json.dump({'lossless': False, **(info or {})}, open(o(name) + '.json', 'w'), indent=1, sort_keys=True)
+    hlg('hlg_srgb.jxl', imagecodecs.jpegxl_encode(hdr, distance=0.3, transfer='hlg', primaries='srgb'))
+    hlg('hlg_bt2100.jxl', imagecodecs.jpegxl_encode(hdr, distance=0.3, transfer='hlg', primaries='bt2100'))
+    hlg('hlg_gray.jxl', imagecodecs.jpegxl_encode(hdr[..., 1], distance=0.3, transfer='hlg'))
+    with open(t('hlg.pfm'), 'wb') as f:
+        f.write(b'PF\n64 48\n-1.0\n'); f.write(hdr[::-1].astype('<f4').tobytes())
+    cjxl(t('hlg.pfm'), t('hlg_4000.jxl'), '-d 0.3 -x color_space=RGB_D65_SRG_Rel_HLG --intensity_target=4000')
+    hlg('hlg_4000.jxl', open(t('hlg_4000.jxl'), 'rb').read())
+    shutil.rmtree(TMP, ignore_errors=True)
     print(f'JPEG XL spec fixtures in {OUT}')
 
 
