@@ -31,6 +31,13 @@ def decode(path):
         return decode_lerc(path)
     if ext in ('.dpx', '.cin'):
         return decode_oiio(path)
+    if ext == '.jls':
+        # JPEG-LS through CharLS (charls.py: any interleave mode, interleaved output); exit 77 without imagecodecs
+        import charls
+        if charls.find() is None:
+            sys.exit(77)
+        with open(path, 'rb') as f:
+            return charls.decode(f.read())
     if ext == '.dds' and dds_block_compressed(path):
         return decode_dds(path)
     if ext in ('.pcx', '.dcx', '.sgi', '.rgb', '.rgba', '.bw', '.ras', '.xbm', '.xpm', '.wbmp'):

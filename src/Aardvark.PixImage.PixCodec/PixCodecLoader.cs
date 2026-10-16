@@ -8,7 +8,7 @@ namespace Aardvark.Data
 {
     /// <summary>
     /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, BMP, TGA,
-    /// DDS, KTX, PVR, ASTC, Radiance HDR, PNM / PFM, QOI, ICO / CUR / ANI, ICNS, PCX / DCX, SGI, Sun Raster, XBM, XPM, WBMP, DPX, Cineon,
+    /// DDS, KTX, PVR, ASTC, Radiance HDR, PNM / PFM, QOI, ICO / CUR / ANI, ICNS, PCX / DCX, SGI, Sun Raster, XBM, XPM, WBMP, DPX, Cineon, JPEG-LS,
     /// and the volume formats NRRD, NIfTI, MetaImage, FITS).
     /// Register with <see cref="PixCodec.Init"/> (done automatically by Aardvark.Init()).
     /// </summary>
@@ -719,7 +719,7 @@ namespace Aardvark.Data
                 ImageCodec.Encode(PixCodecLoader.ToRawImage(image), path);
                 return;
             }
-            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.Pvr or ImageFormat.Astc or ImageFormat.Icns or ImageFormat.Ani or ImageFormat.Dcx or ImageFormat.Dpx or ImageFormat.Cineon)
+            if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.Pvr or ImageFormat.Astc or ImageFormat.Icns or ImageFormat.Ani or ImageFormat.Dcx or ImageFormat.Dpx or ImageFormat.Cineon or ImageFormat.JpegLs)
             {
                 using var fs = File.Create(path);
                 var bytes = image.PixFormat.Type == typeof(byte) ? image : image.ToPixImage<byte>();
@@ -733,6 +733,9 @@ namespace Aardvark.Data
                     case ImageFormat.Dcx: Pcx.EncodeDcx(new[] { PixCodecLoader.ToRawImage(bytes) }, fs); break;
                     case ImageFormat.Dpx: SaveDpx(image, fs); break;
                     case ImageFormat.Cineon: SaveCineon(image, fs); break;
+                    case ImageFormat.JpegLs:
+                        JpegLs.Encode(PixCodecLoader.ToRawImage(image.PixFormat.Type == typeof(byte) || image.PixFormat.Type == typeof(ushort) ? image : bytes), fs);
+                        break;
                     default: Ani.Encode(new[] { new AniInputFrame(PixCodecLoader.ToRawImage(bytes)) }, fs); break;
                 }
                 return;

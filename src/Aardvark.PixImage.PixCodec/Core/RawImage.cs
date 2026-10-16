@@ -80,6 +80,7 @@ namespace Aardvark.ImageCodecs
         Dpx,
         /// <summary>Kodak Cineon.</summary>
         Cineon,
+        JpegLs,
     }
 
     /// <summary>

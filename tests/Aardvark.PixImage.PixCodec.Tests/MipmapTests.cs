@@ -260,13 +260,13 @@ public class MipmapTests
         Directory.CreateDirectory(dir);
         try
         {
-            foreach (var ext in new[] { ".qoi", ".ktx2", ".ico", ".pam", ".ppm", ".hdr", ".pfm", ".pgm", ".pbm", ".pvr", ".ani", ".astc" })
+            foreach (var ext in new[] { ".qoi", ".ktx2", ".ico", ".pam", ".ppm", ".hdr", ".pfm", ".pgm", ".pbm", ".pvr", ".ani", ".astc", ".jls" })
             {
                 var path = Path.Combine(dir, "x" + ext);
                 PixCodec.Save(img, path);
                 var back = PixCodec.Load(path);
                 Assert.Equal(img.Size, back.Size);
-                if (ext is ".qoi" or ".ktx2" or ".ico" or ".pam" or ".ppm" or ".pvr" or ".ani") Assert.Equal(Bytes(img), Bytes((PixImage<byte>)back));
+                if (ext is ".qoi" or ".ktx2" or ".ico" or ".pam" or ".ppm" or ".pvr" or ".ani" or ".jls") Assert.Equal(Bytes(img), Bytes((PixImage<byte>)back));
                 Assert.Equal(ImageCodec.FormatFromExtension(path), PixCodec.GetInfo(path).Format);
             }
         }

@@ -40,6 +40,7 @@ code living in any `Aardvark.*` namespace.
 | Radiance HDR | RGBE and XYZE, new and old RLE and flat scanlines, all eight scan orders, EXPOSURE / PRIMARIES | RLE RGBE from float (or 8/16 bit converted to linear light) |
 | PNM / PAM / PFM | P1..P7, any maxval up to 65535 (scaled to the full range), PAM tuple types, PFM gray / RGB in both byte orders | P1..P7 (plain or binary, bilevel), PFM |
 | QOI | everything (sRGB / linear header) | RGB, RGBA |
+| JPEG-LS | ITU-T T.87: 2..16 bit, 1..255 components, all interleave modes, near-lossless, preset parameters, mapping tables (palettes), oversize dimensions, restart markers, DNL, SPIFF, HP colour transforms, subsampled components (upsampled); as fast as CharLS | lossless and near-lossless, 2..16 bit, any channel count, all interleave modes, preset parameters, HP colour transforms, restart intervals, SPIFF; scan data byte identical to CharLS |
 | ICO / CUR | PNG and DIB entries of every bit depth with AND mask or alpha, cursor hotspots | PNG or 32 bit DIB entries, icons and cursors (with hotspots) |
 | ANI | animated cursors / icons: anih, rate, seq, LIST fram of ICO / CUR frames, INFO title and artist; steps with durations (jiffies) and hotspots | animated cursors and icons, shared frames through seq, per step durations |
 | ICNS | every element type: 1 bit (ICON, ICN#, ics#, icm#, ich#), 4 / 8 bit with the Mac OS palettes, 24 bit RLE (is32, il32, ih32, it32) with 8 bit or 1 bit masks, ARGB (ic04, ic05, icsb), PNG and JPEG 2000 (icp4..icp6, ic07..ic14) | ARGB (16, 32) and PNG elements as iconutil writes them, optionally the RLE types with masks |
@@ -105,7 +106,7 @@ in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF or
 is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
 turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the
 stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`,
-`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`, `Dpx`, `Cineon`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
+`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `JpegLs`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`, `Dpx`, `Cineon`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data, DPX / Cineon headers (`Dpx.GetHeader`, `Cineon.GetHeader`) and DPX image
 elements. Bit depths that do not fill a sample type keep their stored values: 10 bit DPX and Cineon decode to UInt16 0..1023,
 12 bit to 0..4095 (as 12 bit TIFF and JPEG); 1, 2 and 4 bit samples are stretched to 0..255.
@@ -329,7 +330,7 @@ RawVolume rv = ct.ToRawVolume(meta);  PixVolume pv = rv.ToPixVolume();
 PixCodec.SavePvr(volume, stream);  PixCodec.SaveAstc(volume, stream);  PixCodec.SaveIcns(images, stream);  PixCodec.SaveAni(steps, stream);
 PixCodec.WriteMetadata("a.jpg", "a.jpg", new MetadataEdit { Gps = new GpsEdit { Latitude = 47.07, Longitude = 15.44 } });
 PixImage srgb      = PixCodec.LoadSrgb("adobe-rgb.jpg");                 // converted through the embedded ICC profile
-PixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .ani .icns .qoi .ktx2 .pvr .astc .nrrd .nii .mha .fits .dpx .cin too
+PixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .ani .icns .qoi .ktx2 .pvr .astc .nrrd .nii .mha .fits .dpx .cin .jls too
 PixCodec.SaveDpx(img, stream, new DpxEncodeOptions { BitDepth = 10 });   // 10 bit filled method A, big endian
 ```
 

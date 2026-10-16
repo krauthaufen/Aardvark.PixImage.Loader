@@ -10,6 +10,7 @@ namespace Aardvark.ImageCodecs
         public static ImageFormat DetectFormat(ReadOnlySpan<byte> header)
         {
             if (Png.IsMatch(header)) return ImageFormat.Png;
+            if (JpegLs.IsMatch(header)) return ImageFormat.JpegLs;   // FF D8 like JPEG: look for its SOF55 first
             if (Jpeg.IsMatch(header)) return ImageFormat.Jpeg;
             if (Gif.IsMatch(header)) return ImageFormat.Gif;
             if (Tiff.IsMatch(header)) return ImageFormat.Tiff;
@@ -91,6 +92,7 @@ namespace Aardvark.ImageCodecs
                 ".pvr" => ImageFormat.Pvr,
                 ".dpx" => ImageFormat.Dpx,
                 ".cin" or ".cineon" => ImageFormat.Cineon,
+                ".jls" => ImageFormat.JpegLs,
                 _ => ImageFormat.Unknown,
             };
         }
@@ -135,6 +137,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Pvr => Pvr.GetInfo(data),
             ImageFormat.Dpx => Dpx.GetInfo(data),
             ImageFormat.Cineon => Cineon.GetInfo(data),
+            ImageFormat.JpegLs => JpegLs.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -375,6 +378,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Pvr => Pvr.Decode(data),
             ImageFormat.Dpx => Dpx.Decode(data),
             ImageFormat.Cineon => Cineon.Decode(data),
+            ImageFormat.JpegLs => JpegLs.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -654,6 +658,7 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Pvr: Pvr.Encode(image, output); break;
                 case ImageFormat.Dpx: Dpx.Encode(image, output); break;
                 case ImageFormat.Cineon: Cineon.Encode(image, output); break;
+                case ImageFormat.JpegLs: JpegLs.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }
