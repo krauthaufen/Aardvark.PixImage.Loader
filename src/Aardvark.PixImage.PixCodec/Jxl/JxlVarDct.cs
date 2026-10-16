@@ -416,14 +416,37 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
             int shift = pass < fh.NumPasses - 1 ? fh.Shift[pass] : 0;
             int histOff = 495 * numBlockCtx * sel;
+            if (reader.CanFast)
+            {
+                fixed (byte* pd = br.Data)
+                {
+                    var fs = reader.BeginFast(br, pd);
+                    HfBlocks(ref fs, pass, bx0, by0, gw, gh, offsets, coeffs!, shift, histOff);
+                    reader.EndFast(fs, br, pd);
+                }
+            }
+            else
+            {
+                var ss = new JxlSlowSymbols(reader, br);
+                HfBlocks(ref ss, pass, bx0, by0, gw, gh, offsets, coeffs!, shift, histOff);
+            }
+            reader.CheckFinalState();
+        }
+
+        void HfBlocks<TSym>(ref TSym reader, int pass, int bx0, int by0, int gw, int gh, int[] offsets, int[][] coeffs, int shift, int histOff)
+            where TSym : struct, IJxlSymbols
+        {
             int zdOff0 = numBlockCtx * 37;
-            var nzeros = new int[3][];
-            var nzw = new int[3];
+            int* nzw = stackalloc int[3];
+            int nzLen = 0;
             for (int c = 0; c < 3; c++)
             {
                 nzw[c] = (gw + (1 << hs[c]) - 1) >> hs[c];
-                nzeros[c] = new int[nzw[c] * ((gh + (1 << vs[c]) - 1) >> vs[c])];
+                nzLen = Math.Max(nzLen, nzw[c] * ((gh + (1 << vs[c]) - 1) >> vs[c]));
             }
+            int* nzAll = stackalloc int[3 * nzLen];
+            ref ushort nnzCtx = ref System.Runtime.InteropServices.MemoryMarshal.GetArrayDataReference(CoeffNumNonzeroContext);
+            ref ushort freqCtx = ref System.Runtime.InteropServices.MemoryMarshal.GetArrayDataReference(CoeffFreqContext);
             for (int y = 0; y < gh; y++)
             {
                 for (int x = 0; x < gw; x++)
@@ -442,7 +465,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                         int c = ci == 0 ? 1 : ci == 1 ? 0 : 2;
                         if ((x & ((1 << hs[c]) - 1)) != 0 || (y & ((1 << vs[c]) - 1)) != 0) continue;
                         int bctx = BlockContext(c, ord, qf, bx0 + x, by0 + y);
-                        var nzc = nzeros[c];
+                        int* nzc = nzAll + c * nzLen;
                         int gwc = nzw[c], xc = x >> hs[c], yc = y >> vs[c];
                         int pred;
                         if (xc == 0 && yc == 0) pred = 32;
@@ -450,31 +473,36 @@ namespace Aardvark.ImageCodecs.JpegXl
                         else if (yc == 0) pred = nzc[xc - 1];
                         else pred = (nzc[(yc - 1) * gwc + xc] + nzc[yc * gwc + xc - 1] + 1) >> 1;
                         int nzBucket = pred >= 64 ? 36 : pred >= 8 ? 4 + pred / 2 : pred;
-                        int nz = (int)reader.ReadUint(br, histOff + nzBucket * numBlockCtx + bctx);
+                        int nz = (int)reader.ReadUint(histOff + nzBucket * numBlockCtx + bctx);
                         if (nz > size - covered) throw new ImageFormatException("JPEG XL: too many nonzero coefficients");
                         int stored = (nz + covered - 1) >> logCovered;
                         for (int j = 0; j < sy; j++)
                             for (int i = 0; i < sx; i++) nzc[(yc + j) * gwc + xc + i] = stored;
                         if (nz == 0) continue;
                         var order = orders![(pass * 13 + ord) * 3 + c] ?? JxlAcStrategy.NaturalOrder(ord);
-                        var cf = coeffs![c];
+                        if (order.Length < size) throw new ImageFormatException("JPEG XL: coefficient order too short");
+                        var cf = coeffs[c];
+                        if (cf.Length < off + size) throw new ImageFormatException("JPEG XL: coefficient buffer too small");
                         int zdOff = histOff + zdOff0 + 458 * bctx;
                         int prev = nz <= size / 16 ? 1 : 0;
-                        for (int k = covered; k < size && nz > 0; k++)
+                        fixed (int* pcf = cf, pord = order)
                         {
-                            int ctx = zdOff + (CoeffNumNonzeroContext[(nz + covered - 1) >> logCovered] + CoeffFreqContext[k >> logCovered]) * 2 + prev;
-                            uint u = reader.ReadUint(br, ctx);
-                            int v = UnpackSigned(u);
-                            cf[off + order[k]] += v << shift;
-                            prev = u != 0 ? 1 : 0;
-                            if (v != 0) nz--;
+                            int* dst = pcf + off;
+                            for (int k = covered; k < size && nz > 0; k++)
+                            {
+                                int ctx = zdOff + (Unsafe.Add(ref nnzCtx, (nz + covered - 1) >> logCovered) + Unsafe.Add(ref freqCtx, k >> logCovered)) * 2 + prev;
+                                uint u = reader.ReadUint(ctx);
+                                int v = UnpackSigned(u);
+                                dst[pord[k]] += v << shift;
+                                prev = u != 0 ? 1 : 0;
+                                if (v != 0) nz--;
+                            }
                         }
                         if (nz != 0) throw new ImageFormatException("JPEG XL: coefficients end before the nonzero count");
                     }
                 }
-                if (br.Overrun) throw new ImageFormatException("JPEG XL: unexpected end of HF data");
+                if (reader.Overrun) throw new ImageFormatException("JPEG XL: unexpected end of HF data");
             }
-            reader.CheckFinalState();
         }
 
         /// <summary>After the last pass of a group: dequantization, chroma from luma, LLF and the inverse transforms.</summary>

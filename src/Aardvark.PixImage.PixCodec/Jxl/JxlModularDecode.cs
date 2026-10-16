@@ -5,7 +5,7 @@ using System.Runtime.CompilerServices;
 namespace Aardvark.ImageCodecs.JpegXl
 {
     /// <summary>Decodes the samples of one modular channel with its (specialized) MA tree.</summary>
-    internal static class JxlModularChannelDecoder
+    internal static unsafe class JxlModularChannelDecoder
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static long Predict(int predictor, long W, long N, long NW, long NE, long NN, long WW, long NEE, long wp)
@@ -43,16 +43,34 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         public static void Decode(JxlBitReader br, JxlSymbolReader reader, JxlMaTree tree, JxlWpHeader wpHeader, List<JxlChannel> channels, int index)
         {
+            if (reader.CanFast)
+            {
+                fixed (byte* pd = br.Data)
+                {
+                    var fs = reader.BeginFast(br, pd);
+                    Decode(ref fs, tree, wpHeader, channels, index);
+                    reader.EndFast(fs, br, pd);
+                }
+            }
+            else
+            {
+                var ss = new JxlSlowSymbols(reader, br);
+                Decode(ref ss, tree, wpHeader, channels, index);
+            }
+        }
+
+        static void Decode<TSym>(ref TSym reader, JxlMaTree tree, JxlWpHeader wpHeader, List<JxlChannel> channels, int index) where TSym : struct, IJxlSymbols
+        {
             var ch = channels[index];
             if (tree.Property[0] < 0 && tree.Predictor[0] != 6)
             {
-                DecodeSingleLeaf(br, reader, tree, ch);
+                DecodeSingleLeaf(ref reader, tree, ch);
                 return;
             }
-            DecodeGeneral(br, reader, tree, wpHeader, channels, index);
+            DecodeGeneral(ref reader, tree, wpHeader, channels, index);
         }
 
-        static void DecodeSingleLeaf(JxlBitReader br, JxlSymbolReader reader, JxlMaTree tree, JxlChannel ch)
+        static void DecodeSingleLeaf<TSym>(ref TSym reader, JxlMaTree tree, JxlChannel ch) where TSym : struct, IJxlSymbols
         {
             int w = ch.W, h = ch.H;
             var d = ch.Data;
@@ -63,7 +81,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 int row = y * w, prev = row - w;
                 for (int x = 0; x < w; x++)
                 {
-                    long r = JxlBitReader.UnpackSigned(reader.ReadUint(br, ctx)) * mul + off;
+                    long r = JxlBitReader.UnpackSigned(reader.ReadUint(ctx)) * mul + off;
                     long p;
                     switch (pred)
                     {
@@ -79,7 +97,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                     }
                     d[row + x] = (int)(r + p);
                 }
-                if (br.Overrun) throw new ImageFormatException("JPEG XL: unexpected end of modular data");
+                if (reader.Overrun) throw new ImageFormatException("JPEG XL: unexpected end of modular data");
             }
         }
 
@@ -130,15 +148,21 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         /// <summary>Weighted predictor trees that split on its maximum error only (lossless effort 3 and many DC images).</summary>
-        static void DecodeWpIntervals(JxlBitReader br, JxlSymbolReader reader, JxlMaTree tree, JxlWeightedPredictor wp, int[] d, int w, int h,
-            int[] bounds, int[] leaves)
+        static void DecodeWpIntervals<TSym>(ref TSym readerRef, JxlMaTree tree, JxlWeightedPredictor wp, int[] d, int w, int h,
+            int[] bounds, int[] leaves) where TSym : struct, IJxlSymbols
         {
+            var reader = readerRef;   // a local copy the JIT can keep in registers
             int nl = leaves.Length;
             var lpred = new int[nl]; var loff = new long[nl]; var lmul = new long[nl]; var lctx = new int[nl];
             for (int k = 0; k < nl; k++)
             {
                 lpred[k] = tree.Predictor[leaves[k]]; loff[k] = tree.Offset[leaves[k]];
                 lmul[k] = tree.Multiplier[leaves[k]]; lctx[k] = tree.Context[leaves[k]];
+            }
+            if (typeof(TSym) == typeof(JxlAnsFast))
+            {
+                wp.DecodeIntervals(ref Unsafe.As<TSym, JxlAnsFast>(ref readerRef), d, h, bounds, lpred, lmul, loff, lctx);
+                return;
             }
             for (int y = 0; y < h; y++)
             {
@@ -151,16 +175,17 @@ namespace Aardvark.ImageCodecs.JpegXl
                     int me = wp.MaxError;
                     int k = 0;
                     while (me > bounds[k]) k++;
-                    long r = JxlBitReader.UnpackSigned(reader.ReadUint(br, lctx[k])) * lmul[k] + loff[k];
+                    long r = JxlBitReader.UnpackSigned(reader.ReadUint(lctx[k])) * lmul[k] + loff[k];
                     long v = r + (lpred[k] == 6 ? wpPred : Predict(lpred[k], W, N, NW, NE, NN, WW, NEE, wpPred));
                     d[row + x] = (int)v;
                     wp.Update(x, (int)v);
                 }
-                if (br.Overrun) throw new ImageFormatException("JPEG XL: unexpected end of modular data");
+                if (reader.Overrun) throw new ImageFormatException("JPEG XL: unexpected end of modular data");
             }
+            readerRef = reader;
         }
 
-        static void DecodeGeneral(JxlBitReader br, JxlSymbolReader reader, JxlMaTree tree, JxlWpHeader wpHeader, List<JxlChannel> channels, int index)
+        static void DecodeGeneral<TSym>(ref TSym reader, JxlMaTree tree, JxlWpHeader wpHeader, List<JxlChannel> channels, int index) where TSym : struct, IJxlSymbols
         {
             var ch = channels[index];
             int w = ch.W, h = ch.H;
@@ -181,7 +206,7 @@ namespace Aardvark.ImageCodecs.JpegXl
             var lpred = tree.Predictor; var loff = tree.Offset; var lmul = tree.Multiplier; var lctx = tree.Context;
             if (wp != null && OnlyProperty(tree, 15, out var bounds, out var leaves))
             {
-                DecodeWpIntervals(br, reader, tree, wp, d, w, h, bounds, leaves);
+                DecodeWpIntervals(ref reader, tree, wp, d, w, h, bounds, leaves);
                 return;
             }
             for (int y = 0; y < h; y++)
@@ -236,12 +261,12 @@ namespace Aardvark.ImageCodecs.JpegXl
                         n = (int)pv > val[n] ? left[n] : right[n];
                     }
                     lastProp9 = prop9;
-                    long r = JxlBitReader.UnpackSigned(reader.ReadUint(br, lctx[n])) * (long)lmul[n] + loff[n];
+                    long r = JxlBitReader.UnpackSigned(reader.ReadUint(lctx[n])) * (long)lmul[n] + loff[n];
                     long v = r + Predict(lpred[n], W, N, NW, NE, NN, WW, NEE, wpPred);
                     d[row + x] = (int)v;
                     wp?.Update(x, (int)v);
                 }
-                if (br.Overrun) throw new ImageFormatException("JPEG XL: unexpected end of modular data");
+                if (reader.Overrun) throw new ImageFormatException("JPEG XL: unexpected end of modular data");
             }
         }
     }

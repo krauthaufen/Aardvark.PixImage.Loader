@@ -8,6 +8,57 @@ namespace Aardvark.ImageCodecs.JpegXl
     /// Bit reader of the JPEG XL codestream (ISO/IEC 18181-1): bits are read least significant first. Reading past the end
     /// of the section yields zero bits; <see cref="CheckEnd"/> turns that into an <see cref="ImageFormatException"/>.
     /// </summary>
+    /// <summary>
+    /// The state of a <see cref="JxlBitReader"/> as a value (pointer into the pinned codestream) for hot loops; the same
+    /// semantics: bits past the end read as zero, more than 64 bytes past the end throw.
+    /// </summary>
+    internal unsafe struct JxlBitState
+    {
+        public byte* P, End;
+        public ulong Buf;
+        public int NBits;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public uint ReadBits(int n)
+        {
+            if (NBits < n) Refill();
+            uint v = (uint)(Buf & ((1UL << n) - 1));
+            Buf >>= n;
+            NBits -= n;
+            return v;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        void Refill()
+        {
+            if (P + 8 <= End)
+            {
+                Buf |= Unsafe.ReadUnaligned<ulong>(P) << NBits;
+                int take = (63 - NBits) >> 3;
+                P += take;
+                NBits += take << 3;
+            }
+            else this = RefillSlow(this);
+        }
+
+        // by value, so that callers' states are not address exposed (they stay in registers)
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static JxlBitState RefillSlow(JxlBitState s)
+        {
+            while (s.NBits <= 56)
+            {
+                if (s.P < s.End) s.Buf |= (ulong)*s.P << s.NBits;
+                s.P++;
+                s.NBits += 8;
+                if (s.P > s.End + 64) throw new ImageFormatException("JPEG XL: unexpected end of data");
+            }
+            return s;
+        }
+
+        /// <summary>More bits consumed than the section holds.</summary>
+        public bool Overrun => (P - End) * 8 > NBits;
+    }
+
     internal sealed class JxlBitReader
     {
         readonly byte[] data;
@@ -197,6 +248,18 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         public static int UnpackSigned(uint v) => (int)(v >> 1) ^ -(int)(v & 1);
+
+        /// <summary>The codestream the reader reads from (pin it while a <see cref="JxlBitState"/> is in use).</summary>
+        public byte[] Data => data;
+
+        /// <summary>The reader's position as a pointer based state; basePtr points at Data[0].</summary>
+        public unsafe JxlBitState Export(byte* basePtr) => new() { P = basePtr + pos, End = basePtr + end, Buf = buf, NBits = nbits };
+
+        /// <summary>Continues from a state obtained by <see cref="Export"/>.</summary>
+        public unsafe void Import(in JxlBitState s, byte* basePtr)
+        {
+            pos = (int)(s.P - basePtr); buf = s.Buf; nbits = s.NBits;
+        }
         public static long UnpackSigned64(ulong v) => (long)(v >> 1) ^ -(long)(v & 1);
     }
 }

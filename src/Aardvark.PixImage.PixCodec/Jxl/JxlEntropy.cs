@@ -43,6 +43,24 @@ namespace Aardvark.ImageCodecs.JpegXl
             return (uint)v;
         }
 
+        /// <summary><see cref="Decode"/> for a token of at least Split, reading from a bit state (passed by value and returned).</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static uint DecodeLarge(in JxlHybridUint c, uint token, JxlBitState br, out JxlBitState after)
+        {
+            int SplitExponent = c.SplitExponent, MsbInToken = c.MsbInToken, LsbInToken = c.LsbInToken;
+            uint Split = c.Split;
+            int ml = MsbInToken + LsbInToken;
+            int n = SplitExponent - ml + (int)((token - Split) >> ml);
+            if (n > 31) throw new ImageFormatException("JPEG XL: hybrid uint too large");
+            uint low = token & ((1u << LsbInToken) - 1);
+            token >>= LsbInToken;
+            uint high = (token & ((1u << MsbInToken) - 1)) | (1u << MsbInToken);
+            ulong v = ((((ulong)high << n) | br.ReadBits(n)) << LsbInToken) | low;
+            if (v > uint.MaxValue) throw new ImageFormatException("JPEG XL: hybrid uint too large");
+            after = br;
+            return (uint)v;
+        }
+
         public static int CeilLog2(int x)
         {
             int r = 0;
@@ -249,6 +267,46 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// <summary>True when every context of the stream maps to a single-symbol distribution that consumes no bits.</summary>
         public bool[] IsSingle = Array.Empty<bool>();
 
+        /// <summary>Tables of <see cref="JxlAnsFast"/> on the pinned object heap (built on first use).</summary>
+        internal sealed class FastTables
+        {
+            public ulong[] Ans = null!;
+            public byte[] Map = null!;
+            public JxlHybridUint[] Cfg = null!;
+        }
+
+        FastTables? fast;
+
+        /// <summary>
+        /// Per cluster and alias bucket: cutoff (bits 0..11), alias symbol (12..19), alias offset (20..31), the bucket
+        /// symbol's frequency (32..44) and the alias symbol's frequency (45..57). Null for prefix codes.
+        /// </summary>
+        internal FastTables? Fast
+        {
+            get
+            {
+                if (UsePrefix || LogAlphaSize > 8) return null;
+                if (fast != null) return fast;
+                int n = 1 << LogAlphaSize;
+                var tab = GC.AllocateUninitializedArray<ulong>(NumClusters * n, pinned: true);
+                for (int c = 0; c < NumClusters; c++)
+                {
+                    var t = Ans[c];
+                    for (int i = 0; i < n; i++)
+                    {
+                        ulong cutoff = t.Cutoff[i], sym = t.Symbol[i], off = t.Offset[i];
+                        ulong f0 = t.Freq[i], f1 = t.Freq[t.Symbol[i]];
+                        tab[c * n + i] = cutoff | sym << 12 | off << 20 | f0 << 32 | f1 << 45;
+                    }
+                }
+                var map = GC.AllocateUninitializedArray<byte>(ContextMap.Length, pinned: true);
+                ContextMap.CopyTo(map, 0);
+                var cfg = GC.AllocateUninitializedArray<JxlHybridUint>(Configs.Length, pinned: true);
+                Configs.CopyTo(cfg, 0);
+                return fast = new FastTables { Ans = tab, Map = map, Cfg = cfg };
+            }
+        }
+
         public static JxlEntropyCode Read(JxlBitReader br, int numDist, int depth = 0)
         {
             if (depth > 2) throw new ImageFormatException("JPEG XL: nested context maps too deep");
@@ -338,6 +396,159 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
     }
 
+    /// <summary>A source of entropy coded integers by context (generic parameter of the hot decoding loops).</summary>
+    internal interface IJxlSymbols
+    {
+        uint ReadUint(int ctx);
+        bool Overrun { get; }
+    }
+
+    /// <summary>The general symbol reader (prefix codes, LZ77) as an <see cref="IJxlSymbols"/>.</summary>
+    internal readonly struct JxlSlowSymbols : IJxlSymbols
+    {
+        readonly JxlSymbolReader r;
+        readonly JxlBitReader br;
+        public JxlSlowSymbols(JxlSymbolReader r, JxlBitReader br) { this.r = r; this.br = br; }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public uint ReadUint(int ctx) => r.ReadUint(br, ctx);
+        public bool Overrun => br.Overrun;
+    }
+
+    /// <summary>
+    /// ANS without LZ77 with the state in a value: the packed alias tables of <see cref="JxlEntropyCode.Fast"/>, the bit
+    /// reader as a <see cref="JxlBitState"/>. Obtained from <see cref="JxlSymbolReader.BeginFast"/> and handed back with
+    /// <see cref="JxlSymbolReader.EndFast"/>.
+    /// </summary>
+    internal unsafe struct JxlAnsFast : IJxlSymbols
+    {
+        public JxlBitState Bits;
+        public uint State;
+        public ulong* Tab;
+        public byte* Map;
+        public JxlHybridUint* Cfg;
+        public int LogBucket, LogAlpha, MapLength;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public uint ReadUint(int ctx)
+        {
+            if ((uint)ctx >= (uint)MapLength) ThrowContext();
+            uint cl = Map[ctx];
+            uint st = State;
+            uint idx = st & (JxlAnsTable.TabSize - 1);
+            uint i = idx >> LogBucket;
+            uint pos = idx & ((1u << LogBucket) - 1);
+            ulong e = Tab[(cl << LogAlpha) + i];
+            bool hi = pos >= ((uint)e & 0xFFF);
+            uint sym = hi ? (uint)(e >> 12) & 0xFF : i;
+            uint off = hi ? ((uint)(e >> 20) & 0xFFF) + pos : pos;
+            uint freq = (uint)(e >> (hi ? 45 : 32)) & 0x1FFF;
+            st = freq * (st >> JxlAnsTable.LogTabSize) + off;
+            if (st < (1u << 16)) st = (st << 16) | Bits.ReadBits(16);
+            State = st;
+            JxlHybridUint* c = Cfg + cl;
+            if (sym < c->Split) return sym;
+            uint v = JxlHybridUint.DecodeLarge(*c, sym, Bits, out var after);
+            Bits = after;
+            return v;
+        }
+
+        public bool Overrun => Bits.Overrun;
+
+        /// <summary>
+        /// The decoder state split into locals for loops that keep it in registers (<see cref="Read"/>); written back with
+        /// <see cref="Store"/>.
+        /// </summary>
+        public struct Regs
+        {
+            public uint St;
+            public ulong Buf;
+            public int NBits;
+            public byte* P;
+        }
+
+        public Regs Load() => new() { St = State, Buf = Bits.Buf, NBits = Bits.NBits, P = Bits.P };
+
+        public void Store(in Regs r) { State = r.St; Bits.Buf = r.Buf; Bits.NBits = r.NBits; Bits.P = r.P; }
+
+        /// <summary><see cref="ReadUint"/> on separate state locals (st, buf, nbits, p) that stay in registers once inlined.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public readonly uint Read(int ctx, ref uint st, ref ulong buf, ref int nbits, ref byte* p)
+        {
+            if ((uint)ctx >= (uint)MapLength) ThrowContext();
+            uint cl = Map[ctx];
+            uint s = st;
+            uint idx = s & (JxlAnsTable.TabSize - 1);
+            uint i = idx >> LogBucket;
+            uint pos = idx & ((1u << LogBucket) - 1);
+            ulong e = Tab[(cl << LogAlpha) + i];
+            // branch free: lo = all ones when pos is below the cutoff (the bucket's own symbol), else the alias
+            uint lo = (uint)((int)(pos - ((uint)e & 0xFFF)) >> 31);
+            uint sym = ((uint)(e >> 12) & 0xFF & ~lo) | (i & lo);
+            uint off = ((((uint)(e >> 20) & 0xFFF) + pos) & ~lo) | (pos & lo);
+            uint freq = (uint)(e >> (45 - (int)(13 & lo))) & 0x1FFF;
+            s = freq * (s >> JxlAnsTable.LogTabSize) + off;
+            Refill(ref buf, ref nbits, ref p);   // unconditional (a branch on nbits mispredicts): >= 56 bits
+            bool rn = s < (1u << 16);
+            uint m = (uint)-(int)Unsafe.As<bool, byte>(ref rn);
+            int sh = (int)(16 & m);
+            st = (((s << 16) | (uint)(buf & 0xFFFF)) & m) | (s & ~m);
+            buf >>= sh; nbits -= sh;
+            JxlHybridUint* c = Cfg + cl;
+            if (sym < c->Split) return sym;
+            // hybrid uint: n raw bits between the token's msb and lsb parts
+            int ml = c->MsbInToken + c->LsbInToken;
+            int n = c->SplitExponent - ml + (int)((sym - c->Split) >> ml);
+            if ((uint)n > 31) ThrowHybrid();
+            int lsb = c->LsbInToken;
+            uint low = sym & ((1u << lsb) - 1);
+            uint high = ((sym >> lsb) & ((1u << c->MsbInToken) - 1)) | (1u << c->MsbInToken);
+            ulong raw = buf & ((1UL << n) - 1);
+            buf >>= n; nbits -= n;
+            ulong v = ((((ulong)high << n) | raw) << lsb) | low;
+            if (v > uint.MaxValue) ThrowHybrid();
+            return (uint)v;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        readonly void Refill(ref ulong buf, ref int nbits, ref byte* p)
+        {
+            if (p + 8 <= Bits.End)
+            {
+                buf |= Unsafe.ReadUnaligned<ulong>(p) << nbits;
+                int take = (63 - nbits) >> 3;
+                p += take;
+                nbits += take << 3;
+            }
+            else
+            {
+                var s = Bits;
+                s.Buf = buf; s.NBits = nbits; s.P = p;
+                s = RefillSlowCopy(s);
+                buf = s.Buf; nbits = s.NBits; p = s.P;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static JxlBitState RefillSlowCopy(JxlBitState s)
+        {
+            while (s.NBits <= 56)
+            {
+                if (s.P < s.End) s.Buf |= (ulong)*s.P << s.NBits;
+                s.P++;
+                s.NBits += 8;
+                if (s.P > s.End + 64) throw new ImageFormatException("JPEG XL: unexpected end of data");
+            }
+            return s;
+        }
+
+        /// <summary>More bits consumed than the section holds, for state locals.</summary>
+        public readonly bool OverrunAt(int nbits, byte* p) => (p - Bits.End) * 8 > nbits;
+
+        static void ThrowHybrid() => throw new ImageFormatException("JPEG XL: hybrid uint too large");
+
+        static void ThrowContext() => throw new ImageFormatException("JPEG XL: entropy context out of range");
+    }
+
     /// <summary>Decoding state of one entropy coded stream (ANS state, LZ77 window).</summary>
     internal sealed class JxlSymbolReader
     {
@@ -363,6 +574,28 @@ namespace Aardvark.ImageCodecs.JpegXl
         }
 
         public bool UsesLz77 => lz77;
+
+        /// <summary>Whether <see cref="BeginFast"/> can be used (ANS, no LZ77, no copy in progress).</summary>
+        public bool CanFast => ans && !lz77 && code.Fast != null;
+
+        /// <summary>The fast state for a hot loop; basePtr pins br.Data. Hand it back with <see cref="EndFast"/>.</summary>
+        public unsafe JxlAnsFast BeginFast(JxlBitReader br, byte* basePtr)
+        {
+            var f = code.Fast!;
+            return new JxlAnsFast
+            {
+                Bits = br.Export(basePtr), State = state,
+                Tab = (ulong*)Unsafe.AsPointer(ref f.Ans[0]), Map = (byte*)Unsafe.AsPointer(ref f.Map[0]),
+                Cfg = (JxlHybridUint*)Unsafe.AsPointer(ref f.Cfg[0]),
+                LogAlpha = code.LogAlphaSize, LogBucket = JxlAnsTable.LogTabSize - code.LogAlphaSize, MapLength = f.Map.Length,
+            };
+        }
+
+        public unsafe void EndFast(in JxlAnsFast f, JxlBitReader br, byte* basePtr)
+        {
+            br.Import(f.Bits, basePtr);
+            state = f.State;
+        }
 
         public void CheckFinalState()
         {

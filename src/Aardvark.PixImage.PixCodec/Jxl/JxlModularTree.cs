@@ -246,6 +246,136 @@ namespace Aardvark.ImageCodecs.JpegXl
             return (p + 3) >> 3;
         }
 
+        /// <summary>
+        /// The loop of JxlModularChannelDecoder.DecodeWpIntervals for the fast ANS reader, with the predictor and the entropy
+        /// decoder state in locals: the same arithmetic as <see cref="Predict"/> and <see cref="Update"/>.
+        /// </summary>
+        public unsafe void DecodeIntervals(ref JxlAnsFast rd, int[] d, int h, int[] bounds, int[] lpred, long[] lmul, long[] loff, int[] lctx)
+        {
+            var regs = rd.Load();
+            uint st = regs.St; ulong buf = regs.Buf; int nbits = regs.NBits; byte* bp = regs.P;
+            int nl = bounds.Length;
+            if (lpred.Length < nl || lmul.Length < nl || loff.Length < nl || lctx.Length < nl || nl == 0 || bounds[nl - 1] != int.MaxValue)
+                throw new InvalidOperationException();
+            if (d.Length < (long)w * h) throw new InvalidOperationException();
+            long* lm = stackalloc long[nl]; long* lo = stackalloc long[nl];
+            int* lp = stackalloc int[nl]; int* lc = stackalloc int[nl]; int* bd = stackalloc int[nl];
+            for (int k = 0; k < nl; k++) { lm[k] = lmul[k]; lo[k] = loff[k]; lp[k] = lpred[k]; lc[k] = lctx[k]; bd[k] = bounds[k]; }
+            // the leaf: the number of bounds below the maximum error, counted with vector compares (no data dependent branch)
+            bool simd = System.Runtime.Intrinsics.X86.Avx2.IsSupported;
+            int nv = (nl + 7) / 8;
+            int* bpad = stackalloc int[nv * 8];
+            for (int k = 0; k < nv * 8; k++) bpad[k] = k < nl ? bounds[k] : int.MaxValue;
+            uint mw0_ = mw0, mw1_ = mw1, mw2_ = mw2, mw3_ = mw3;
+            long p1c_ = p1c, p2c_ = p2c, p3a_ = p3a, p3b_ = p3b, p3c_ = p3c, p3d_ = p3d, p3e_ = p3e;
+            fixed (Cell* c0 = cells)
+            fixed (int* pd = d)
+            fixed (uint* div = DivLookup)
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    Cell* cur_ = c0 + ((y & 1) != 0 ? 0 : stride);
+                    Cell* prev_ = c0 + ((y & 1) != 0 ? stride : 0);
+                    int* row = pd + (long)y * w;
+                    for (int x = 0; x < w; x++)
+                    {
+                        long W, N, NW, NE, NN, WW, NEE;
+                        if (y >= 2 && x >= 2 && x + 2 < w)
+                        {
+                            int* q = row + x;
+                            W = q[-1]; WW = q[-2];
+                            int* n_ = q - w;
+                            N = n_[0]; NW = n_[-1]; NE = n_[1]; NEE = n_[2]; NN = n_[-w];
+                        }
+                        else JxlModularChannelDecoder.Neighbours(d, w, x, y, out W, out N, out NW, out NE, out NN, out WW, out NEE);
+                        // prediction (Predict)
+                        Cell* cn = prev_ + x;
+                        Cell* cne = x < w - 1 ? cn + 1 : cn;
+                        Cell* cnw = x > 0 ? cn - 1 : cn;
+                        uint w0 = Weight(cn->E0 + cne->E0 + cnw->E0, mw0_, div);
+                        uint w1 = Weight(cn->E1 + cne->E1 + cnw->E1, mw1_, div);
+                        uint w2 = Weight(cn->E2 + cne->E2 + cnw->E2, mw2_, div);
+                        uint w3 = Weight(cn->E3 + cne->E3 + cnw->E3, mw3_, div);
+                        long N3 = N << 3, W3 = W << 3, NE3 = NE << 3, NW3 = NW << 3, NN3 = NN << 3;
+                        long teW = x == 0 ? 0 : cur_[x - 1].True;
+                        long teN = cn->True, teNW = cnw->True, teNE = cne->True;
+                        long sumWN = teN + teW;
+                        long s0 = W3 + NE3 - N3;
+                        long s1 = N3 - ((sumWN + teNE) * p1c_ >> 5);
+                        long s2 = W3 - ((sumWN + teNW) * p2c_ >> 5);
+                        long s3 = N3 - ((teNW * p3a_ + teN * p3b_ + teNE * p3c_ + (NN3 - N3) * p3d_ + (NW3 - W3) * p3e_) >> 5);
+                        uint ws = w0 + w1 + w2 + w3;
+                        int lw = 31 - BitOperations.LeadingZeroCount(ws) - 4;
+                        w0 >>= lw; w1 >>= lw; w2 >>= lw; w3 >>= lw;
+                        uint sum = w0 + w1 + w2 + w3;
+                        long sp = (sum >> 1) - 1 + s0 * w0 + s1 * w1 + s2 * w2 + s3 * w3;
+                        long pr = (sp * div[sum - 1]) >> 24;
+                        {
+                            // branch free (data dependent): clamp to the range of W, N, NE when the three errors agree in sign
+                            long mx = Max(W3, Max(N3, NE3)), mn = Min(W3, Min(N3, NE3));
+                            long cl = Min(Max(pr, mn), mx);
+                            long cond = (((teN ^ teW) | (teN ^ teNW)) - 1) >> 63;   // all ones when <= 0
+                            pr = (cl & cond) | (pr & ~cond);
+                        }
+                        long me = teW, ame = Abs(teW);
+                        { long a = Abs(teN), m_ = (ame - a) >> 63; me = (teN & m_) | (me & ~m_); ame = (a & m_) | (ame & ~m_); }
+                        { long a = Abs(teNW), m_ = (ame - a) >> 63; me = (teNW & m_) | (me & ~m_); ame = (a & m_) | (ame & ~m_); }
+                        { long a = Abs(teNE), m_ = (ame - a) >> 63; me = (teNE & m_) | (me & ~m_); }
+                        long wpPred = (pr + 3) >> 3;
+                        // leaf by the maximum error: the number of bounds below it
+                        int mei = (int)me, k;
+                        if (simd)
+                        {
+                            var vm = System.Runtime.Intrinsics.Vector256.Create(mei);
+                            k = 0;
+                            for (int j = 0; j < nv; j++)
+                            {
+                                var gt = System.Runtime.Intrinsics.X86.Avx2.CompareGreaterThan(vm, System.Runtime.Intrinsics.Vector256.Load(bpad + 8 * j));
+                                k += BitOperations.PopCount((uint)System.Runtime.Intrinsics.X86.Avx.MoveMask(System.Runtime.Intrinsics.Vector256.AsSingle(gt)));
+                            }
+                        }
+                        else
+                        {
+                            k = 0;
+                            while (mei > bd[k]) k++;
+                        }
+                        uint u = rd.Read(lc[k], ref st, ref buf, ref nbits, ref bp);
+                        long r = (long)JxlBitReader.UnpackSigned(u) * lm[k] + lo[k];
+                        int pk = lp[k];
+                        long v = r + (pk == 6 ? wpPred : JxlModularChannelDecoder.Predict(pk, W, N, NW, NE, NN, WW, NEE, wpPred));
+                        int vi = (int)v;
+                        row[x] = vi;
+                        // Update
+                        long v3 = (long)vi << 3;
+                        Cell* c = cur_ + x;
+                        Cell* ne = prev_ + x + 1;
+                        c->True = (int)(pr - v3);
+                        uint e;
+                        e = (uint)((Abs(s0 - v3) + 3) >> 3); c->E0 = e; ne->E0 += e;
+                        e = (uint)((Abs(s1 - v3) + 3) >> 3); c->E1 = e; ne->E1 += e;
+                        e = (uint)((Abs(s2 - v3) + 3) >> 3); c->E2 = e; ne->E2 += e;
+                        e = (uint)((Abs(s3 - v3) + 3) >> 3); c->E3 = e; ne->E3 += e;
+                    }
+                    if (rd.OverrunAt(nbits, bp)) throw new ImageFormatException("JPEG XL: unexpected end of modular data");
+                }
+            }
+            rd.Store(new JxlAnsFast.Regs { St = st, Buf = buf, NBits = nbits, P = bp });
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static long Max(long a, long b) { long d = a - b; return a - (d & (d >> 63)); }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static long Min(long a, long b) { long d = a - b; return b + (d & (d >> 63)); }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static unsafe uint Weight(uint x, uint maxWeight, uint* div)
+        {
+            int shift = 63 - BitOperations.LeadingZeroCount((ulong)x + 1) - 5;
+            shift = shift < 0 ? 0 : shift;
+            return 4 + ((maxWeight * div[x >> shift]) >> shift);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Update(int x, long value)
         {
