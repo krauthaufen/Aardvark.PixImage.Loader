@@ -403,7 +403,10 @@ namespace Aardvark.Data
             return ToPixVolume(v, frame);
         }
 
-        /// <summary><see cref="LoadVolume(string, int, int)"/> converted to PixVolume&lt;T&gt; if the file holds another sample type.</summary>
+        /// <summary>
+        /// <see cref="LoadVolume(string, int, int)"/> converted to PixVolume&lt;T&gt; if the file holds another sample type (by
+        /// PixVolume.ToPixVolume, which maps integer ranges as PixImage conversions do: byte 255 becomes float 1).
+        /// </summary>
         public static PixVolume<T> LoadVolume<T>(string path, int frame = 0) => AsVolume<T>(LoadVolume(path, 0, frame));
 
         /// <summary><see cref="LoadVolume(string, out PhysicalMetadata?, int, VolumeDecodeOptions?)"/> as PixVolume&lt;T&gt;.</summary>
