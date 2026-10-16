@@ -222,7 +222,6 @@ namespace Aardvark.ImageCodecs.JpegXl
                     {
                         AppendTag(o, "gXYZ"); AppendU32(o, tagStart + tagSize); AppendU32(o, tagSize);
                         AppendTag(o, "bXYZ"); AppendU32(o, tagStart + tagSize * 2); AppendU32(o, tagSize);
-                        //EXPERIMENT prevStart = tagStart + tagSize * 2;
                     }
                 }
             }
