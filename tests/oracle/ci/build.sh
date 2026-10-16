@@ -49,7 +49,7 @@ if [ ! -f "$D/libjpeg/jpeg$X" ]; then
   unpack "$D/libjpeg.tar.gz" "$D/libjpeg"
   # (MinGW has no libc to link explicitly: -lc goes, the runtime is linked statically)
   if [ $WIN = 1 ]; then libs=(LDLIBS="-lm -static"); else libs=(); fi
-  (cd "$D/libjpeg" && ./configure > /dev/null && make -j4 final "${libs[@]}" > "$D/libjpeg.log" 2>&1) || { tail -40 "$D/libjpeg.log"; exit 1; }
+  (cd "$D/libjpeg" && ./configure > /dev/null && make -j4 final ${libs[@]+"${libs[@]}"} > "$D/libjpeg.log" 2>&1) || { tail -40 "$D/libjpeg.log"; exit 1; }
   deps "$D/libjpeg/jpeg$X"
 fi
 set_env PIXCODEC_ISO_JPEG "$D/libjpeg/jpeg$X"
