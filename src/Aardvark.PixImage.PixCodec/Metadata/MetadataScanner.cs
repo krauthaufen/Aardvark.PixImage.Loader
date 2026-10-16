@@ -17,6 +17,7 @@ namespace Aardvark.ImageCodecs
         public readonly List<string> Comments = new();
         public readonly List<KeyValuePair<string, string>> Text = new();
         public IReadOnlyList<ExrAttribute>? ExrAttributes;
+        public bool GainMap;                  // a gain map outside XMP (JPEG XL jhgm box)
     }
 
     /// <summary>Walks the container of each format and collects EXIF, XMP, IPTC, ICC and text blocks; never decodes pixels.</summary>

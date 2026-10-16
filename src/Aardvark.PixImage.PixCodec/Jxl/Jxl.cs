@@ -191,18 +191,20 @@ namespace Aardvark.ImageCodecs
             return (color, RawImage.ChannelCount(color), t);
         }
 
-        static TransferFunction TransferOf(JxlImageHeader h, out double gamma)
+        static TransferFunction TransferOf(JxlImageHeader h, out double gamma) => TransferOf(h.Colour, out gamma);
+
+        internal static TransferFunction TransferOf(JxlColourEncoding ce, out double gamma)
         {
             gamma = 0;
-            if (h.Colour.WantIcc) return TransferFunction.Unknown;
-            switch (h.Colour.Transfer)
+            if (ce.WantIcc) return TransferFunction.Unknown;
+            switch (ce.Transfer)
             {
                 case JxlTransfer.Srgb: return TransferFunction.Srgb;
                 case JxlTransfer.Linear: return TransferFunction.Linear;
                 case JxlTransfer.Pq: return TransferFunction.Pq;
                 case JxlTransfer.Hlg: return TransferFunction.Hlg;
                 case JxlTransfer.Dci: gamma = 1 / 2.6; return TransferFunction.Gamma;
-                case JxlTransfer.Gamma: gamma = h.Colour.Gamma; return TransferFunction.Gamma;
+                case JxlTransfer.Gamma: gamma = ce.Gamma; return TransferFunction.Gamma;
                 default: return TransferFunction.Unknown;
             }
         }
@@ -321,6 +323,19 @@ namespace Aardvark.ImageCodecs
                 });
             }
             return list;
+        }
+
+        /// <summary>
+        /// The HDR gain map of the file (ISO/IEC 18181-2:2026 jhgm box, Brotli compressed or not), or null when there is
+        /// none (or its version is unknown).
+        /// </summary>
+        public static JxlGainMap? GetGainMap(ReadOnlySpan<byte> data)
+        {
+            var c = JxlContainer.Parse(data);
+            if (!c.IsContainer) return null;
+            var boxes = c.Metadata(data, "jhgm");
+            try { return boxes.Count > 0 ? JxlGainMap.Parse(boxes[0]) : null; }
+            catch (Exception e) when (IsCorruption(e)) { throw Corrupt(e); }
         }
 
         /// <summary>EXIF (TIFF structure), XMP and JUMBF of the container, Brotli compressed boxes included.</summary>

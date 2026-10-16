@@ -529,6 +529,88 @@ public class JxlSpecTests(ITestOutputHelper output)
         }
     }
 
+    // ------------------------------------------------------------------ 18181-2:2026 gain map box
+
+    static byte[] Box(string type, byte[] body)
+    {
+        var b = new byte[8 + body.Length];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(b, (uint)b.Length);
+        for (int i = 0; i < 4; i++) b[4 + i] = (byte)type[i];
+        body.CopyTo(b, 8);
+        return b;
+    }
+
+    /// <summary>A jhgm box (18181-2:2026 9.11): version, ISO 21496-1 metadata, alternate colour encoding and ICC, gain map.</summary>
+    static byte[] GainMapBox(byte[] meta, JxlColourEncoding? ce, byte[]? icc, byte[] gainMap)
+    {
+        var ms = new MemoryStream();
+        ms.WriteByte(0);
+        ms.WriteByte((byte)(meta.Length >> 8)); ms.WriteByte((byte)meta.Length);
+        ms.Write(meta);
+        byte[] ceBytes = Array.Empty<byte>();
+        if (ce != null) { var w = new JxlBitWriter(); JxlHeaderWriter.WriteColourEncoding(w, ce); w.ZeroPadToByte(); ceBytes = w.ToArray(); }
+        ms.WriteByte((byte)ceBytes.Length);
+        ms.Write(ceBytes);
+        byte[] iccBytes = Array.Empty<byte>();
+        if (icc != null) { var w = new JxlBitWriter(); JxlIccWriter.Write(w, icc); w.ZeroPadToByte(); iccBytes = w.ToArray(); }
+        var n = new byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(n, (uint)iccBytes.Length);
+        ms.Write(n);
+        ms.Write(iccBytes);
+        ms.Write(gainMap);
+        return Box("jhgm", ms.ToArray());
+    }
+
+    [Fact]
+    public void GainMapBoxIsRead()
+    {
+        var baseline = JxlEncodeTests.Synthetic(40, 30, ColorModel.Rgb, SampleType.UInt8, 0);
+        var gain = JxlEncodeTests.Synthetic(20, 15, ColorModel.Gray, SampleType.UInt8, 4);
+        var gainFile = Jxl.Encode(gain, new JxlEncodeOptions { Lossless = true });
+        var a98 = File.ReadAllBytes(Fixture("icc/ours/a98.icc"));
+        var meta = Enumerable.Range(0, 37).Select(i => (byte)(i * 7)).ToArray();
+        byte[] File_(byte[] jhgm) => JxlContainer.Signature.ToArray()
+            .Concat(Box("ftyp", "jxl \0\0\0\0jxl "u8.ToArray()))
+            .Concat(Box("jxlc", Jxl.Encode(baseline, new JxlEncodeOptions { Lossless = true })))
+            .Concat(jhgm).ToArray();
+
+        // alternate colour space as an encoding: PQ, BT.2100 primaries
+        var pq = new JxlColourEncoding { Primaries = JxlPrimaries.Bt2100, Transfer = JxlTransfer.Pq };
+        var f1 = File_(GainMapBox(meta, pq, null, gainFile));
+        JxlEncodeTests.AssertExact(baseline, Jxl.Decode(f1));
+        var g = Jxl.GetGainMap(f1)!;
+        Assert.Equal((0, true, TransferFunction.Pq), (g.Version, g.HasAlternateColourSpace, g.AlternateTransfer));
+        Assert.Equal(meta, g.Metadata);
+        Assert.Null(g.AlternateIcc);   // PQ is said by the transfer function
+        JxlEncodeTests.AssertExact(gain, g.DecodeImage());
+        Assert.True(ImageCodec.ReadMetadata(f1).HasGainMap);
+        var p3 = new JxlColourEncoding { Primaries = JxlPrimaries.P3, Transfer = JxlTransfer.Gamma, Gamma = 0.5 };
+        g = Jxl.GetGainMap(File_(GainMapBox(meta, p3, null, gainFile)))!;
+        Assert.Equal(TransferFunction.Gamma, g.AlternateTransfer);
+        Assert.NotNull(g.AlternateIcc);   // described by a profile built from the encoding
+
+        // as an ICC profile
+        var f2 = File_(GainMapBox(meta, new JxlColourEncoding { WantIcc = true }, a98, gainFile));
+        g = Jxl.GetGainMap(f2)!;
+        Assert.Equal((true, TransferFunction.Unknown), (g.HasAlternateColourSpace, g.AlternateTransfer));
+        Assert.Equal(a98, g.AlternateIcc);
+
+        // the baseline's colour space
+        var f3 = File_(GainMapBox(meta, null, null, gainFile));
+        g = Jxl.GetGainMap(f3)!;
+        Assert.False(g.HasAlternateColourSpace);
+        Assert.Null(g.AlternateIcc);
+        JxlEncodeTests.AssertExact(gain, g.DecodeImage());
+
+        // none, an unknown version, damage
+        var plain = Jxl.Encode(baseline, new JxlEncodeOptions { Lossless = true, ForceContainer = true });
+        Assert.Null(Jxl.GetGainMap(plain));
+        Assert.False(ImageCodec.ReadMetadata(plain).HasGainMap);
+        var v1 = GainMapBox(meta, null, null, gainFile); v1[8] = 1;
+        Assert.Null(Jxl.GetGainMap(File_(v1)));
+        Assert.Throws<ImageFormatException>(() => Jxl.GetGainMap(File_(GainMapBox(meta, pq, null, gainFile)[..30])));
+    }
+
     // ------------------------------------------------------------------ fixtures of gen_jxl_spec.py
 
     static byte[] SpecFixture(string name) => File.ReadAllBytes(Path.Combine(FixtureDir, "jxl-spec", name));
