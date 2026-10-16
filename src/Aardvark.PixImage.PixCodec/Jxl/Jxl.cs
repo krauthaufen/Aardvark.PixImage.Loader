@@ -396,8 +396,22 @@ namespace Aardvark.ImageCodecs
             }
             Array data = RawImage.CreateArray(type, checked(n * nch));
             int maxv = h.BitDepth.Float ? 0 : (int)Math.Min((1L << h.BitDepth.Bits) - 1, int.MaxValue);
+            bool rgb8 = ints != null && type == SampleType.UInt8 && nch == 3 && ncol == 3 && h.BitDepth.Bits == 8;
             JxlColour.Chunked(n, opt.Multithreaded, (s0, e0) =>
             {
+                if (rgb8)
+                {
+                    // 8 bit RGB as coded: clamp and interleave in one pass
+                    var d = ((byte[])data).AsSpan(3 * s0, 3 * (e0 - s0));
+                    var r = ints![0].AsSpan(s0, e0 - s0); var g = ints[1].AsSpan(s0, e0 - s0); var b = ints[2].AsSpan(s0, e0 - s0);
+                    for (int i = 0; i < r.Length; i++)
+                    {
+                        d[3 * i] = (byte)Math.Clamp(r[i], 0, 255);
+                        d[3 * i + 1] = (byte)Math.Clamp(g[i], 0, 255);
+                        d[3 * i + 2] = (byte)Math.Clamp(b[i], 0, 255);
+                    }
+                    return;
+                }
                 for (int c = 0; c < nch; c++)
                 {
                     bool isAlpha = c == ncol;
@@ -624,19 +638,46 @@ namespace Aardvark.ImageCodecs
         static void WriteInts(Array data, SampleType type, int c, int nch, int[] src, int srcBits, int dstBits, int start, int n)
         {
             long maxSrc = (1L << srcBits) - 1, maxDst = (1L << dstBits) - 1;
-            bool rescale = srcBits != dstBits;
-            for (int i = start; i < n; i++)
+            if (srcBits != dstBits)
             {
-                long v = src[i];
-                if (v < 0) v = 0; else if (v > maxSrc) v = maxSrc;
-                if (rescale) v = (v * maxDst + maxSrc / 2) / maxSrc;
-                int o = i * nch + c;
-                switch (type)
+                for (int i = start; i < n; i++)
                 {
-                    case SampleType.UInt8: ((byte[])data)[o] = (byte)v; break;
-                    case SampleType.UInt16: ((ushort[])data)[o] = (ushort)v; break;
-                    default: ((uint[])data)[o] = (uint)v; break;
+                    long v = Math.Clamp(src[i], 0, maxSrc);
+                    v = (v * maxDst + maxSrc / 2) / maxSrc;
+                    int o = i * nch + c;
+                    switch (type)
+                    {
+                        case SampleType.UInt8: ((byte[])data)[o] = (byte)v; break;
+                        case SampleType.UInt16: ((ushort[])data)[o] = (ushort)v; break;
+                        default: ((uint[])data)[o] = (uint)v; break;
+                    }
                 }
+                return;
+            }
+            // same depth: clamp and store, one loop per sample type
+            var s = src.AsSpan(start, n - start);
+            switch (type)
+            {
+                case SampleType.UInt8:
+                    {
+                        var d = ((byte[])data).AsSpan(start * nch + c);
+                        int mx = (int)maxSrc;
+                        for (int i = 0; i < s.Length; i++) d[i * nch] = (byte)Math.Clamp(s[i], 0, mx);
+                        break;
+                    }
+                case SampleType.UInt16:
+                    {
+                        var d = ((ushort[])data).AsSpan(start * nch + c);
+                        int mx = (int)maxSrc;
+                        for (int i = 0; i < s.Length; i++) d[i * nch] = (ushort)Math.Clamp(s[i], 0, mx);
+                        break;
+                    }
+                default:
+                    {
+                        var d = ((uint[])data).AsSpan(start * nch + c);
+                        for (int i = 0; i < s.Length; i++) d[i * nch] = (uint)Math.Clamp(s[i], 0, maxSrc);
+                        break;
+                    }
             }
         }
 

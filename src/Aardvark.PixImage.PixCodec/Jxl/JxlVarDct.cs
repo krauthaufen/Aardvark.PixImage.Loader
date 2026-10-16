@@ -414,7 +414,9 @@ namespace Aardvark.ImageCodecs.JpegXl
                         total += JxlAcStrategy.CoveredX[st] * JxlAcStrategy.CoveredY[st] * 64;
                     }
                 groupOffsets[group] = offsets;
-                coeffs = new[] { new int[total], new int[total], new int[total] };
+                // pooled (returned after the group's transforms): cleared, as the passes accumulate into them
+                coeffs = new int[3][];
+                for (int c = 0; c < 3; c++) { coeffs[c] = System.Buffers.ArrayPool<int>.Shared.Rent(total); Array.Clear(coeffs[c], 0, total); }
                 groupCoeffs[group] = coeffs;
             }
             int shift = pass < fh.NumPasses - 1 ? fh.Shift[pass] : 0;
@@ -535,6 +537,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 FinishGroupCore(group, bx0, by0, gw, gh, offsets, coeffs, xyb, xm, bm, qb, qbn, inv, pY, pX, pB, ps, pl, p0, p1, p2);
             }
             groupCoeffs[group] = null!;
+            foreach (var cf in coeffs) System.Buffers.ArrayPool<int>.Shared.Return(cf);
         }
 
         const int GroupScratchMax = 256 * 256;

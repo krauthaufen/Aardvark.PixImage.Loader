@@ -348,7 +348,14 @@ namespace Aardvark.ImageCodecs.JpegXl
             else
             {
                 float s = 1.0f / (float)((1L << bd.Bits) - 1);
-                for (int i = 0; i < d.Length; i++) f[i] = d[i] * s;
+                JxlColour.Chunked(d.Length, parallel, (a, e) =>
+                {
+                    var vs = new System.Numerics.Vector<float>(s);
+                    int vc = System.Numerics.Vector<float>.Count, i = a;
+                    for (; i + vc <= e; i += vc)
+                        (System.Numerics.Vector.ConvertToSingle(new System.Numerics.Vector<int>(d, i)) * vs).CopyTo(f, i);
+                    for (; i < e; i++) f[i] = d[i] * s;
+                });
             }
             return f;
         }
