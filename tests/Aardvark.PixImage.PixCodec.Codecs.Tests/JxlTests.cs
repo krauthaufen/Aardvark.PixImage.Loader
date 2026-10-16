@@ -87,12 +87,6 @@ public class JxlTests(ITestOutputHelper output)
         Assert.Equal(SampleType.Float32, f.SampleType);
         double max = LossyDiff(expected, f, Flag(j, "premultiplied"), out double rms);
         output.WriteLine($"{file}: max {max:E2} rms {rms:E2}");
-        if (Flag(j, "noise"))
-        {
-            // the grain is not libjxl's pseudo random sequence: only its strength is compared
-            Assert.InRange(rms, 0.002, 0.03);
-            return;
-        }
         Assert.True(max <= LossyTolerance, $"{file}: max difference {max:E2} > {LossyTolerance:E2}");
         // the integer output is the float output rounded (libjxl's own integer output is dithered)
         if (img.SampleType is SampleType.UInt8 or SampleType.UInt16)
@@ -428,11 +422,7 @@ public class JxlTests(ITestOutputHelper output)
     }
 
     /// <summary>Cases that do not meet the suite's tolerance, and why.</summary>
-    static readonly Dictionary<string, string> KnownFailures = new()
-    {
-        ["noise"] = "the noise synthesis uses a different pseudo random sequence than libjxl (amplitude and spectrum match)",
-        ["noise_5"] = "the noise synthesis uses a different pseudo random sequence than libjxl (amplitude and spectrum match)",
-    };
+    static readonly Dictionary<string, string> KnownFailures = new();
 
     /// <summary>Reads a little endian float32 .npy array (frames x height x width x channels).</summary>
     static (float[] data, int[] shape) LoadNpy(string path)

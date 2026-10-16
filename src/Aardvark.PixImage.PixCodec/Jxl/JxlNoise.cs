@@ -1,4 +1,6 @@
 using System;
+using System.Buffers;
+using System.Threading.Tasks;
 
 namespace Aardvark.ImageCodecs.JpegXl
 {
@@ -16,10 +18,12 @@ namespace Aardvark.ImageCodecs.JpegXl
 
         // ------------------------------------------------------------------ random numbers
 
-        sealed class XorShift128Plus
+        /// <summary>Eight XorShift128+ generators run side by side; one step gives 16 32 bit values.</summary>
+        struct XorShift128Plus
         {
             const int N = 8;
-            readonly ulong[] s0 = new ulong[N], s1 = new ulong[N];
+            unsafe fixed ulong s0[N];
+            unsafe fixed ulong s1[N];
 
             static ulong SplitMix64(ulong z)
             {
@@ -28,17 +32,19 @@ namespace Aardvark.ImageCodecs.JpegXl
                 return z ^ (z >> 31);
             }
 
-            public XorShift128Plus(ulong seed0, ulong seed1)
+            public unsafe XorShift128Plus(ulong seed0, ulong seed1)
             {
-                for (int i = 0; i < N; i++)
+                s0[0] = SplitMix64(seed0 + 0x9E3779B97F4A7C15UL);
+                s1[0] = SplitMix64(seed1 + 0x9E3779B97F4A7C15UL);
+                for (int i = 1; i < N; i++)
                 {
-                    s0[i] = SplitMix64(seed0 + (ulong)i * 0x9E3779B97F4A7C15UL);
-                    s1[i] = SplitMix64(seed1 + (ulong)i * 0x9E3779B97F4A7C15UL);
+                    s0[i] = SplitMix64(s0[i - 1]);
+                    s1[i] = SplitMix64(s1[i - 1]);
                 }
             }
 
-            /// <summary>16 random 32 bit values.</summary>
-            public void Fill(Span<uint> bits)
+            /// <summary>16 random 32 bit values: the low then the high half of each generator's output.</summary>
+            public unsafe void Fill(Span<uint> bits)
             {
                 for (int i = 0; i < N; i++)
                 {
@@ -54,20 +60,19 @@ namespace Aardvark.ImageCodecs.JpegXl
             }
         }
 
-        static void RandomPlane(XorShift128Plus rng, float[] plane, int stride, int x0, int y0, int w, int h)
+        /// <summary>Random samples in [1, 2) for one group of one channel, row by row in batches of 16.</summary>
+        static void RandomPlane(ref XorShift128Plus rng, float[] plane, int stride, int x0, int y0, int w, int h)
         {
             Span<uint> batch = stackalloc uint[16];
             for (int y = 0; y < h; y++)
             {
                 int row = (y0 + y) * stride + x0;
-                int x = 0;
-                for (; x + 16 < w; x += 16)
+                for (int x = 0; x < w; x += 16)
                 {
                     rng.Fill(batch);
-                    for (int i = 0; i < 16; i++) plane[row + x + i] = BitConverter.Int32BitsToSingle((int)((batch[i] >> 9) | 0x3F800000u));
+                    for (int i = 0, n = Math.Min(16, w - x); i < n; i++)
+                        plane[row + x + i] = BitConverter.Int32BitsToSingle((int)((batch[i] >> 9) | 0x3F800000u));
                 }
-                rng.Fill(batch);
-                for (int i = 0; x < w; x++, i++) plane[row + x] = BitConverter.Int32BitsToSingle((int)((batch[i] >> 9) | 0x3F800000u));
             }
         }
 
@@ -82,52 +87,70 @@ namespace Aardvark.ImageCodecs.JpegXl
             return v < 0 ? 0 : v > 1 ? 1 : v;
         }
 
-        /// <summary>Adds the noise to the XYB planes of a frame (full resolution).</summary>
-        public void Apply(float[] X, float[] Y, float[] B, int w, int h, int groupDim, int visible, int nonVisible, float ytox, float ytob)
+        /// <summary>
+        /// Adds the noise to the XYB planes of a frame (full resolution). The generator of each group is seeded with
+        /// <paramref name="frameSeed"/> (displayed frames so far, counting this one, in the high half; frames since the last
+        /// displayed one, counting this one if it is not displayed, in the low half) and the group position.
+        /// </summary>
+        public void Apply(float[] X, float[] Y, float[] B, int w, int h, int groupDim, ulong frameSeed, float ytox, float ytob, bool parallel)
         {
-            var raw = new[] { new float[w * h], new float[w * h], new float[w * h] };
-            int gx = (w + groupDim - 1) / groupDim, gy = (h + groupDim - 1) / groupDim;
-            for (int j = 0; j < gy; j++)
-                for (int i = 0; i < gx; i++)
-                {
-                    int x0 = i * groupDim, y0 = j * groupDim;
-                    int gw = Math.Min(groupDim, w - x0), gh = Math.Min(groupDim, h - y0);
-                    var rng = new XorShift128Plus(((ulong)(uint)visible << 32) + (uint)nonVisible, ((ulong)(uint)x0 << 32) + (uint)y0);
-                    for (int c = 0; c < 3; c++) RandomPlane(rng, raw[c], w, x0, y0, gw, gh);
-                }
-            // high pass: 0.16 * (sum of the 24 neighbours) - 3.84 * centre
-            var nz = new float[3][];
-            for (int c = 0; c < 3; c++)
+            int n = w * h;
+            var raw = new[] { ArrayPool<float>.Shared.Rent(n), ArrayPool<float>.Shared.Rent(n), ArrayPool<float>.Shared.Rent(n) };
+            try
             {
-                var s = raw[c];
-                var o = new float[w * h];
-                for (int y = 0; y < h; y++)
+                int gx = (w + groupDim - 1) / groupDim, gy = (h + groupDim - 1) / groupDim;
+                void Group(int g)
+                {
+                    int x0 = g % gx * groupDim, y0 = g / gx * groupDim;
+                    int gw = Math.Min(groupDim, w - x0), gh = Math.Min(groupDim, h - y0);
+                    var rng = new XorShift128Plus(frameSeed, ((ulong)(uint)x0 << 32) + (uint)y0);
+                    for (int c = 0; c < 3; c++) RandomPlane(ref rng, raw[c], w, x0, y0, gw, gh);
+                }
+                if (parallel && gx * gy > 1) Parallel.For(0, gx * gy, Group);
+                else for (int g = 0; g < gx * gy; g++) Group(g);
+
+                void Row(int y)
                 {
                     Span<int> rows = stackalloc int[5];
+                    Span<int> cols = stackalloc int[5];
                     for (int k = 0; k < 5; k++) rows[k] = JxlFilters.Mirror(y + k - 2, h) * w;
+                    const float norm = 0.22f, rgCorr = 0.9921875f, rgNCorr = 0.0078125f;
+                    Span<float> nz = stackalloc float[3];
                     for (int x = 0; x < w; x++)
                     {
-                        float sum = 0;
-                        for (int k = 0; k < 5; k++)
-                            for (int l = 0; l < 5; l++)
-                                if (k != 2 || l != 2) sum += s[rows[k] + JxlFilters.Mirror(x + l - 2, w)];
-                        o[y * w + x] = sum * 0.16f + s[y * w + x] * -3.84f;
+                        bool inner = x >= 2 && x + 2 < w;
+                        if (!inner) for (int l = 0; l < 5; l++) cols[l] = JxlFilters.Mirror(x + l - 2, w);
+                        for (int c = 0; c < 3; c++)
+                        {
+                            // high pass: 0.16 * (sum of the 24 neighbours) - 3.84 * centre
+                            var s = raw[c];
+                            float sum = 0;
+                            for (int k = 0; k < 5; k++)
+                            {
+                                int r = rows[k];
+                                if (inner) sum += s[r + x - 2] + s[r + x - 1] + s[r + x] + s[r + x + 1] + s[r + x + 2];
+                                else sum += s[r + cols[0]] + s[r + cols[1]] + s[r + cols[2]] + s[r + cols[3]] + s[r + cols[4]];
+                            }
+                            float centre = s[y * w + x];
+                            nz[c] = ((sum - centre) * 0.16f + centre * -3.84f) * norm;
+                        }
+                        int i = y * w + x;
+                        float vx = X[i], vy = Y[i];
+                        float sg = Strength((vy - vx) * 0.5f), sr = Strength((vy + vx) * 0.5f);
+                        float red = sr * (rgNCorr * nz[0] + rgCorr * nz[2]);
+                        float green = sg * (rgNCorr * nz[1] + rgCorr * nz[2]);
+                        float rg = red + green;
+                        X[i] += red - green + ytox * rg;
+                        Y[i] += rg;
+                        B[i] += ytob * rg;
                     }
                 }
-                nz[c] = o;
+                if (parallel && h >= 64) Parallel.For(0, h, Row);
+                else for (int y = 0; y < h; y++) Row(y);
             }
-            const float norm = 0.22f, rgCorr = 0.9921875f, rgNCorr = 0.0078125f;
-            for (int i = 0; i < w * h; i++)
+            finally
             {
-                float vx = X[i], vy = Y[i];
-                float sg = Strength((vy - vx) * 0.5f), sr = Strength((vy + vx) * 0.5f);
-                float nr = nz[0][i] * norm, ng = nz[1][i] * norm, nc = nz[2][i] * norm;
-                float red = sr * (rgNCorr * nr + rgCorr * nc);
-                float green = sg * (rgNCorr * ng + rgCorr * nc);
-                float rg = red + green;
-                X[i] += red - green + ytox * rg;
-                Y[i] += rg;
-                B[i] += ytob * rg;
+                foreach (var r in raw) ArrayPool<float>.Shared.Return(r);
             }
         }
     }

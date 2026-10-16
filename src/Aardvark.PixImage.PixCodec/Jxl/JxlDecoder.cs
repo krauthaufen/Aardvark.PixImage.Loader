@@ -10,7 +10,10 @@ namespace Aardvark.ImageCodecs.JpegXl
         /// <summary>Whether the reference slot holds a frame saved before its colour transform.</summary>
         public readonly bool[] ReferencePreCt = new bool[4];
         public readonly JxlFrameImage?[] LfFrames = new JxlFrameImage?[4];
-        /// <summary>Displayed and other frames decoded so far (they seed the noise generator).</summary>
+        /// <summary>
+        /// Displayed frames so far and frames since the last displayed one, both counting the frame being decoded (they seed
+        /// the noise generator).
+        /// </summary>
         public int VisibleFrames, NonVisibleFrames;
     }
 
@@ -99,6 +102,8 @@ namespace Aardvark.ImageCodecs.JpegXl
                 long next = (long)sectionsStart + toc.TotalSize;
                 if (next > Data.Length) throw new ImageFormatException("JPEG XL: truncated frame");
                 if (++FramesDecoded > 1 << 16) throw new ImageNotSupportedException("JPEG XL: too many frames");
+                if (IsDisplayed(fh)) { state.VisibleFrames++; state.NonVisibleFrames = 0; }
+                else state.NonVisibleFrames++;
                 var dec = new JxlFrameDecoder(Header, fh, state, Data, sectionsStart, toc, opt.Multithreaded);
                 var frame = dec.Decode();
                 JxlProfile.Mark("finish frame");
@@ -110,12 +115,15 @@ namespace Aardvark.ImageCodecs.JpegXl
             return null;
         }
 
+        bool IsDisplayed(JxlFrameHeader fh)
+            => (fh.Type == JxlFrameType.Regular || fh.Type == JxlFrameType.SkipProgressive)
+               && (fh.IsLast || Header.Animation != null && fh.Duration != 0);
+
         JxlDisplayedFrame? Process(JxlFrameHeader fh, JxlFrameImage frame)
         {
             if (fh.Type == JxlFrameType.LfFrame)
             {
                 state.LfFrames[fh.LfLevel - 1] = frame;
-                state.NonVisibleFrames++;
                 return null;
             }
             bool canReference = !fh.IsLast && fh.Type != JxlFrameType.LfFrame;
@@ -132,10 +140,7 @@ namespace Aardvark.ImageCodecs.JpegXl
                 state.References[fh.SaveAsReference] = canvas;
                 state.ReferencePreCt[fh.SaveAsReference] = false;
             }
-            bool displayed = (fh.Type == JxlFrameType.Regular || fh.Type == JxlFrameType.SkipProgressive)
-                             && (fh.IsLast || Header.Animation != null && fh.Duration != 0);
-            if (!displayed) { state.NonVisibleFrames++; return null; }
-            state.VisibleFrames++;
+            if (!IsDisplayed(fh)) return null;
             return new JxlDisplayedFrame { Canvas = canvas, Duration = fh.Duration, Timecode = fh.Timecode, Name = fh.Name };
         }
 
