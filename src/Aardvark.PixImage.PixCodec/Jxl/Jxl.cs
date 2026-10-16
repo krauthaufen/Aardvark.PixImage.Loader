@@ -247,7 +247,11 @@ namespace Aardvark.ImageCodecs
             {
                 // colour planes in the output colour space
                 float[][] col = new float[ncol][];
-                if (h.XybEncoded)
+                if (h.XybEncoded && h.Colour.WantIcc && h.Icc != null && IccOutput(h, p, n, ncol, opt) is { } viaIcc)
+                {
+                    col = viaIcc;
+                }
+                else if (h.XybEncoded)
                 {
                     var r = (float[])p[0].Clone(); var g = (float[])p[1].Clone(); var b = (float[])p[2].Clone();
                     if (!h.Colour.WantIcc && JxlColour.NeedsPrimaryConversion(h.Colour))
@@ -308,6 +312,32 @@ namespace Aardvark.ImageCodecs
             var img = new RawImage(w, hh, color, data, nch, meta);
             if (opt.ApplyOrientation && h.Orientation > 1) img = ImageOps.ApplyOrientation(img, h.Orientation);
             return img;
+        }
+
+        /// <summary>XYB images with an ICC profile: linear sRGB to the profile's device space (relative colorimetric).</summary>
+        static float[][]? IccOutput(JxlImageHeader h, float[][] p, int n, int ncol, JxlDecodeOptions opt)
+        {
+            IccTransform t;
+            try
+            {
+                var dst = IccProfile.Parse(h.Icc);
+                if (dst.Channels != ncol) return null;
+                t = new IccTransform(IccProfile.LinearSrgb, dst, IccRenderingIntent.RelativeColorimetric);
+            }
+            catch (Exception e) when (e is ImageFormatException or ImageNotSupportedException) { return null; }
+            var col = new float[ncol][];
+            for (int c = 0; c < ncol; c++) col[c] = new float[n];
+            JxlColour.Chunked(n, opt.Multithreaded, (s, e) =>
+            {
+                int cnt = e - s;
+                var inp = new float[cnt * 3];
+                var outp = new float[cnt * ncol];
+                for (int i = 0; i < cnt; i++) { inp[3 * i] = p[0][s + i]; inp[3 * i + 1] = p[1][s + i]; inp[3 * i + 2] = p[2][s + i]; }
+                t.Transform(inp, outp);
+                for (int i = 0; i < cnt; i++)
+                    for (int c = 0; c < ncol; c++) col[c][s + i] = outp[i * ncol + c];
+            });
+            return col;
         }
 
         static bool HasSpot(JxlImageHeader h)

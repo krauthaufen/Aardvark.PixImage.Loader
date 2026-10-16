@@ -10,7 +10,6 @@ namespace Aardvark.ImageCodecs.JpegXl
         void DecodeNoise(JxlBitReader br) => throw new ImageNotSupportedException("noise");
         void ApplyFeatures(JxlFrameImage f) { }
     }
-    internal static class JxlIcc { public static byte[] Read(JxlBitReader br) => throw new ImageNotSupportedException("icc"); }
 }
 namespace Aardvark.ImageCodecs.Compression
 {
