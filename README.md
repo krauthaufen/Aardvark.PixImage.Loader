@@ -124,7 +124,8 @@ CMYK profile) are converted to sRGB through the profile, since `RawImage` has no
 onto the colour (`RenderSpotColours = false` keeps them out). `Jxl.DecodeExtraChannels` returns every extra channel
 (depth, thermal, selection masks, spot colours, black, ...) with its type and name. `Jxl.DecodeAnimation` gives every displayed frame with durations, `Jxl.GetMetadataBoxes` the raw EXIF / XMP /
 JUMBF. Groups and colour conversion run in parallel (`Multithreaded = false` for one thread). On 8 cores a 13 MP photo
-takes about 0.5 s (lossy, distance 1) and 1.2 s (lossless, effort 3), libjxl 0.07 s and 0.28 s.
+takes about 0.13 s (lossy, distance 1) and 0.5 s (lossless, effort 3), libjxl 0.08 s and 0.29 s; on one thread 0.5 s and
+2.4 s, libjxl 0.3 s and 1.6 s.
 
 ### Volumes and scientific images
 
