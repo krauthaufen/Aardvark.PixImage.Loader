@@ -456,7 +456,7 @@ public class JxlTests(ITestOutputHelper output)
         return (data, shape);
     }
 
-    [TestDataTheory, MemberData(nameof(ConformanceCases))]
+    [TestDataTheory("downloads/jxl-conformance/bike/test.json"), MemberData(nameof(ConformanceCases))]
     public void Conformance(string name)
     {
         var dir = Path.Combine(TestDataDir!, "downloads", "jxl-conformance", name);
