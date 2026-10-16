@@ -271,17 +271,17 @@ namespace Aardvark.ImageCodecs
             {
                 axes[i] = h.GetLong("NAXIS" + (i + 1), -1);
                 if (axes[i] < 0) throw new ImageFormatException($"FITS: bad NAXIS{i + 1}");
-                n = checked(n * axes[i]);
+                n = VolumeIO.Mul(n, axes[i], Fmt);
             }
             long pcount = h.GetLong("PCOUNT", 0), gcount = h.GetLong("GCOUNT", 1);
             bool groups = h.Index == 0 && naxis > 0 && axes[0] == 0 && h.GetBool("GROUPS");
             if (groups)
             {
                 n = 1;
-                for (int i = 1; i < naxis; i++) n = checked(n * axes[i]);
+                for (int i = 1; i < naxis; i++) n = VolumeIO.Mul(n, axes[i], Fmt);
             }
             if (pcount < 0 || gcount < 0) throw new ImageFormatException("FITS: bad PCOUNT / GCOUNT");
-            h.DataSize = checked(Math.Abs(bitpix) / 8 * (h.Index == 0 && !groups ? n : gcount * (pcount + n)));
+            h.DataSize = VolumeIO.Mul(Math.Abs(bitpix) / 8, h.Index == 0 && !groups ? n : VolumeIO.Mul(gcount, pcount + n, Fmt), Fmt);
             h.BitPix = (int)bitpix;
             if ((h.Type == "PRIMARY" || h.Type == "IMAGE") && !groups && n > 0)
             {

@@ -54,6 +54,32 @@ namespace Aardvark.ImageCodecs.Compression
             }
         }
 
+        /// <summary>Like <see cref="Decompress(ReadOnlySpan{byte}, Span{byte})"/>, but a truncated or damaged stream only ends the output early.</summary>
+        internal static int DecompressPrefix(ReadOnlySpan<byte> source, Span<byte> destination)
+        {
+            if (source.IsEmpty) return 0;
+            int total = 0;
+            unsafe
+            {
+                fixed (byte* p = source)
+                {
+                    using var ms = new UnmanagedMemoryStream(p, source.Length);
+                    using var g = new GzipReader(ms, leaveOpen: true) { StopAtEnd = true };
+                    try
+                    {
+                        while (total < destination.Length)
+                        {
+                            int n = g.Read(destination.Slice(total));
+                            if (n <= 0) break;
+                            total += n;
+                        }
+                    }
+                    catch (ImageFormatException) { }
+                }
+            }
+            return total;
+        }
+
         /// <summary>Compresses to a single gzip member. Level 0..9.</summary>
         public static byte[] Compress(ReadOnlySpan<byte> source, int level = 6)
         {

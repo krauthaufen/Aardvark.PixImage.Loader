@@ -375,7 +375,7 @@ namespace Aardvark.ImageCodecs
             if (!Gzip.IsGzip(data)) return data;
             // header and extensions: decompress what precedes the samples (at most 1 MB)
             var b = new byte[1 << 20];
-            int n = Gzip.Decompress(data, b);
+            int n = Gzip.DecompressPrefix(data, b);   // (a prefix of the file is enough for the header)
             owned = b.AsSpan(0, n).ToArray();
             return owned;
         }
@@ -504,7 +504,9 @@ namespace Aardvark.ImageCodecs
         {
             var l = LayoutOf(h);
             long voxels = 1;
-            foreach (var d in l.Dims) voxels = checked(voxels * d);
+            foreach (var d in l.Dims) voxels = VolumeIO.Mul(voxels, d, Fmt);
+            voxels = VolumeIO.Mul(voxels, l.Comps, Fmt);
+            voxels /= l.Comps;
             long count = voxels * l.Comps;
             var arr = VolumeIO.Allocate(l.Stored, count, o.MaxSamples, Fmt);
             VolumeIO.ReadSamples(s, arr, 0, count, h.BigEndian, Fmt);

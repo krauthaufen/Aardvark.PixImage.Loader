@@ -429,10 +429,18 @@ namespace Aardvark.ImageCodecs
             }
         }
 
+        /// <summary>a * b, throwing ImageFormatException on overflow (sizes from damaged headers).</summary>
+        public static long Mul(long a, long b, string format)
+        {
+            try { return checked(a * b); }
+            catch (OverflowException) { throw new ImageFormatException($"{format}: sizes overflow"); }
+        }
+
         public static long Product(int[] sizes, int channels)
         {
             long n = channels;
-            foreach (var s in sizes) n = checked(n * s);
+            try { foreach (var s in sizes) n = checked(n * s); }
+            catch (OverflowException) { throw new ImageNotSupportedException("grid too large"); }
             return n;
         }
 

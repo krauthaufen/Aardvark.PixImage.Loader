@@ -250,6 +250,7 @@ namespace Aardvark.ImageCodecs.KtxImpl
                 MipLevels = i.MipLevels,
                 BitsPerSample = p.Format is { Layout: KtxLayout.Plain } f ? f.Bits[0] : 0,
                 Transfer = i.Transfer,
+                Depth = i.Depth,
             };
         }
 

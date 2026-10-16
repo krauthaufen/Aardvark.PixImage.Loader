@@ -195,6 +195,14 @@ public class VolumeTests
         Assert.Equal((4, 3, 2, 3), (t.Width, t.Height, t.Depth, t.FrameCount));
         Assert.NotEqual(info, info with { Depth = 2 });
         Assert.Equal(1, ImageCodec.GetInfo(Fixture("volume/nifti/slice2d.nii")).Depth);
+        // volume textures report their slices too, and decode through the volume path
+        var vol = ImageCodec.DecodeVolume(Fixture("volume/metaimage/u8.mha"));
+        var dds = Dds.EncodeVolume(vol.GetSlices());
+        Assert.Equal(4, ImageCodec.GetInfo(dds).Depth);
+        AssertSame(new RawVolume(vol.Sizes, vol.Color, vol.Data), ImageCodec.DecodeVolume(dds));
+        var ktx = new MemoryStream();
+        ImageCodec.EncodeVolume(vol, ktx, ImageFormat.Ktx);
+        Assert.Equal(4, ImageCodec.GetInfo(ktx.ToArray()).Depth);
     }
 
     [Fact]
@@ -263,7 +271,8 @@ public class VolumeTests
         for (int k = 0; k < 6; k++) cuts.Add(rnd.Next(data.Length));
         foreach (var cut in cuts.Where(c => c < data.Length))
             Check(data.AsSpan(0, cut).ToArray());
-        for (int k = 0; k < 40; k++)
+        int rounds = int.TryParse(Environment.GetEnvironmentVariable("PIXCODEC_FUZZ_ROUNDS"), out var fr) ? fr : 40;
+        for (int k = 0; k < rounds; k++)
         {
             var bad = (byte[])data.Clone();
             int n = 1 + rnd.Next(4);

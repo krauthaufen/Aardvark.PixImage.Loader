@@ -41,8 +41,14 @@ code living in any `Aardvark.*` namespace.
 | PNM / PAM / PFM | P1..P7, any maxval up to 65535 (scaled to the full range), PAM tuple types, PFM gray / RGB in both byte orders | P1..P7 (plain or binary, bilevel), PFM |
 | QOI | everything (sRGB / linear header) | RGB, RGBA |
 | ICO / CUR | PNG and DIB entries of every bit depth with AND mask or alpha, cursor hotspots | PNG or 32 bit DIB entries, icons and cursors |
+| NRRD | .nrrd and detached .nhdr; every scalar type, raw / ascii / hex / gzip / bzip2, both byte orders, data file / LIST / printf pattern (with subdim), line skip, byte skip (also -1), kinds (RGB / vector axes as channels), space, directions, origin, spacings, key:=value pairs | .nrrd and .nhdr + data file; raw, gzip, ascii, hex; space, directions, origin from the metadata |
+| NIfTI | NIfTI-1 and -2, .nii, .nii.gz, .hdr + .img (also gzipped), Analyze 7.5 headers; every data type but float128 / complex256 (RGB24 / RGBA32 as RGB(A), complex as two channels, vector intents as channels), scl_slope / scl_inter, sform / qform, dim_info, intents, extensions | NIfTI-1 .nii and .nii.gz: every integer and float type, RGB24 / RGBA32, vectors; qform and sform |
+| MetaImage | .mha and .mhd; every MET_ type, ElementNumberOfChannels, zlib (CompressedData), both byte orders, HeaderSize (also -1), ElementDataFile LOCAL / file / LIST / pattern; TransformMatrix, Offset, ElementSpacing | .mha and .mhd + .raw / .zraw, compressed or not, every type, channels |
+| FITS | primary array, IMAGE extensions, tile compressed images (RICE_1, GZIP_1, GZIP_2, PLIO_1, NOCOMPRESS; quantized floats with NO_DITHER / SUBTRACTIVE_DITHER_1 / 2), BITPIX 8 / 16 / 32 / 64 / -32 / -64, BSCALE / BZERO (unsigned conventions exact), BLANK, CONTINUE, linear WCS, .fits.gz | primary image of every BITPIX (unsigned via BZERO), optionally RICE_1 / GZIP_1 / GZIP_2 tile compressed, WCS from the metadata |
 
-Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions.
+Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions,
+FITS HCOMPRESS_1 tiles (the convention does not specify its bit stream), FITS tables and random groups, NRRD's block type,
+NIfTI float128 / complex256, ASCII MetaImage data.
 LERC encoding is not offered because Esri holds patents on LERC compression.
 
 ## Core library
@@ -79,10 +85,53 @@ in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF or
 is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
 turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the
 stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`,
-`Dds`, `Ktx`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Lerc`, `Jbig`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
+`Dds`, `Ktx`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Lerc`, `Jbig`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`) with format specific options and extras: animations (GIF, APNG, WebP), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data.
 
 Malformed files throw `ImageFormatException`, valid files using an unimplemented feature throw `ImageNotSupportedException`.
+
+### Volumes and scientific images
+
+NRRD, NIfTI, MetaImage and FITS hold 2D images, volumes and more dimensions, with physical units. 2D files go through
+the normal `Decode` / `GetInfo`; for a volume `Decode` gives its first z slice and `ImageInfo.Depth` the number of slices
+(`FrameCount` the product of the axes beyond the third). The whole grid comes from the volume path:
+
+```csharp
+RawVolume v = ImageCodec.DecodeVolume("brain.nii.gz");   // or .nrrd, .nhdr, .mha, .mhd, .hdr, .fits, DDS / KTX volume textures
+// v.Sizes (x, y, z, then further axes), v.Width / Height / Depth, v.FrameCount, v.Channels, v.SampleType, v.Color
+// v.Data: dense, channel fastest, then x, y, z, further axes; v.GetIndex(x, y, z, t), v.GetSlice(z, frame), v.GetFrame(t)
+PhysicalMetadata m = v.Metadata!;
+// m.Space ("RAS", "LPS", "LAS", NRRD space names, "FITS-WCS"), m.Spacing, m.Origin, m.Direction (columns = axis directions),
+// m.Units, m.ValueUnit, m.Slope / Intercept / ScalingApplied, m.Blank, m.Header (every header entry), m.Get("descrip")
+double[,] toLps = m.GetVoxelToLps()!;                    // 4x4 index -> world affine (also GetVoxelToRas, GetVoxelToWorld)
+VolumeInfo vi = Nifti.GetVolumeInfo(bytes);              // the same from the header only
+NiftiHeader h = Nifti.ReadHeader(bytes);                  // every NIfTI field: intent, dim_info, qform / sform, extensions
+IReadOnlyList<FitsHdu> hdus = Fits.ReadHdus(bytes);       // every HDU with its cards; Fits.DecodeAllVolumes(bytes)
+ImageCodec.EncodeVolume(v, "out.nrrd");                   // .nrrd .nhdr .nii .nii.gz .mha .mhd .fits .dds .ktx2
+Fits.Encode(v, stream, new FitsEncodeOptions { Compression = FitsCompression.Rice });
+```
+
+Detached data (NRRD `data file`, MetaImage `ElementDataFile`, the .img of a NIfTI .hdr) is found next to the header when
+decoding from a path; from memory set `VolumeDecodeOptions.DataDirectory` or `OpenDataFile`. Path based decoding streams
+the samples, so volumes above 2 GB work (up to 2^31 samples per volume).
+
+- Axes: x is the fastest axis of the file. NRRD, NIfTI and MetaImage are not flipped (row y = 0 first, as ITK, nibabel
+  and 3D Slicer index them; viewers place voxels by the affine). FITS stores y = 1 at the bottom, as ds9 shows it: rows
+  are reversed so that the top row comes first like in every other image (`FitsDecodeOptions.ApplyOrientation = false`
+  keeps the file order); the WCS in the metadata is adjusted to that. Interleaved channels: NRRD's leading non-spatial
+  axis (RGB-color, vector, ...; a single trailing one is moved to the front), MetaImage ElementNumberOfChannels, NIfTI
+  RGB24 / RGBA32, complex (real, imaginary) and vector intents (dim 5). FITS has no channels: RGB images are written as
+  three planes.
+- Orientation: NRRD space directions / origin in the header's space (LPS for Slicer and ITK files); NIfTI sform when
+  sform_code > 0, else qform, else the voxel sizes (nibabel's choice), in RAS; MetaImage TransformMatrix / Offset in LPS;
+  FITS the linear part of the WCS (CRPIX, CRVAL, CDELT, PC / CD, CROTA2) as "FITS-WCS", celestial projections are left to
+  the raw keywords. Encoders convert between RAS and LPS as needed.
+- Value scaling (NIfTI scl_slope / scl_inter, FITS BSCALE / BZERO) is applied by default (`DataScaling.Physical`)
+  without losing integer precision: integer slope and intercept keep integers in the smallest type that holds every
+  value (FITS' unsigned conventions give exact UInt16 / UInt32 / UInt64 / Int8, an intercept of -1024 on Int16 gives
+  Int32); otherwise Float32 for stored types up to 16 bit, Float64 for 32 / 64 bit integers. FITS BLANK samples become
+  NaN in float results. `DataScaling.Raw` keeps the stored values (slope and intercept are reported, and written back by
+  the NIfTI encoder), `Float32` / `Float64` force a float type.
 
 ### sRGB and gamma
 
@@ -185,7 +234,8 @@ every structural and GeoTIFF tag.
 
 `Aardvark.ImageCodecs.Compression` holds fully managed deflate/inflate (zlib, levels 0..9, streaming `Inflater`), Zstandard
 (decode and encode, both with dictionaries), XZ / LZMA (decode incl. BCJ filters, encode up to an optimal parser,
-multi-threaded) and vectorised CRC-32 / Adler-32. The managed deflate is the default; `Zlib.Backend = ZlibBackend.Bcl` (or `PIXCODEC_ZLIB=bcl`) switches to
+multi-threaded), gzip (`Gzip`: multi-member decode, encode, streaming) and bzip2 decoding (`Bzip2`, written from the
+format description) and vectorised CRC-32 / Adler-32. The managed deflate is the default; `Zlib.Backend = ZlibBackend.Bcl` (or `PIXCODEC_ZLIB=bcl`) switches to
 `System.IO.Compression`.
 
 ## Image operations
@@ -244,10 +294,15 @@ PixCube cube       = PixCodec.LoadCube("sky.dds");                        // DDS
 PixCodec.SaveDds(cube, stream);
 PixCodec.SaveDds(volume, stream, new DdsEncodeOptions { Compression = DdsCompression.BC1 });   // PixVolume
 PixCodec.SaveKtx(cube, stream, new KtxEncodeOptions { Compression = TextureCompression.BC7 });
-PixVolume vol      = PixCodec.LoadVolume("ct.ktx2");                      // DDS or KTX volume texture
+PixVolume vol      = PixCodec.LoadVolume("ct.ktx2");                      // DDS or KTX volume texture, or NRRD / NIfTI / MHA / FITS
+PixVolume ct       = PixCodec.LoadVolume("ct.nrrd", out PhysicalMetadata? meta);   // + spacing, origin, direction, header
+PixVolume<float> t = PixCodec.LoadVolume<float>("fmri.nii.gz", frame: 7);  // one volume of a 4D series, converted
+PixImage sky       = PixCodec.Load("m31.fits", out var wcs);             // 2D, top row first, with the FITS keywords
+PixCodec.SaveVolume(ct, "ct.nii.gz", meta);                              // .nrrd .nhdr .nii .nii.gz .mha .mhd .fits .dds .ktx2
+RawVolume rv = ct.ToRawVolume(meta);  PixVolume pv = rv.ToPixVolume();
 PixCodec.WriteMetadata("a.jpg", "a.jpg", new MetadataEdit { Gps = new GpsEdit { Latitude = 47.07, Longitude = 15.44 } });
 PixImage srgb      = PixCodec.LoadSrgb("adobe-rgb.jpg");                 // converted through the embedded ICC profile
-PixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .qoi .ktx2 too
+PixCodec.Save(img, "out.qoi");                                           // .hdr .pfm .ppm .pgm .pbm .pam .ico .qoi .ktx2 .nrrd .nii .mha .fits too
 ```
 
 `PixImage.Save` of Aardvark.Base only accepts the file extensions Aardvark.Base knows; `PixCodec.Save` takes every format
@@ -284,6 +339,12 @@ checks use tools fetched by `tests/oracle/gen_png.py --fetch-tools`. Written KTX
 against LittleCMS 2 float transforms (`tests/oracle/gen_icc.py` runs liblcms2 through ctypes) on profiles LittleCMS made
 itself, on PixCodec's own profiles read back by LittleCMS, and on the ICC's sRGB v4 and the CC0 Compact-ICC-Profiles of
 the test-data repository.
+
+The volume formats are checked against pynrrd, nibabel, SimpleITK and astropy: `tests/oracle/gen_volume.py` writes the
+fixtures with them (and hand-written variants none of them writes), and the encoder tests read PixCodec's NRRD, NIfTI,
+MetaImage and FITS files back with them (`tests/oracle/decode_volume.py`). They are looked for in a virtual environment
+`.tmp/venv` of the repository (`python3 -m venv .tmp/venv && .tmp/venv/bin/pip install numpy pynrrd nibabel SimpleITK
+astropy`) or the python given by `PIXCODEC_PYTHON`; without them those checks are skipped.
 
 Metadata is checked against ExifTool (run, never linked): `tests/oracle/gen_meta.py` writes the reading fixtures,
 `tests/oracle/gen_meta_write.py` stores golden `WriteMetadata` outputs with ExifTool's reading and validation of them
