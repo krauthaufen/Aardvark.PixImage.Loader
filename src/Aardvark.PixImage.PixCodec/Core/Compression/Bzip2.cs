@@ -16,6 +16,7 @@ namespace Aardvark.ImageCodecs.Compression
         /// <summary>Decompresses all streams of a bzip2 file.</summary>
         public static byte[] Decompress(ReadOnlySpan<byte> source)
         {
+            if (source.IsEmpty) throw new ImageFormatException("compressed data is empty");
             unsafe
             {
                 fixed (byte* p = source)

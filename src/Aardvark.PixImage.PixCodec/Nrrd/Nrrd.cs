@@ -245,7 +245,7 @@ namespace Aardvark.ImageCodecs
                 if (id == "data file")
                 {
                     var w = VolumeIO.Words(desc);
-                    if (w.Length >= 1 && w[0] == "LIST") { listMode = true; if (w.Length > 1) h.SubDim = int.Parse(w[1], VolumeIO.Inv); }
+                    if (w.Length >= 1 && w[0] == "LIST") { listMode = true; if (w.Length > 1) h.SubDim = SubDim(w[1]); }
                     else dataFile = desc;
                 }
             }
@@ -287,7 +287,7 @@ namespace Aardvark.ImageCodecs
                 if (w.Length >= 4 && w[0].Contains('%') && TryInt(w[1], out int mn) && TryInt(w[2], out int mx) && TryInt(w[3], out int st))
                 {
                     if (st == 0 || st > 0 && mn > mx || st < 0 && mx > mn) throw new ImageFormatException("NRRD: bad data file range");
-                    if (w.Length >= 5) h.SubDim = int.Parse(w[4], VolumeIO.Inv);
+                    if (w.Length >= 5) h.SubDim = SubDim(w[4]);
                     for (long v = mn; st > 0 ? v <= mx : v >= mx; v += st)
                     {
                         h.DataFiles.Add(CFormat(w[0], (int)v));
@@ -367,6 +367,14 @@ namespace Aardvark.ImageCodecs
             if (grid.Count == 0) grid.Add(1);
             h.Grid = grid.ToArray();
             return h;
+        }
+
+        internal static int SubDim(string s)
+        {
+            int n = 0, i = 0;
+            while (i < s.Length && char.IsDigit(s[i]) && n < 100) n = n * 10 + (s[i++] - '0');
+            if (i == 0) throw new ImageFormatException($"bad subdim '{s}'");
+            return n;
         }
 
         static bool TryInt(string s, out int v) => int.TryParse(s, System.Globalization.NumberStyles.Integer, VolumeIO.Inv, out v);

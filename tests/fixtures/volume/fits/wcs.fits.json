@@ -1,0 +1,36 @@
+{
+ "sizes": [
+  8,
+  6
+ ],
+ "channels": 1,
+ "type": "Float32",
+ "space": "FITS-WCS",
+ "origin": [
+  150.0046,
+  2.0006
+ ],
+ "spacing": [
+  0.0014422205101855955,
+  0.0017088007490635062
+ ],
+ "direction": [
+  [
+   -0.5547001962252293,
+   -0.35112344158839165
+  ],
+  [
+   0.8320502943378437,
+   -0.9363291775690445
+  ]
+ ],
+ "tol": 1e-09,
+ "units": [
+  "deg",
+  "deg"
+ ],
+ "header": {
+  "CTYPE1": "RA---TAN",
+  "LONGSTR": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+ }
+}

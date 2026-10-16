@@ -574,6 +574,13 @@ namespace Aardvark.ImageCodecs
 
         static long Unmap(uint d) => (d & 1) == 0 ? (long)(d >> 1) : ~(long)(d >> 1);
 
+        static long SignedWrap(long v, int bytepix) => bytepix switch
+        {
+            1 => (sbyte)v,
+            2 => (short)v,
+            _ => (int)v,
+        };
+
         static long Wrap(long v, int bytepix) => bytepix switch
         {
             1 => (byte)v,
@@ -614,7 +621,7 @@ namespace Aardvark.ImageCodecs
                 double psum = 0;
                 for (int j = 0; j < n; j++)
                 {
-                    long d = Wrap(px[i + j] - lastpix, bytepix);
+                    long d = SignedWrap(px[i + j] - lastpix, bytepix);
                     lastpix = px[i + j];
                     uint m = d < 0 ? (uint)~(d << 1) : (uint)(d << 1);
                     if (bytepix == 1) m &= 0xFF; else if (bytepix == 2) m &= 0xFFFF;

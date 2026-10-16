@@ -1,0 +1,17 @@
+{
+ "sizes": [
+  4,
+  3,
+  2
+ ],
+ "channels": 1,
+ "type": "Float64",
+ "spacing": [
+  1,
+  2,
+  null
+ ],
+ "header": {
+  "my key": "some value"
+ }
+}

@@ -1,0 +1,9 @@
+{
+ "sizes": [
+  70,
+  5
+ ],
+ "channels": 1,
+ "type": "Int16",
+ "tol": 0
+}

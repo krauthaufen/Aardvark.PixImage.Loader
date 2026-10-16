@@ -15,6 +15,7 @@ namespace Aardvark.ImageCodecs.Compression
         /// <summary>Decompresses all members of a gzip file.</summary>
         public static byte[] Decompress(ReadOnlySpan<byte> source, int sizeHint = 0)
         {
+            if (source.IsEmpty) throw new ImageFormatException("compressed data is empty");
             unsafe
             {
                 fixed (byte* p = source)
@@ -34,6 +35,7 @@ namespace Aardvark.ImageCodecs.Compression
         /// </summary>
         public static int Decompress(ReadOnlySpan<byte> source, Span<byte> destination)
         {
+            if (source.IsEmpty) throw new ImageFormatException("compressed data is empty");
             unsafe
             {
                 fixed (byte* p = source)

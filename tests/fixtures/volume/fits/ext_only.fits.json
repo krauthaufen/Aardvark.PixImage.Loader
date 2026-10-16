@@ -1,0 +1,8 @@
+{
+ "sizes": [
+  6,
+  5
+ ],
+ "channels": 1,
+ "type": "UInt16"
+}

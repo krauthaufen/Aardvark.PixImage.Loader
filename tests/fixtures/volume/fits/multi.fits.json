@@ -1,0 +1,9 @@
+{
+ "sizes": [
+  6,
+  4
+ ],
+ "channels": 1,
+ "type": "Float32",
+ "hdus": 2
+}

@@ -152,7 +152,7 @@ namespace Aardvark.ImageCodecs
                             else if (w.Length >= 1 && w[0].Equals("LIST", StringComparison.OrdinalIgnoreCase))
                             {
                                 h.Local = false;
-                                if (w.Length > 1) h.SubDim = int.Parse(w[1], VolumeIO.Inv);
+                                if (w.Length > 1) h.SubDim = Nrrd.SubDim(w[1]);
                                 // the file names follow, one per line (several per line are allowed too)
                                 while (pos < d.Length)
                                 {
@@ -167,7 +167,7 @@ namespace Aardvark.ImageCodecs
                             {
                                 h.Local = false;
                                 if (st == 0 || st > 0 && mn > mx || st < 0 && mx > mn) throw new ImageFormatException("MetaImage: bad file pattern range");
-                                if (w.Length >= 5) h.SubDim = int.Parse(w[4], VolumeIO.Inv);
+                                if (w.Length >= 5) h.SubDim = Nrrd.SubDim(w[4]);
                                 for (long v = mn; st > 0 ? v <= mx : v >= mx; v += st)
                                 {
                                     h.Files.Add(Nrrd.CFormat(w[0], (int)v));

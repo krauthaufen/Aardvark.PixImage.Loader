@@ -48,6 +48,7 @@ namespace Aardvark.ImageCodecs
 
         public static unsafe T WithStream<T>(ReadOnlySpan<byte> data, Func<Stream, T> f)
         {
+            if (data.IsEmpty) return f(new MemoryStream(Array.Empty<byte>(), false));
             fixed (byte* p = data)
             {
                 using var ms = new UnmanagedMemoryStream(p, data.Length);
@@ -226,7 +227,7 @@ namespace Aardvark.ImageCodecs
 
         // -------------------------------------------------------------- scaling
 
-        static bool IsIntegral(double v) => Math.Abs(v) < 9.2e18 && Math.Floor(v) == v;
+        static bool IsIntegral(double v) => Math.Abs(v) <= 18446744073709551616.0 && Math.Floor(v) == v;
 
         static (Int128 lo, Int128 hi) Range(SampleType t) => t switch
         {
@@ -255,7 +256,7 @@ namespace Aardvark.ImageCodecs
             if (IsInteger(stored) && IsIntegral(slope) && IsIntegral(inter))
             {
                 var (lo, hi) = Range(stored);
-                Int128 s = (Int128)(long)slope, z = (Int128)(long)inter;
+                Int128 s = (Int128)slope, z = (Int128)inter;
                 Int128 a = lo * s + z, b = hi * s + z;
                 Int128 min = a < b ? a : b, max = a < b ? b : a;
                 foreach (var t in IntTypes)
@@ -344,8 +345,8 @@ namespace Aardvark.ImageCodecs
         static void ToInt<TIn, TOut>(TIn[] src, TOut[] dst, double slope, double inter)
             where TIn : unmanaged, INumberBase<TIn> where TOut : unmanaged, INumberBase<TOut>
         {
-            long s = (long)slope, z = (long)inter;
-            if (s == 1 && Math.Abs(z) < (1L << 62))
+            Int128 s = (Int128)slope, z = (Int128)inter;
+            if (s == 1)
             {
                 for (long i = 0; i < src.LongLength; i++) dst[i] = TOut.CreateTruncating(Int128.CreateTruncating(src[i]) + z);
                 return;

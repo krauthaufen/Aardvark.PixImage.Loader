@@ -1,0 +1,11 @@
+{
+ "sizes": [
+  6,
+  4
+ ],
+ "channels": 1,
+ "type": "Float32",
+ "slope_value": 0.5,
+ "intercept": 100.0,
+ "value_unit": "Jy/beam"
+}

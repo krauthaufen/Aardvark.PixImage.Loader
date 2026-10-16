@@ -1,0 +1,10 @@
+ObjectType = Image
+NDims = 3
+BinaryData = True
+BinaryDataByteOrderMSB = False
+DimSize = 4 3 3
+ElementType = MET_USHORT
+ElementDataFile = LIST 2D
+sl_0.raw
+sl_1.raw
+sl_2.raw
