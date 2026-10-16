@@ -16,6 +16,7 @@ namespace Aardvark.ImageCodecs
             if (Exr.IsMatch(header)) return ImageFormat.Exr;
             if (Webp.IsMatch(header)) return ImageFormat.Webp;
             if (Jp2.IsMatch(header)) return ImageFormat.Jp2;
+            if (Jxl.IsMatch(header)) return ImageFormat.Jxl;
             if (Bmp.IsMatch(header)) return ImageFormat.Bmp;
             if (Dds.IsMatch(header)) return ImageFormat.Dds;
             if (Ktx.IsMatch(header)) return ImageFormat.Ktx;
@@ -47,6 +48,7 @@ namespace Aardvark.ImageCodecs
                 ".qoi" => ImageFormat.Qoi,
                 ".ico" or ".cur" => ImageFormat.Ico,
                 ".ktx" or ".ktx2" => ImageFormat.Ktx,
+                ".jxl" => ImageFormat.Jxl,
                 _ => ImageFormat.Unknown,
             };
 
@@ -74,6 +76,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Qoi => Qoi.GetInfo(data),
             ImageFormat.Ico => Ico.GetInfo(data),
             ImageFormat.Ktx => Ktx.GetInfo(data),
+            ImageFormat.Jxl => Jxl.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -274,6 +277,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Qoi => Qoi.Decode(data),
             ImageFormat.Ico => Ico.Decode(data),
             ImageFormat.Ktx => Ktx.Decode(data),
+            ImageFormat.Jxl => Jxl.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -281,7 +285,7 @@ namespace Aardvark.ImageCodecs
         public static RawImage Decode(string path) => Decode(File.ReadAllBytes(path));
 
         /// <summary>
-        /// Decodes every image in the file: the pages of a TIFF, the frames of an animated GIF, PNG or WebP (each the whole canvas
+        /// Decodes every image in the file: the pages of a TIFF, the frames of an animated GIF, PNG, WebP or JPEG XL (each the whole canvas
         /// as a viewer shows it), the array elements / cube faces of a DDS texture (top mip level), or else the single image.
         /// </summary>
         public static RawImage[] DecodeAll(ReadOnlySpan<byte> data) => ColorTags.Tag(DecodeAllCore(data), data, DetectFormat(data));
@@ -315,6 +319,8 @@ namespace Aardvark.ImageCodecs
                     return Ico.DecodeAll(data);
                 case ImageFormat.Ktx:
                     return Ktx.DecodeAll(data);
+                case ImageFormat.Jxl:
+                    return Jxl.DecodeAll(data);
                 default:
                     return new[] { Decode(data) };
             }
@@ -369,6 +375,7 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Qoi: Qoi.Encode(image, output); break;
                 case ImageFormat.Ico: Ico.Encode(new[] { image }, output); break;
                 case ImageFormat.Ktx: Ktx.Encode(image, output); break;
+                case ImageFormat.Jxl: throw new ImageNotSupportedException("JPEG XL encoding is not available");
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }
