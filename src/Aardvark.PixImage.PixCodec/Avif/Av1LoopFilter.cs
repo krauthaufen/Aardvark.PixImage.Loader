@@ -63,11 +63,12 @@ namespace Aardvark.ImageCodecs.Av1
             bool isBlockEdge = pass == 0 ? xP % (T.Num4x4BlocksWide[planeSize] * 4) == 0 : yP % (T.Num4x4BlocksHigh[planeSize] * 4) == 0;
             bool isTxEdge = pass == 0 ? xP % T.TxWidth[txSz] == 0 : yP % T.TxHeight[txSz] == 0;
             bool applyFilter = isTxEdge && (isBlockEdge || !skip || isIntra);
+            if (!applyFilter) return;
             int baseSize = pass == 0 ? Math.Min(T.TxWidth[prevTxSz], T.TxWidth[txSz]) : Math.Min(T.TxHeight[prevTxSz], T.TxHeight[txSz]);
             int filterSize = plane == 0 ? Math.Min(16, baseSize) : Math.Min(8, baseSize);
             int lvl = FilterLevel(f, ref b, plane, pass);
             if (lvl == 0) lvl = FilterLevel(f, ref f.BlockAtMi(prevRow, prevCol), plane, pass);
-            if (!applyFilter || lvl == 0) return;
+            if (lvl == 0) return;
             int shift = h.LoopFilterSharpness > 4 ? 2 : h.LoopFilterSharpness > 0 ? 1 : 0;
             int limit = h.LoopFilterSharpness > 0 ? Math.Clamp(lvl >> shift, 1, 9 - h.LoopFilterSharpness) : Math.Max(1, lvl >> shift);
             int blimit = 2 * (lvl + 2) + limit;
@@ -168,23 +169,30 @@ namespace Aardvark.ImageCodecs.Av1
             }
         }
 
+        /// <summary>
+        /// The wide filter process (7.14.6.4): each output is the rounded mean of 2^log2Size taps around it (the centre
+        /// taps weighted 2, samples beyond the filter clamped to the outermost one), computed as a sliding sum.
+        /// </summary>
         static void WideFilter(ushort[] p, int o, int step, int log2Size, int plane)
         {
             int n = log2Size == 4 ? 6 : plane == 0 ? 3 : 2;
             int n2 = log2Size == 3 && plane == 0 ? 0 : 1;
-            Span<int> v = stackalloc int[14];   // samples -7 .. 6
-            for (int k = -(n + 1); k <= n; k++) v[k + 7] = p[o + k * step];
+            Span<int> v = stackalloc int[32];   // samples -(n + 1) .. n at v[k + 15], clamped beyond
+            int lo = -(n + 1), hi = n;
+            for (int k = lo; k <= hi; k++) v[k + 15] = p[o + k * step];
+            for (int k = lo - n; k < lo; k++) v[k + 15] = v[lo + 15];
+            for (int k = hi + 1; k <= hi + n; k++) v[k + 15] = v[hi + 15];
+            int round = 1 << (log2Size - 1);
+            // t(i) = sum over j in -n..n of v[i + j] plus the extra weight of |j| <= n2
+            int sum = 0;
+            for (int j = -n; j <= n; j++) sum += v[-n + j + 15];
             Span<int> F = stackalloc int[12];
             for (int i = -n; i < n; i++)
             {
-                int t = 0;
-                for (int j = -n; j <= n; j++)
-                {
-                    int pp = Math.Clamp(i + j, -(n + 1), n);
-                    int tap = Math.Abs(j) <= n2 ? 2 : 1;
-                    t += v[pp + 7] * tap;
-                }
-                F[i + 6] = (t + (1 << (log2Size - 1))) >> log2Size;
+                int extra = 0;
+                for (int j = -n2; j <= n2; j++) extra += v[i + j + 15];
+                F[i + 6] = (sum + extra + round) >> log2Size;
+                sum += v[i + n + 1 + 15] - v[i - n + 15];
             }
             for (int i = -n; i < n; i++) p[o + i * step] = (ushort)F[i + 6];
         }

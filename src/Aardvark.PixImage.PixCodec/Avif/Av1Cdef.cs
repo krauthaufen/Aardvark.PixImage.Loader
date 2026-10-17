@@ -1,4 +1,7 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Threading.Tasks;
 using T = Aardvark.ImageCodecs.Av1.Av1Tables;
 
@@ -38,7 +41,9 @@ namespace Aardvark.ImageCodecs.Av1
             var s = f.Seq;
             int coeffShift = s.BitDepth - 8;
             if (Skip(f, r, c)) return;
-            Direction(f, cur, r, c, out int yDir, out int var);
+            int yDir = 0, var = 0;
+            // the direction only matters with a primary strength
+            if (h.CdefYPriStrength[idx] != 0 || s.NumPlanes > 1 && h.CdefUvPriStrength[idx] != 0) Direction(f, cur, r, c, out yDir, out var);
             int priStr = h.CdefYPriStrength[idx] << coeffShift;
             int secStr = h.CdefYSecStrength[idx] << coeffShift;
             int dir = priStr == 0 ? 0 : yDir;
@@ -107,17 +112,26 @@ namespace Aardvark.ImageCodecs.Av1
             var = (bestCost - cost[(yDir + 4) & 7]) >> 10;
         }
 
-        static int Constrain(int diff, int threshold, int damping)
+        static int Constrain(int diff, int threshold, int dampingAdj)
         {
-            if (threshold == 0) return 0;
-            int dampingAdj = Math.Max(0, damping - Av1BitReader.FloorLog2(threshold));
             int ad = Math.Abs(diff);
             int v = Math.Clamp(threshold - (ad >> dampingAdj), 0, ad);
             return diff < 0 ? -v : v;
         }
 
+        /// <summary>Marks samples outside the frame in the padded block (CdefAvailable is false).</summary>
+        const short Na = 30000;
+
+        /// <summary>
+        /// The CDEF filter process (7.15.2) for one 8x8 block of a plane. The block and a 2 sample border are copied into a
+        /// padded buffer first, unavailable samples marked, so that each tap is one load; a row of the block is filtered at
+        /// once with 16 bit lanes. The mark is so large that the constrained difference to it is 0 (|d| &gt;&gt; adj exceeds
+        /// any threshold: threshold &lt;&lt; adj &lt;= 2^(damping + 1) &lt;= 2^11), and it is left out of the maximum.
+        /// </summary>
         static void Filter(Av1FrameState f, Av1Frame cur, Av1Frame outF, int plane, int r, int c, int priStr, int secStr, int damping, int dir)
         {
+            // with both strengths 0 the sum is 0 and the sample stays as it is
+            if (priStr == 0 && secStr == 0) return;
             var s = f.Seq;
             int coeffShift = s.BitDepth - 8;
             int sx = plane > 0 ? s.SubsamplingX : 0, sy = plane > 0 ? s.SubsamplingY : 0;
@@ -126,47 +140,140 @@ namespace Aardvark.ImageCodecs.Av1
             var src = cur.Planes[plane];
             var dst = outF.Planes[plane];
             int stride = cur.Stride[plane];
-            var dirs = T.CdefDirections;
+            const int B = 12;
+            Span<short> buf = stackalloc short[B * B + 16];
+            // available: inside the frame in units of 4x4 luma blocks
+            int maxY = (f.MiRows << Av1C.MiSizeLog2) >> sy, maxX = (f.MiCols << Av1C.MiSizeLog2) >> sx;
+            for (int i = -2; i < hh + 2; i++)
+            {
+                int yy = y0 + i;
+                int bo = (i + 2) * B + 2;
+                bool rowOk = yy >= 0 && yy < maxY;
+                for (int j = -2; j < w + 2; j++)
+                {
+                    int xx = x0 + j;
+                    buf[bo + j] = rowOk && xx >= 0 && xx < maxX ? (short)src[yy * stride + xx] : Na;
+                }
+            }
             int priTap = (priStr >> coeffShift) & 1;
-            int miRows = f.MiRows, miCols = f.MiCols;
+            int p0 = T.CdefPriTaps[priTap * 2], p1 = T.CdefPriTaps[priTap * 2 + 1];
+            int s0 = T.CdefSecTaps[priTap * 2], s1 = T.CdefSecTaps[priTap * 2 + 1];
+            static int Off(int d, int k) => T.CdefDirections[(d * 2 + k) * 2] * B + T.CdefDirections[(d * 2 + k) * 2 + 1];
+            int po0 = Off(dir, 0), po1 = Off(dir, 1);
+            int da = (dir - 2) & 7, db = (dir + 2) & 7;
+            int sa0 = Off(da, 0), sa1 = Off(da, 1), sb0 = Off(db, 0), sb1 = Off(db, 1);
+            int priAdj = priStr != 0 ? Math.Max(0, damping - Av1BitReader.FloorLog2(priStr)) : 0;
+            int secAdj = secStr != 0 ? Math.Max(0, damping - Av1BitReader.FloorLog2(secStr)) : 0;
+            if (Vector128.IsHardwareAccelerated)
+            {
+                ref short b0 = ref MemoryMarshal.GetReference(buf);
+                var vPri = Vector128.Create((short)priStr);
+                var vSec = Vector128.Create((short)secStr);
+                var na = Vector128.Create(Na);
+                for (int i = 0; i < hh; i++)
+                {
+                    int ci = (i + 2) * B + 2;
+                    var x = Vector128.LoadUnsafe(ref b0, (nuint)ci);
+                    var sum = Vector128<short>.Zero;
+                    Vector128<short> min = x, max = x;
+                    if (priStr != 0)
+                    {
+                        TapV(ref b0, ci + po0, x, vPri, priAdj, (short)p0, ref sum, ref min, ref max, na);
+                        TapV(ref b0, ci - po0, x, vPri, priAdj, (short)p0, ref sum, ref min, ref max, na);
+                        TapV(ref b0, ci + po1, x, vPri, priAdj, (short)p1, ref sum, ref min, ref max, na);
+                        TapV(ref b0, ci - po1, x, vPri, priAdj, (short)p1, ref sum, ref min, ref max, na);
+                    }
+                    else
+                    {
+                        MinMaxV(ref b0, ci + po0, ref min, ref max, na);
+                        MinMaxV(ref b0, ci - po0, ref min, ref max, na);
+                        MinMaxV(ref b0, ci + po1, ref min, ref max, na);
+                        MinMaxV(ref b0, ci - po1, ref min, ref max, na);
+                    }
+                    if (secStr != 0)
+                    {
+                        TapV(ref b0, ci + sa0, x, vSec, secAdj, (short)s0, ref sum, ref min, ref max, na);
+                        TapV(ref b0, ci - sa0, x, vSec, secAdj, (short)s0, ref sum, ref min, ref max, na);
+                        TapV(ref b0, ci + sb0, x, vSec, secAdj, (short)s0, ref sum, ref min, ref max, na);
+                        TapV(ref b0, ci - sb0, x, vSec, secAdj, (short)s0, ref sum, ref min, ref max, na);
+                        TapV(ref b0, ci + sa1, x, vSec, secAdj, (short)s1, ref sum, ref min, ref max, na);
+                        TapV(ref b0, ci - sa1, x, vSec, secAdj, (short)s1, ref sum, ref min, ref max, na);
+                        TapV(ref b0, ci + sb1, x, vSec, secAdj, (short)s1, ref sum, ref min, ref max, na);
+                        TapV(ref b0, ci - sb1, x, vSec, secAdj, (short)s1, ref sum, ref min, ref max, na);
+                    }
+                    else
+                    {
+                        MinMaxV(ref b0, ci + sa0, ref min, ref max, na);
+                        MinMaxV(ref b0, ci - sa0, ref min, ref max, na);
+                        MinMaxV(ref b0, ci + sb0, ref min, ref max, na);
+                        MinMaxV(ref b0, ci - sb0, ref min, ref max, na);
+                        MinMaxV(ref b0, ci + sa1, ref min, ref max, na);
+                        MinMaxV(ref b0, ci - sa1, ref min, ref max, na);
+                        MinMaxV(ref b0, ci + sb1, ref min, ref max, na);
+                        MinMaxV(ref b0, ci - sb1, ref min, ref max, na);
+                    }
+                    // x + ((8 + sum - (sum < 0)) >> 4), clamped to min .. max; the comparison mask is -1 where sum < 0
+                    var neg = Vector128.LessThan(sum, Vector128<short>.Zero);
+                    var res = x + Vector128.ShiftRightArithmetic(sum + Vector128.Create((short)8) + neg, 4);
+                    res = Vector128.Max(Vector128.Min(res, max), min);
+                    var d = dst.AsSpan((y0 + i) * stride + x0, w);
+                    if (w == 8) res.AsUInt16().StoreUnsafe(ref MemoryMarshal.GetReference(d));
+                    else res.AsUInt16().GetLower().StoreUnsafe(ref MemoryMarshal.GetReference(d));
+                }
+                return;
+            }
             for (int i = 0; i < hh; i++)
+            {
+                int row = (y0 + i) * stride + x0;
                 for (int j = 0; j < w; j++)
                 {
-                    int sum = 0;
-                    int x = src[(y0 + i) * stride + x0 + j];
-                    int max = x, min = x;
-                    for (int k = 0; k < 2; k++)
-                        for (int sign = -1; sign <= 1; sign += 2)
-                        {
-                            {
-                                int yy = y0 + i + sign * dirs[(dir * 2 + k) * 2];
-                                int xx = x0 + j + sign * dirs[(dir * 2 + k) * 2 + 1];
-                                int candR = (yy << sy) >> Av1C.MiSizeLog2, candC = (xx << sx) >> Av1C.MiSizeLog2;
-                                if (yy >= 0 && xx >= 0 && candR < miRows && candC < miCols)
-                                {
-                                    int p = src[yy * stride + xx];
-                                    sum += T.CdefPriTaps[priTap * 2 + k] * Constrain(p - x, priStr, damping);
-                                    max = Math.Max(p, max);
-                                    min = Math.Min(p, min);
-                                }
-                            }
-                            for (int dirOff = -2; dirOff <= 2; dirOff += 4)
-                            {
-                                int d2 = (dir + dirOff) & 7;
-                                int yy = y0 + i + sign * dirs[(d2 * 2 + k) * 2];
-                                int xx = x0 + j + sign * dirs[(d2 * 2 + k) * 2 + 1];
-                                int candR = (yy << sy) >> Av1C.MiSizeLog2, candC = (xx << sx) >> Av1C.MiSizeLog2;
-                                if (yy >= 0 && xx >= 0 && candR < miRows && candC < miCols)
-                                {
-                                    int sv = src[yy * stride + xx];
-                                    sum += T.CdefSecTaps[priTap * 2 + k] * Constrain(sv - x, secStr, damping);
-                                    max = Math.Max(sv, max);
-                                    min = Math.Min(sv, min);
-                                }
-                            }
-                        }
-                    dst[(y0 + i) * stride + x0 + j] = (ushort)Math.Clamp(x + ((8 + sum - (sum < 0 ? 1 : 0)) >> 4), min, max);
+                    int ci = (i + 2) * B + j + 2;
+                    int x = buf[ci];
+                    int sum = 0, max = x, min = x;
+                    static void Tap(Span<short> b, int idx, int tap, int str, int adj, int x, ref int sum, ref int min, ref int max)
+                    {
+                        int p = b[idx];
+                        if (p == Na) return;
+                        if (str != 0) sum += tap * Constrain(p - x, str, adj);
+                        if (p > max) max = p;
+                        if (p < min) min = p;
+                    }
+                    Tap(buf, ci + po0, p0, priStr, priAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci - po0, p0, priStr, priAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci + po1, p1, priStr, priAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci - po1, p1, priStr, priAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci + sa0, s0, secStr, secAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci - sa0, s0, secStr, secAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci + sb0, s0, secStr, secAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci - sb0, s0, secStr, secAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci + sa1, s1, secStr, secAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci - sa1, s1, secStr, secAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci + sb1, s1, secStr, secAdj, x, ref sum, ref min, ref max);
+                    Tap(buf, ci - sb1, s1, secStr, secAdj, x, ref sum, ref min, ref max);
+                    dst[row + j] = (ushort)Math.Clamp(x + ((8 + sum - (sum < 0 ? 1 : 0)) >> 4), min, max);
                 }
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void TapV(ref short b0, int idx, Vector128<short> x, Vector128<short> str, int adj, short tap,
+                         ref Vector128<short> sum, ref Vector128<short> min, ref Vector128<short> max, Vector128<short> na)
+        {
+            var p = Vector128.LoadUnsafe(ref b0, (nuint)idx);
+            var d = p - x;
+            var ad = Vector128.Abs(d);
+            var v = Vector128.Min(ad, Vector128.Max(Vector128<short>.Zero, str - Vector128.ShiftRightArithmetic(ad, adj)));
+            sum += Vector128.ConditionalSelect(Vector128.LessThan(d, Vector128<short>.Zero), -v, v) * tap;
+            min = Vector128.Min(min, p);
+            max = Vector128.Max(max, Vector128.AndNot(p, Vector128.Equals(p, na)));
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void MinMaxV(ref short b0, int idx, ref Vector128<short> min, ref Vector128<short> max, Vector128<short> na)
+        {
+            var p = Vector128.LoadUnsafe(ref b0, (nuint)idx);
+            min = Vector128.Min(min, p);
+            max = Vector128.Max(max, Vector128.AndNot(p, Vector128.Equals(p, na)));
         }
     }
 }
