@@ -1,0 +1,13 @@
+{
+ "args": "-M 0",
+ "gamma": 1.0,
+ "hdrCapacityMax": 49.2611,
+ "hdrCapacityMin": 1.0,
+ "maxContentBoost": 8.0676,
+ "minContentBoost": 0.995361,
+ "offsetHdr": 1e-07,
+ "offsetSdr": 1e-07,
+ "source": "ultrahdr_app 1.4.0 from a synthetic image",
+ "tolerance": 0.1,
+ "useBaseColorSpace": 1.0
+}
