@@ -40,6 +40,7 @@ jobs:
     env:
       PIXCODEC_TESTDATA: ${{ github.workspace }}\testdata
       PIXCODEC_REQUIRE_ORACLES: 1
+      PIXCODEC_ORACLE_EXEMPT: jxrlib   # jxrlib does not build with MinGW
       VSTEST_CONNECTION_TIMEOUT: 600
     steps:
       - name: Keep line endings

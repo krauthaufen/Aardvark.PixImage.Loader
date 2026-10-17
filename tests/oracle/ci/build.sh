@@ -7,7 +7,8 @@
 #   ultrahdr_app  libultrahdr 1.4.0 (Ultra HDR / ISO 21496-1 gain map JPEG), with libjpeg-turbo it fetches itself
 #   JxrEncApp / JxrDecApp  jxrlib (JPEG XR reference software, BSD-2-Clause) of 4creators/jxrlib, unpatched: its old C is
 #              compiled with the diagnostics that modern compilers make errors turned off, and the library list given
-#              (its Makefile builds it with GNU sed syntax)
+#              (its Makefile builds it with GNU sed syntax); not on Windows, where its Win32 path needs MSVC SAL
+#              annotations (CI exempts the jxrlib gate there)
 # into $CI_TOOLS/src (default .tmp/ci-tools/src); kept when present, so that directory can be cached. Needs a C/C++
 # compiler, make, cmake, git, zlib and OpenEXR development files (with pkg-config). Tells later steps where things are
 # through $GITHUB_ENV / $GITHUB_PATH.
@@ -81,11 +82,12 @@ fi
 set_env PIXCODEC_ULTRAHDR "$D/libultrahdr/build/ultrahdr_app$X"
 
 # jxrlib's JxrEncApp / JxrDecApp
-if [ ! -f "$D/jxrlib/build/JxrDecApp$X" ]; then
+if [ $WIN = 1 ]; then :
+elif [ ! -f "$D/jxrlib/build/JxrDecApp$X" ]; then
   fetch "https://github.com/4creators/jxrlib/archive/$JXRLIB_COMMIT.tar.gz" "$D/jxrlib.tar.gz"
   unpack "$D/jxrlib.tar.gz" "$D/jxrlib"
   jcc="cc -std=gnu99 -O2 -Wno-implicit-function-declaration -Wno-incompatible-pointer-types -Wno-incompatible-function-pointer-types -Wno-int-conversion -Wno-implicit-int $STATIC"
   (cd "$D/jxrlib" && make -j4 CC="$jcc" LIBS="-L$D/jxrlib/build -ljxrglue -ljpegxr -lm" > "$D/jxrlib.log" 2>&1) || { tail -40 "$D/jxrlib.log"; exit 1; }
   deps "$D/jxrlib/build/JxrDecApp$X"
 fi
-set_env PIXCODEC_JXRLIB "$D/jxrlib/build"
+[ $WIN = 1 ] || set_env PIXCODEC_JXRLIB "$D/jxrlib/build"

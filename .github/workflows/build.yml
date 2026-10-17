@@ -43,8 +43,9 @@ jobs:
     env:
       PIXCODEC_TESTDATA: ${{ github.workspace }}/testdata
       # every oracle gate fails instead of skipping (see AGENTS.md, Tests); PIXCODEC_ORACLE_EXEMPT would list the gates a
-      # platform cannot provide (none at the moment)
+      # platform cannot provide (jxrlib does not build with MinGW)
       PIXCODEC_REQUIRE_ORACLES: 1
+      PIXCODEC_ORACLE_EXEMPT: ${{ matrix.os == 'windows-latest' && 'jxrlib' || '' }}
       VSTEST_CONNECTION_TIMEOUT: 600
     steps:
     - name: Keep line endings
