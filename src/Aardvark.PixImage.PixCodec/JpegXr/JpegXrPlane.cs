@@ -739,8 +739,8 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         int BlockOffset(int c, int blk)
         {
-            int bw = _mbPxW[c] >> 2, bh = _mbPxH[c] >> 2;
-            return ((_mby * bh + blk / bw) * DcW[c] + _mbx * bw + blk % bw) << 4;
+            int lb = _mbPxW[c] == 16 ? 2 : 1, bh = _mbPxH[c] >> 2;   // 4 or 2 blocks per row
+            return ((_mby * bh + (blk >> lb)) * DcW[c] + (_mbx << lb) + (blk & ((1 << lb) - 1))) << 4;
         }
 
         /// <summary>

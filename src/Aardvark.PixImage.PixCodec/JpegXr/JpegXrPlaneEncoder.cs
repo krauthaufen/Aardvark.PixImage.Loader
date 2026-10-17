@@ -25,7 +25,7 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
 
         // quantization (one QP set per band for the whole plane)
         public readonly int[] DcFactor, LpFactor, HpFactor;
-        public bool HpDeadzone = true;
+        public readonly JxrQuantizer[] HpQuant;
 
         // per macroblock state shared by the tiles
         public readonly int[] Pred;
@@ -75,6 +75,8 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                 LpFactor[c] = ph.LpQp != null ? JxrQp.Map(ph.LpQp[c], c == 0 ? 1 : 0, ph.Scaled) : 1;
                 HpFactor[c] = ph.HpQp != null ? JxrQp.Map(ph.HpQp[c], 1, ph.Scaled) : 1;
             }
+            HpQuant = new JxrQuantizer[Nc];
+            for (int c = 0; c < Nc; c++) HpQuant[c] = new JxrQuantizer(HpFactor[c], true);
             Pred = new int[mbs * Nc * 7];
             Cbphp = new int[mbs * Nc];
             HpMode = new byte[mbs];
@@ -83,11 +85,14 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             LpRes = new int[mbs * Nc * 16];
         }
 
-        /// <summary>Offset of block <paramref name="blk"/> (raster index in the macroblock) of component c of macroblock (mbx, mby) in Px.</summary>
+        /// <summary>
+        /// Offset of block <paramref name="blk"/> (raster index in the macroblock) of component c of macroblock (mbx, mby) in Px,
+        /// which is block-major like the decoder's planes: 4x4 blocks of 16 values in raster block order.
+        /// </summary>
         public int BlockOffset(int c, int mbx, int mby, int blk)
         {
-            int bw = MbPxW[c] >> 2;
-            return (mby * MbPxH[c] + 4 * (blk / bw)) * PxW[c] + mbx * MbPxW[c] + 4 * (blk % bw);
+            int lb = MbPxW[c] == 16 ? 2 : 1, bh = MbPxH[c] >> 2;   // 4 or 2 blocks per row
+            return ((mby * bh + (blk >> lb)) * DcW[c] + (mbx << lb) + (blk & ((1 << lb) - 1))) << 4;
         }
 
         // ------------------------------------------------------------------ forward transform (D.4, D.5)
@@ -99,41 +104,37 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             if (ih.Overlap != 0)
                 for (int c = 0; c < Nc; c++)
                 {
-                    int mw = MbPxW[c], mh = MbPxH[c];
+                    int mw = MbPxW[c] >> 2, mh = MbPxH[c] >> 2;   // blocks per macroblock
                     var px = Px[c];
-                    int s = PxW[c];
+                    int bw = DcW[c];
                     ForRegions((x0, y0, x1, y1) =>
                     {
                         int X0 = x0 * mw, Y0 = y0 * mh, X1 = x1 * mw, Y1 = y1 * mh;
                         // edges first: the decoder runs them after the interior filters, but the two sets are disjoint
-                        JxrTransform.Overlap4Edges(px, s, X0, Y0, X1, Y1, true);
-                        if (parallel && Y1 - Y0 >= 256)
+                        JxrTransform.Overlap4BEdges(px, bw, X0, Y0, X1, Y1, true);
+                        if (parallel && Y1 - Y0 >= 64)
                         {
-                            int bands = (Y1 - Y0) / 128;
+                            int bands = (Y1 - Y0) / 32;
                             Parallel.For(0, bands, k =>
                             {
                                 int from = Y0 + (Y1 - Y0) * k / bands, to = Y0 + (Y1 - Y0) * (k + 1) / bands;
-                                JxrTransform.Overlap4Interior(px, s, X0, Y0, X1, Y1, from, to, true);
+                                JxrTransform.Overlap4BInterior(px, bw, X0, Y0, X1, Y1, from, to, true);
                             });
                         }
-                        else JxrTransform.Overlap4Interior(px, s, X0, Y0, X1, Y1, Y0 + 2, Y1 - 2, true);
+                        else JxrTransform.Overlap4BInterior(px, bw, X0, Y0, X1, Y1, Y0, Y1, true);
                     });
                 }
             for (int c = 0; c < Nc; c++)
             {
                 var px = Px[c];
                 var dc = Dc[c];
-                int s = PxW[c], dw = DcW[c], dh = DcH[c];
+                int dw = DcW[c], dh = DcH[c];
                 void Rows(int r0, int r1)
                 {
-                    for (int y = r0; y < r1; y++)
+                    for (int b = r0 * dw; b < r1 * dw; b++)
                     {
-                        int po = 4 * y * s;
-                        for (int x = 0; x < dw; x++)
-                        {
-                            JxrTransform.Fct4x4(px, po + 4 * x, s);
-                            dc[y * dw + x] = px[po + 4 * x];
-                        }
+                        JxrTransform.Fct4x4(px, b << 4, 4);
+                        dc[b] = px[b << 4];
                     }
                 }
                 if (parallel && dh >= 64) Parallel.For(0, (dh + 31) / 32, k => Rows(k * 32, Math.Min(dh, k * 32 + 32)));
@@ -209,6 +210,37 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             int a = Math.Abs(v);
             int q = deadzone ? (int)(((long)a * 3 + f) / (3L * f) ) : (int)((a + (long)(f >> 1)) / f);
             return v < 0 ? -q : q;
+        }
+    }
+
+    /// <summary><see cref="JxrPlaneEncoder.Quant"/> for one factor, dividing by a multiplication (exact below 2^31).</summary>
+    internal readonly struct JxrQuantizer
+    {
+        readonly int _f, _add, _mul, _shift;
+        readonly long _d;
+        readonly ulong _m;
+
+        public JxrQuantizer(int f, bool deadzone)
+        {
+            _f = f;
+            _mul = deadzone ? 3 : 1;
+            _add = deadzone ? f : f >> 1;
+            _d = (long)_mul * f;
+            int l = 64 - BitOperations.LeadingZeroCount((ulong)(_d - 1));
+            _shift = 31 + l;
+            _m = (ulong)((((System.UInt128)1 << _shift) + (ulong)_d - 1) / (ulong)_d);
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public int Quant(int v)
+        {
+            if (_f == 1) return v;
+            // branch free sign handling: the signs of HP coefficients are unpredictable
+            long sg = v >> 31;
+            long a = (v ^ sg) - sg;
+            long n = a * _mul + _add;
+            long q = n < int.MaxValue ? (long)(((ulong)n * _m) >> _shift) : n / _d;
+            return (int)((q ^ sg) - sg);
         }
     }
 
@@ -386,32 +418,43 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
         {
             var p = _p;
             int mode = p.HpMode[_mbi];
+            // final (dequantized, predicted) values of the predicted coefficient positions, per block
+            Span<int> fin = stackalloc int[16 * 3];
             for (int c = 0; c < _nc; c++)
             {
                 var px = p.Px[c];
-                int s = p.PxW[c];
                 int f = p.HpFactor[c];
+                var qz = p.HpQuant[c];
                 int bw = p.MbPxW[c] >> 2, bh = p.MbPxH[c] >> 2;
-                int o0 = _mby * p.MbPxH[c] * s + _mbx * p.MbPxW[c];
-                // final (dequantized, predicted) values of the predicted coefficient positions, per block
-                Span<int> fin = stackalloc int[16 * 3];
+                bool lossless = f == 1;
                 for (int by = 0; by < bh; by++)
                     for (int bx = 0; bx < bw; bx++)
                     {
                         int blk = by * bw + bx;
-                        int o = o0 + 4 * by * s + 4 * bx;
-                        for (int k = 1; k < 16; k++)
-                        {
-                            ref int cell = ref px[o + (k >> 2) * s + (k & 3)];
-                            int v = cell;
-                            bool predicted = mode == 0 && bx > 0 && (k & 3) == 0 || mode == 1 && by > 0 && k < 4;
-                            int pv = 0;
-                            if (predicted) pv = mode == 0 ? fin[(blk - 1) * 3 + (k >> 2) - 1] : fin[(blk - bw) * 3 + k - 1];
-                            int r = JxrPlaneEncoder.Quant(v - pv, f, p.HpDeadzone);
-                            cell = r;
-                            if (mode == 0 && (k & 3) == 0) fin[blk * 3 + (k >> 2) - 1] = r * f + pv;
-                            else if (mode == 1 && k < 4) fin[blk * 3 + k - 1] = r * f + pv;
-                        }
+                        int o = p.BlockOffset(c, _mbx, _mby, blk);
+                        if (!lossless)
+                            for (int k = 1; k < 16; k++)
+                                if (mode == 2 || mode == 0 && (k & 3) != 0 || mode == 1 && k >= 4) px[o + k] = qz.Quant(px[o + k]);
+                        if (mode == 0)
+                            for (int i = 0; i < 3; i++)
+                            {
+                                // left prediction of coefficients 4, 8, 12
+                                ref int cell = ref px[o + 4 * (i + 1)];
+                                int pv = bx > 0 ? fin[(blk - 1) * 3 + i] : 0;
+                                int r = qz.Quant(cell - pv);
+                                cell = r;
+                                fin[blk * 3 + i] = r * f + pv;
+                            }
+                        else if (mode == 1)
+                            for (int i = 0; i < 3; i++)
+                            {
+                                // top prediction of coefficients 1, 2, 3
+                                ref int cell = ref px[o + i + 1];
+                                int pv = by > 0 ? fin[(blk - bw) * 3 + i] : 0;
+                                int r = qz.Quant(cell - pv);
+                                cell = r;
+                                fin[blk * 3 + i] = r * f + pv;
+                            }
                     }
             }
         }
@@ -508,7 +551,11 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             int count = 16 - location0;
             Span<int> pos = stackalloc int[17];
             int n = 0;
-            for (int i = 0; i < count; i++) if (vals[i] != 0) pos[n++] = i;
+            for (int i = 0; i < count; i++)
+            {
+                pos[n] = i;
+                n += vals[i] != 0 ? 1 : 0;
+            }
             // whether the run before the next non-zero value is zero (1) / non-zero (2) / there is none (0)
             Span<int> next = stackalloc int[16];
             for (int k = 0; k < n; k++) next[k] = k + 1 >= n ? 0 : pos[k + 1] - pos[k] - 1 == 0 ? 1 : 2;
@@ -739,13 +786,12 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                 int nBlocks = c > 0 && _is420 ? 1 : c > 0 && _is422 ? 2 : 4;
                 int cb = 0;
                 var px = p.Px[c];
-                int s = p.PxW[c];
                 for (int b = 0; b < nBlocks * 4; b++)
                 {
                     int map = nBlocks == 4 ? JxrTables.HierScanOrder[b] : b;
                     int o = p.BlockOffset(c, _mbx, _mby, map);
                     for (int k = 1; k < 16; k++)
-                        if (Math.Abs(px[o + (k >> 2) * s + (k & 3)]) >> bits != 0) { cb |= 1 << b; break; }
+                        if (Math.Abs(px[o + k]) >> bits != 0) { cb |= 1 << b; break; }
                 }
                 p.Cbphp[baseIdx + c] = cb;
             }
@@ -937,16 +983,14 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                 int bits = chroma ? _modelHp.Bits1 : _modelHp.Bits0;
                 int cb = p.Cbphp[_mbi * _nc + c];
                 var px = p.Px[c];
-                int s = p.PxW[c];
                 for (int b = 0; b < nBlocks * 4; b++, cb >>= 1)
                 {
                     int map = nBlocks == 4 ? JxrTables.HierScanOrder[b] : b;
                     int o = p.BlockOffset(c, _mbx, _mby, map);
                     for (int k = 1; k < 16; k++)
                     {
-                        int v = px[o + (k >> 2) * s + (k & 3)];
-                        int h = Math.Abs(v) >> bits;
-                        hi[k] = v < 0 ? -h : h;
+                        int v = px[o + k], sg = v >> 31;
+                        hi[k] = ((((v ^ sg) - sg) >> bits) ^ sg) - sg;
                     }
                     int numNz = 0;
                     if ((cb & 1) != 0)
@@ -964,7 +1008,7 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                             }
                         }
                     }
-                    if (flex) WriteFlex(w, px, o, s, hi, bits, trim);
+                    if (flex) WriteFlex(w, px, o, hi, bits, trim);
                     if (chroma) lap1 += numNz; else lap0 += numNz;
                 }
             }
@@ -981,18 +1025,20 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
         }
 
         /// <summary>BLOCK_FLEXBITS( ) of one block: the low bits (above the trimmed ones) in transposed order.</summary>
-        static void WriteFlex(JxrBitWriter w, int[] px, int o, int s, ReadOnlySpan<int> hi, int bits, int trim)
+        static void WriteFlex(JxrBitWriter w, int[] px, int o, ReadOnlySpan<int> hi, int bits, int trim)
         {
             int left = bits - trim;
             if (left <= 0) return;
             var t = JxrTables.Transpose444;
+            int mask = (1 << bits) - 1;
             for (int n = 1; n < 16; n++)
             {
                 int k = t[n];
-                int v = px[o + (k >> 2) * s + (k & 3)];
-                int lo = (Math.Abs(v) & ((1 << bits) - 1)) >> trim;
-                w.Bits(lo, left);
-                if (hi[k] == 0 && lo != 0) w.Bit(v < 0);
+                int v = px[o + k], sg = v >> 31;
+                int lo = (((v ^ sg) - sg) & mask) >> trim;
+                // the sign follows when only the low bits are non-zero
+                int extra = (hi[k] == 0 ? 1 : 0) & (lo != 0 ? 1 : 0);
+                w.Bits((uint)((lo << extra) | (sg & extra)), left + extra);
             }
         }
 
@@ -1007,13 +1053,12 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                 int nBlocks = chroma && _is420 ? 1 : chroma && _is422 ? 2 : 4;
                 int bits = p.ModelBitsHp[_mbi * 2 + (chroma ? 1 : 0)];
                 var px = p.Px[c];
-                int s = p.PxW[c];
                 for (int b = 0; b < nBlocks * 4; b++)
                 {
                     int map = nBlocks == 4 ? JxrTables.HierScanOrder[b] : b;
                     int o = p.BlockOffset(c, _mbx, _mby, map);
-                    for (int k = 1; k < 16; k++) hi[k] = Math.Abs(px[o + (k >> 2) * s + (k & 3)]) >> bits;
-                    WriteFlex(w, px, o, s, hi, bits, trim);
+                    for (int k = 1; k < 16; k++) { int v = px[o + k], sg = v >> 31; hi[k] = ((v ^ sg) - sg) >> bits; }
+                    WriteFlex(w, px, o, hi, bits, trim);
                 }
             }
         }

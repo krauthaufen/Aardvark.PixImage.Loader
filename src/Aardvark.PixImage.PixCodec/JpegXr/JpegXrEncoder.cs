@@ -159,13 +159,15 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                     case SampleType.UInt8:
                         {
                             var d = (byte[])_img.Data;
-                            for (int x = 0; x < W; x++) o[x] = FromUnorm(d[b + (long)x * ch], 255, bd);
+                            if (bd == JxrBitDepth.Bd8) for (int x = 0; x < W; x++) o[x] = d[b + (long)x * ch];
+                            else for (int x = 0; x < W; x++) o[x] = FromUnorm(d[b + (long)x * ch], 255, bd);
                             break;
                         }
                     case SampleType.UInt16:
                         {
                             var d = (ushort[])_img.Data;
-                            for (int x = 0; x < W; x++) o[x] = FromUnorm(d[b + (long)x * ch], 65535, bd);
+                            if (bd == JxrBitDepth.Bd16) for (int x = 0; x < W; x++) o[x] = d[b + (long)x * ch];
+                            else for (int x = 0; x < W; x++) o[x] = FromUnorm(d[b + (long)x * ch], 65535, bd);
                             break;
                         }
                     case SampleType.Float16:
@@ -534,98 +536,178 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             int nc = alphaPlane ? 1 : t.Color;
             int ncInt = p.Nc;
             int top = ih.TopMargin, left = ih.LeftMargin;
-            // full resolution internal components (42x chroma is subsampled afterwards)
+            // rows go straight into the block-major planes; 42x chroma is kept at full resolution and subsampled afterwards
             var full = new int[ncInt][];
-            for (int c = 0; c < ncInt; c++) full[c] = p.Is42x && c > 0 ? new int[ew * eh] : p.Px[c];
-            if (of == JxrOutputFormat.Rgbe) FillRgbe(src, full, ew, scale, top, left);
-            else
+            for (int c = 1; c < ncInt; c++) if (p.Is42x) full[c] = new int[ew * eh];
+            void Store(int y, int[][] line)
             {
-                void Row(int y)
+                for (int c = 0; c < ncInt; c++)
+                    if (full[c] != null) line[c].AsSpan(0, ew).CopyTo(full[c].AsSpan(y * ew, ew));
+                    else JxrTransform.WriteRow(p.Px[c], p.DcW[c], y, line[c]);
+            }
+            int srcCh = of == JxrOutputFormat.Rgbe ? 3 : nc;
+            {
+                (int[][] rows, int[][] line) Buffers()
                 {
-                    var rows = new int[nc][];
-                    for (int c = 0; c < nc; c++)
+                    var rows = new int[srcCh][];
+                    for (int c = 0; c < srcCh; c++) rows[c] = new int[W];
+                    var line = new int[ncInt][];
+                    for (int c = 0; c < ncInt; c++) line[c] = new int[ew];
+                    return (rows, line);
+                }
+                void Row(int y, (int[][] rows, int[][] line) buf)
+                {
+                    var (rows, line) = buf;
+                    for (int c = 0; c < srcCh; c++) src.Row(y, alphaPlane ? t.Color : c, rows[c]);
+                    int yo = left;
+                    switch (of)
                     {
-                        rows[c] = new int[W];
-                        src.Row(y, alphaPlane ? t.Color : c, rows[c]);
-                    }
-                    int yo = (y + top) * ew + left;
-                    for (int x = 0; x < W; x++)
-                    {
-                        int o = yo + x;
-                        switch (of)
-                        {
-                            case JxrOutputFormat.YOnly:
-                                full[0][o] = PreScale(rows[0][x], bd, ph, bias, scale);
+                        case JxrOutputFormat.Rgbe:
+                            for (int x = 0; x < W; x++)
+                            {
+                                // the reference output of RGBE is R, G, B and E bytes; Source gives the float bits of each channel
+                                float fr = BitConverter.Int32BitsToSingle(rows[0][x]), fg = BitConverter.Int32BitsToSingle(rows[1][x]), fb = BitConverter.Int32BitsToSingle(rows[2][x]);
+                                var (mr, mg, mb, ex) = ToRgbe(fr, fg, fb);
+                                int R = RgbeForward(mr, ex) << scale, G = RgbeForward(mg, ex) << scale, B = RgbeForward(mb, ex) << scale;
+                                int V = B - R;
+                                int tt = R - G + ((V + 1) >> 1);
+                                line[0][yo + x] = G + (tt >> 1);
+                                line[1][yo + x] = -tt;
+                                line[2][yo + x] = V;
+                            }
+                            break;
+                        case JxrOutputFormat.YOnly:
+                            {
+                                var r0 = rows[0]; var f0 = line[0];
+                                for (int x = 0; x < W; x++) f0[yo + x] = PreScale(r0[x], bd, ph, bias, scale);
                                 break;
-                            case JxrOutputFormat.Rgb:
+                            }
+                        case JxrOutputFormat.Rgb:
+                            {
+                                // packed formats with RED_BLUE_NOT_SWAPPED_FLAG 0: the internal R is blue (the least
+                                // significant field), the internal B red
+                                bool swap = bd is JxrBitDepth.Bd5 or JxrBitDepth.Bd565 or JxrBitDepth.Bd10;
+                                var R = rows[swap ? 2 : 0]; var G = rows[1]; var B = rows[swap ? 0 : 2];
+                                if (bd == JxrBitDepth.Bd565)
                                 {
-                                    int r, g, b;
-                                    // packed formats with RED_BLUE_NOT_SWAPPED_FLAG 0: the internal R is blue (the least
-                                    // significant field), the internal B red
-                                    bool swap = bd is JxrBitDepth.Bd5 or JxrBitDepth.Bd565 or JxrBitDepth.Bd10;
-                                    int ri = swap ? 2 : 0, bi = swap ? 0 : 2;
-                                    if (bd == JxrBitDepth.Bd565)
+                                    // R and B are 5 bit fields in the 6 bit domain of G (ComputeScaling shifts them once more)
+                                    for (int x = 0; x < W; x++)
                                     {
-                                        // R and B are 5 bit fields in the 6 bit domain of G (ComputeScaling shifts them once more)
-                                        r = ((rows[ri][x] << 1) - bias) << scale;
-                                        g = (rows[1][x] - bias) << scale;
-                                        b = ((rows[bi][x] << 1) - bias) << scale;
+                                        R[x] = ((R[x] << 1) - bias) << scale;
+                                        G[x] = (G[x] - bias) << scale;
+                                        B[x] = ((B[x] << 1) - bias) << scale;
                                     }
-                                    else
+                                }
+                                else if (bd is JxrBitDepth.Bd8 or JxrBitDepth.Bd5 or JxrBitDepth.Bd10 or JxrBitDepth.Bd16)
+                                {
+                                    int sh = bd == JxrBitDepth.Bd16 ? ph.ShiftBits : 0;
+                                    for (int x = 0; x < W; x++)
                                     {
-                                        r = PreScale(rows[ri][x], bd, ph, bias, scale);
-                                        g = PreScale(rows[1][x], bd, ph, bias, scale);
-                                        b = PreScale(rows[bi][x], bd, ph, bias, scale);
+                                        R[x] = ((R[x] >> sh) - bias) << scale;
+                                        G[x] = ((G[x] >> sh) - bias) << scale;
+                                        B[x] = ((B[x] >> sh) - bias) << scale;
                                     }
-                                    // FwdColorFmtConvert1( ) (Table D.6); YONLY keeps its luma only
+                                }
+                                else
+                                    for (int x = 0; x < W; x++)
+                                    {
+                                        R[x] = PreScale(R[x], bd, ph, bias, scale);
+                                        G[x] = PreScale(G[x], bd, ph, bias, scale);
+                                        B[x] = PreScale(B[x], bd, ph, bias, scale);
+                                    }
+                                // FwdColorFmtConvert1( ) (Table D.6); YONLY keeps its luma only
+                                var f0 = line[0];
+                                bool chroma = fmt != JxrInternalFormat.YOnly;
+                                var f1 = chroma ? line[1] : f0; var f2 = chroma ? line[2] : f0;
+                                for (int x = 0; x < W; x++)
+                                {
+                                    int r = R[x], g = G[x], b = B[x];
                                     int V = b - r;
                                     int tt = r - g + ((V + 1) >> 1);
-                                    full[0][o] = g + (tt >> 1);
-                                    if (fmt != JxrInternalFormat.YOnly)
+                                    if (chroma)
                                     {
-                                        full[1][o] = -tt;
-                                        full[2][o] = V;
+                                        f1[yo + x] = -tt;
+                                        f2[yo + x] = V;
                                     }
-                                    break;
+                                    f0[yo + x] = g + (tt >> 1);
                                 }
-                            case JxrOutputFormat.Cmyk:
-                                {
-                                    int bs = bias >> 1;
-                                    int c = (rows[0][x] - bs) << scale, m = (rows[1][x] - bs) << scale, yy = (rows[2][x] - bs) << scale, k = (rows[3][x] + bs) << scale;
-                                    // FwdColorFmtConvert2( ) (Table D.7; its comments have the signs that invert Table 186)
-                                    int V = c - yy;
-                                    int U = c - m - (V >> 1);
-                                    int Y = k - m - (U >> 1);
-                                    full[0][o] = Y;
-                                    full[1][o] = U;
-                                    full[2][o] = V;
-                                    full[3][o] = k - (Y >> 1);
-                                    break;
-                                }
-                            case JxrOutputFormat.CmykDirect:
-                                full[0][o] = PreScale(rows[3][x], bd, ph, bias, scale);
-                                full[1][o] = PreScale(rows[0][x], bd, ph, bias, scale);
-                                full[2][o] = PreScale(rows[1][x], bd, ph, bias, scale);
-                                full[3][o] = PreScale(rows[2][x], bd, ph, bias, scale);
                                 break;
-                            default:   // NCOMPONENT, YUV444 / 422 / 420 (Y, U, V as given)
-                                for (int c = 0; c < nc; c++) full[c][o] = PreScale(rows[c][x], bd, ph, bias, scale);
-                                break;
-                        }
+                            }
+                        case JxrOutputFormat.Cmyk:
+                            for (int x = 0; x < W; x++)
+                            {
+                                int o = yo + x;
+                                int bs = bias >> 1;
+                                int c = (rows[0][x] - bs) << scale, m = (rows[1][x] - bs) << scale, yy = (rows[2][x] - bs) << scale, k = (rows[3][x] + bs) << scale;
+                                // FwdColorFmtConvert2( ) (Table D.7; its comments have the signs that invert Table 186)
+                                int V = c - yy;
+                                int U = c - m - (V >> 1);
+                                int Y = k - m - (U >> 1);
+                                line[0][o] = Y;
+                                line[1][o] = U;
+                                line[2][o] = V;
+                                line[3][o] = k - (Y >> 1);
+                            }
+                            break;
+                        case JxrOutputFormat.CmykDirect:
+                            for (int x = 0; x < W; x++)
+                            {
+                                int o = yo + x;
+                                line[0][o] = PreScale(rows[3][x], bd, ph, bias, scale);
+                                line[1][o] = PreScale(rows[0][x], bd, ph, bias, scale);
+                                line[2][o] = PreScale(rows[1][x], bd, ph, bias, scale);
+                                line[3][o] = PreScale(rows[2][x], bd, ph, bias, scale);
+                            }
+                            break;
+                        default:   // NCOMPONENT, YUV444 / 422 / 420 (Y, U, V as given)
+                            for (int c = 0; c < nc; c++)
+                            {
+                                var rc = rows[c]; var fc = line[c];
+                                for (int x = 0; x < W; x++) fc[yo + x] = PreScale(rc[x], bd, ph, bias, scale);
+                            }
+                            break;
                     }
-                    PadRow(full, ncInt, yo - left, left, W, ew);
+                    PadRow(line, ncInt, 0, left, W, ew);
+                    Store(y + top, line);
                 }
-                if (parallel && H >= 256) Parallel.For(0, H, Row);
-                else for (int y = 0; y < H; y++) Row(y);
+                if (parallel && H >= 256) Parallel.For(0, H, Buffers, (y, _, buf) => { Row(y, buf); return buf; }, _ => { });
+                else
+                {
+                    var buf = Buffers();
+                    for (int y = 0; y < H; y++) Row(y, buf);
+                }
             }
+            // top and bottom margins: copies of the first and last row
+            var tmp = new int[ew];
             for (int c = 0; c < ncInt; c++)
             {
-                var a = full[c];
-                for (int y = 0; y < top; y++) Array.Copy(a, top * ew, a, y * ew, ew);
-                for (int y = top + H; y < eh; y++) Array.Copy(a, (top + H - 1) * ew, a, y * ew, ew);
+                if (full[c] is { } a)
+                {
+                    for (int y = 0; y < top; y++) Array.Copy(a, top * ew, a, y * ew, ew);
+                    for (int y = top + H; y < eh; y++) Array.Copy(a, (top + H - 1) * ew, a, y * ew, ew);
+                    continue;
+                }
+                var px = p.Px[c];
+                int bw = p.DcW[c];
+                if (top > 0)
+                {
+                    JxrTransform.ReadRow(px, bw, top, 0, ew, tmp);
+                    for (int y = 0; y < top; y++) JxrTransform.WriteRow(px, bw, y, tmp);
+                }
+                if (top + H < eh)
+                {
+                    JxrTransform.ReadRow(px, bw, top + H - 1, 0, ew, tmp);
+                    for (int y = top + H; y < eh; y++) JxrTransform.WriteRow(px, bw, y, tmp);
+                }
             }
             if (p.Is42x)
-                for (int c = 1; c < 3; c++) Downsample(full[c], ew, eh, p.Px[c], p.PxW[c], p.PxH[c], p.Is420);
+                for (int c = 1; c < 3; c++)
+                {
+                    var d = new int[p.PxW[c] * p.PxH[c]];
+                    Downsample(full[c], ew, eh, d, p.PxW[c], p.PxH[c], p.Is420);
+                    full[c] = null!;
+                    JxrTransform.ToBlocks(d, p.PxW[c], p.PxH[c], p.Px[c]);
+                }
         }
 
         /// <summary>Replicates the first and last sample of a row into the left and right margins.</summary>
@@ -637,31 +719,6 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                 int first = a[rowStart + left], last = a[rowStart + left + w - 1];
                 for (int x = 0; x < left; x++) a[rowStart + x] = first;
                 for (int x = left + w; x < ew; x++) a[rowStart + x] = last;
-            }
-        }
-
-        static void FillRgbe(Source src, int[][] full, int ew, int scale, int top, int left)
-        {
-            Span<int> r = stackalloc int[src.W], g = stackalloc int[src.W], b = stackalloc int[src.W], e = stackalloc int[src.W];
-            for (int y = 0; y < src.H; y++)
-            {
-                src.Row(y, 0, r);
-                src.Row(y, 1, g);
-                src.Row(y, 2, b);
-                int yo = (y + top) * ew + left;
-                for (int x = 0; x < src.W; x++)
-                {
-                    // the reference output of RGBE is R, G, B and E bytes; Source gives the float bits of each channel
-                    float fr = BitConverter.Int32BitsToSingle(r[x]), fg = BitConverter.Int32BitsToSingle(g[x]), fb = BitConverter.Int32BitsToSingle(b[x]);
-                    var (mr, mg, mb, ex) = ToRgbe(fr, fg, fb);
-                    int R = RgbeForward(mr, ex) << scale, G = RgbeForward(mg, ex) << scale, B = RgbeForward(mb, ex) << scale;
-                    int V = B - R;
-                    int tt = R - G + ((V + 1) >> 1);
-                    full[0][yo + x] = G + (tt >> 1);
-                    full[1][yo + x] = -tt;
-                    full[2][yo + x] = V;
-                }
-                PadRow(full, 3, yo - left, left, src.W, ew);
             }
         }
 
@@ -795,6 +852,31 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                     w.Byte((t << 3) | band);
                     return w;
                 }
+                // quantization and prediction: interleaved with the coding, or first (the HP part in parallel)
+                bool prepass = ih.Frequency || parallel && tiles == 1 && bt - tp >= 8;
+                if (prepass)
+                {
+                    for (int y = tp; y < bt; y++)
+                        for (int x = l; x < r; x++)
+                            for (int k = 0; k < planes.Count; k++)
+                            {
+                                coders[k].SetMacroblock(x, y, l, r, tp);
+                                coders[k].PrepareDcLp();
+                            }
+                    void HpRow(int y, List<JxrTileCoder> cs)
+                    {
+                        for (int x = l; x < r; x++)
+                            for (int k = 0; k < planes.Count; k++)
+                                if (Hp(planes[k]))
+                                {
+                                    cs[k].SetMacroblock(x, y, l, r, tp);
+                                    cs[k].PrepareHp();
+                                }
+                    }
+                    if (parallel && tiles == 1)
+                        Parallel.For(tp, bt, () => planes.ConvertAll(p => new JxrTileCoder(p)), (y, _, cs) => { HpRow(y, cs); return cs; }, _ => { });
+                    else for (int y = tp; y < bt; y++) HpRow(y, coders);
+                }
                 if (!ih.Frequency)
                 {
                     var w = Start(0);
@@ -806,12 +888,12 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                                 var p = planes[k];
                                 var c = coders[k];
                                 c.SetMacroblock(x, y, l, r, tp);
-                                c.PrepareDcLp();
+                                if (!prepass) c.PrepareDcLp();
                                 c.WriteMbDc(w);
                                 if (p.Ph.Bands != JxrBands.DcOnly) c.WriteMbLp(w);
                                 if (Hp(p))
                                 {
-                                    c.PrepareHp();
+                                    if (!prepass) c.PrepareHp();
                                     c.WriteMbCbphp(w);
                                     c.WriteMbHp(w, p.Ph.Bands == JxrBands.All, trim);
                                 }
@@ -820,16 +902,7 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                     packets[t] = w.Span.ToArray();
                     return;
                 }
-                // frequency order: the coefficients of the whole tile first, then one packet per band
-                for (int y = tp; y < bt; y++)
-                    for (int x = l; x < r; x++)
-                        for (int k = 0; k < planes.Count; k++)
-                        {
-                            var c = coders[k];
-                            c.SetMacroblock(x, y, l, r, tp);
-                            c.PrepareDcLp();
-                            if (Hp(planes[k])) c.PrepareHp();
-                        }
+                // frequency order: one packet per band
                 for (int band = 0; band < bands; band++)
                 {
                     var w = Start(band);

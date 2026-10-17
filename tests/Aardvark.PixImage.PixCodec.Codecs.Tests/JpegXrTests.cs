@@ -530,5 +530,40 @@ public class JpegXrTests
         foreach (var v in new[] { JxrTables.ValDcYuv, JxrTables.CbplpYuv444, JxrTables.CbplpYuv42x, JxrTables.ChrCbphp, JxrTables.NumChBlk, JxrTables.RefCbphp1, JxrTables.RunIndex, JxrTables.IndexB }
                      .Concat(JxrTables.AbsLevelIndex).Concat(JxrTables.NumCbphp).Concat(JxrTables.NumBlkCbphpYuv).Concat(JxrTables.IndexA).Concat(JxrTables.FirstIndex))
             Assert.Equal(1.0, v.Lengths.Sum(l => Math.Pow(2, -l)), 9);
+        // the block-major array helpers and overlap filters agree with the raster ones
+        var blocks = new int[p.Length];
+        JxrTransform.ToBlocks(p, 32, 32, blocks);
+        Assert.Equal(p, JxrTransform.ToRaster(blocks, 32, 32));
+        var row = new int[32];
+        for (int y = 0; y < 32; y++)
+        {
+            JxrTransform.ReadRow(blocks, 8, y, 0, 32, row);
+            Assert.Equal(p.AsSpan(y * 32, 32).ToArray(), row);
+            JxrTransform.WriteRow(blocks, 8, y, row);
+        }
+        foreach (bool forward in new[] { true, false })
+        {
+            JxrTransform.Overlap4(q, 32, 0, 0, 32, 32, forward);
+            JxrTransform.Overlap4B(blocks, 8, 0, 0, 8, 8, forward);
+            Assert.Equal(q, JxrTransform.ToRaster(blocks, 32, 32));
+        }
+    }
+
+    [Fact]
+    public void QuantizerDividesExactly()
+    {
+        var rng = new Random(5);
+        foreach (int f in new[] { 1, 2, 3, 5, 7, 16, 100, 255, 1000, 65535, 1 << 20, 123456789, int.MaxValue / 3 })
+            foreach (bool deadzone in new[] { true, false })
+            {
+                var q = new JxrQuantizer(f, deadzone);
+                foreach (int v in new[] { 0, 1, -1, f, -f, f - 1, 1 - f, int.MaxValue, int.MinValue + 1, int.MaxValue / 3, -(int.MaxValue / 3) })
+                    Assert.Equal(JxrPlaneEncoder.Quant(v, f, deadzone), q.Quant(v));
+                for (int i = 0; i < 20000; i++)
+                {
+                    int v = rng.Next(int.MinValue + 1, int.MaxValue) >> rng.Next(31);
+                    Assert.Equal(JxrPlaneEncoder.Quant(v, f, deadzone), q.Quant(v));
+                }
+            }
     }
 }

@@ -523,6 +523,17 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             for (int k = 0; i < n; i++, k++) dst[i] = p[o + k];
         }
 
+        /// <summary>Stores a whole row y (width a multiple of 4) of a block-major array.</summary>
+        public static void WriteRow(int[] p, int bw, int y, ReadOnlySpan<int> src)
+        {
+            int n = bw << 2;
+            if (src.Length < n || (long)At(bw, n - 4, y) + 4 > p.Length) throw new ArgumentOutOfRangeException(nameof(src));
+            ref int d = ref MemoryMarshal.GetArrayDataReference(p);
+            ref int s = ref MemoryMarshal.GetReference(src);
+            for (int i = 0, o = At(bw, 0, y); i < n; i += 4, o += 16)
+                Vector128.StoreUnsafe(Vector128.LoadUnsafe(ref s, (nuint)i), ref d, (nuint)o);
+        }
+
         /// <summary>A raster array (width a multiple of 4) as a block-major one and back.</summary>
         public static void ToBlocks(int[] raster, int w, int h, int[] blocks)
         {
