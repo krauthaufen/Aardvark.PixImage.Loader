@@ -167,7 +167,21 @@ namespace Aardvark.ImageCodecs.Av1
                 for (int i = 0; i < hh; i++)
                 {
                     int o = (y + i) * stride + x;
-                    for (int j = 0; j < w; j++)
+                    int j = 0;
+                    if (Vector128.IsHardwareAccelerated)
+                    {
+                        var rnd = Vector128.Create(1 << (sh - 1));
+                        var max = Vector128.Create(maxV);
+                        for (; j + 8 <= w; j += 8)
+                        {
+                            var a = (Vector128.Create<int>(p0.AsSpan(i * w + j, 4)) + Vector128.Create<int>(p1.AsSpan(i * w + j, 4)) + rnd) >> sh;
+                            var b = (Vector128.Create<int>(p0.AsSpan(i * w + j + 4, 4)) + Vector128.Create<int>(p1.AsSpan(i * w + j + 4, 4)) + rnd) >> sh;
+                            a = Vector128.Max(Vector128<int>.Zero, Vector128.Min(max, a));
+                            b = Vector128.Max(Vector128<int>.Zero, Vector128.Min(max, b));
+                            Vector128.Narrow(a.AsUInt32(), b.AsUInt32()).CopyTo(cur.AsSpan(o + j));
+                        }
+                    }
+                    for (; j < w; j++)
                         cur[o + j] = (ushort)Math.Clamp((p0[i * w + j] + p1[i * w + j] + (1 << (sh - 1))) >> sh, 0, maxV);
                 }
             }
