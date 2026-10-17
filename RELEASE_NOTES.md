@@ -1,3 +1,11 @@
+### 1.0.0
+* AVIF decoder: full AV1 (bit exact with dav1d, passes Argon and the libaom vectors), HEIF grids, overlays, alpha, depth, thumbnails, sequences, gain maps.
+* JPEG XR decode and encode, every pixel format of the standard, bit exact with jxrlib.
+* DNG decode (raw access and rendering with opcodes, colour calibration, demosaicing) and encode; `PixCodec.LoadDng`.
+* JPEG HDR gain maps (Ultra HDR, ISO 21496-1) read and written, MPO / MPF; `PixCodec.LoadHdr`.
+* TIFF: DNG lossy JPEG and JPEG XL tiles, X2 / X4 predictors.
+* JPEG XL: fixes from a check against ISO/IEC 18181-1:2024 and -2:2026, gain map box, HDR encoding.
+
 ### 1.0.0-prerelease0002
 * JPEG XL: decoder (all conformance files pass, within 2x of libjxl) and encoder (lossless, lossy VarDCT, metadata, animation).
 * JPEG-LS decode and encode.
