@@ -2034,14 +2034,14 @@ public class TiffTests
                     found = true;
                 }
                 if (!found || tag == 278) continue; // (RowsPerStrip beyond the image height is legal)
-                long before = GC.GetTotalAllocatedBytes(true);
+                long before = GC.GetAllocatedBytesForCurrentThread();
                 var sw = Stopwatch.StartNew();
                 RawImage? got = null;
                 var ex = Record.Exception(() => got = Tiff.Decode(b));
                 // (an uncompressed tile claiming more rows than it has is fine as long as the rows the image needs are there)
                 if (ex == null) Assert.True(tag == 323 && img.GetBytes().SequenceEqual(got!.GetBytes()), $"{what} tag {tag}: decoded something else");
                 else Assert.True(ex is ImageFormatException || ex is ImageNotSupportedException, $"{what} tag {tag}: {ex.GetType().Name}");
-                Assert.True(GC.GetTotalAllocatedBytes(true) - before < 64 << 20, $"{what} tag {tag}: allocated too much");
+                Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 64 << 20, $"{what} tag {tag}: allocated too much");
                 Assert.True(sw.Elapsed.TotalSeconds < 2, $"{what} tag {tag}: took {sw.Elapsed}");
             }
         }
