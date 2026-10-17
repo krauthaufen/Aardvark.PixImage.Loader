@@ -21,8 +21,9 @@ namespace Aardvark.ImageCodecs.Av1
                 int rowGroups = (f.MiRows + 15) / 16;
                 void Rows(int g)
                 {
+                    var cache = new LevelCache();
                     for (int row = g * 16; row < Math.Min(f.MiRows, g * 16 + 16); row += rowStep)
-                        for (int col = 0; col < f.MiCols; col += colStep) Edge(f, p, 0, row, col);
+                        for (int col = 0; col < f.MiCols; col += colStep) Edge(f, p, 0, row, col, ref cache);
                 }
                 if (multithreaded && rowGroups > 1) Parallel.For(0, rowGroups, Rows);
                 else for (int g = 0; g < rowGroups; g++) Rows(g);
@@ -30,15 +31,33 @@ namespace Aardvark.ImageCodecs.Av1
                 int colGroups = (f.MiCols + 15) / 16;
                 void Cols(int g)
                 {
+                    var cache = new LevelCache();
                     for (int row = 0; row < f.MiRows; row += rowStep)
-                        for (int col = g * 16; col < Math.Min(f.MiCols, g * 16 + 16); col += colStep) Edge(f, p, 1, row, col);
+                        for (int col = g * 16; col < Math.Min(f.MiCols, g * 16 + 16); col += colStep) Edge(f, p, 1, row, col, ref cache);
                 }
                 if (multithreaded && colGroups > 1) Parallel.For(0, colGroups, Cols);
                 else for (int g = 0; g < colGroups; g++) Cols(g);
             }
         }
 
-        static void Edge(Av1FrameState f, int plane, int pass, int row, int col)
+        /// <summary>The filter levels of the last two blocks seen (neighbouring edges mostly share their blocks).</summary>
+        struct LevelCache
+        {
+            public uint H0, H1;
+            public int L0, L1;
+            public LevelCache() { H0 = H1 = uint.MaxValue; }
+
+            public int Get(Av1FrameState f, uint handle, int plane, int pass)
+            {
+                if (handle == H0) return L0;
+                if (handle == H1) return L1;
+                int l = FilterLevel(f, ref f.Block(handle), plane, pass);
+                H1 = H0; L1 = L0; H0 = handle; L0 = l;
+                return l;
+            }
+        }
+
+        static void Edge(Av1FrameState f, int plane, int pass, int row, int col, ref LevelCache cache)
         {
             var h = f.Hdr;
             var s = f.Seq;
@@ -52,7 +71,8 @@ namespace Aardvark.ImageCodecs.Av1
             if (pass == 1 && y == 0) return;
             int xP = x >> sx, yP = y >> sy;
             int prevRow = row - (dy << sy), prevCol = col - (dx << sx);
-            ref var b = ref f.BlockAtMi(row, col);
+            uint handle = f.BlockAt[row * f.MiStride + col];
+            ref var b = ref f.Block(handle);
             int miSize = b.MiSize;
             var lft = f.LfTxSizes[plane];
             int txSz = lft[(row >> sy) * f.MiStride + (col >> sx)];
@@ -60,14 +80,15 @@ namespace Aardvark.ImageCodecs.Av1
             bool skip = b.Skip;
             bool isIntra = b.RefFrame0 <= Av1C.IntraFrame;
             int prevTxSz = lft[(prevRow >> sy) * f.MiStride + (prevCol >> sx)];
-            bool isBlockEdge = pass == 0 ? xP % (T.Num4x4BlocksWide[planeSize] * 4) == 0 : yP % (T.Num4x4BlocksHigh[planeSize] * 4) == 0;
-            bool isTxEdge = pass == 0 ? xP % T.TxWidth[txSz] == 0 : yP % T.TxHeight[txSz] == 0;
+            // the block and transform sizes are powers of two
+            bool isBlockEdge = pass == 0 ? (xP & (T.Num4x4BlocksWide[planeSize] * 4 - 1)) == 0 : (yP & (T.Num4x4BlocksHigh[planeSize] * 4 - 1)) == 0;
+            bool isTxEdge = pass == 0 ? (xP & (T.TxWidth[txSz] - 1)) == 0 : (yP & (T.TxHeight[txSz] - 1)) == 0;
             bool applyFilter = isTxEdge && (isBlockEdge || !skip || isIntra);
             if (!applyFilter) return;
             int baseSize = pass == 0 ? Math.Min(T.TxWidth[prevTxSz], T.TxWidth[txSz]) : Math.Min(T.TxHeight[prevTxSz], T.TxHeight[txSz]);
             int filterSize = plane == 0 ? Math.Min(16, baseSize) : Math.Min(8, baseSize);
-            int lvl = FilterLevel(f, ref b, plane, pass);
-            if (lvl == 0) lvl = FilterLevel(f, ref f.BlockAtMi(prevRow, prevCol), plane, pass);
+            int lvl = cache.Get(f, handle, plane, pass);
+            if (lvl == 0) lvl = cache.Get(f, f.BlockAt[prevRow * f.MiStride + prevCol], plane, pass);
             if (lvl == 0) return;
             int shift = h.LoopFilterSharpness > 4 ? 2 : h.LoopFilterSharpness > 0 ? 1 : 0;
             int limit = h.LoopFilterSharpness > 0 ? Math.Clamp(lvl >> shift, 1, 9 - h.LoopFilterSharpness) : Math.Max(1, lvl >> shift);

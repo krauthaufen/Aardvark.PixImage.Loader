@@ -19,6 +19,7 @@ namespace Aardvark.ImageCodecs.Av1
                 f.Tiles[i].DecodeTile(data, off, size, i);
             }
             bool parallel = Options.Multithreaded && n > 1 && Environment.ProcessorCount > 1;
+            long t0 = Av1Stats.TimeOn ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             if (parallel)
             {
                 try { Parallel.For(0, n, Run); }
@@ -26,6 +27,7 @@ namespace Aardvark.ImageCodecs.Av1
             }
             else
                 for (int i = 0; i < n; i++) Run(i);
+            Av1Stats.Time("time.tiles", t0);
             if (!h.DisableFrameEndUpdateCdf)
                 f.SavedCdfs = f.Tiles[h.ContextUpdateTileId].Cdf;
         }
@@ -36,10 +38,13 @@ namespace Aardvark.ImageCodecs.Av1
             var h = fh!;
             var f = fs!;
             var s = Seq!;
+            long t0 = Av1Stats.TimeOn ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             if (h.LoopFilterLevel[0] != 0 || h.LoopFilterLevel[1] != 0)
                 Av1LoopFilter.Apply(f, Options.Multithreaded);
+            t0 = Av1Stats.Time("time.deblock", t0);
             bool anyCdef = s.EnableCdef && !h.CodedLossless && !h.AllowIntrabc;
             var cdef = anyCdef ? Av1Cdef.Apply(f, Options.Multithreaded) : f.Cur;
+            t0 = Av1Stats.Time("time.cdef", t0);
             var upCdef = h.UseSuperres ? Av1SuperRes.Upscale(f, cdef) : cdef;
             Av1Frame lr;
             if (h.UsesLr)
@@ -48,12 +53,15 @@ namespace Aardvark.ImageCodecs.Av1
                 lr = Av1LoopRestoration.Apply(f, upCur, upCdef, Options.Multithreaded);
             }
             else lr = upCdef;
+            t0 = Av1Stats.Time("time.superres+lr", t0);
             lr.Width = h.UpscaledWidth;
             lr.Height = h.FrameHeight;
             var slot = MakeRefSlot(h, f, lr);
             for (int i = 0; i < 8; i++)
                 if (((h.RefreshFrameFlags >> i) & 1) != 0) { Ref[i] = slot; refValid[i] = true; }
+            t0 = Av1Stats.Time("time.refs", t0);
             if (h.ShowFrame) EmitOutput(lr, h.FilmGrain, h.FrameType, false);
+            Av1Stats.Time("time.output", t0);
         }
 
         Av1RefSlot MakeRefSlot(Av1FrameHeader h, Av1FrameState f, Av1Frame lr)

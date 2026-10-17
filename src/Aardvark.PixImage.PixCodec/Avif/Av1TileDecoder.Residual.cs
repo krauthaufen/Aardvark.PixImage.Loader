@@ -1,13 +1,25 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using T = Aardvark.ImageCodecs.Av1.Av1Tables;
 
 namespace Aardvark.ImageCodecs.Av1
 {
     internal sealed partial class Av1TileDecoder
     {
+        /// <summary>Quantized levels of the current transform block (stride Min(32, w)); all zero between blocks.</summary>
         int[] quant = null!;
+        /// <summary>Dequantized coefficients; all zero between blocks.</summary>
         int[] dequant = null!;
+        /// <summary>
+        /// Min(level, 15) of the decoded coefficients with 4 zero columns / rows of padding (stride LevelStride); all zero
+        /// between blocks.
+        /// </summary>
+        byte[] levels = null!;
+        /// <summary>The scan positions of the last Coeffs call (coefficients 0 .. eob - 1).</summary>
+        int[] scanPos = null!;
+        const int LevelStride = 32 + 4;
         int[] residualBuf = null!;
         Av1Transform transform = null!;
         int planeTxType;
@@ -16,6 +28,8 @@ namespace Aardvark.ImageCodecs.Av1
         {
             quant = new int[1024];
             dequant = new int[1024];
+            levels = new byte[LevelStride * (32 + 4)];
+            scanPos = new int[1024];
             residualBuf = new int[64 * 64];
             transform = new Av1Transform();
             InitIntraScratch();
@@ -134,7 +148,7 @@ namespace Aardvark.ImageCodecs.Av1
             if (!skip)
             {
                 int eob = Coeffs(plane, startX, startY, txSz);
-                if (eob > 0) Reconstruct(plane, startX, startY, txSz);
+                if (eob > 0) Reconstruct(plane, startX, startY, txSz, eob);
             }
             var lf = fs.LfTxSizes[plane];
             int r0 = row >> sy, c0 = col >> sx;
@@ -259,7 +273,6 @@ namespace Aardvark.ImageCodecs.Av1
             int txSzCtx = (T.TxSizeSqr[txSz] + T.TxSizeSqrUp[txSz] + 1) >> 1;
             int ptype = plane > 0 ? 1 : 0;
             int segEob = txSz == Av1C.Tx16x64 || txSz == Av1C.Tx64x16 ? 512 : Math.Min(1024, T.TxWidth[txSz] * T.TxHeight[txSz]);
-            Array.Clear(quant, 0, segEob);
             int eob = 0, culLevel = 0, dcCategory = 0;
             var aboveLevel = aboveLevelCtx[plane];
             var leftLevel = leftLevelCtx[plane];
@@ -344,6 +357,7 @@ namespace Aardvark.ImageCodecs.Av1
                 for (int c = eob - 1; c >= 0; c--)
                 {
                     int pos = wide ? scan16[c] : scan8[c];
+                    scanPos[c] = pos;
                     int level;
                     if (c == eob - 1)
                     {
@@ -370,10 +384,11 @@ namespace Aardvark.ImageCodecs.Av1
                         }
                     }
                     quant[pos] = level;
+                    levels[(pos >> bwl) * LevelStride + (pos & (width - 1))] = (byte)level;
                 }
                 for (int c = 0; c < eob; c++)
                 {
-                    int pos = wide ? scan16[c] : scan8[c];
+                    int pos = scanPos[c];
                     int sign = 0;
                     if (quant[pos] != 0)
                     {
@@ -417,46 +432,41 @@ namespace Aardvark.ImageCodecs.Av1
                     if (sign != 0) quant[pos] = -quant[pos];
                 }
                 culLevel = Math.Min(63, culLevel);
+                // back to all zero for the next block
+                for (int c = 0; c < eob; c++) { int pos = scanPos[c]; levels[(pos >> bwl) * LevelStride + (pos & (width - 1))] = 0; }
             }
             for (int i = 0; i < w4; i++) { aboveLevel[x4 + i] = (byte)culLevel; aboveDc[x4 + i] = (byte)dcCategory; }
             for (int i = 0; i < h4; i++) { leftLevel[y4 + i] = (byte)culLevel; leftDc[y4 + i] = (byte)dcCategory; }
             return eob;
         }
 
+        /// <summary>get_coeff_base_ctx (8.3.2) on the padded levels (positions past the block read 0).</summary>
         int CoeffBaseCtx(int txSz, int txClass, int bwl, int width, int height, int pos)
         {
-            int row = pos >> bwl, col = pos - (row << bwl);
+            int row = pos >> bwl, col = pos & (width - 1);
             int mag = 0;
             var offs = T.SigRefDiffOffset;
+            int o = row * LevelStride + col;
             for (int idx = 0; idx < 5; idx++)
-            {
-                int refRow = row + offs[(txClass * 5 + idx) * 2];
-                int refCol = col + offs[(txClass * 5 + idx) * 2 + 1];
-                if (refRow < height && refCol < width)
-                    mag += Math.Min(Math.Abs(quant[(refRow << bwl) + refCol]), 3);
-            }
+                mag += Math.Min((int)levels[o + offs[(txClass * 5 + idx) * 2] * LevelStride + offs[(txClass * 5 + idx) * 2 + 1]], 3);
             int ctx = Math.Min((mag + 1) >> 1, 4);
             if (txClass == 0)
             {
-                if (row == 0 && col == 0) return 0;
+                if (pos == 0) return 0;
                 return ctx + T.CoeffBaseCtxOffset[txSz * 25 + Math.Min(row, 4) * 5 + Math.Min(col, 4)];
             }
             int i2 = txClass == 2 ? row : col;
             return ctx + T.CoeffBasePosCtxOffset[Math.Min(i2, 2)];
         }
 
+        /// <summary>The coeff_br context (8.3.2) on the padded levels.</summary>
         int CoeffBrCtx(int txClass, int bwl, int txw, int txh, int pos)
         {
-            int row = pos >> bwl, col = pos - (row << bwl);
-            int mag = 0;
+            int row = pos >> bwl, col = pos & (txw - 1);
+            int o = row * LevelStride + col;
             var offs = T.MagRefOffsetWithTxClass;
-            for (int idx = 0; idx < 3; idx++)
-            {
-                int refRow = row + offs[(txClass * 3 + idx) * 2];
-                int refCol = col + offs[(txClass * 3 + idx) * 2 + 1];
-                if (refRow < txh && refCol < (1 << bwl))
-                    mag += Math.Min(quant[refRow * txw + refCol], Av1C.CoeffBaseRange + Av1C.NumBaseLevels + 1);
-            }
+            int mag = 0;
+            for (int idx = 0; idx < 3; idx++) mag += levels[o + offs[(txClass * 3 + idx) * 2] * LevelStride + offs[(txClass * 3 + idx) * 2 + 1]];
             mag = Math.Min((mag + 1) >> 1, 6);
             if (pos == 0) return mag;
             if (txClass == 0) return row < 2 && col < 2 ? mag + 7 : mag + 14;
@@ -469,7 +479,7 @@ namespace Aardvark.ImageCodecs.Av1
         int DcQ(int b) => T.DcQlookup[((bitDepth - 8) >> 1) * 256 + Math.Clamp(b, 0, 255)];
         int AcQ(int b) => T.AcQlookup[((bitDepth - 8) >> 1) * 256 + Math.Clamp(b, 0, 255)];
 
-        void Reconstruct(int plane, int x, int y, int txSz)
+        void Reconstruct(int plane, int x, int y, int txSz, int eob)
         {
             int dqDenom = txSz is Av1C.Tx32x32 or Av1C.Tx16x32 or Av1C.Tx32x16 or Av1C.Tx16x64 or Av1C.Tx64x16 ? 2
                 : txSz is Av1C.Tx64x64 or Av1C.Tx32x64 or Av1C.Tx64x32 ? 4 : 1;
@@ -489,33 +499,88 @@ namespace Aardvark.ImageCodecs.Av1
             int qmBase = useQm ? (qmLevel * 2 + (plane > 0 ? 1 : 0)) * 3344 + T.QmOffset[txSz] : 0;
             var qm = T.QuantizerMatrix;
             long lo = -(1L << (7 + bitDepth)), hi = (1L << (7 + bitDepth)) - 1;
-            for (int i = 0; i < th; i++)
-                for (int j = 0; j < tw; j++)
-                {
-                    int k = i * tw + j;
-                    int qv = quant[k];
-                    if (qv == 0) { dequant[k] = 0; continue; }
-                    long q = k == 0 ? dcQ : acQ;
-                    if (useQm) q = (q * qm[qmBase + k] + 16) >> 5;
-                    long dq = qv * q;
-                    long a = (Math.Abs(dq) & 0xFFFFFF) / dqDenom;
-                    dequant[k] = (int)Math.Clamp(dq < 0 ? -a : a, lo, hi);
-                }
-            transform.Inverse2D(dequant, txSz, tt, lossless, bitDepth, residualBuf);
+            int dqShift = dqDenom >> 1;   // 1, 2, 4 -> 0, 1, 2
+            int log2Tw = Math.Min(5, log2W), nzRows = 0;
+            // only the coefficients in scan order up to eob can be nonzero
+            for (int c = 0; c < eob; c++)
+            {
+                int k = scanPos[c];
+                int qv = quant[k];
+                if (qv == 0) continue;
+                long q = k == 0 ? dcQ : acQ;
+                if (useQm) q = (q * qm[qmBase + k] + 16) >> 5;
+                long dq = qv * q;
+                long a = (Math.Abs(dq) & 0xFFFFFF) >> dqShift;
+                dequant[k] = (int)Math.Clamp(dq < 0 ? -a : a, lo, hi);
+                nzRows = Math.Max(nzRows, (k >> log2Tw) + 1);
+            }
             var plane0 = fs.Cur.Planes[plane];
             int stride = fs.Cur.Stride[plane];
             int maxV = (1 << bitDepth) - 1;
+            if (eob == 1 && tt == Av1C.DctDct && !lossless)
+            {
+                int dcRes = Av1Transform.DcOnly(dequant[0], txSz, bitDepth);
+                quant[0] = 0; dequant[0] = 0;
+                for (int i = 0; i < hh; i++) AddConstant(plane0.AsSpan((y + i) * stride + x, w), dcRes, maxV);
+                return;
+            }
+            transform.Inverse2D(dequant, txSz, tt, lossless, bitDepth, residualBuf, nzRows);
+            for (int c = 0; c < eob; c++) { int k = scanPos[c]; quant[k] = 0; dequant[k] = 0; }
             for (int i = 0; i < hh; i++)
             {
                 int yy = flipUD ? hh - i - 1 : i;
                 int rowOff = (y + yy) * stride + x;
+                if (!flipLR)
+                {
+                    AddRow(plane0.AsSpan(rowOff, w), residualBuf.AsSpan(i * w, w), maxV);
+                    continue;
+                }
                 for (int j = 0; j < w; j++)
                 {
-                    int xx = flipLR ? w - j - 1 : j;
-                    ref ushort px = ref plane0[rowOff + xx];
+                    ref ushort px = ref plane0[rowOff + w - j - 1];
                     px = (ushort)Math.Clamp(px + residualBuf[i * w + j], 0, maxV);
                 }
             }
+        }
+
+        /// <summary>dst = Clip1( dst + res ) for one row.</summary>
+        static void AddRow(Span<ushort> dst, ReadOnlySpan<int> res, int maxV)
+        {
+            int j = 0;
+            if (Vector128.IsHardwareAccelerated && dst.Length >= 8)
+            {
+                var max = Vector128.Create(maxV);
+                ref ushort d0 = ref MemoryMarshal.GetReference(dst);
+                ref int r0 = ref MemoryMarshal.GetReference(res);
+                for (; j + 8 <= dst.Length; j += 8)
+                {
+                    var (lo, hi) = Vector128.Widen(Vector128.LoadUnsafe(ref d0, (nuint)j));
+                    var a = Vector128.Max(Vector128<int>.Zero, Vector128.Min(max, lo.AsInt32() + Vector128.LoadUnsafe(ref r0, (nuint)j)));
+                    var b = Vector128.Max(Vector128<int>.Zero, Vector128.Min(max, hi.AsInt32() + Vector128.LoadUnsafe(ref r0, (nuint)j + 4)));
+                    Vector128.Narrow(a.AsUInt32(), b.AsUInt32()).StoreUnsafe(ref d0, (nuint)j);
+                }
+            }
+            for (; j < dst.Length; j++) dst[j] = (ushort)Math.Clamp(dst[j] + res[j], 0, maxV);
+        }
+
+        /// <summary>dst = Clip1( dst + v ) for one row.</summary>
+        static void AddConstant(Span<ushort> dst, int v, int maxV)
+        {
+            int j = 0;
+            if (Vector128.IsHardwareAccelerated && dst.Length >= 8)
+            {
+                var max = Vector128.Create(maxV);
+                var vv = Vector128.Create(v);
+                ref ushort d0 = ref MemoryMarshal.GetReference(dst);
+                for (; j + 8 <= dst.Length; j += 8)
+                {
+                    var (lo, hi) = Vector128.Widen(Vector128.LoadUnsafe(ref d0, (nuint)j));
+                    var a = Vector128.Max(Vector128<int>.Zero, Vector128.Min(max, lo.AsInt32() + vv));
+                    var b = Vector128.Max(Vector128<int>.Zero, Vector128.Min(max, hi.AsInt32() + vv));
+                    Vector128.Narrow(a.AsUInt32(), b.AsUInt32()).StoreUnsafe(ref d0, (nuint)j);
+                }
+            }
+            for (; j < dst.Length; j++) dst[j] = (ushort)Math.Clamp(dst[j] + v, 0, maxV);
         }
     }
 }

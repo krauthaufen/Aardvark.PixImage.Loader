@@ -100,10 +100,30 @@ namespace Aardvark.ImageCodecs.Av1
         static long Round2(long x, int n) => n == 0 ? x : (x + (1L << (n - 1))) >> n;
 
         /// <summary>
-        /// 2D inverse transform (7.13.3) of <paramref name="dequant"/> (row-major, stride Min(32, w), Min(32, h) rows)
-        /// into <paramref name="residual"/> (row-major, stride w).
+        /// The 2D inverse DCT_DCT of a block whose only nonzero coefficient is the DC one: every 1D DCT of a DC-only input
+        /// outputs Round2( dc * cos128( 32 ), 12 ) everywhere (the other butterfly inputs are zero), so the residual is
+        /// one value.
         /// </summary>
-        public void Inverse2D(int[] dequant, int txSz, int txType, bool lossless, int bitDepth, int[] residual)
+        public static int DcOnly(int dc, int txSz, int bitDepth)
+        {
+            int log2W = T.TxWidthLog2[txSz], log2H = T.TxHeightLog2[txSz];
+            int rowShift = T.TransformRowShift[txSz];
+            int rowClamp = bitDepth + 8, colClamp = Math.Max(bitDepth + 6, 16);
+            long rowLo = -(1L << (rowClamp - 1)), rowHi = (1L << (rowClamp - 1)) - 1;
+            long colLo = -(1L << (colClamp - 1)), colHi = (1L << (colClamp - 1)) - 1;
+            long a = dc;
+            if (Math.Abs(log2W - log2H) == 1) a = Round12(a * 2896);
+            long v = Math.Clamp(Round12(a * 2896), rowLo, rowHi);
+            long r = Math.Clamp(Round2(v, rowShift), colLo, colHi);
+            long u = Math.Clamp(Round12(r * 2896), colLo, colHi);
+            return (int)Round2(u, 4);
+        }
+
+        /// <summary>
+        /// 2D inverse transform (7.13.3) of <paramref name="dequant"/> (row-major, stride Min(32, w), Min(32, h) rows)
+        /// into <paramref name="residual"/> (row-major, stride w); rows of dequant from <paramref name="nzRows"/> on are zero.
+        /// </summary>
+        public void Inverse2D(int[] dequant, int txSz, int txType, bool lossless, int bitDepth, int[] residual, int nzRows)
         {
             int log2W = T.TxWidthLog2[txSz], log2H = T.TxHeightLog2[txSz];
             int w = 1 << log2W, hh = 1 << log2H;
@@ -114,9 +134,7 @@ namespace Aardvark.ImageCodecs.Av1
             int colClamp = Math.Max(bitDepth + 6, 16);
             bool rect = Math.Abs(log2W - log2H) == 1;
             long colLo = -(1L << (colClamp - 1)), colHi = (1L << (colClamp - 1)) - 1;
-            // rows without a nonzero coefficient transform to zero
-            int nzRows = th;
-            while (nzRows > 0 && dequant.AsSpan((nzRows - 1) * tw, tw).IndexOfAnyExcept(0) < 0) nzRows--;
+            // rows from nzRows on have no nonzero coefficient: they transform to zero
             for (int i = 0; i < hh; i++)
             {
                 if (i >= nzRows)
