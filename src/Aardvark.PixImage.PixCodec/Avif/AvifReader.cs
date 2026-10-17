@@ -495,6 +495,7 @@ namespace Aardvark.ImageCodecs.Heif
             for (int j = 0; j < 4; j++) cf[j] = fill[j] / 65535.0;
             var acc = new double[(long)ow * oh * 4];
             for (long i = 0; i < (long)ow * oh; i++) for (int j = 0; j < 4; j++) acc[i * 4 + j] = cf[j];
+            Span<double> px = stackalloc double[4];
             foreach (var (li, ox, oy, lb) in layers)
             {
                 double scale = (1 << lb) - 1;
@@ -506,7 +507,6 @@ namespace Aardvark.ImageCodecs.Heif
                     {
                         long cx = ox + x;
                         if (cx < 0 || cx >= ow) continue;
-                        Span<double> px = stackalloc double[4];
                         Sample(li, x, y, scale, px);
                         long o = (cy * ow + cx) * 4;
                         // later inputs over earlier ones (straight alpha "over")
