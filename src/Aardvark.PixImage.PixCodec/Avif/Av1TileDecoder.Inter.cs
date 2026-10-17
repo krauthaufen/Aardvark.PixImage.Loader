@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using T = Aardvark.ImageCodecs.Av1.Av1Tables;
 
 namespace Aardvark.ImageCodecs.Av1
@@ -157,11 +159,7 @@ namespace Aardvark.ImageCodecs.Av1
             var p1 = preds[1];
             if (!isCompound && !isInterIntra)
             {
-                for (int i = 0; i < hh; i++)
-                {
-                    int o = (y + i) * stride + x;
-                    for (int j = 0; j < w; j++) cur[o + j] = (ushort)Math.Clamp(p0[i * w + j], 0, maxV);
-                }
+                for (int i = 0; i < hh; i++) StoreClipped(cur.AsSpan((y + i) * stride + x, w), p0.AsSpan(i * w, w), maxV);
             }
             else if (compoundType == Av1C.CompoundAverage)
             {
@@ -185,6 +183,23 @@ namespace Aardvark.ImageCodecs.Av1
             }
             else MaskBlend(plane, x, y, w, hh);
             if (motionMode == Av1C.Obmc) OverlappedMotionCompensation(plane, w, hh);
+        }
+
+        /// <summary>dst = Clip3( 0, maxV, src ) for one row.</summary>
+        static void StoreClipped(Span<ushort> dst, ReadOnlySpan<int> src, int maxV)
+        {
+            int j = 0;
+            if (Vector128.IsHardwareAccelerated)
+            {
+                var max = Vector128.Create(maxV);
+                for (; j + 8 <= dst.Length; j += 8)
+                {
+                    var a = Vector128.Max(Vector128<int>.Zero, Vector128.Min(max, Vector128.Create<int>(src.Slice(j, 4))));
+                    var b = Vector128.Max(Vector128<int>.Zero, Vector128.Min(max, Vector128.Create<int>(src.Slice(j + 4, 4))));
+                    Vector128.Narrow(a.AsUInt32(), b.AsUInt32()).CopyTo(dst.Slice(j));
+                }
+            }
+            for (; j < dst.Length; j++) dst[j] = (ushort)Math.Clamp(src[j], 0, maxV);
         }
 
         readonly int[] gmRowTmp = new int[6];
@@ -231,6 +246,23 @@ namespace Aardvark.ImageCodecs.Av1
             var filters = T.SubpelFilters;
             var im = intermediate;
             int r0 = interRound0;
+            int vFilter = filter0;
+            if (hh <= 4)
+            {
+                if (vFilter == Av1C.EightTap || vFilter == Av1C.EightTapSharp) vFilter = 4;
+                else if (vFilter == Av1C.EightTapSmooth) vFilter = 5;
+            }
+            // unscaled and inside the reference: every row / column has the same filter phase and no clamping
+            if (xStep == 1 << Av1C.ScaleSubpelBits && yStep == 1 << Av1C.ScaleSubpelBits && Vector128.IsHardwareAccelerated)
+            {
+                int x0 = (x >> 10) - 3, y0 = (y >> 10) - 3;
+                if (x0 >= 0 && x0 + w + 6 <= lastX && y0 >= 0 && y0 + intermediateHeight - 1 <= lastY)
+                {
+                    PredictUnscaled(refPlane, refStride, x0, y0, w, hh, intermediateHeight,
+                        (interpFilter * 16 + ((x >> 6) & Av1C.SubpelMask)) * 8, (vFilter * 16 + ((y >> 6) & Av1C.SubpelMask)) * 8, outp, outStride);
+                    return;
+                }
+            }
             for (int r = 0; r < intermediateHeight; r++)
             {
                 int ry = Math.Clamp((y >> 10) + r - 3, 0, lastY) * refStride;
@@ -244,12 +276,7 @@ namespace Aardvark.ImageCodecs.Av1
                     im[r * w + c] = (s + (1 << (r0 - 1))) >> r0;
                 }
             }
-            interpFilter = filter0;
-            if (hh <= 4)
-            {
-                if (interpFilter == Av1C.EightTap || interpFilter == Av1C.EightTapSharp) interpFilter = 4;
-                else if (interpFilter == Av1C.EightTapSmooth) interpFilter = 5;
-            }
+            interpFilter = vFilter;
             int r1 = interRound1;
             for (int r = 0; r < hh; r++)
             {
@@ -261,6 +288,74 @@ namespace Aardvark.ImageCodecs.Av1
                     int s = 0;
                     for (int t = 0; t < 8; t++) s += filters[fo + t] * im[(baseRow + t) * w + c];
                     outp[r * outStride + c] = (s + (1 << (r1 - 1))) >> r1;
+                }
+            }
+        }
+
+        /// <summary>
+        /// <see cref="BlockInterPrediction"/> for an unscaled reference block that needs no clamping: the 8 tap filters
+        /// with one phase per direction, four samples at a time. <paramref name="x0"/>, <paramref name="y0"/> is the
+        /// first reference sample (3 before the block).
+        /// </summary>
+        void PredictUnscaled(ushort[] refPlane, int refStride, int x0, int y0, int w, int hh, int imH, int hfo, int vfo, int[] outp, int outStride)
+        {
+            var filters = T.SubpelFilters;
+            int h0 = filters[hfo], h1 = filters[hfo + 1], h2 = filters[hfo + 2], h3 = filters[hfo + 3];
+            int h4 = filters[hfo + 4], h5 = filters[hfo + 5], h6 = filters[hfo + 6], h7 = filters[hfo + 7];
+            var im = intermediate;
+            int r0 = interRound0, r1 = interRound1;
+            var rnd0 = Vector128.Create(1 << (r0 - 1));
+            int w4 = w & ~3;
+            var src = refPlane.AsSpan();
+            static Vector128<int> L4(ReadOnlySpan<ushort> s, int i)
+                => Vector128.WidenLower(Vector128.CreateScalar(MemoryMarshal.Read<ulong>(MemoryMarshal.AsBytes(s.Slice(i, 4)))).AsUInt16()).AsInt32();
+            for (int r = 0; r < imH; r++)
+            {
+                int ro = (y0 + r) * refStride + x0;
+                int c = 0;
+                if (h3 == 128)
+                {
+                    // phase 0: the filter is the sample itself
+                    for (; c < w4; c += 4) ((L4(src, ro + c + 3) * 128 + rnd0) >> r0).CopyTo(im, r * w + c);
+                }
+                else
+                    for (; c < w4; c += 4)
+                    {
+                        int b = ro + c;
+                        var acc = L4(src, b) * h0 + L4(src, b + 1) * h1 + L4(src, b + 2) * h2 + L4(src, b + 3) * h3
+                                  + L4(src, b + 4) * h4 + L4(src, b + 5) * h5 + L4(src, b + 6) * h6 + L4(src, b + 7) * h7;
+                        ((acc + rnd0) >> r0).CopyTo(im, r * w + c);
+                    }
+                for (; c < w; c++)
+                {
+                    int b = ro + c;
+                    int sum = h0 * src[b] + h1 * src[b + 1] + h2 * src[b + 2] + h3 * src[b + 3] + h4 * src[b + 4] + h5 * src[b + 5] + h6 * src[b + 6] + h7 * src[b + 7];
+                    im[r * w + c] = (sum + (1 << (r0 - 1))) >> r0;
+                }
+            }
+            int v0 = filters[vfo], v1 = filters[vfo + 1], v2 = filters[vfo + 2], v3 = filters[vfo + 3];
+            int v4 = filters[vfo + 4], v5 = filters[vfo + 5], v6 = filters[vfo + 6], v7 = filters[vfo + 7];
+            var rnd1 = Vector128.Create(1 << (r1 - 1));
+            for (int r = 0; r < hh; r++)
+            {
+                int c = 0;
+                if (v3 == 128)
+                    for (; c < w4; c += 4)
+                        ((Vector128.Create<int>(im.AsSpan(r * w + c + 3 * w, 4)) * 128 + rnd1) >> r1).CopyTo(outp, r * outStride + c);
+                for (; c < w4; c += 4)
+                {
+                    int b = r * w + c;
+                    var acc = Vector128.Create<int>(im.AsSpan(b, 4)) * v0 + Vector128.Create<int>(im.AsSpan(b + w, 4)) * v1
+                              + Vector128.Create<int>(im.AsSpan(b + 2 * w, 4)) * v2 + Vector128.Create<int>(im.AsSpan(b + 3 * w, 4)) * v3
+                              + Vector128.Create<int>(im.AsSpan(b + 4 * w, 4)) * v4 + Vector128.Create<int>(im.AsSpan(b + 5 * w, 4)) * v5
+                              + Vector128.Create<int>(im.AsSpan(b + 6 * w, 4)) * v6 + Vector128.Create<int>(im.AsSpan(b + 7 * w, 4)) * v7;
+                    ((acc + rnd1) >> r1).CopyTo(outp, r * outStride + c);
+                }
+                for (; c < w; c++)
+                {
+                    int b = r * w + c;
+                    int sum = v0 * im[b] + v1 * im[b + w] + v2 * im[b + 2 * w] + v3 * im[b + 3 * w] + v4 * im[b + 4 * w] + v5 * im[b + 5 * w] + v6 * im[b + 6 * w] + v7 * im[b + 7 * w];
+                    outp[r * outStride + c] = (sum + (1 << (r1 - 1))) >> r1;
                 }
             }
         }
