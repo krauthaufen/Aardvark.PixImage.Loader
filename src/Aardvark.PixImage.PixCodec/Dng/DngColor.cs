@@ -214,6 +214,10 @@ namespace Aardvark.ImageCodecs
         public static readonly double[] XyzD50ToLinearSrgb =
             Invert(Mul(Bradford(D65, D50), 3, 3, RgbToXyz((0.64, 0.33), (0.30, 0.60), (0.15, 0.06), D65), 3), 3);
 
+        /// <summary>Linear ProPhoto RGB (RIMM: ROMM primaries, D50 white) to XYZ D50, and back.</summary>
+        public static readonly double[] ProPhotoToXyzD50 = RgbToXyz((0.7347, 0.2653), (0.1596, 0.8404), (0.0366, 0.0001), D50);
+        public static readonly double[] XyzD50ToProPhoto = Invert(ProPhotoToXyzD50, 3);
+
         // ------------------------------------------------------------------------------------------ the DNG model
 
         /// <summary>The calibration matrices interpolated for one white balance (definitions of chapter 6).</summary>

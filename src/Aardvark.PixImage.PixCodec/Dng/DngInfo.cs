@@ -40,6 +40,11 @@ namespace Aardvark.ImageCodecs
         public double[]? ReductionMatrix { get; init; }
         /// <summary>ForwardMatrixN: white balanced camera space to XYZ D50, 3 x n; null when absent.</summary>
         public double[]? ForwardMatrix { get; init; }
+        /// <summary>
+        /// ProfileHueSatMapDataN: hue shift (degrees), saturation scale, value scale per table entry (value divisions outer,
+        /// hue middle, saturation inner; see <see cref="DngInfo.HueSatMapDims"/>); null when absent.
+        /// </summary>
+        public float[]? HueSatMap { get; init; }
     }
 
     /// <summary>One opcode of an opcode list (DNG 1.7.1 chapter 7).</summary>
@@ -178,6 +183,13 @@ namespace Aardvark.ImageCodecs
         public string? CameraCalibrationSignature { get; init; }
         public string? ProfileCalibrationSignature { get; init; }
         public string? ProfileName { get; init; }
+        /// <summary>ProfileHueSatMapDims (hue, saturation, value divisions) and ProfileHueSatMapEncoding (0 linear, 1 sRGB); null without tables.</summary>
+        public int[]? HueSatMapDims { get; init; }
+        public int HueSatMapEncoding { get; init; }
+        /// <summary>ProfileLookTableDims / Data / Encoding: the profile's default "look", same layout as the hue / saturation maps.</summary>
+        public int[]? LookTableDims { get; init; }
+        public float[]? LookTable { get; init; }
+        public int LookTableEncoding { get; init; }
         /// <summary>DefaultBlackRender: 0 auto, 1 none.</summary>
         public int DefaultBlackRender { get; init; }
 

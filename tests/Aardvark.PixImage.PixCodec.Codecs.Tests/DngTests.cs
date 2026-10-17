@@ -180,6 +180,28 @@ public class DngTests
     }
 
     [Fact]
+    public void HueSatMapAndLookTable()
+    {
+        // two 3D hue / saturation / value maps (sRGB encoded value axis) interpolated like the calibrations, and a look table
+        var path = F("huesatmap_look.dng");
+        var bytes = File.ReadAllBytes(path);
+        var j = Json(path);
+        var pr = Ints(j.GetProperty("patch"));
+        var info = Dng.ReadInfo(bytes);
+        Assert.Equal(new[] { 8, 3, 3 }, info.HueSatMapDims);
+        Assert.Equal(1, info.HueSatMapEncoding);
+        Assert.Equal(new[] { 6, 2, 1 }, info.LookTableDims);
+        Assert.All(info.Calibrations, c => Assert.Equal(8 * 3 * 3 * 3, c.HueSatMap!.Length));
+        var img = Dng.Decode(bytes, LinearSrgb);
+        AssertPatches(TestUtil.LoadRef(path + ".color.ref"), PatchMeans(img, pr[0], pr[1], 4, 6), 0.004, "hue / saturation map");
+        var look = Dng.Decode(bytes, new DngDecodeOptions { OutputType = SampleType.Float32, ApplyLookTable = true });
+        AssertPatches(TestUtil.LoadRef(path + ".look.color.ref"), PatchMeans(look, pr[0], pr[1], 4, 6), 0.004, "look table");
+        // without the maps the file renders like its twin without them
+        var plain = Dng.Decode(bytes, new DngDecodeOptions { OutputType = SampleType.Float32, ApplyHueSatMap = false });
+        TestUtil.AssertEqual(Dng.Decode(File.ReadAllBytes(F("bayer12_be_lin_dual.dng")), LinearSrgb), plain, 1e-6);
+    }
+
+    [Fact]
     public void XTransFlatPatches()
     {
         var path = F("xtrans16.dng");
@@ -406,7 +428,7 @@ public class DngTests
             var expected = TestUtil.LoadRef(path + ".libraw.ref");
             var img = Dng.Decode(File.ReadAllBytes(path), new DngDecodeOptions
             {
-                OutputType = SampleType.Float32, ApplyDefaultCrop = false, ApplyBaselineExposure = false,
+                OutputType = SampleType.Float32, ApplyDefaultCrop = false, ApplyBaselineExposure = false, ApplyHueSatMap = false,
                 ApplyOpcodes = j.GetProperty("libraw_opcodes").GetBoolean(),
             });
             Assert.Equal(expected.Channels, img.Channels);

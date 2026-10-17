@@ -74,6 +74,22 @@ namespace Aardvark.ImageCodecs
             return v != null && v.Length >= len ? v.Take(len).ToArray() : null;
         }
 
+        /// <summary>Hue / saturation / value divisions of a table (hue &gt;= 1, saturation &gt;= 2, value &gt;= 1), null when absent or invalid.</summary>
+        static int[]? Dims(TiffFile f, TiffEntry[] e, int tag)
+        {
+            long[]? d;
+            try { d = f.Integers(e, tag); }
+            catch (ImageFormatException) { return null; }
+            if (d == null || d.Length < 3 || d[0] < 1 || d[1] < 2 || d[2] < 1 || d[0] * d[1] * d[2] > 1 << 20) return null;
+            return new[] { (int)d[0], (int)d[1], (int)d[2] };
+        }
+
+        static float[]? Floats(TiffFile f, TiffEntry[] e, int tag, int len)
+        {
+            var v = D(f, e, tag);
+            return v != null && v.Length >= len ? v.Take(len).Select(x => (float)x).ToArray() : null;
+        }
+
         static (double, double)? IlluminantXY(TiffFile f, TiffEntry[] e, int tag)
         {
             var b = f.Bytes(e, tag);
@@ -196,7 +212,10 @@ namespace Aardvark.ImageCodecs
             // colour calibrations (camera profile in IFD 0)
             var cals = new List<DngCalibration>();
             int[] illTags = { 50778, 50779, 52529 }, cmTags = { 50721, 50722, 52531 }, ccTags = { 50723, 50724, 52530 },
-                  rmTags = { 50725, 50726, 52538 }, fmTags = { 50964, 50965, 52532 }, idTags = { 52533, 52534, 52535 };
+                  rmTags = { 50725, 50726, 52538 }, fmTags = { 50964, 50965, 52532 }, idTags = { 52533, 52534, 52535 },
+                  hsTags = { 50938, 50939, 52537 };
+            var hsDims = Dims(f, ifd0, 50937);
+            int hsLen = hsDims == null ? 0 : hsDims[0] * hsDims[1] * hsDims[2] * 3;
             for (int k = 0; k < 3; k++)
             {
                 var cm = Matrix(f, ifd0, cmTags[k], colorPlanes * 3);
@@ -210,6 +229,7 @@ namespace Aardvark.ImageCodecs
                     CameraCalibration = Matrix(f, ifd0, ccTags[k], colorPlanes * colorPlanes),
                     ReductionMatrix = colorPlanes > 3 ? Matrix(f, ifd0, rmTags[k], 3 * colorPlanes) : null,
                     ForwardMatrix = Matrix(f, ifd0, fmTags[k], 3 * colorPlanes),
+                    HueSatMap = hsLen > 0 ? Floats(f, ifd0, hsTags[k], hsLen) : null,
                 });
             }
             var asn = D(f, ifd0, 50728);
@@ -297,6 +317,11 @@ namespace Aardvark.ImageCodecs
                 CameraCalibrationSignature = Text(f, ifd0, 50931), ProfileCalibrationSignature = Text(f, ifd0, 50932),
                 ProfileName = Text(f, ifd0, 50936),
                 DefaultBlackRender = (int)f.Integer(ifd0, 51110, 0),
+                HueSatMapDims = cals.Any(c => c.HueSatMap != null) ? hsDims : null,
+                HueSatMapEncoding = (int)f.Integer(ifd0, 51107, 0),
+                LookTableDims = Dims(f, ifd0, 50981) is { } ld && Floats(f, ifd0, 50982, ld[0] * ld[1] * ld[2] * 3) != null ? ld : null,
+                LookTable = Dims(f, ifd0, 50981) is { } ld2 ? Floats(f, ifd0, 50982, ld2[0] * ld2[1] * ld2[2] * 3) : null,
+                LookTableEncoding = (int)f.Integer(ifd0, 51108, 0),
                 OpcodeList1 = ops1, OpcodeList2 = ops2, OpcodeList3 = ops3,
                 Previews = previews,
             };

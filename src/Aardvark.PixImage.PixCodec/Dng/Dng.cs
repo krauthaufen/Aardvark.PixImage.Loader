@@ -54,6 +54,12 @@ namespace Aardvark.ImageCodecs
         /// </summary>
         public bool ClipHighlights { get; set; } = true;
 
+        /// <summary>Apply the camera profile's hue / saturation / value maps (ProfileHueSatMapData, part of its colour calibration; default true).</summary>
+        public bool ApplyHueSatMap { get; set; } = true;
+
+        /// <summary>Apply the profile's look table (ProfileLookTableData, a default "look"; default false). Its tone curve is never applied.</summary>
+        public bool ApplyLookTable { get; set; }
+
         /// <summary>Apply OpcodeList1..3 (default true). Unknown opcodes not marked optional make decoding fail.</summary>
         public bool ApplyOpcodes { get; set; } = true;
 

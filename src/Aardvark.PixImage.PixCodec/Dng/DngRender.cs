@@ -293,6 +293,8 @@ namespace Aardvark.ImageCodecs
             // output colour
             int oc;
             double[] mat;   // oc x n, from white balanced camera space
+            double[]? post = null;   // with hue / saturation / value maps: mat ends in ProPhoto RGB, post maps that to the output
+            DngHsv? hsv = null, look = null;
             if (o.ColorSpace == DngColorSpace.Camera || info.Calibrations.Count == 0 || n == 1)
             {
                 oc = n == 3 || n == 1 ? n : n;
@@ -303,7 +305,15 @@ namespace Aardvark.ImageCodecs
             {
                 var c2x = DngColor.CameraToXyzD50(info, neutral, white, UseCameraCalibration(info));
                 var wb2x = DngColor.Mul(c2x, 3, n, DngColor.Diagonal(neutral), n);
-                mat = o.ColorSpace == DngColorSpace.XyzD50 ? wb2x : DngColor.Mul(DngColor.XyzD50ToLinearSrgb, 3, 3, wb2x, n);
+                var x2o = o.ColorSpace == DngColorSpace.XyzD50 ? DngColor.Identity(3) : DngColor.XyzD50ToLinearSrgb;
+                if (o.ApplyHueSatMap) hsv = DngHsv.HueSatMap(info, DngColor.Weights(info.Calibrations, DngColor.Temperature(white.X, white.Y)));
+                if (o.ApplyLookTable && info.LookTable != null && info.LookTableDims != null) look = new DngHsv(info.LookTable, info.LookTableDims, info.LookTableEncoding);
+                if (hsv != null || look != null)
+                {
+                    mat = DngColor.Mul(DngColor.XyzD50ToProPhoto, 3, 3, wb2x, n);
+                    post = DngColor.Mul(x2o, 3, 3, DngColor.ProPhotoToXyzD50, 3);
+                }
+                else mat = DngColor.Mul(x2o, 3, 3, wb2x, n);
                 oc = 3;
             }
             double ev = o.ExposureCompensation + (o.ApplyBaselineExposure ? info.BaselineExposure + info.BaselineExposureOffset : 0);
@@ -320,7 +330,8 @@ namespace Aardvark.ImageCodecs
             var data = RawImage.CreateArray(type, checked(cw * ch * oc));
             var lut = srgb ? SrgbLut() : null;
             var fm = new float[mat.Length];
-            for (int i = 0; i < fm.Length; i++) fm[i] = (float)mat[i] * gain;
+            for (int i = 0; i < fm.Length; i++) fm[i] = (float)mat[i] * (post == null ? gain : 1);
+            float[]? fp = post == null ? null : Array.ConvertAll(post, x => (float)x);
             int iw = img.Width;
             var planes = img.Data;
             Parallel.For(0, ch, po, y =>
@@ -337,6 +348,15 @@ namespace Aardvark.ImageCodecs
                         float s = 0;
                         for (int p = 0; p < n; p++) s += fm[c * n + p] * px[p];
                         outv[c] = s;
+                    }
+                    if (fp != null)
+                    {
+                        // ProPhoto: hue / saturation map, exposure, look table, then the output space
+                        float r = outv[0], g = outv[1], b = outv[2];
+                        hsv?.Apply(ref r, ref g, ref b);
+                        r *= gain; g *= gain; b *= gain;
+                        look?.Apply(ref r, ref g, ref b);
+                        for (int c = 0; c < 3; c++) outv[c] = fp[c * 3] * r + fp[c * 3 + 1] * g + fp[c * 3 + 2] * b;
                     }
                     switch (type)
                     {

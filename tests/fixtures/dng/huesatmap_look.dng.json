@@ -1,0 +1,17 @@
+{
+ "bits": 12,
+ "cfa": [
+  1,
+  0,
+  2,
+  1
+ ],
+ "height": 96,
+ "layout": "cfa",
+ "patch": [
+  24,
+  16
+ ],
+ "planes": 3,
+ "width": 96
+}

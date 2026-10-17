@@ -341,6 +341,51 @@ def camera_to_srgb_single(neutral):
     return srgb_from_xyz_d50() @ bradford(xy, D50) @ np.linalg.inv(cm), xy
 
 
+def prophoto_to_xyz():
+    prim = np.array([[0.7347, 0.2653], [0.1596, 0.8404], [0.0366, 0.0001]])
+    p = np.array([xyz(c) for c in prim]).T
+    return p @ np.diag(np.linalg.solve(p, xyz(D50)))
+
+
+def srgb_enc(v):
+    return 12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055
+
+
+def srgb_dec(v):
+    return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+
+def hsv_map(rgb, table, dims, encoding):
+    """Chapter 6, applying a hue / saturation / value table to one linear ProPhoto colour (standard dynamic range)."""
+    import colorsys
+    hd, sd, vd = dims
+    r, g, b = rgb
+    mx = max(r, g, b)
+    if mx <= 0:
+        return rgb
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    h *= 360
+    enc = encoding == 1 and vd > 1
+    if enc:
+        v = srgb_enc(min(v, 1))
+    t = np.asarray(table, np.float64).reshape(vd, hd, sd, 3)
+    hs = h * hd / 360
+    h0 = int(math.floor(hs)); fh = hs - h0; h0 %= hd; h1 = (h0 + 1) % hd
+    ss = min(max(s, 0), 1) * (sd - 1); s0 = min(int(ss), sd - 1); fs = ss - s0; s1 = min(s0 + 1, sd - 1)
+    vs = min(max(v, 0), 1) * (vd - 1) if vd > 1 else 0.0; v0 = min(int(vs), vd - 1); fv = vs - v0; v1 = min(v0 + 1, vd - 1)
+    acc = np.zeros(3)
+    for vv, wv in ((v0, 1 - fv), (v1, fv)):
+        for hh, wh in ((h0, 1 - fh), (h1, fh)):
+            for s_, ws in ((s0, 1 - fs), (s1, fs)):
+                acc += wv * wh * ws * t[vv, hh, s_]
+    h = (h + acc[0]) % 360
+    s = min(s * acc[1], 1)
+    v = min(v * acc[2], 1)
+    if enc:
+        v = srgb_dec(v)
+    return np.array(colorsys.hsv_to_rgb(h / 360, s, v))
+
+
 # opcodes ---------------------------------------------------------------------------------------
 
 def opcode(oid, params, optional=False, version=(1, 3, 0, 0)):
@@ -469,6 +514,41 @@ def main():
     write_json(p + '.json', dict(width=W, height=H, active=[0, 0, H, W], final=[W, H], cfa=pat, bits=12, white=[white],
                                  patch=[pw, ph], crop=[0, 0], layout='cfa', planes=3, white_xy=list(xy), weight=wgt,
                                  temperatures=[2856, 6504], baseline_exposure=0.5))
+
+    # 2b. The same scene with hue / saturation maps for both calibrations (3D, sRGB encoded value axis) and a look table
+    hdims, ldims = (8, 3, 3), (6, 2, 1)     # hue, saturation, value divisions
+
+    def hsv_table(dims, seed):
+        g = np.random.default_rng(seed)
+        t = np.zeros((dims[2], dims[0], dims[1], 3))   # value outer, hue middle, saturation inner
+        t[..., 0] = g.uniform(-12, 12, t.shape[:-1])
+        t[..., 1] = g.uniform(0.8, 1.2, t.shape[:-1])
+        t[..., 2] = g.uniform(0.9, 1.1, t.shape[:-1])
+        t[:, :, 0, 2] = 1.0            # zero saturation entries keep the value
+        return t.reshape(-1).astype(np.float32)
+    hs1, hs2, lk = hsv_table(hdims, 11), hsv_table(hdims, 12), hsv_table(ldims, 13)
+    tags = base_tags(W, H, 12, cfa=(2, 2, pat), black=[black0], white=white, colour='dual', neutral=list(nd),
+                     lin=table, baseline_exposure=0.5,
+                     extra=[Tag(50715, SRATIONAL, dh), Tag(50716, SRATIONAL, dv), Tag(278, LONG, 20),
+                            Tag(50937, LONG, list(hdims)), Tag(50938, FLOAT, [float(x) for x in hs1]),
+                            Tag(50939, FLOAT, [float(x) for x in hs2]), Tag(51107, LONG, 1),
+                            Tag(50981, LONG, list(ldims)), Tag(50982, FLOAT, [float(x) for x in lk])])
+    p = os.path.join(OUT, 'huesatmap_look.dng')
+    write_tiff(p, [(tags, strips(packed, 20, rowb))], big_endian=True)
+    c2x = np.linalg.inv(srgb_from_xyz_d50()) @ mat          # camera to XYZ D50 of the dual model above
+    to_pp = np.linalg.inv(prophoto_to_xyz())
+    out_m = srgb_from_xyz_d50() @ prophoto_to_xyz()
+    hs = wgt * hs1.astype(np.float64) + (1 - wgt) * hs2.astype(np.float64)
+    for name, with_look in (('color.ref', False), ('look.color.ref', True)):
+        cols = []
+        for c in PATCHES[:24]:
+            pp = to_pp @ (c2x @ (c * nd))
+            pp = hsv_map(pp, hs, hdims, 1) * 2 ** 0.5
+            if with_look:
+                pp = hsv_map(pp, lk.astype(np.float64), ldims, 0)
+            cols.append(out_m @ pp)
+        write_ref(p + '.' + name, np.array(cols, np.float32).reshape(6, 4, 3))
+    write_json(p + '.json', dict(width=W, height=H, cfa=pat, bits=12, patch=[pw, ph], layout='cfa', planes=3))
 
     # 3. Lossless JPEG tiles, 14-bit, BGGR, each 32 x 32 tile coded as a 64 x 16 frame (DNG's reshaping) --------------
     W, H, T = 96, 64, 32
