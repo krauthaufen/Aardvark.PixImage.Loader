@@ -14,7 +14,7 @@ runs:
     - name: Cache key
       id: key
       shell: bash
-      run: echo "key=testdata-v2-${{ hashFiles('tests/oracle/fetch_*.py', 'tests/oracle/gen_tiff.py', 'tests/oracle/pxref.py', 'tests/oracle/requirements.txt', 'testdata/fetch/*', 'testdata/fixtures/webp/vectors/refs.txt', 'testdata/fixtures/jp2/conformance/limits.txt', 'testdata/fixtures/tga/gimp/sha256.txt') }}" >> "$GITHUB_OUTPUT"
+      run: echo "key=testdata-v2-${{ hashFiles('tests/oracle/fetch_*.py', 'tests/oracle/gen_tiff.py', 'tests/oracle/pxref.py', 'tests/oracle/requirements.txt', 'testdata/fetch/*', 'testdata/fixtures/webp/vectors/refs.txt', 'testdata/fixtures/jp2/conformance/limits.txt', 'testdata/fixtures/tga/gimp/sha256.txt', 'testdata/fixtures/mpo/pillow/sha256.txt') }}" >> "$GITHUB_OUTPUT"
 
     - name: Look up downloads
       if: inputs.mode == 'fetch'
@@ -32,6 +32,8 @@ runs:
           testdata/fixtures/jp2/conformance/reference_*
           testdata/fixtures/tga/gimp/*.tga
           testdata/fixtures/tga/gimp/*.png
+          testdata/fixtures/mpo/pillow/*.mpo
+          testdata/fixtures/mpo/pillow/*.jpg
 
     - name: Fetch
       if: inputs.mode == 'fetch' && steps.lookup.outputs.cache-hit != 'true'
@@ -72,6 +74,8 @@ runs:
           testdata/fixtures/jp2/conformance/reference_*
           testdata/fixtures/tga/gimp/*.tga
           testdata/fixtures/tga/gimp/*.png
+          testdata/fixtures/mpo/pillow/*.mpo
+          testdata/fixtures/mpo/pillow/*.jpg
 
     - name: Restore downloads
       if: inputs.mode == 'restore'
@@ -88,3 +92,5 @@ runs:
           testdata/fixtures/jp2/conformance/reference_*
           testdata/fixtures/tga/gimp/*.tga
           testdata/fixtures/tga/gimp/*.png
+          testdata/fixtures/mpo/pillow/*.mpo
+          testdata/fixtures/mpo/pillow/*.jpg

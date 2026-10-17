@@ -148,8 +148,17 @@ namespace Aardvark.ImageCodecs
                 HasIccProfile = h.Colour.WantIcc ? !(BlackChannel(h) >= 0 && !h.Colour.IsGray && !h.XybEncoded) : JxlColour.DescribingIcc(h.Colour) != null,
                 IsAnimated = animated,
                 Transfer = tf,
+                HasGainMap = HasGainMapBox(c, data),
             };
             return info;
+        }
+
+        internal static bool HasGainMapBox(JxlContainer c, ReadOnlySpan<byte> d)
+        {
+            if (!c.IsContainer) return false;
+            foreach (var box in c.Boxes)
+                if (box.Type == "jhgm" || box.Type == "brob" && box.Length >= 4 && box.Offset + 4 <= d.Length && d.Slice(box.Offset, 4).SequenceEqual("jhgm"u8)) return true;
+            return false;
         }
 
         static int CountFrames(byte[] cs, int pos, JxlImageHeader h)
@@ -336,6 +345,19 @@ namespace Aardvark.ImageCodecs
             var boxes = c.Metadata(data, "jhgm");
             try { return boxes.Count > 0 ? JxlGainMap.Parse(boxes[0]) : null; }
             catch (Exception e) when (IsCorruption(e)) { throw Corrupt(e); }
+        }
+
+        /// <summary>
+        /// The alternate (usually HDR) rendition of a file with a jhgm gain map as linear Float32 RGB, 1.0 = HDR reference
+        /// white, for a display with HDR headroom <paramref name="headroom"/> (log2; null = fully applied): <see cref="Decode(ReadOnlySpan{byte}, JxlDecodeOptions?)"/>
+        /// plus <see cref="GainMap.Apply(RawImage, GainMap, double?)"/>, the code path JPEG gain maps use too. Without a
+        /// usable gain map the image converted to linear light is returned.
+        /// </summary>
+        public static RawImage DecodeHdr(ReadOnlySpan<byte> data, double? headroom = null, JxlDecodeOptions? options = null)
+        {
+            var baseline = Decode(data, options);
+            var gm = GetGainMap(data)?.ToGainMap(options);
+            return gm == null ? GainMap.LinearRgb(baseline) : GainMap.Apply(baseline, gm, headroom);
         }
 
         /// <summary>EXIF (TIFF structure), XMP and JUMBF of the container, Brotli compressed boxes included.</summary>

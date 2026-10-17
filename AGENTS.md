@@ -89,7 +89,7 @@ to run the net8.0 tests.
 - Oracle locations: python (`python3`, else `python`) with `tests/oracle/requirements.txt`; the volume oracles use
   `PIXCODEC_PYTHON` or `.tmp/venv` if present. Tools on the PATH: `magick` (ImageMagick 7), `zstd`, `7z`, `ffmpeg`,
   netpbm (`pamtopnm`, `pngtopam`, `sgitopnm`, `wbmptopbm`), `pngcheck`, `cjxl` / `djxl`. By variable: `ASTCENC`,
-  `PIXCODEC_KTX`, `PIXCODEC_BASISU`, `EXIFTOOL`, `EXR_ORACLE` (`tests/oracle/exr_oracle.cpp`), `PIXCODEC_JBIGKIT` (jbigkit's
+  `PIXCODEC_KTX`, `PIXCODEC_BASISU`, `EXIFTOOL`, `PIXCODEC_ULTRAHDR` (libultrahdr's `ultrahdr_app`), `EXR_ORACLE` (`tests/oracle/exr_oracle.cpp`), `PIXCODEC_JBIGKIT` (jbigkit's
   pbmtools folder), `PIXCODEC_ISO_JPEG` (the ISO libjpeg's `jpeg`), `PIXCODEC_CHARLS` (a CharLS library, where imagecodecs
   has none of its own: Windows).
 - CI (`.github/workflows/build.yml`, and the test step of `publish.yml`): the `testdata` job fetches the downloaded test

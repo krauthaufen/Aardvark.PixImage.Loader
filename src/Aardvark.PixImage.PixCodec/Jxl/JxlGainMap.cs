@@ -30,6 +30,32 @@ namespace Aardvark.ImageCodecs
         /// <summary>Decodes the gain map image.</summary>
         public RawImage DecodeImage(JxlDecodeOptions? options = null) => Jxl.Decode(Image, options);
 
+        /// <summary>
+        /// <see cref="Metadata"/> parsed (ISO 21496-1 C.2); null for an unknown minimum_version, a truncated payload or
+        /// values clause 5 does not allow.
+        /// </summary>
+        public GainMapMetadata? ParsedMetadata
+        {
+            get
+            {
+                try { return GainMapMetadata.FromIso21496(Metadata); }
+                catch (ImageFormatException) { return null; }
+            }
+        }
+
+        /// <summary>
+        /// The gain map in the format independent form that <see cref="GainMap.Apply(RawImage, GainMap, double?)"/> takes
+        /// (the same one JPEG files give): metadata, decoded image, alternate colour space. Null when the metadata is unusable.
+        /// </summary>
+        public GainMap? ToGainMap(JxlDecodeOptions? options = null)
+        {
+            var m = ParsedMetadata;
+            if (m == null) return null;
+            var img = DecodeImage(options);
+            img.Metadata = null;
+            return new GainMap { Metadata = m, Image = img, AlternateIcc = HasAlternateColourSpace ? AlternateIcc : null, Source = GainMapSource.Iso21496 };
+        }
+
         /// <summary>Parses the content of a jhgm box; null for a version this reader does not know.</summary>
         internal static JxlGainMap? Parse(byte[] box)
         {

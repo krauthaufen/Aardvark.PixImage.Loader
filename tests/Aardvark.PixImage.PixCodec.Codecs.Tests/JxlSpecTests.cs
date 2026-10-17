@@ -594,7 +594,7 @@ public class JxlSpecTests(ITestOutputHelper output)
 
     // ------------------------------------------------------------------ 18181-2:2026 gain map box
 
-    static byte[] Box(string type, byte[] body)
+    internal static byte[] Box(string type, byte[] body)
     {
         var b = new byte[8 + body.Length];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(b, (uint)b.Length);
@@ -604,7 +604,7 @@ public class JxlSpecTests(ITestOutputHelper output)
     }
 
     /// <summary>A jhgm box (18181-2:2026 9.11): version, ISO 21496-1 metadata, alternate colour encoding and ICC, gain map.</summary>
-    static byte[] GainMapBox(byte[] meta, JxlColourEncoding? ce, byte[]? icc, byte[] gainMap)
+    internal static byte[] GainMapBox(byte[] meta, JxlColourEncoding? ce, byte[]? icc, byte[] gainMap)
     {
         var ms = new MemoryStream();
         ms.WriteByte(0);

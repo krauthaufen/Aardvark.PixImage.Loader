@@ -4,9 +4,10 @@
 #   pngcheck   4.0.1 (PNG chunk reader)
 #   jpeg       the ISO/IEC 10918 reference software (libjpeg by Thomas Richter)
 #   exr_oracle tests/oracle/exr_oracle.cpp against the system's OpenEXR
+#   ultrahdr_app  libultrahdr 1.4.0 (Ultra HDR / ISO 21496-1 gain map JPEG), with libjpeg-turbo it fetches itself
 # into $CI_TOOLS/src (default .tmp/ci-tools/src); kept when present, so that directory can be cached. Needs a C/C++
-# compiler, make, zlib and OpenEXR development files (with pkg-config). Tells later steps where things are through
-# $GITHUB_ENV / $GITHUB_PATH.
+# compiler, make, cmake, git, zlib and OpenEXR development files (with pkg-config). Tells later steps where things are
+# through $GITHUB_ENV / $GITHUB_PATH.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -26,6 +27,7 @@ deps() { [ $WIN = 1 ] || return 0; ldd "$1" | awk '/mingw64/ { print $3 }' | whi
 STATIC=; [ $WIN = 1 ] && STATIC=-static
 
 JPEG_COMMIT=c719010a26ce0c666e98b2acf924ad5fc24b4f5d
+UHDR=1.4.0
 
 # jbigkit
 if [ ! -f "$D/jbigkit/pbmtools/jbgtopbm$X" ]; then
@@ -61,3 +63,15 @@ if [ ! -f "$D/exr/exr_oracle$X" ]; then   # (the CI cache key covers exr_oracle.
   deps "$D/exr/exr_oracle$X"
 fi
 set_env EXR_ORACLE "$D/exr/exr_oracle$X"
+
+# libultrahdr's ultrahdr_app, writing both XMP and ISO 21496-1 gain map metadata
+if [ ! -f "$D/libultrahdr/build/ultrahdr_app$X" ]; then
+  fetch "https://github.com/google/libultrahdr/archive/refs/tags/v$UHDR.tar.gz" "$D/libultrahdr.tar.gz"
+  unpack "$D/libultrahdr.tar.gz" "$D/libultrahdr"
+  gen=(); command -v ninja > /dev/null && gen=(-G Ninja)
+  (cd "$D/libultrahdr" && cmake -S . -B build "${gen[@]+"${gen[@]}"}" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+      -DUHDR_BUILD_DEPS=ON -DUHDR_WRITE_XMP=ON -DUHDR_WRITE_ISO=ON -DUHDR_ENABLE_INSTALL=OFF -DUHDR_BUILD_EXAMPLES=ON > "$D/libultrahdr.log" 2>&1 \
+    && cmake --build build --config Release -j4 --target ultrahdr_app >> "$D/libultrahdr.log" 2>&1) || { tail -40 "$D/libultrahdr.log"; exit 1; }
+  deps "$D/libultrahdr/build/ultrahdr_app$X"
+fi
+set_env PIXCODEC_ULTRAHDR "$D/libultrahdr/build/ultrahdr_app$X"

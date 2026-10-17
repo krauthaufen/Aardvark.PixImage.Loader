@@ -316,6 +316,18 @@ namespace Aardvark.Data
         /// <inheritdoc cref="Load(string)"/>
         public static PixImage Load(ReadOnlySpan<byte> data) => Convert(ImageCodec.Decode(data));
 
+        /// <summary>
+        /// The HDR rendition of a JPEG (Ultra HDR / ISO 21496-1) or JPEG XL file with a gain map as a linear float RGB(A)
+        /// image, 1.0 = SDR white, for a display with HDR headroom <paramref name="headroom"/> (log2 of peak over SDR white;
+        /// null = the full alternate rendition, 0 = the SDR look). <see cref="Load(string)"/> keeps returning the SDR
+        /// baseline of such files. Images without a gain map come back converted to linear light. See <see cref="ImageCodec.DecodeHdr(string, double?)"/>.
+        /// </summary>
+        public static PixImage<float> LoadHdr(string path, double? headroom = null) => (PixImage<float>)Convert(ImageCodec.DecodeHdr(path, headroom));
+        /// <inheritdoc cref="LoadHdr(string, double?)"/>
+        public static PixImage<float> LoadHdr(Stream stream, double? headroom = null) => (PixImage<float>)Convert(ImageCodec.DecodeHdr(stream, headroom));
+        /// <inheritdoc cref="LoadHdr(string, double?)"/>
+        public static PixImage<float> LoadHdr(ReadOnlySpan<byte> data, double? headroom = null) => (PixImage<float>)Convert(ImageCodec.DecodeHdr(data, headroom));
+
         /// <summary>Decodes into a PixImage&lt;T&gt;, converting the samples if the file has another type (e.g. 16 bit to byte).</summary>
         public static PixImage<T> Load<T>(string path) => As<T>(Load(path));
         /// <inheritdoc cref="Load{T}(string)"/>

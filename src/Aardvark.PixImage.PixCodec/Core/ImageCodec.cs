@@ -61,7 +61,7 @@ namespace Aardvark.ImageCodecs
             return ext switch
             {
                 ".png" => ImageFormat.Png,
-                ".jpg" or ".jpeg" or ".jpe" or ".jfif" => ImageFormat.Jpeg,
+                ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".mpo" => ImageFormat.Jpeg,
                 ".tif" or ".tiff" => ImageFormat.Tiff,
                 ".gif" => ImageFormat.Gif,
                 ".exr" => ImageFormat.Exr,
@@ -347,6 +347,25 @@ namespace Aardvark.ImageCodecs
 
         public static RawImage Decode(ReadOnlySpan<byte> data) => ColorTags.Tag(DecodeCore(data), data, DetectFormat(data));
 
+        /// <summary>
+        /// The HDR rendition of an image with a gain map (JPEG: Ultra HDR / ISO 21496-1, see <see cref="Jpeg.DecodeHdr"/>;
+        /// JPEG XL: jhgm box, see <see cref="Jxl.DecodeHdr"/>) as linear Float32 RGB(A) where 1.0 is SDR white, for a display
+        /// with HDR headroom <paramref name="headroom"/> (log2 of peak over SDR white; null = the full alternate rendition).
+        /// Every other image (or one without a usable gain map) is returned converted to linear light in the same form.
+        /// </summary>
+        public static RawImage DecodeHdr(ReadOnlySpan<byte> data, double? headroom = null) => DetectFormat(data) switch
+        {
+            ImageFormat.Jpeg => Jpeg.DecodeHdr(data, headroom),
+            ImageFormat.Jxl => Jxl.DecodeHdr(data, headroom),
+            _ => GainMap.LinearRgb(Decode(data)),
+        };
+
+        /// <inheritdoc cref="DecodeHdr(ReadOnlySpan{byte}, double?)"/>
+        public static RawImage DecodeHdr(Stream stream, double? headroom = null) => DecodeHdr(ReadAll(stream), headroom);
+
+        /// <inheritdoc cref="DecodeHdr(ReadOnlySpan{byte}, double?)"/>
+        public static RawImage DecodeHdr(string path, double? headroom = null) => DecodeHdr(File.ReadAllBytes(path), headroom);
+
         static RawImage DecodeCore(ReadOnlySpan<byte> data) => DetectFormat(data) switch
         {
             ImageFormat.Png => Png.Decode(data),
@@ -571,6 +590,8 @@ namespace Aardvark.ImageCodecs
                     return Dpx.DecodeAll(data);
                 case ImageFormat.Jxl:
                     return Jxl.DecodeAll(data);
+                case ImageFormat.Jpeg:
+                    return Jpeg.DecodeAll(data);
                 default:
                     return new[] { Decode(data) };
             }
