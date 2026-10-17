@@ -22,6 +22,8 @@ namespace Aardvark.ImageCodecs
         public long MaxPixels { get; set; } = 1L << 28;
         /// <summary>Leave out the alpha auxiliary image.</summary>
         public bool IgnoreAlpha { get; set; }
+        /// <summary>Test hook: leave out the clean aperture crop (libavif's tools return the uncropped image).</summary>
+        internal bool ApplyCrop { get; set; } = true;
 
         internal static readonly AvifDecodeOptions Default = new();
     }

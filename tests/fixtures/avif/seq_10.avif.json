@@ -1,0 +1,15 @@
+{
+ "frames": 4,
+ "animated": true,
+ "width": 96,
+ "height": 64,
+ "channels": 3,
+ "bitDepth": 10,
+ "subsampling": "11",
+ "yuv": [
+  "958b157fed5a97f05ad623a86f47e7c0341b6e4bfa27a85a4fea9cf10c458d7d",
+  "a205f8797da605f01e2fe02d99e3a3b4b1d7838feac463006bf3144ee028620c",
+  "ca476eecd8429f4bc311660b62fa4a492dde6c9a8c4e8d0d287f23ad532d6a09",
+  "aff9b4333e5714e1457e8320de0c4778330f2e48924712b928f6f353b57ca8ce"
+ ]
+}

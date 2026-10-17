@@ -1,0 +1,11 @@
+{
+ "frames": 1,
+ "width": 192,
+ "height": 64,
+ "channels": 4,
+ "bitDepth": 8,
+ "subsampling": "11",
+ "yuv": [
+  "bcc1d0f6202703820cb6ea049b27895ffcc00c571e9c8b3995dd5ef980c9a166"
+ ]
+}

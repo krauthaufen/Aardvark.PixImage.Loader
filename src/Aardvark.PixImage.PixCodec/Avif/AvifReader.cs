@@ -400,7 +400,7 @@ namespace Aardvark.ImageCodecs.Heif
                 switch (t.Kind)
                 {
                     case 'c':
-                        if (Clap(t.Clap!, img.Width, img.Height) is var (x, y, w, h)) img = ImageOps.Crop(img, x, y, w, h);
+                        if (opt.ApplyCrop && Clap(t.Clap!, img.Width, img.Height) is var (x, y, w, h)) img = ImageOps.Crop(img, x, y, w, h);
                         break;
                     case 'r':
                         if (!orientation) break;

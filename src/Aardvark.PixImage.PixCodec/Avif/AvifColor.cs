@@ -206,7 +206,10 @@ namespace Aardvark.ImageCodecs.Heif
             return (int)(v * max + 0.5f);
         }
 
-        /// <summary>The chroma samples of one luma row, bilinearly upsampled (3:1 weights) for subsampled planes.</summary>
+        /// <summary>
+        /// The chroma samples of one luma row, bilinearly upsampled (3:1 weights) for subsampled planes and rounded to the
+        /// sample grid (as libavif does, so the RGB stays within one step of avifdec).
+        /// </summary>
         static void UpsampleRow(YuvImage y, int row, float[] uRow, float[] vRow)
         {
             int w = y.Width;
@@ -229,18 +232,19 @@ namespace Aardvark.ImageCodecs.Heif
                 if (y.SubX != 0)
                 {
                     int cx = x >> 1;
-                    int ox = Math.Clamp((x & 1) == 0 ? cx - 1 : cx + 1, 0, cw - 1);
+                    // 4:2:0: the last column of an odd width takes its chroma sample alone (as avifdec does)
+                    int ox = x == w - 1 && (w & 1) != 0 && y.SubY != 0 ? cx : Math.Clamp((x & 1) == 0 ? cx - 1 : cx + 1, 0, cw - 1);
                     float u0 = 0.75f * U[r0 * cs + cx] + 0.25f * U[r0 * cs + ox];
                     float u1 = 0.75f * U[r1 * cs + cx] + 0.25f * U[r1 * cs + ox];
                     float v0 = 0.75f * V[r0 * cs + cx] + 0.25f * V[r0 * cs + ox];
                     float v1 = 0.75f * V[r1 * cs + cx] + 0.25f * V[r1 * cs + ox];
-                    uRow[x] = w0 * u0 + w1 * u1;
-                    vRow[x] = w0 * v0 + w1 * v1;
+                    uRow[x] = MathF.Floor(w0 * u0 + w1 * u1 + 0.5f);
+                    vRow[x] = MathF.Floor(w0 * v0 + w1 * v1 + 0.5f);
                 }
                 else
                 {
-                    uRow[x] = w0 * U[r0 * cs + x] + w1 * U[r1 * cs + x];
-                    vRow[x] = w0 * V[r0 * cs + x] + w1 * V[r1 * cs + x];
+                    uRow[x] = MathF.Floor(w0 * U[r0 * cs + x] + w1 * U[r1 * cs + x] + 0.5f);
+                    vRow[x] = MathF.Floor(w0 * V[r0 * cs + x] + w1 * V[r1 * cs + x] + 0.5f);
                 }
             }
         }

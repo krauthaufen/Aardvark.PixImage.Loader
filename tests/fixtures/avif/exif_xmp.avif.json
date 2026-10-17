@@ -1,0 +1,13 @@
+{
+ "frames": 1,
+ "make": "PixCodecTest",
+ "xmpTitle": "AVIF fixture",
+ "width": 160,
+ "height": 112,
+ "channels": 3,
+ "bitDepth": 8,
+ "subsampling": "11",
+ "yuv": [
+  "9b8b3a30be8dffea60c6a26da7bf8ffcc14d454c26c7b08a238b8644e577273d"
+ ]
+}
