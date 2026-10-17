@@ -384,7 +384,9 @@ namespace Aardvark.ImageCodecs.Heif
                             if (a.Width != y.Width || a.Height != y.Height) a = ResizeNearest(a, y.Width, y.Height);
                             prem = IsPremultiplied(it, ai);
                         }
+                        long t0 = Av1Stats.TimeOn ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                         img = AvifColor.ToRaw(y, a, prem, opt.Multithreaded);
+                        Av1Stats.Time("time.rgb", t0);
                         img.Metadata = ColourMetadata(y, Colour(it));
                         break;
                     }

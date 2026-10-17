@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 using System.Threading.Tasks;
 
 namespace Aardvark.ImageCodecs.Heif
@@ -124,11 +126,14 @@ namespace Aardvark.ImageCodecs.Heif
             int aMax = alpha != null ? (1 << alpha.BitDepth) - 1 : 0;
             byte[]? b8 = type == SampleType.UInt8 ? (byte[])img.Data : null;
             ushort[]? b16 = type == SampleType.UInt16 ? (ushort[])img.Data : null;
-            void Row(int row)
+            void Row(int row, float[] uRow, float[] vRow, int[] scratch, int[] rgb)
             {
-                var uRow = new float[w];
-                var vRow = new float[w];
-                if (!gray) UpsampleRow(y, row, uRow, vRow);
+                if (!gray) UpsampleRow(y, row, uRow, vRow, scratch);
+                if (alpha == null && !gray && mc != 0 && mc != 8)
+                {
+                    FastRow(y, row, uRow, vRow, rgb, b8, b16, yOff, yScale, cOff, cScale, crR, cbB, cbG, crG, maxF);
+                    return;
+                }
                 var Y = y.Planes[0];
                 int yo = row * y.Stride[0];
                 int o = row * w * nc;
@@ -194,58 +199,131 @@ namespace Aardvark.ImageCodecs.Heif
                     o += nc;
                 }
             }
-            if (multithreaded && h > 64) Parallel.For(0, h, Row);
-            else for (int r = 0; r < h; r++) Row(r);
+            const int Chunk = 16;
+            void Rows(int c)
+            {
+                var uRow = new float[w];
+                var vRow = new float[w];
+                var scratch = new int[2 * w + 2];
+                var rgb = new int[3 * w + 12];
+                for (int r = c * Chunk; r < Math.Min(h, c * Chunk + Chunk); r++) Row(r, uRow, vRow, scratch, rgb);
+            }
+            int chunks = (h + Chunk - 1) / Chunk;
+            if (multithreaded && h > 64) Parallel.For(0, chunks, Rows);
+            else for (int c = 0; c < chunks; c++) Rows(c);
             return img;
         }
 
+        /// <summary>One row of the usual case: Y'CbCr with a matrix, no alpha (four pixels at a time, then interleaved).</summary>
+        static void FastRow(YuvImage y, int row, float[] uRow, float[] vRow, int[] rgb, byte[]? b8, ushort[]? b16,
+                            float yOff, float yScale, float cOff, float cScale, float crR, float cbB, float cbG, float crG, float maxF)
+        {
+            int w = y.Width;
+            var Y = y.Planes[0].AsSpan(row * y.Stride[0], w);
+            int x = 0;
+            if (Vector128.IsHardwareAccelerated)
+            {
+                var vyOff = Vector128.Create(yOff); var vyScale = Vector128.Create(yScale);
+                var vcOff = Vector128.Create(cOff); var vcScale = Vector128.Create(cScale);
+                var vMax = Vector128.Create(maxF); var half = Vector128.Create(0.5f);
+                var one = Vector128.Create(1f);
+                for (; x + 4 <= w; x += 4)
+                {
+                    var yv = Vector128.ConvertToSingle(Vector128.WidenLower(Vector128.Create(Y[x], Y[x + 1], Y[x + 2], Y[x + 3], 0, 0, 0, 0)).AsInt32());
+                    var yy = (yv - vyOff) * vyScale;
+                    var cb = (Vector128.Create<float>(uRow.AsSpan(x, 4)) - vcOff) * vcScale;
+                    var cr = (Vector128.Create<float>(vRow.AsSpan(x, 4)) - vcOff) * vcScale;
+                    var r = yy + Vector128.Create(crR) * cr;
+                    var g = yy - Vector128.Create(cbG) * cb - Vector128.Create(crG) * cr;
+                    var b = yy + Vector128.Create(cbB) * cb;
+                    Vector128.ConvertToInt32(Vector128.Min(Vector128.Max(r, Vector128<float>.Zero), one) * vMax + half).CopyTo(rgb, x);
+                    Vector128.ConvertToInt32(Vector128.Min(Vector128.Max(g, Vector128<float>.Zero), one) * vMax + half).CopyTo(rgb, w + x);
+                    Vector128.ConvertToInt32(Vector128.Min(Vector128.Max(b, Vector128<float>.Zero), one) * vMax + half).CopyTo(rgb, 2 * w + x);
+                }
+            }
+            for (; x < w; x++)
+            {
+                float yy = (Y[x] - yOff) * yScale;
+                float cb = (uRow[x] - cOff) * cScale, cr = (vRow[x] - cOff) * cScale;
+                rgb[x] = Q(yy + crR * cr, maxF);
+                rgb[w + x] = Q(yy - cbG * cb - crG * cr, maxF);
+                rgb[2 * w + x] = Q(yy + cbB * cb, maxF);
+            }
+            int o = row * w * 3;
+            if (b8 != null)
+            {
+                var d = b8.AsSpan(o, w * 3);
+                for (int i = 0; i < w; i++) { d[3 * i] = (byte)rgb[i]; d[3 * i + 1] = (byte)rgb[w + i]; d[3 * i + 2] = (byte)rgb[2 * w + i]; }
+            }
+            else
+            {
+                var d = b16!.AsSpan(o, w * 3);
+                for (int i = 0; i < w; i++) { d[3 * i] = (ushort)rgb[i]; d[3 * i + 1] = (ushort)rgb[w + i]; d[3 * i + 2] = (ushort)rgb[2 * w + i]; }
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static int Q(float v, float max)
         {
-            if (!(v > 0)) return 0;
-            if (v >= 1) return (int)max;
-            return (int)(v * max + 0.5f);
+            return (int)(Math.Clamp(v, 0f, 1f) * max + 0.5f);
         }
 
         /// <summary>
         /// The chroma samples of one luma row, bilinearly upsampled (3:1 weights) for subsampled planes and rounded to the
         /// sample grid (as libavif does, so the RGB stays within one step of avifdec).
         /// </summary>
-        static void UpsampleRow(YuvImage y, int row, float[] uRow, float[] vRow)
+        /// <summary>
+        /// The chroma of one luma row in integers: vertically 3 * near + far (or 4 * the row), horizontally
+        /// 3 * near + far again, and (sum + 8) &gt;&gt; 4 - the bilinear weights 9 / 3 / 3 / 1 rounded once.
+        /// </summary>
+        static void UpsampleRow(YuvImage y, int row, float[] uRow, float[] vRow, int[]? scratch)
         {
             int w = y.Width;
             int cw = y.PlaneWidth(1), ch = y.PlaneHeight(1);
             var U = y.Planes[1];
             var V = y.Planes[2];
             int cs = y.Stride[1];
-            int r0, r1;
-            float w0, w1;
+            int r0 = row, r1 = row, a0 = 4, a1 = 0;
             if (y.SubY != 0)
             {
-                int cr = row >> 1;
-                int other = (row & 1) == 0 ? cr - 1 : cr + 1;
-                other = Math.Clamp(other, 0, ch - 1);
-                r0 = cr; r1 = other; w0 = 0.75f; w1 = 0.25f;
+                r0 = row >> 1;
+                r1 = Math.Clamp((row & 1) == 0 ? r0 - 1 : r0 + 1, 0, ch - 1);
+                a0 = 3; a1 = 1;
             }
-            else { r0 = r1 = row; w0 = 1; w1 = 0; }
-            for (int x = 0; x < w; x++)
+            if (y.SubX == 0)
             {
-                if (y.SubX != 0)
+                for (int x = 0; x < w; x++)
                 {
-                    int cx = x >> 1;
-                    // 4:2:0: the last column of an odd width takes its chroma sample alone (as avifdec does)
-                    int ox = x == w - 1 && (w & 1) != 0 && y.SubY != 0 ? cx : Math.Clamp((x & 1) == 0 ? cx - 1 : cx + 1, 0, cw - 1);
-                    float u0 = 0.75f * U[r0 * cs + cx] + 0.25f * U[r0 * cs + ox];
-                    float u1 = 0.75f * U[r1 * cs + cx] + 0.25f * U[r1 * cs + ox];
-                    float v0 = 0.75f * V[r0 * cs + cx] + 0.25f * V[r0 * cs + ox];
-                    float v1 = 0.75f * V[r1 * cs + cx] + 0.25f * V[r1 * cs + ox];
-                    uRow[x] = MathF.Floor(w0 * u0 + w1 * u1 + 0.5f);
-                    vRow[x] = MathF.Floor(w0 * v0 + w1 * v1 + 0.5f);
+                    uRow[x] = (a0 * U[r0 * cs + x] + a1 * U[r1 * cs + x] + 2) >> 2;
+                    vRow[x] = (a0 * V[r0 * cs + x] + a1 * V[r1 * cs + x] + 2) >> 2;
                 }
-                else
+                return;
+            }
+            var tmp = scratch != null && scratch.Length >= 2 * cw ? scratch : new int[2 * cw];
+            for (int i = 0; i < cw; i++)
+            {
+                tmp[i] = a0 * U[r0 * cs + i] + a1 * U[r1 * cs + i];
+                tmp[cw + i] = a0 * V[r0 * cs + i] + a1 * V[r1 * cs + i];
+            }
+            // two luma columns per chroma sample: its left and right neighbour as the far one
+            for (int i = 0; i < cw; i++)
+            {
+                int l = Math.Max(i - 1, 0), r = Math.Min(i + 1, cw - 1);
+                int cu = 3 * tmp[i] + 8, cv = 3 * tmp[cw + i] + 8;
+                int x = 2 * i;
+                uRow[x] = (cu + tmp[l]) >> 4;
+                vRow[x] = (cv + tmp[cw + l]) >> 4;
+                if (x + 1 < w)
                 {
-                    uRow[x] = MathF.Floor(w0 * U[r0 * cs + x] + w1 * U[r1 * cs + x] + 0.5f);
-                    vRow[x] = MathF.Floor(w0 * V[r0 * cs + x] + w1 * V[r1 * cs + x] + 0.5f);
+                    uRow[x + 1] = (cu + tmp[r]) >> 4;
+                    vRow[x + 1] = (cv + tmp[cw + r]) >> 4;
                 }
+            }
+            // 4:2:0: the last column of an odd width takes its chroma sample alone (as avifdec does)
+            if ((w & 1) != 0 && y.SubY != 0)
+            {
+                uRow[w - 1] = (4 * tmp[cw - 1] + 8) >> 4;
+                vRow[w - 1] = (4 * tmp[2 * cw - 1] + 8) >> 4;
             }
         }
     }

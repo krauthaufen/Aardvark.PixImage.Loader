@@ -18,23 +18,25 @@ namespace Aardvark.ImageCodecs.Av1
 
         public static void Count(string key, long n = 1)
         {
-            if (!TimeOn) return;
+            if (!On) return;
             counts.AddOrUpdate(key, n, (_, v) => v + n);
         }
 
-        /// <summary>Adds the microseconds since <paramref name="start"/> (a Stopwatch timestamp) to <paramref name="key"/>; returns now.</summary>
+        /// <summary>Adds the time since <paramref name="start"/> (a Stopwatch timestamp) to <paramref name="key"/>; returns now.</summary>
         public static long Time(string key, long start)
         {
             if (!TimeOn) return 0;
             long now = System.Diagnostics.Stopwatch.GetTimestamp();
-            Count(key + "_us", (now - start) * 1000000 / System.Diagnostics.Stopwatch.Frequency);
+            counts.AddOrUpdate(key + "_ticks", now - start, (_, v) => v + now - start);
             return now;
         }
 
         public static void Print()
         {
             if (!TimeOn) return;
-            foreach (var kv in counts.OrderBy(k => k.Key, StringComparer.Ordinal)) Console.Error.WriteLine($"  {kv.Key,-32} {kv.Value}");
+            foreach (var kv in counts.OrderBy(k => k.Key, StringComparer.Ordinal))
+                if (kv.Key.EndsWith("_ticks")) Console.Error.WriteLine($"  {kv.Key[..^6] + " ms",-32} {kv.Value * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
+                else Console.Error.WriteLine($"  {kv.Key,-32} {kv.Value}");
             counts.Clear();
         }
     }
