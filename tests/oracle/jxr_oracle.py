@@ -22,7 +22,7 @@ PREFIX = bytes.fromhex('24C3DD6F034EFE4BB1853D77768DC9')
 
 # pixel format id (last GUID byte) -> (name, JxrDecApp -c code or None, output file type)
 FORMATS = {
-    0x0D: ('24bppRGB', 9, 'tif'), 0x0C: ('24bppBGR', 9, 'tif'), 0x0E: ('32bppBGR', 9, 'tif'),
+    0x0D: ('24bppRGB', 9, 'tif'), 0x0C: ('24bppBGR', 9, 'tif'), 0x0E: ('32bppBGR', 34, 'bmp32'),
     0x15: ('48bppRGB', 10, 'tif'), 0x12: ('48bppRGBFixedPoint', 11, 'tif'), 0x3B: ('48bppRGBHalf', 12, 'tif'),
     0x18: ('96bppRGBFixedPoint', 14, 'tif'), 0x40: ('64bppRGBFixedPoint', 11, 'tif'), 0x42: ('64bppRGBHalf', 12, 'tif'),
     0x41: ('128bppRGBFixedPoint', 14, 'tif'), 0x1B: ('128bppRGBFloat', 15, 'tif'),
@@ -124,12 +124,16 @@ def decode_jxrlib(path, data, fid):
         return None
     w, h = _size(data)
     with tempfile.TemporaryDirectory() as tmp:
-        out = os.path.join(tmp, 'out.' + ext)
+        out = os.path.join(tmp, 'out.' + ext.replace('32', ''))
         r = subprocess.run([exe, '-i', path, '-o', out, '-c', str(code)], capture_output=True)
         if r.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
             return None
         if ext == 'bmp':
             return _bmp_words(out)
+        if ext == 'bmp32':
+            # JxrDecApp's conversion of 32bppBGR to 24bppRGB scrambles the samples: read its own BGRX bitmap
+            wd = _bmp_words(out)
+            return np.stack([(wd >> 16) & 255, (wd >> 8) & 255, wd & 255], -1).astype(np.uint8)
         if ext == 'hdr':
             d = open(out, 'rb').read()
             i = d.index(b'+X')

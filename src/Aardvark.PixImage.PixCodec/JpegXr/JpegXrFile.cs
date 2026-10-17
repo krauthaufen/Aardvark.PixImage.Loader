@@ -89,8 +89,8 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                 var ares = JxrDecoder.Decode(acs, parallel);
                 // a separate alpha plane is a coded image of its own: its primary plane (or its interleaved alpha plane)
                 alpha = ares.Alpha != null ? JxrOutput.Format(ares.Alpha, true, parallel) : JxrOutput.Format(ares.Primary, false, parallel);
-                if (ares.Primary.Ih.Width != full.Ih.Width || ares.Primary.Ih.Height != full.Ih.Height)
-                    throw new ImageFormatException("JPEG XR: alpha plane size differs from the image size");
+                if (alpha.A[0].Length != (long)full.Ih.Width * full.Ih.Height || ares.Primary.Ih.BitDepth != full.Ih.BitDepth)
+                    throw new ImageFormatException("JPEG XR: the alpha plane does not fit the image");
             }
             return (primary, alpha);
         }

@@ -691,6 +691,7 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Cineon: Cineon.Encode(image, output); break;
                 case ImageFormat.JpegLs: JpegLs.Encode(image, output); break;
                 case ImageFormat.Jxl: Jxl.Encode(image, output); break;
+                case ImageFormat.JpegXr: JpegXr.Encode(image, output); break;
                 default: throw new ArgumentException("unknown image format", nameof(format));
             }
         }

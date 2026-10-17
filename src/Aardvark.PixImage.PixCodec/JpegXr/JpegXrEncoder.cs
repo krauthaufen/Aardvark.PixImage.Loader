@@ -592,10 +592,10 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                                 {
                                     int bs = bias >> 1;
                                     int c = (rows[0][x] - bs) << scale, m = (rows[1][x] - bs) << scale, yy = (rows[2][x] - bs) << scale, k = (rows[3][x] + bs) << scale;
-                                    // FwdColorFmtConvert2( ) (Table D.7)
+                                    // FwdColorFmtConvert2( ) (Table D.7; its comments have the signs that invert Table 186)
                                     int V = c - yy;
-                                    int U = c - m + (V >> 1);
-                                    int Y = k - m + (U >> 1);
+                                    int U = c - m - (V >> 1);
+                                    int Y = k - m - (U >> 1);
                                     full[0][o] = Y;
                                     full[1][o] = U;
                                     full[2][o] = V;

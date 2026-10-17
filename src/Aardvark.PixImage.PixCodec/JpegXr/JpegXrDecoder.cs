@@ -28,6 +28,7 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             cs.Primary = JxrPlaneHeader.Read(r, cs.Ih, false);
             if (cs.Ih.AlphaPlane) cs.Alpha = JxrPlaneHeader.Read(r, cs.Ih, true);
             if (r.PastEnd) throw new ImageFormatException("JPEG XR: codestream ends inside the headers");
+            Validate(cs.Ih, cs.Primary);
             if (headersOnly) return cs;
             var ih = cs.Ih;
             int tiles = checked(ih.TileCols * ih.TileRows);
@@ -56,6 +57,29 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             if (r.PastEnd) throw new ImageFormatException("JPEG XR: codestream ends inside the headers");
             cs.TilesStart = r.BitPosition >> 3;
             return cs;
+        }
+
+        /// <summary>The combinations of internal and output colour format and bit depth of Tables 176, 179 and 183.</summary>
+        static void Validate(JxrImageHeader ih, JxrPlaneHeader ph)
+        {
+            var i = ph.Format;
+            var bd = ih.BitDepth;
+            bool yuv = i is JxrInternalFormat.Yuv420 or JxrInternalFormat.Yuv422 or JxrInternalFormat.Yuv444;
+            bool ok = ih.OutputFormat switch
+            {
+                JxrOutputFormat.YOnly => i == JxrInternalFormat.YOnly,
+                JxrOutputFormat.Yuv420 => i is JxrInternalFormat.Yuv420 or JxrInternalFormat.YOnly,
+                JxrOutputFormat.Yuv422 => i is JxrInternalFormat.Yuv422 or JxrInternalFormat.YOnly,
+                JxrOutputFormat.Yuv444 or JxrOutputFormat.Rgb => yuv || i == JxrInternalFormat.YOnly,
+                JxrOutputFormat.Rgbe => i == JxrInternalFormat.Yuv444,
+                JxrOutputFormat.Cmyk or JxrOutputFormat.CmykDirect => i == JxrInternalFormat.Yuvk,
+                _ => i == JxrInternalFormat.NComponent,
+            };
+            if (bd is JxrBitDepth.Bd1White1 or JxrBitDepth.Bd1Black1 && ih.OutputFormat != JxrOutputFormat.YOnly) ok = false;
+            if (bd is JxrBitDepth.Bd5 or JxrBitDepth.Bd565 && ih.OutputFormat != JxrOutputFormat.Rgb) ok = false;
+            if (ih.OutputFormat == JxrOutputFormat.Rgbe && bd != JxrBitDepth.Bd8) ok = false;
+            if (ph.NumComponents < 1) ok = false;
+            if (!ok) throw new ImageFormatException($"JPEG XR: output format {ih.OutputFormat} / {bd} from internal format {i}");
         }
     }
 

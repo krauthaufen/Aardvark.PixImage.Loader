@@ -22,8 +22,11 @@ namespace Aardvark.ImageCodecs
         /// <summary>Divide premultiplied colours (32bppPBGRA, 64bppPRGBA, 128bppPRGBAFloat) by alpha (default), since RawImage alpha is straight.</summary>
         public bool Unpremultiply { get; set; } = true;
 
-        /// <summary>Upper bound for the image in pixels; larger files are rejected with <see cref="ImageNotSupportedException"/>.</summary>
-        public long MaxPixels { get; set; } = 1L << 30;
+        /// <summary>
+        /// Upper bound for the image in pixels; larger files are rejected with <see cref="ImageNotSupportedException"/>. The
+        /// default (2^28, e.g. 16384 x 16384) bounds the working memory, about 4 bytes per pixel and component plus the result.
+        /// </summary>
+        public long MaxPixels { get; set; } = 1L << 28;
 
         /// <summary>Reconstruct and format large images on several threads (same result).</summary>
         public bool Multithreaded { get; set; } = true;
