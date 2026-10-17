@@ -65,8 +65,7 @@ namespace Aardvark.ImageCodecs
             int h0 = (int)hs; float fh = hs - h0; h0 %= _hd; int h1 = (h0 + 1) % _hd;
             int s0 = Math.Min((int)ss, _sd - 1); float fs = ss - s0; int s1 = Math.Min(s0 + 1, _sd - 1);
             int v0 = Math.Min((int)vs, _vd - 1); float fv = vs - v0; int v1 = Math.Min(v0 + 1, _vd - 1);
-            Span<float> acc = stackalloc float[3];
-            acc.Clear();
+            float a0 = 0, a1 = 0, a2 = 0;
             for (int iv = 0; iv < 2; iv++)
             {
                 float wv = iv == 0 ? 1 - fv : fv;
@@ -82,14 +81,14 @@ namespace Aardvark.ImageCodecs
                         float w = wv * wh * (js == 0 ? 1 - fs : fs);
                         if (w == 0) continue;
                         int k = ((vv * _hd + hh) * _sd + (js == 0 ? s0 : s1)) * 3;
-                        acc[0] += w * _t[k]; acc[1] += w * _t[k + 1]; acc[2] += w * _t[k + 2];
+                        a0 += w * _t[k]; a1 += w * _t[k + 1]; a2 += w * _t[k + 2];
                     }
                 }
             }
-            h += acc[0];
+            h += a0;
             h = (h % 360 + 360) % 360;
-            s = MathF.Min(s * acc[1], 1);
-            v = MathF.Min(v * acc[2], 1);
+            s = MathF.Min(s * a1, 1);
+            v = MathF.Min(v * a2, 1);
             if (_srgb) v = Dec(v);
 
             // HSV -> RGB

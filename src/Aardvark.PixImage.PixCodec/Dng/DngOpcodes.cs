@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace Aardvark.ImageCodecs
@@ -310,21 +311,6 @@ namespace Aardvark.ImageCodecs
             return t < 1 ? (1.5f * t - 2.5f) * t * t + 1 : t < 2 ? ((-0.5f * t + 2.5f) * t - 4) * t + 2 : 0;
         }
 
-        static float Sample(float[] src, int w, int h, double x, double y)
-        {
-            int ix = (int)Math.Floor(x), iy = (int)Math.Floor(y);
-            float fx = (float)(x - ix), fy = (float)(y - iy);
-            float sum = 0;
-            for (int j = -1; j <= 2; j++)
-            {
-                int yy = Math.Clamp(iy + j, 0, h - 1);
-                float wy = Cubic(j - fy), row = 0;
-                for (int i = -1; i <= 2; i++) row += src[(long)yy * w + Math.Clamp(ix + i, 0, w - 1)] * Cubic(i - fx);
-                sum += row * wy;
-            }
-            return sum;
-        }
-
         static void Warp(DngOpcode op, DngPlanes img)
         {
             var p = new P(op.Parameters);
@@ -347,15 +333,19 @@ namespace Aardvark.ImageCodecs
             int w = img.Width, h = img.Height;
             var (cx, cy, m) = Centre(ncx, ncy, w, h);
             if (m <= 0) return;
-            for (int pl = 0; pl < img.Planes; pl++)
+            // planes sharing a coefficient set share the source positions and filter weights
+            for (int set = 0; set < Math.Min(n, img.Planes); set++)
             {
-                int set = n == 1 ? 0 : Math.Min(pl, n - 1);
+                var planes = new List<int>();
+                for (int pl = 0; pl < img.Planes; pl++) if ((n == 1 ? 0 : Math.Min(pl, n - 1)) == set) planes.Add(pl);
+                var srcs = planes.Select(pl => (float[])img.Data[pl].Clone()).ToArray();
+                var dsts = planes.Select(pl => img.Data[pl]).ToArray();
                 var r_ = kr[set]; var t_ = kt[set]; var (rmin, rmax) = rng[set];
-                var src = (float[])img.Data[pl].Clone();
-                var dst = img.Data[pl];
                 Parallel.For(0, h, y =>
                 {
                     double dy = (y - cy) / m;
+                    Span<float> wx = stackalloc float[4], wy = stackalloc float[4];
+                    Span<int> xs = stackalloc int[4], ys = stackalloc int[4];
                     for (int x = 0; x < w; x++)
                     {
                         double dx = (x - cx) / m, r2 = dx * dx + dy * dy, r = Math.Sqrt(r2);
@@ -379,7 +369,28 @@ namespace Aardvark.ImageCodecs
                             sx = f * dx + t_[0] * 2 * dx * dy + t_[1] * (r2 + 2 * dx * dx);
                             sy = f * dy + t_[1] * 2 * dx * dy + t_[0] * (r2 + 2 * dy * dy);
                         }
-                        dst[(long)y * w + x] = Sample(src, w, h, cx + m * sx, cy + m * sy);
+                        // bicubic resampling at (cx + m sx, cy + m sy), edges replicated
+                        double px = cx + m * sx, py = cy + m * sy;
+                        px = Math.Clamp(px, -2, w + 1); py = Math.Clamp(py, -2, h + 1);
+                        int ix = (int)Math.Floor(px), iy = (int)Math.Floor(py);
+                        float fx = (float)(px - ix), fy = (float)(py - iy);
+                        for (int k = 0; k < 4; k++)
+                        {
+                            wx[k] = Cubic(k - 1 - fx); wy[k] = Cubic(k - 1 - fy);
+                            xs[k] = Math.Clamp(ix + k - 1, 0, w - 1); ys[k] = Math.Clamp(iy + k - 1, 0, h - 1) * w;
+                        }
+                        long o = (long)y * w + x;
+                        for (int q = 0; q < srcs.Length; q++)
+                        {
+                            var src = srcs[q];
+                            float sum = 0;
+                            for (int j = 0; j < 4; j++)
+                            {
+                                int row = ys[j];
+                                sum += wy[j] * (wx[0] * src[row + xs[0]] + wx[1] * src[row + xs[1]] + wx[2] * src[row + xs[2]] + wx[3] * src[row + xs[3]]);
+                            }
+                            dsts[q][o] = sum;
+                        }
                     }
                 });
             }
