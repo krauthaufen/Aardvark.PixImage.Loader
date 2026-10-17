@@ -210,6 +210,19 @@ namespace Aardvark.ImageCodecs
         /// </summary>
         public PhotoMetadata? Metadata { get; init; }
 
+        /// <summary>
+        /// Whether the file carries an HDR gain map (JPEG: Ultra HDR XMP, ISO 21496-1 APP2 or an MPF gain map image; JPEG XL:
+        /// a jhgm box). Decode returns the baseline; Jpeg.DecodeHdr / Jxl.DecodeHdr the alternate rendition. Not part of equality.
+        /// </summary>
+        public bool HasGainMap { get; init; }
+
+        /// <summary>
+        /// The Multi-Picture Format index of a JPEG (CIPA DC-007: MPO stereo / multi-view files, gain map and large thumbnail
+        /// images), null for other files. For Extended MP files (.MPO) <see cref="FrameCount"/> is the number of views.
+        /// Not part of equality.
+        /// </summary>
+        public MpfInfo? MultiPicture { get; init; }
+
         public bool Equals(ImageInfo o)
             => Format == o.Format && Width == o.Width && Height == o.Height && Channels == o.Channels && SampleType == o.SampleType
                && Color == o.Color && FrameCount == o.FrameCount && BitsPerSample == o.BitsPerSample && Orientation == o.Orientation

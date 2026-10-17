@@ -17,7 +17,7 @@ namespace Aardvark.ImageCodecs
         public readonly List<string> Comments = new();
         public readonly List<KeyValuePair<string, string>> Text = new();
         public IReadOnlyList<ExrAttribute>? ExrAttributes;
-        public bool GainMap;                  // a gain map outside XMP (JPEG XL jhgm box)
+        public bool GainMap;                  // a gain map outside XMP (JPEG XL jhgm box, JPEG ISO 21496-1 / MPF gain map)
     }
 
     /// <summary>Walks the container of each format and collects EXIF, XMP, IPTC, ICC and text blocks; never decodes pixels.</summary>
@@ -109,6 +109,10 @@ namespace Aardvark.ImageCodecs
                     if (!iptc.IsEmpty) b.Iptc ??= iptc.ToArray();
                 }
                 else if (m == 0xE2 && s.Length > 14 && s.StartsWith("ICC_PROFILE\0"u8)) icc[s[12]] = s.Slice(14).ToArray();
+                else if (m == 0xE2 && s.Length >= GainMapMetadata.Urn.Length + 4 && s.StartsWith(GainMapMetadata.Urn)
+                    && s[GainMapMetadata.Urn.Length] == 0 && s[GainMapMetadata.Urn.Length + 1] == 0) b.GainMap = true;   // ISO 21496-1 C.4.3
+                else if (m == 0xE2 && s.StartsWith("MPF\0"u8) && Mpf.Parse(d, p + 8, len - 6, 0) is { } mpf)
+                    foreach (var i in mpf.Images) b.GainMap |= i.Type == MpfImageType.GainMap;
                 else if (m == 0xFE) b.Comments.Add(TextOf(s));
                 p += 2 + len;
             }

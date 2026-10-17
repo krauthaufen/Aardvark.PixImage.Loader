@@ -147,7 +147,7 @@ namespace Aardvark.ImageCodecs
     /// profiles are returned as metadata. Not supported: 12 bit samples, lossless, hierarchical and arithmetic coded files.</para>
     /// <para>Encoding: baseline or progressive JPEG from 8 bit Gray or Rgb images (an alpha channel is dropped).</para>
     /// </summary>
-    public static unsafe class Jpeg
+    public static unsafe partial class Jpeg
     {
         /// <summary>Returns whether the data starts with a JPEG signature (needs at most 16 bytes).</summary>
         public static bool IsMatch(ReadOnlySpan<byte> header)
@@ -213,9 +213,12 @@ namespace Aardvark.ImageCodecs
                 var d = Open(p, data, options, headerOnly: true);
                 var (_, model, channels) = Plan(d, options);
                 var m = d.Metadata;
+                var (mpf, gainMap) = MultiPictureInfo(data, options);
                 var info = new ImageInfo(ImageFormat.Jpeg, d.OutWidth, d.OutHeight, channels,
-                    d.Precision > 8 ? SampleType.UInt16 : SampleType.UInt8, model)
+                    d.Precision > 8 ? SampleType.UInt16 : SampleType.UInt8, model, mpf?.ViewCount ?? 1)
                 {
+                    MultiPicture = mpf,
+                    HasGainMap = gainMap,
                     BitsPerSample = d.Precision,
                     Orientation = m.Orientation,
                     DpiX = m.DpiX,
