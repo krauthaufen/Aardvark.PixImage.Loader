@@ -153,7 +153,10 @@ transfer function, not applied. The clean aperture is always applied, rotation a
 `Avif.DecodeAnimation` gives the frames of an image sequence with durations and sync flags, `Avif.GetGainMap` the tone
 map item's ISO 21496-1 metadata, the alternate colour space and the gain map image, `Avif.GetMetadataItems` the Exif /
 XMP items and `Avif.DecodeAuxiliaryImages` depth maps and other auxiliary images. Tiles, loop filters and the colour
-conversion run in parallel (`Multithreaded = false` for one thread).
+conversion run in parallel (`Multithreaded = false` for one thread). The AV1 layer matches dav1d bit for bit (libaom
+test vectors, Argon conformance streams). On a Ryzen 7 7700X a 12.5 MP 4:2:0 photo (avifenc speed 6) decodes to RGB in
+0.29 s on one thread and 0.05 s on 16 (dav1d alone, without colour conversion: 0.054 s / 0.016 s); 1080p inter frames
+take about 15 ms each (dav1d 1.5 ms).
 
 ### Volumes and scientific images
 
