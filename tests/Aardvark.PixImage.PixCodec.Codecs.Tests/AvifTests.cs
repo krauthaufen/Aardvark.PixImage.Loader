@@ -251,6 +251,18 @@ public class AvifTests(ITestOutputHelper output)
     /// An overlay (iovl, made by gen_avif.py; libavif does not read overlays): the inputs' avifdec references pasted on
     /// the fill colour, the second input partly outside the canvas.
     /// </summary>
+    /// <summary>The overlay compositor must not grow the stack per pixel (it once overflowed macOS test threads).</summary>
+    [Fact]
+    public void OverlayOnSmallStack()
+    {
+        var data = File.ReadAllBytes(Fixture("avif/overlay/overlay.avif"));
+        Exception? error = null;
+        var t = new Thread(() => { try { Avif.Decode(data, new AvifDecodeOptions { Multithreaded = false }); } catch (Exception e) { error = e; } }, 512 << 10);
+        t.Start();
+        t.Join();
+        Assert.Null(error);
+    }
+
     [Fact]
     public void Overlay()
     {
