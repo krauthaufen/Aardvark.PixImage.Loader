@@ -1,0 +1,11 @@
+{
+ "frames": 1,
+ "width": 96,
+ "height": 80,
+ "channels": 3,
+ "bitDepth": 10,
+ "subsampling": "10",
+ "yuv": [
+  "7c25dcb9556118ee9b19a9299c992c5d23357fa651810042a9537eb62a35e7ba"
+ ]
+}

@@ -3,6 +3,7 @@
 # Git bash). Downloads go to $1 (default .tmp/ci-tools); they are kept when present, so that directory can be cached.
 # Tells later steps where things are through $GITHUB_ENV / $GITHUB_PATH.
 #   install.sh [tool ...]    tools: magick astcenc ktx libjxl exiftool basisu charls zstd 7z ffmpeg netpbm (default: all)
+#                            and avif (libavif, libaom, dav1d: only to regenerate tests/fixtures/avif with gen_avif.py)
 set -euo pipefail
 
 TOOLS="${CI_TOOLS:-$(pwd)/.tmp/ci-tools}"
@@ -159,6 +160,10 @@ for t in "${want[@]}"; do
   netpbm:Linux) apt_get netpbm ;;
   netpbm:macOS) brew_get netpbm ;;
   netpbm:Windows) echo "netpbm comes from Cygwin (see build.yml)" ;;
+
+  avif:Linux) apt_get libavif-bin aom-tools dav1d ;;
+  avif:macOS) brew_get libavif aom dav1d ;;
+  avif:Windows) echo "libavif / aom / dav1d: pacman -S mingw-w64-x86_64-libavif mingw-w64-x86_64-aom mingw-w64-x86_64-dav1d in MSYS2" ;;
 
   *) echo "unknown tool $t" >&2; exit 1 ;;
   esac

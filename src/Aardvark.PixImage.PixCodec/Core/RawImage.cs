@@ -86,6 +86,8 @@ namespace Aardvark.ImageCodecs
         Dng,
         /// <summary>JPEG XR (HD Photo; .jxr, .wdp, .hdp).</summary>
         JpegXr,
+        /// <summary>AV1 Image File Format (HEIF with AV1 images and sequences).</summary>
+        Avif,
     }
 
     /// <summary>

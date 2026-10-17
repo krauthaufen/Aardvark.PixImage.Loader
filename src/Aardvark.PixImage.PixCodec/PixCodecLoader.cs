@@ -7,7 +7,7 @@ using Aardvark.ImageCodecs;
 namespace Aardvark.Data
 {
     /// <summary>
-    /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, JPEG XL, BMP, TGA,
+    /// PixImage loader backed by the fully managed Aardvark.PixImage.PixCodec library (PNG, JPEG, TIFF, GIF, OpenEXR, WebP, JPEG 2000, JPEG XL, AVIF, BMP, TGA,
     /// DDS, KTX, PVR, ASTC, Radiance HDR, PNM / PFM, QOI, ICO / CUR / ANI, ICNS, PCX / DCX, SGI, Sun Raster, XBM, XPM, WBMP, DPX, Cineon, JPEG-LS,
     /// and the volume formats NRRD, NIfTI, MetaImage, FITS).
     /// Register with <see cref="PixCodec.Init"/> (done automatically by Aardvark.Init()).
@@ -336,7 +336,7 @@ namespace Aardvark.Data
         public static PixImage<T> Load<T>(ReadOnlySpan<byte> data) => As<T>(Load(data));
 
         /// <summary>
-        /// Decodes every image in the file: TIFF pages, the frames of animated GIF / PNG / WebP / JPEG XL (each the whole canvas as shown), or
+        /// Decodes every image in the file: TIFF pages, the frames of animated GIF / PNG / WebP / JPEG XL / AVIF (each the whole canvas as shown), or
         /// the single image.
         /// </summary>
         public static PixImage[] LoadAll(string path) => ConvertAll(ImageCodec.DecodeAll(path));

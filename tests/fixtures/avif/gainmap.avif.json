@@ -1,0 +1,27 @@
+{
+ "frames": 1,
+ "gainMap": {
+  "width": 64,
+  "height": 48,
+  "bitDepth": 8,
+  "yuv": "a1fa638c2848dfe92efc6ac30d8342bafe38e52602dd1a85f7cff5054146c102",
+  "baseHeadroom": [
+   0,
+   1
+  ],
+  "alternateHeadroom": [
+   5895489,
+   1048576
+  ],
+  "alternatePrimaries": 9,
+  "alternateTransfer": 16
+ },
+ "width": 128,
+ "height": 96,
+ "channels": 3,
+ "bitDepth": 8,
+ "subsampling": "11",
+ "yuv": [
+  "654ac441a1e7436573f010578068bcda21593d1dd2c9345884431c36909b5352"
+ ]
+}
