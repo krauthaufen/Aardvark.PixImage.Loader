@@ -14,6 +14,7 @@ namespace Aardvark.ImageCodecs
             if (Jpeg.IsMatch(header)) return ImageFormat.Jpeg;
             if (Gif.IsMatch(header)) return ImageFormat.Gif;
             if (Tiff.IsMatch(header)) return ImageFormat.Tiff;
+            if (JpegXr.IsMatch(header)) return ImageFormat.JpegXr;
             if (Exr.IsMatch(header)) return ImageFormat.Exr;
             if (Webp.IsMatch(header)) return ImageFormat.Webp;
             if (Jp2.IsMatch(header)) return ImageFormat.Jp2;
@@ -95,6 +96,7 @@ namespace Aardvark.ImageCodecs
                 ".cin" or ".cineon" => ImageFormat.Cineon,
                 ".jls" => ImageFormat.JpegLs,
                 ".jxl" => ImageFormat.Jxl,
+                ".jxr" or ".wdp" or ".hdp" => ImageFormat.JpegXr,
                 _ => ImageFormat.Unknown,
             };
         }
@@ -141,6 +143,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Cineon => Cineon.GetInfo(data),
             ImageFormat.JpegLs => JpegLs.GetInfo(data),
             ImageFormat.Jxl => Jxl.GetInfo(data),
+            ImageFormat.JpegXr => JpegXr.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -402,6 +405,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Cineon => Cineon.Decode(data),
             ImageFormat.JpegLs => JpegLs.Decode(data),
             ImageFormat.Jxl => Jxl.Decode(data),
+            ImageFormat.JpegXr => JpegXr.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 

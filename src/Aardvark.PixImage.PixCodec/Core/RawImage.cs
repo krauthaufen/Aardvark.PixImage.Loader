@@ -82,6 +82,8 @@ namespace Aardvark.ImageCodecs
         Cineon,
         JpegLs,
         Jxl,
+        /// <summary>JPEG XR (HD Photo; .jxr, .wdp, .hdp).</summary>
+        JpegXr,
     }
 
     /// <summary>

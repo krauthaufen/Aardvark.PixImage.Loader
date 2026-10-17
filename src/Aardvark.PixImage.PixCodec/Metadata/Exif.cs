@@ -162,7 +162,7 @@ namespace Aardvark.ImageCodecs
             else return null;
             int magic = U16(d, 2, be);
             bool big = magic == 43;
-            if (magic != 42 && !big) return null;
+            if (magic != 42 && !big && !(magic == 0x01BC && !be)) return null;   // 0x01BC: JPEG XR (T.832 Annex A)
             long first;
             if (big)
             {
