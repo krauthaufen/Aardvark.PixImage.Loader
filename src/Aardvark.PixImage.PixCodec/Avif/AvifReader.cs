@@ -387,6 +387,7 @@ namespace Aardvark.ImageCodecs.Heif
                         long t0 = Av1Stats.TimeOn ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                         img = AvifColor.ToRaw(y, a, prem, opt.Multithreaded);
                         Av1Stats.Time("time.rgb", t0);
+                        if (Av1Stats.TimeOn) Av1Stats.Print();
                         img.Metadata = ColourMetadata(y, Colour(it));
                         break;
                     }

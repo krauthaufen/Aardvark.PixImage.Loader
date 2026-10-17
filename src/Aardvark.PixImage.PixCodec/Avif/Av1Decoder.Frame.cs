@@ -62,6 +62,7 @@ namespace Aardvark.ImageCodecs.Av1
             t0 = Av1Stats.Time("time.refs", t0);
             if (h.ShowFrame) EmitOutput(lr, h.FilmGrain, h.FrameType, false);
             Av1Stats.Time("time.output", t0);
+            if (Av1Stats.TimeOn) Av1Stats.Print();
         }
 
         Av1RefSlot MakeRefSlot(Av1FrameHeader h, Av1FrameState f, Av1Frame lr)
