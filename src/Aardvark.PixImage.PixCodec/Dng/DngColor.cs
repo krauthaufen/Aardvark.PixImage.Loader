@@ -257,6 +257,18 @@ namespace Aardvark.ImageCodecs
             return w;
         }
 
+        static double[] Normalized(double[] cm, int n)
+        {
+            if (cm.Length != n * 3) return cm;
+            var v = Apply(cm, n, 3, XyToXyz(D50));
+            double max = 0;
+            foreach (var x in v) max = Math.Max(max, x);
+            if (!(max > 0)) return cm;
+            var r = new double[cm.Length];
+            for (int i = 0; i < r.Length; i++) r[i] = cm[i] / max;
+            return r;
+        }
+
         public static Interpolated Interpolate(DngInfo info, double t, bool useCameraCalibration)
         {
             int n = info.ColorPlanes;
@@ -275,7 +287,9 @@ namespace Aardvark.ImageCodecs
                 }
                 return acc;
             }
-            r.CM = Sum(c => c.ColorMatrix, n * 3, false);
+            // colour matrices scaled so that D50 maps to a camera neutral whose largest component is 1: the scale of a
+            // matrix is not part of its meaning, and writers that do not normalize would otherwise shift the exposure
+            r.CM = Sum(c => Normalized(c.ColorMatrix, n), n * 3, false);
             r.CC = useCameraCalibration ? Sum(c => c.CameraCalibration, n * n, true) : Identity(n);
             bool allFm = cals.Count > 0, allRm = cals.Count > 0 && n > 3;
             for (int i = 0; i < cals.Count; i++)

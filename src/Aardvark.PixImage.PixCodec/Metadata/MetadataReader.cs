@@ -63,7 +63,8 @@ namespace Aardvark.ImageCodecs
             m.OwnerName = S(Ex, 0xA430) ?? X("exifEX:CameraOwnerName") ?? X("aux:OwnerName");
 
             // dates
-            (m.DateTaken, m.DateTakenOffset) = ExifDate(S(Ex, 0x9003), S(Ex, 0x9291), S(Ex, 0x9011) ?? S(Im, 0x882A));
+            // (TIFF-EP, and DNG files following it, keep the EXIF tags in IFD 0)
+            (m.DateTaken, m.DateTakenOffset) = ExifDate(S(Ex, 0x9003) ?? S(Im, 0x9003), S(Ex, 0x9291), S(Ex, 0x9011) ?? S(Im, 0x882A));
             if (m.DateTaken == null) (m.DateTaken, m.DateTakenOffset) = IsoDate(X("exif:DateTimeOriginal") ?? X("photoshop:DateCreated") ?? X("xmp:CreateDate"));
             if (m.DateTaken == null) (m.DateTaken, m.DateTakenOffset) = IptcDate(I("DateCreated"), I("TimeCreated"));
             if (m.DateTaken == null && AS("capDate") is string cap)
@@ -81,11 +82,11 @@ namespace Aardvark.ImageCodecs
             // exposure
             m.ExposureTime = D(Ex, 0x829A) ?? D(Im, 0x829A) ?? XD("exif:ExposureTime") ?? AF("expTime");
             m.FNumber = D(Ex, 0x829D) ?? D(Im, 0x829D) ?? XD("exif:FNumber") ?? AF("aperture");
-            double? iso = D(Ex, 0x8827);
+            double? iso = D(Ex, 0x8827) ?? D(Im, 0x8827);
             if (iso is null or >= 65535) iso = D(Ex, 0x8832) ?? D(Ex, 0x8833) ?? iso;
             iso ??= XD("exif:ISOSpeedRatings") ?? XD("exifEX:PhotographicSensitivity") ?? AF("isoSpeed");
             m.Iso = iso is double isv && isv > 0 ? (int)Math.Round(isv) : null;
-            m.FocalLength = D(Ex, 0x920A) ?? XD("exif:FocalLength");
+            m.FocalLength = D(Ex, 0x920A) ?? D(Im, 0x920A) ?? XD("exif:FocalLength");
             m.FocalLengthIn35mm = D(Ex, 0xA405) is double f35 && f35 > 0 ? f35 : XD("exif:FocalLengthIn35mmFilm");
             m.ExposureBias = D(Ex, 0x9204) ?? XD("exif:ExposureBiasValue");
             m.Flash = (int?)D(Ex, 0x9209);

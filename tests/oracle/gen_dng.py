@@ -296,6 +296,13 @@ def srgb_from_xyz_d50():
     return np.linalg.inv(bradford(D65, D50) @ rgb2xyz65)
 
 
+def norm_cm(cm):
+    """Colour matrices are used scaled so that D50 maps to a camera neutral with largest component 1 (the scale of a
+    matrix carries no meaning; the reader documents this convention)."""
+    m = np.array(cm).reshape(3, 3)
+    return m / (m @ xyz(D50)).max()
+
+
 def dual_weight(t, t1=2856, t2=6504):
     if t <= t1:
         return 1.0
@@ -308,7 +315,7 @@ def neutral_to_xy(neutral):
     xy = D50
     for _ in range(100):
         w = dual_weight(cct(*xy))
-        cm = w * np.array(CM_A).reshape(3, 3) + (1 - w) * np.array(CM_D65).reshape(3, 3)
+        cm = w * norm_cm(CM_A) + (1 - w) * norm_cm(CM_D65)
         X = np.linalg.solve(cm, neutral)
         nxy = (X[0] / X.sum(), X[1] / X.sum())
         if abs(nxy[0] - xy[0]) < 1e-9 and abs(nxy[1] - xy[1]) < 1e-9:
@@ -328,7 +335,7 @@ def camera_to_srgb_dual(neutral):
 
 def camera_to_srgb_single(neutral):
     """One calibration, no forward matrix: CA * inverse(ColorMatrix1), Bradford from the white to D50."""
-    cm = np.array(CM_D65).reshape(3, 3)
+    cm = norm_cm(CM_D65)
     X = np.linalg.solve(cm, neutral)
     xy = (X[0] / X.sum(), X[1] / X.sum())
     return srgb_from_xyz_d50() @ bradford(xy, D50) @ np.linalg.inv(cm), xy

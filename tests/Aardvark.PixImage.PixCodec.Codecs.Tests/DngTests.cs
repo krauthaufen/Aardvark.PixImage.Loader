@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using Aardvark.ImageCodecs;
 using Xunit;
@@ -336,5 +337,170 @@ public class DngTests
             catch (ImageFormatException) { }
             catch (ImageNotSupportedException) { }
         }
+    }
+
+    // ------------------------------------------------------------------------------------------ camera files
+
+    const string Samples = "downloads/dng-samples";
+
+    static IEnumerable<(string Path, JsonElement Json)> RealSamples()
+    {
+        var dir = TestUtil.TestData(Samples);
+        foreach (var j in Directory.GetFiles(dir, "*.json").OrderBy(f => f, StringComparer.Ordinal))
+            yield return (j[..^5], Json(j[..^5]));
+    }
+
+    static string Sha(Span<byte> b) => Convert.ToHexString(SHA256.HashData(b)).ToLowerInvariant();
+
+    [TestDataFact(Samples)]
+    public void RealSamplesStoredValues()
+    {
+        int n = 0, libraw = 0;
+        foreach (var (path, j) in RealSamples())
+        {
+            var name = Path.GetFileName(path);
+            var bytes = File.ReadAllBytes(path);
+            var raw = Dng.DecodeRaw(bytes);
+            var shape = Ints(j.GetProperty("stored_shape"));
+            Assert.Equal((shape[1], shape[0], shape[2]), (raw.Image.Width, raw.Image.Height, raw.Image.Channels));
+            Assert.True(j.GetProperty("stored_sha256").GetString() == Sha(raw.Image.GetBytes()), $"{name}: stored samples differ from tifffile");
+            if (j.TryGetProperty("libraw_sha256", out var lr))
+            {
+                // LibRaw's raw values are the stored ones through the linearization table
+                var lin = raw.Info.LinearizationTable;
+                var src = TestUtil.ToDoubles(raw.Image);
+                var v = new ushort[src.Length];
+                for (int i = 0; i < v.Length; i++) v[i] = lin == null ? (ushort)src[i] : lin[Math.Min((int)src[i], lin.Length - 1)];
+                Assert.True(lr.GetString() == Sha(System.Runtime.InteropServices.MemoryMarshal.AsBytes(v.AsSpan())), $"{name}: linearized values differ from LibRaw");
+                libraw++;
+            }
+            n++;
+        }
+        Assert.True(n >= 14 && libraw >= 10, $"{n} files, {libraw} with LibRaw values");
+    }
+
+    static double Encode(double x)
+    {
+        x = Math.Clamp(x, 0, 1);
+        return x <= 0.0031308 ? 12.92 * x : 1.055 * Math.Pow(x, 1 / 2.4) - 0.055;
+    }
+
+    /// <summary>
+    /// Rendering against LibRaw: both linear sRGB, LibRaw's camera white balance and clipped highlights, box averaged. LibRaw
+    /// differs by design in demosaicing (AHD), in its exposure convention, in using one colour matrix (ours: interpolated
+    /// calibrations and forward matrices) and in skipping most opcodes. After normalizing the exposure (median ratio of the
+    /// mid tones, required within 0.7 .. 1.4) the sRGB encoded difference must stay below 0.012 on average and 0.08 at the
+    /// 99th percentile.
+    /// </summary>
+    [TestDataFact(Samples)]
+    public void RealSamplesRenderLikeLibRaw()
+    {
+        int n = 0;
+        var report = new List<string>();
+        foreach (var (path, j) in RealSamples())
+        {
+            if (!j.TryGetProperty("box", out var kk)) continue;
+            var name = Path.GetFileName(path);
+            int k = kk.GetInt32();
+            var size = Ints(j.GetProperty("libraw_size"));
+            var expected = TestUtil.LoadRef(path + ".libraw.ref");
+            var img = Dng.Decode(File.ReadAllBytes(path), new DngDecodeOptions
+            {
+                OutputType = SampleType.Float32, ApplyDefaultCrop = false, ApplyBaselineExposure = false,
+                ApplyOpcodes = j.GetProperty("libraw_opcodes").GetBoolean(),
+            });
+            Assert.Equal(expected.Channels, img.Channels);
+            int c = img.Channels, w = expected.Width, h = expected.Height;
+            Assert.True(img.Width >= size[0] && img.Height >= size[1], $"{name}: {img.Width}x{img.Height} smaller than LibRaw's {size[0]}x{size[1]}");
+            var src = img.GetData<float>();
+            var e = expected.GetData<float>();
+            var ours = new double[w * h * c];
+            for (int y = 0; y < h * k; y++)
+                for (int x = 0; x < w * k; x++)
+                    for (int ch = 0; ch < c; ch++) ours[((y / k) * w + x / k) * c + ch] += src[((long)y * img.Width + x) * c + ch] / (k * k);
+            var ratios = new List<double>();
+            for (int i = 0; i < ours.Length; i++) if (e[i] > 0.05 && e[i] < 0.6 && ours[i] > 0.01) ratios.Add(e[i] / ours[i]);
+            ratios.Sort();
+            double scale = ratios[ratios.Count / 2];
+            var diff = new double[ours.Length];
+            for (int i = 0; i < ours.Length; i++) diff[i] = Math.Abs(Encode(ours[i] * scale) - Encode(e[i]));
+            double mean = diff.Average();
+            Array.Sort(diff);
+            double p99 = diff[(int)(diff.Length * 0.99)];
+            report.Add($"{name}: scale {scale:F3} mean {mean:F4} p99 {p99:F4}");
+            Assert.True(scale is > 0.7 and < 1.4, report[^1]);
+            Assert.True(mean <= 0.012 && p99 <= 0.08, report[^1]);
+            n++;
+        }
+        Assert.True(n >= 13, $"only {n} files with LibRaw renderings: " + string.Join("; ", report));
+    }
+
+    [TestDataFact(Samples)]
+    public void RealSamplesMetadata()
+    {
+        int n = 0;
+        foreach (var (path, j) in RealSamples())
+        {
+            var name = Path.GetFileName(path);
+            var t = j.GetProperty("tags");
+            var bytes = File.ReadAllBytes(path);
+            var info = Dng.ReadInfo(bytes);
+            var gi = ImageCodec.GetInfo(path);
+            Assert.Equal(ImageFormat.Dng, gi.Format);
+            Assert.Equal(t.GetProperty("make").GetString(), info.Make);
+            Assert.Equal(t.GetProperty("model").GetString(), info.Model);
+            Assert.Equal(info.Make, gi.Metadata?.Make);
+            Assert.Equal((t.GetProperty("raw_width").GetInt32(), t.GetProperty("raw_height").GetInt32()), (info.RawWidth, info.RawHeight));
+            Assert.Equal(t.GetProperty("bits").GetInt32(), info.BitsPerSample);
+            Assert.Equal(t.GetProperty("photometric").GetInt32() == 32803, info.Layout == DngRawLayout.ColorFilterArray);
+            Assert.Equal(t.GetProperty("cfa_pattern").EnumerateArray().Select(x => (byte)x.GetInt32()).ToArray(), info.CfaPattern);
+            var aa = Ints(t.GetProperty("active_area"));
+            if (aa.Length == 4) Assert.Equal(new DngRect(aa[0], aa[1], aa[2], aa[3]), info.ActiveArea);
+            int orient = t.GetProperty("orientation").GetInt32();
+            Assert.Equal(orient, info.Orientation);
+            Assert.Equal(orient, gi.Orientation);
+            var cs = t.GetProperty("crop_size").EnumerateArray().Select(x => x.GetDouble()).ToArray();
+            int fw = cs.Length == 2 ? (int)Math.Round(cs[0]) : info.ActiveArea.Width, fh = cs.Length == 2 ? (int)Math.Round(cs[1]) : info.ActiveArea.Height;
+            Assert.Equal((fw, fh), (info.FinalWidth, info.FinalHeight));
+            Assert.Equal(orient >= 5 ? (fh, fw) : (fw, fh), (gi.Width, gi.Height));
+            var m = gi.Metadata!;
+            if (t.GetProperty("iso").ValueKind == JsonValueKind.Number) Assert.Equal(t.GetProperty("iso").GetInt32(), m.Iso);
+            if (t.GetProperty("exposure").ValueKind == JsonValueKind.Number) Assert.Equal(t.GetProperty("exposure").GetDouble(), m.ExposureTime!.Value, 6);
+            if (t.GetProperty("fnumber").ValueKind == JsonValueKind.Number) Assert.Equal(t.GetProperty("fnumber").GetDouble(), m.FNumber!.Value, 6);
+            if (t.GetProperty("focal").ValueKind == JsonValueKind.Number) Assert.Equal(t.GetProperty("focal").GetDouble(), m.FocalLength!.Value, 6);
+            if (t.GetProperty("date").ValueKind == JsonValueKind.String)
+            {
+                var d = m.DateTaken!.Value;   // (with SubSecTimeOriginal where the file has it)
+                Assert.Equal(DateTime.ParseExact(t.GetProperty("date").GetString()!, "yyyy:MM:dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture), d.AddTicks(-(d.Ticks % TimeSpan.TicksPerSecond)));
+            }
+            n++;
+        }
+        Assert.True(n >= 14);
+    }
+
+    [TestDataFact(Samples)]
+    public void RealSamplesPreviews()
+    {
+        int jpegs = 0;
+        foreach (var (path, _) in RealSamples())
+        {
+            var name = Path.GetFileName(path);
+            var bytes = File.ReadAllBytes(path);
+            var info = Dng.ReadInfo(bytes);
+            foreach (var p in info.Previews.Where(p => p.IsJpegFile))
+            {
+                var jpeg = Dng.ExtractPreviewJpeg(bytes, Math.Max(p.Width, p.Height))!;
+                var ji = Jpeg.GetInfo(jpeg);
+                Assert.True((ji.StoredWidth, ji.StoredHeight) == (p.Width, p.Height), $"{name}: preview JPEG {ji.StoredWidth}x{ji.StoredHeight}, directory {p.Width}x{p.Height}");
+                jpegs++;
+            }
+            if (info.Previews.Count > 0)
+            {
+                var big = info.Previews[^1];
+                var img = Dng.DecodePreview(bytes)!;
+                Assert.Equal(info.Orientation >= 5 ? (big.Height, big.Width) : (big.Width, big.Height), (img.Width, img.Height));
+            }
+        }
+        Assert.True(jpegs >= 5, $"{jpegs} JPEG previews");
     }
 }
