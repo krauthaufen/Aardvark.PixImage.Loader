@@ -126,7 +126,18 @@ def gdal():
             with rasterio.open(path) as ds:
                 a = ds.read()
         except Exception:
-            continue    # GDAL does not read it (most of these are its broken-file tests)
+            # GDAL does not read it (most of these are its broken-file tests); JPEG XL as DNG 1.7 stores it (compression
+            # 52546) needs a GDAL built with libjxl: tifffile + imagecodecs read it instead
+            try:
+                with tifffile.TiffFile(path) as t:
+                    if int(t.pages[0].compression) != 52546:
+                        continue
+                    a = t.pages[0].asarray()
+                write_ref(path + '.ref', np.ascontiguousarray(a))
+                written += 1
+            except Exception:
+                pass
+            continue
         if a.dtype.kind == 'c':
             # complex samples: real and imaginary part as two channels
             # (numpy has no complex integers; the TIFF tags say what the parts are)
