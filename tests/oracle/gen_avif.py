@@ -6,12 +6,14 @@
     little-endian samples above 8 bit) - the AV1 layer has to match bit for bit.
   * name.avif.ref (name.avif.N.ref for frame N of sequences): avifdec's RGB(A) output with bilinear chroma
     upsampling (8 bit, or 16 bit for deeper streams), which the tests compare within 1 (in the stream's bit depth).
-  * av1/name.ivf + name.ivf.json: aomenc streams covering the inter tools with the SHA-256 of dav1d's raw output per frame.
+  * av1/name.ivf + name.ivf.json: aomenc streams covering the inter tools with the SHA-256 of dav1d's raw output of
+    all frames.
 
-Tools: avifenc, avifdec, avifgainmaputil, aomenc, dav1d from PATH or .tmp/tools/usr/bin (the Debian libavif-bin,
-aom-tools and dav1d packages unpacked there, with their libraries in .tmp/tools/usr/lib/x86_64-linux-gnu).
+Tools: avifenc, avifdec, avifgainmaputil, aomenc, dav1d from PATH (tests/oracle/ci/install.sh avif) or
+.tmp/tools/usr/bin (the Debian trixie packages libavif-bin 1.2.1, aom-tools 3.12.1 and dav1d 1.5.1 unpacked there, with
+their libraries in .tmp/tools/usr/lib/x86_64-linux-gnu); the fixtures were made with those versions.
 
-usage: python3 gen_avif.py
+usage: python3 gen_avif.py [avif] [gainmap] [av1]
 """
 import hashlib
 import json
@@ -339,9 +341,30 @@ def gen_av1():
     ivf_case('good_10', y4m10, ['--cpu-used=4', '--cq-level=30', '--bit-depth=10', '--input-bit-depth=10'], n)
 
 
+def gen_gainmap():
+    """An SDR base image with a gain map to a brighter BT.2100 PQ alternate (ISO 21496-1 tone map item)."""
+    os.makedirs(TMP, exist_ok=True)
+    base = natural(128, 96, 30)
+    alt = (np.clip(base.astype(np.float64) / 255 * 1.6, 0, 1) ** 1.2 * 65535).astype(np.uint16)
+    bp, ap = os.path.join(TMP, 'gm_base.png'), os.path.join(TMP, 'gm_alt.png')
+    save_png(bp, base)
+    save_png(ap, alt)
+    out = os.path.join(OUT, 'gainmap.avif')
+    run(tool('avifgainmaputil'), 'combine', bp, ap, out, '--cicp-alternate', '9/16/9', '--downscaling', '2', '-y', '420', '-q', '60')
+    y4m = os.path.join(TMP, 'gm.y4m')
+    run(tool('avifgainmaputil'), 'extractgainmap', out, y4m)
+    w, h, bd, sub, fr = read_y4m(y4m)
+    meta = run(tool('avifgainmaputil'), 'printmetadata', out)
+    frac = lambda key: [int(x) for x in meta.split(key)[1].split('fraction:')[1].split(')')[0].split('/')]
+    finish('gainmap', out, {'gainMap': {'width': w, 'height': h, 'bitDepth': bd, 'yuv': hashlib.sha256(fr[0]).hexdigest(),
+                                        'baseHeadroom': frac('Base headroom'), 'alternateHeadroom': frac('Alternate headroom'),
+                                        'alternatePrimaries': 9, 'alternateTransfer': 16}}, 1)
+
+
 if __name__ == '__main__':
     os.makedirs(OUT, exist_ok=True)
     what = sys.argv[1:] or ['avif', 'av1']
     if 'avif' in what: gen_stills()
+    if 'gainmap' in what or 'avif' in what: gen_gainmap()
     if 'av1' in what: gen_av1()
     shutil.rmtree(TMP, ignore_errors=True)

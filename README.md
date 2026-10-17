@@ -37,6 +37,7 @@ code living in any `Aardvark.*` namespace.
 | JBIG1 | the whole of T.82 (layers, all stripe orders, bit planes) | single layer, 1..8 bit planes |
 | JPEG 2000 | Part 1 and HTJ2K (.j2k / .jph codestreams, JP2 / JPH container), 1..38 bit, region / reduced resolution / layer limited decode | Part 1 and HTJ2K, lossless and lossy (up to 16 bit), target bitrate, tiles, progression orders |
 | JPEG XL | ISO/IEC 18181-1 codestreams and the 18181-2 container: Modular (every predictor incl. the weighted one, MA trees, RCT, palette and delta palette, squeeze) and VarDCT (every transform up to 256x256, AFV, chroma from luma, custom quantization tables), ANS / prefix codes with LZ77, groups, passes, LF frames, patches, splines, noise, Gaborish, EPF, upsampling, XYB, extra channels (alpha incl. premultiplied, depth, spot colours rendered, CMYK through its profile to sRGB), blending, layers and animation, JPEG recompressions (as pixels), 1..32 bit integer, half and float; EXIF / XMP / JUMBF boxes incl. Brotli compressed ones, HDR gain map boxes (18181-2:2026). Encode: lossless modular (8 / 16 bit, half, float; RCT, palettes, learned MA trees, weighted predictor, LZ77, effort 1..9) and lossy VarDCT in XYB (distance / quality like cjxl, DCT 4x4 .. 64x64, chroma from luma, Gaborish, EPF), alpha, ICC, EXIF / XMP boxes, orientation, animation | decode, encode |
+| AVIF | AV1 Image File Format (.avif, .avifs): the whole AV1 decoding process (all intra and inter tools, palette, intra block copy, every transform, quantizer matrices, segmentation, loop filter, CDEF, loop restoration, superres, film grain, scaled references, 8 / 10 / 12 bit, 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4, tiles in parallel, operating points and layers; bit exact with dav1d, passes the libaom test vectors and the Argon conformance streams), HEIF items (grids, overlays, identity derivations, alpha incl. premultiplied, depth and other auxiliary images, clap / irot / imir, nclx and ICC, Exif / XMP, layered images), image sequences with alpha, HDR gain maps (tmap, ISO 21496-1 metadata and the gain map image) | decode only |
 | KTX / KTX2 | KTX 1.1 and 2.0: 1D, 2D, 3D, cube map and array textures, mip chains; every uncompressed Vulkan / OpenGL format with 8..64 bit components and the packed ones; BC1..BC7, ETC1 / ETC2 / EAC, ASTC (LDR and HDR, all 2D and 3D footprints), Basis Universal ETC1S (BasisLZ), UASTC LDR 4x4 and UASTC HDR 4x4; Zstandard and zlib supercompression; KTX 1 big endian files and orientation | KTX 2 with a full data format descriptor (passes `ktx validate`): uncompressed 8/16/32 bit int, half and float, BC1..BC7, ETC2 / EAC, ASTC (LDR and HDR, every 2D footprint), or Basis Universal ETC1S (BasisLZ, codebooks shared by all images, quality 1..255) and UASTC LDR 4x4; mip chains (given or computed), cube maps, arrays, volumes with 3D mip chains; Zstandard or zlib supercompression |
 | Radiance HDR | RGBE and XYZE, new and old RLE and flat scanlines, all eight scan orders, EXPOSURE / PRIMARIES | RLE RGBE from float (or 8/16 bit converted to linear light) |
 | PNM / PAM / PFM | P1..P7, any maxval up to 65535 (scaled to the full range), PAM tuple types, PFM gray / RGB in both byte orders | P1..P7 (plain or binary, bilevel), PFM |
@@ -103,11 +104,11 @@ Icns.Encode(new[] { img16, img32, img128, img512 }, stream);   // Icns.ReadEntri
 ```
 
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
-in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF orientation (JPEG, PNG, WebP, TIFF, JPEG 2000, JPEG XL)
-is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
+in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF orientation (JPEG, PNG, WebP, TIFF, JPEG 2000, JPEG XL) and AVIF's irot / imir
+are applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
 turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the
 stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`,
-`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `Jxl`, `JpegLs`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`, `Dpx`, `Cineon`) with format specific options and extras: animations (GIF, APNG, WebP, JPEG XL), TIFF pages / tags / regions / overviews,
+`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `Jxl`, `Avif`, `JpegLs`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`, `Dpx`, `Cineon`) with format specific options and extras: animations (GIF, APNG, WebP, JPEG XL, AVIF), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data, DPX / Cineon headers (`Dpx.GetHeader`, `Cineon.GetHeader`) and DPX image
 elements. Bit depths that do not fill a sample type keep their stored values: 10 bit DPX and Cineon decode to UInt16 0..1023,
 12 bit to 0..4095 (as 12 bit TIFF and JPEG); 1, 2 and 4 bit samples are stretched to 0..255.
@@ -139,6 +140,20 @@ lossless), orientation and intensity target are kept; `Jxl.EncodeAnimation` writ
 a 12 MP photo, 8 threads / 1 thread (busy machine): lossless effort 1 / 3 / 7 0.57 / 0.88 / 3.9 s and 1.7 / 3.5 / 11.5 s
 (cjxl 0.14 / 1.4 / 3.6 s and 0.11 / 2.1 / 13.5 s), lossy effort 3 / 7 0.77 / 2.2 s and 2.2 / 10 s (cjxl 0.63 / 1.5 s and
 0.45 / 4.5 s).
+
+### AVIF
+
+`Avif.Decode` returns the primary image (for a sequence without one, its first frame) as RGB(A) or gray(+alpha):
+UInt8 for 8 bit streams, UInt16 holding the stored range for 10 and 12 bit (0..1023, 0..4095). YUV is converted with
+the matrix and range of the nclx box or the AV1 sequence header (BT.601 / 709 / 2020, identity, YCgCo), chroma
+upsampled bilinearly (within one step of avifdec); premultiplied alpha comes back straight. The colour space is described
+by the ICC profile of the file or one built from the nclx primaries and transfer; PQ and HLG are reported as the
+transfer function, not applied. The clean aperture is always applied, rotation and mirroring unless
+`ApplyOrientation = false`. `Avif.GetInfo` reads everything from the container without decoding.
+`Avif.DecodeAnimation` gives the frames of an image sequence with durations and sync flags, `Avif.GetGainMap` the tone
+map item's ISO 21496-1 metadata, the alternate colour space and the gain map image, `Avif.GetMetadataItems` the Exif /
+XMP items and `Avif.DecodeAuxiliaryImages` depth maps and other auxiliary images. Tiles, loop filters and the colour
+conversion run in parallel (`Multithreaded = false` for one thread).
 
 ### Volumes and scientific images
 
@@ -316,7 +331,7 @@ var w     = ImageOps.WarpPerspective(img, 800, 600, homography, new WarpOptions 
 - Multi-threaded and vectorised: 4000x3000 RGB to 1000x750 with Lanczos3 takes about 30 ms on 8 cores (Pillow: 125 ms,
   one thread).
 
-`ImageCodec.DecodeAll` returns every page of a TIFF, every frame of an animated GIF, PNG, WebP or JPEG XL, every layer / face of a
+`ImageCodec.DecodeAll` returns every page of a TIFF, every frame of an animated GIF, PNG, WebP, JPEG XL or AVIF sequence, every layer / face of a
 DDS, KTX or PVR texture (every slice of a KTX / PVR / .astc volume), every image of an ICO / ICNS icon and every step of
 an animated cursor.
 
@@ -411,7 +426,7 @@ Metadata is checked against ExifTool (run, never linked): `tests/oracle/gen_meta
 writing tests also run it live, including a tag by tag comparison of rewritten camera files with maker notes.
 
 Everything in `tests/fixtures` is generated by `tests/oracle/gen_*.py` from synthetic images. Third-party test files
-(the PngSuite, openexr-images samples, the lists of the libwebp vectors, the JPEG 2000 and JPEG XL conformance suites, the
+(the PngSuite, openexr-images samples, the lists of the libwebp vectors, the JPEG 2000 and JPEG XL conformance suites, the libaom AV1 test vectors and Argon streams, the
 libtiff / GDAL / OpenSlide samples and ICC profiles) are in a separate test-data repository,
 https://github.com/krauthaufen/Aardvark.PixImage.PixCodec.TestData, with their licences (clone it next to this one).
 The tests look for it in `PIXCODEC_TESTDATA` or next to this repository (`../Aardvark.PixImage.PixCodec.TestData`);

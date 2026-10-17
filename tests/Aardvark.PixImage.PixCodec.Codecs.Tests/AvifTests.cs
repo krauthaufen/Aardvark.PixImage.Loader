@@ -307,6 +307,37 @@ public class AvifTests(ITestOutputHelper output)
         Assert.All(al.Frames, f => Assert.Equal(100, f.DurationMs, 6));
     }
 
+    [Fact]
+    public void GainMap()
+    {
+        var path = Fixture("avif/gainmap.avif");
+        var data = File.ReadAllBytes(path);
+        var j = Json(path).GetProperty("gainMap");
+        var gm = Avif.GetGainMap(data)!;
+        Assert.NotNull(gm);
+        Assert.Equal(0, gm.Version);
+        Assert.Equal(j.GetProperty("alternatePrimaries").GetInt32(), gm.AlternatePrimaries);
+        Assert.Equal(j.GetProperty("alternateTransfer").GetInt32(), gm.AlternateTransferCharacteristics);
+        Assert.Equal(TransferFunction.Pq, gm.AlternateTransfer);
+        // ISO 21496-1 C.2: minimum_version, writer_version (16 bit), flags byte, then base / alternate headroom fractions
+        var m = gm.Metadata;
+        uint U32(int o) => (uint)(m[o] << 24 | m[o + 1] << 16 | m[o + 2] << 8 | m[o + 3]);
+        Assert.Equal(0, m[0] << 8 | m[1]);
+        var bh = j.GetProperty("baseHeadroom").EnumerateArray().Select(e => (uint)e.GetInt64()).ToArray();
+        var ah = j.GetProperty("alternateHeadroom").EnumerateArray().Select(e => (uint)e.GetInt64()).ToArray();
+        Assert.Equal(bh, new[] { U32(5), U32(9) });
+        Assert.Equal(ah, new[] { U32(13), U32(17) });
+        // the gain map image: bit exact planes, its stored size
+        var y = gm.Reader.DecodeYuv(gm.Reader.File.Items[gm.GainMapItemId]);
+        Assert.Equal(j.GetProperty("yuv").GetString(), Sha256(y));
+        var img = gm.DecodeImage();
+        Assert.Equal((j.GetProperty("width").GetInt32(), j.GetProperty("height").GetInt32()), (img.Width, img.Height));
+        // the primary image is the base image
+        var b = Avif.Decode(data);
+        Assert.Equal((128, 96), (b.Width, b.Height));
+        Assert.Null(Avif.GetGainMap(File.ReadAllBytes(Fixture("avif/nat_420_s6.avif"))));
+    }
+
     // ------------------------------------------------------------------ robustness
 
     [Fact]
