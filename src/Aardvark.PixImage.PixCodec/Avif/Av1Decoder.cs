@@ -401,6 +401,39 @@ namespace Aardvark.ImageCodecs.Av1
             GlobalMotionParams(r, h);
             FilmGrainParams(r, h, s);
             fs.Allocate();
+            if (Av1Stats.On) FrameStats(h, s);
+        }
+
+        static void FrameStats(Av1FrameHeader h, Av1SequenceHeader s)
+        {
+            Av1Stats.Count($"frame.type{h.FrameType}");
+            Av1Stats.Count($"seq.bd{s.BitDepth}.ss{s.SubsamplingX}{s.SubsamplingY}{(s.MonoChrome ? ".mono" : "")}");
+            if (s.Use128x128Superblock) Av1Stats.Count("seq.sb128");
+            if (s.ReducedStillPictureHeader) Av1Stats.Count("seq.reducedStill");
+            Av1Stats.Count($"frame.tiles{h.TileCols}x{h.TileRows}");
+            if (h.UseSuperres) Av1Stats.Count($"frame.superres{h.SuperresDenom}");
+            if (h.CdefBits > 0 || h.CdefYPriStrength[0] + h.CdefYSecStrength[0] + h.CdefUvPriStrength[0] + h.CdefUvSecStrength[0] > 0) Av1Stats.Count("frame.cdef");
+            for (int p = 0; p < 3; p++) if (h.FrameRestorationType[p] != 0) Av1Stats.Count($"frame.lr.p{p}.t{h.FrameRestorationType[p]}");
+            if (h.UsingQmatrix) Av1Stats.Count("frame.qmatrix");
+            if (h.SegmentationEnabled) Av1Stats.Count("frame.segmentation");
+            if (h.DeltaQPresent) Av1Stats.Count("frame.deltaQ");
+            if (h.DeltaLfPresent) Av1Stats.Count(h.DeltaLfMulti ? "frame.deltaLfMulti" : "frame.deltaLf");
+            if (h.FilmGrain.ApplyGrain) Av1Stats.Count("frame.filmGrain");
+            if (h.AllowIntrabc) Av1Stats.Count("frame.allowIntrabc");
+            if (h.AllowScreenContentTools) Av1Stats.Count("frame.screenContent");
+            if (h.CodedLossless) Av1Stats.Count("frame.lossless");
+            if (h.ReducedTxSet) Av1Stats.Count("frame.reducedTxSet");
+            Av1Stats.Count($"frame.txMode{h.TxMode}");
+            if (h.LoopFilterLevel[0] != 0 || h.LoopFilterLevel[1] != 0) Av1Stats.Count("frame.deblock");
+            if (!h.FrameIsIntra)
+            {
+                if (h.ReferenceSelect) Av1Stats.Count("frame.referenceSelect");
+                if (h.SkipModePresent) Av1Stats.Count("frame.skipMode");
+                if (h.AllowWarpedMotion) Av1Stats.Count("frame.allowWarped");
+                if (h.UseRefFrameMvs) Av1Stats.Count("frame.refFrameMvs");
+                Av1Stats.Count($"frame.interp{h.InterpolationFilter}");
+                for (int rf = 1; rf < 8; rf++) if (h.GmType[rf] != 0) Av1Stats.Count($"frame.gm{h.GmType[rf]}");
+            }
         }
 
         void SetupPastIndependence(Av1FrameHeader h)

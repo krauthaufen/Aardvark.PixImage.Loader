@@ -307,6 +307,7 @@ namespace Aardvark.ImageCodecs.Av1
             {
                 if (plane == 0) TransformType(x4, y4, txSz);
                 planeTxType = ComputeTxType(plane, txSz, x4, y4);
+                if (Av1Stats.On) { Av1Stats.Count($"tx.size{txSz}"); Av1Stats.Count($"tx.type{planeTxType}"); if (lossless) Av1Stats.Count("tx.wht"); }
                 int txClass = TxClass(planeTxType);
                 bool wide = ScanIsWide(txSz);
                 ReadOnlySpan<byte> scan8 = wide ? default : ScanU8(txSz, planeTxType);

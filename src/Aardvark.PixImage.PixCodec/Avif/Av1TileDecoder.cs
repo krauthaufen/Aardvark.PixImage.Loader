@@ -324,10 +324,35 @@ namespace Aardvark.ImageCodecs.Av1
             else InterFrameModeInfo();
             PaletteTokens();
             ReadBlockTxSize();
+            if (Av1Stats.On) BlockStats();
             if (skip) ResetBlockContext();
             StoreBlock();
             ComputePrediction();
             Residual();
+        }
+
+        void BlockStats()
+        {
+            Av1Stats.Count($"block.size{MiSize}");
+            if (skip) Av1Stats.Count("block.skip");
+            if (useIntrabc) { Av1Stats.Count("block.intrabc"); return; }
+            if (!isInter)
+            {
+                Av1Stats.Count($"intra.y{YMode}");
+                if (HasChroma) Av1Stats.Count($"intra.uv{UVMode}");
+                if (AngleDeltaY != 0 || AngleDeltaUV != 0) Av1Stats.Count("intra.angleDelta");
+                if (PaletteSizeY > 0) Av1Stats.Count($"intra.paletteY{PaletteSizeY}");
+                if (PaletteSizeUV > 0) Av1Stats.Count($"intra.paletteUV{PaletteSizeUV}");
+                if (useFilterIntra) Av1Stats.Count($"intra.filter{filterIntraMode}");
+                return;
+            }
+            Av1Stats.Count($"inter.mode{YMode}");
+            if (skipMode) Av1Stats.Count("inter.skipMode");
+            if (RefFrame[1] > 0) Av1Stats.Count($"inter.compound{compoundType}");
+            if (interintra != 0) Av1Stats.Count(wedgeInterintra != 0 ? "inter.interintraWedge" : $"inter.interintra{interintraMode}");
+            if (motionMode != 0) Av1Stats.Count($"inter.motion{motionMode}");
+            Av1Stats.Count($"inter.filter{interpFilter[0]}{interpFilter[1]}");
+            if (segmentId != 0) Av1Stats.Count("block.segment>0");
         }
 
         void ResetBlockContext()
@@ -965,6 +990,7 @@ namespace Aardvark.ImageCodecs.Av1
             else if (frt == Av1C.RestoreSgrproj) restorationType = S(Av1Cdf.UseSgrproj, 2) != 0 ? Av1C.RestoreSgrproj : Av1C.RestoreNone;
             else restorationType = S(Av1Cdf.RestorationType, 3);
             fs.LrType[plane][unit] = (byte)restorationType;
+            if (Av1Stats.On) Av1Stats.Count($"lr.unit.t{restorationType}");
             if (restorationType == Av1C.RestoreWiener)
             {
                 for (int pass = 0; pass < 2; pass++)
