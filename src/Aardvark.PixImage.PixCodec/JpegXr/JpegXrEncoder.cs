@@ -224,7 +224,7 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                     case JxrBitDepth.Bd16: return max == 65535 ? v : v * 257;
                     case JxrBitDepth.Bd5: return (v * 31 + max / 2) / max;
                     case JxrBitDepth.Bd565: return (v * 63 + max / 2) / max;   // the 6 bit field; R and B are rescaled by the caller
-                    case JxrBitDepth.Bd10: return (v * 1023 + max / 2) / max;
+                    case JxrBitDepth.Bd10: return max == 65535 ? Math.Min(v, 1023) : (v * 1023 + max / 2) / max;   // UInt16: 10 bit values
                     case JxrBitDepth.Bd1White1: case JxrBitDepth.Bd1Black1: return v * 2 >= max ? 1 : 0;
                     default: return FromFloat(v / (float)max, bd);
                 }

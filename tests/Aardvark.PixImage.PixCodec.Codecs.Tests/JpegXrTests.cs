@@ -124,10 +124,10 @@ public class JpegXrTests
                         };
                         for (int c = 0; c < 3; c++)
                         {
-                            int bits = bd == JxrBitDepth.Bd10 ? 10 : bd == JxrBitDepth.Bd565 && c == 1 ? 6 : 5;
-                            int target = bd == JxrBitDepth.Bd10 ? 16 : 8;
-                            double s = Math.Round(f3[c] * ((1 << target) - 1) / (double)((1 << bits) - 1));
-                            if (target == 16) ((ushort[])o.Data)[i * 3 + c] = (ushort)s; else ((byte[])o.Data)[i * 3 + c] = (byte)s;
+                            // 10 bit values as they are, 5 and 6 bit ones stretched to 0..255
+                            int max = bd == JxrBitDepth.Bd565 && c == 1 ? 63 : 31;
+                            if (bd == JxrBitDepth.Bd10) ((ushort[])o.Data)[i * 3 + c] = (ushort)f3[c];
+                            else ((byte[])o.Data)[i * 3 + c] = (byte)Math.Round(f3[c] * 255.0 / max, MidpointRounding.AwayFromZero);
                         }
                     }
                     return o;
@@ -145,7 +145,7 @@ public class JpegXrTests
                 return new RawImage(w, h, model, Array.ConvertAll(raw, v => (byte)((v != 0) != (bd == JxrBitDepth.Bd1Black1) ? 255 : 0)), ch);
             case JxrBitDepth.Bd8: return new RawImage(w, h, model, Array.ConvertAll(raw, v => (byte)v), ch);
             case JxrBitDepth.Bd16: return new RawImage(w, h, model, Array.ConvertAll(raw, v => (ushort)v), ch);
-            case JxrBitDepth.Bd10: return new RawImage(w, h, model, Array.ConvertAll(raw, v => (ushort)Math.Round(v * 65535 / 1023)), ch);
+            case JxrBitDepth.Bd10: return new RawImage(w, h, model, Array.ConvertAll(raw, v => (ushort)v), ch);
             case JxrBitDepth.Bd16S: return new RawImage(w, h, model, Array.ConvertAll(raw, v => (float)(v / 8192)), ch);
             case JxrBitDepth.Bd32S: return new RawImage(w, h, model, Array.ConvertAll(raw, v => (float)(v / 16777216)), ch);
             case JxrBitDepth.Bd16F: return new RawImage(w, h, model, (Half[])r.Data.Clone(), ch);

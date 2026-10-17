@@ -41,6 +41,7 @@ namespace Aardvark.ImageCodecs
         Auto = 0,
         Gray8, Gray16, Gray16Fixed, Gray16Half, Gray32Fixed, Gray32Float, BlackWhite,
         Rgb24, Bgr24, Bgr32, Rgb48, Rgb48Fixed, Rgb48Half, Rgb64Fixed, Rgb64Half, Rgb96Fixed, Rgb128Fixed, Rgb128Float,
+        /// <summary>Packed RGB: 5 / 6 bit fields from 8 bit samples; Bgr101010 (and the 10 bit YCC formats) take UInt16 samples as 10 bit values 0..1023, as decoding returns them.</summary>
         Bgr555, Bgr565, Bgr101010,
         /// <summary>Radiance RGBE (from float samples).</summary>
         Rgbe,
@@ -124,7 +125,7 @@ namespace Aardvark.ImageCodecs
     /// selections (DC only, no highpass, no flexbits, trimmed flexbits), per tile / band / component quantization with
     /// several QP sets per tile, interleaved and separate (planar) alpha, internal 4:2:0 / 4:2:2 / 4:4:4 / Y only / YUVK /
     /// n-component formats. Samples come back in the dense layout: UInt8 / UInt16 for unsigned integer formats (BGR orders
-    /// as Rgb; 5 / 6 bit packed channels expanded to UInt8, 10 bit ones to UInt16), Float32 for fixed point (s2.13, s7.24)
+    /// as Rgb; 5 / 6 bit packed channels stretched to UInt8 0..255, 10 bit ones as UInt16 0..1023), Float32 for fixed point (s2.13, s7.24)
     /// and float formats, Float16 for half floats, Float32 Rgb for RGBE, UInt8 0 / 255 Gray for BlackWhite, CMYK as Rgb (or
     /// stored, <see cref="JpegXrDecodeOptions.ConvertToRgb"/>), n-channel and YCC interchange formats as
     /// <see cref="ColorModel.Other"/> (YCC chroma replicated to the full size). Premultiplied alpha is undone. Metadata:

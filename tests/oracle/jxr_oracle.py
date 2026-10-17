@@ -60,21 +60,23 @@ def pixel_format(data):
     raise ValueError('no PIXEL_FORMAT')
 
 
-def jxrlib():
-    """The JxrDecApp executable, or None."""
+def _tool(name):
+    """A jxrlib program: from $PIXCODEC_JXRLIB when that is set, else from the PATH; None if missing."""
     d = os.environ.get('PIXCODEC_JXRLIB')
-    for exe in ('JxrDecApp', 'JxrDecApp.exe'):
-        if d and os.path.isfile(os.path.join(d, exe)):
-            return os.path.join(d, exe)
-    return shutil.which('JxrDecApp')
+    if d is not None:
+        for exe in (name, name + '.exe'):
+            if os.path.isfile(os.path.join(d, exe)):
+                return os.path.join(d, exe)
+        return None
+    return shutil.which(name)
+
+
+def jxrlib():
+    return _tool('JxrDecApp')
 
 
 def jxrenc():
-    d = os.environ.get('PIXCODEC_JXRLIB')
-    for exe in ('JxrEncApp', 'JxrEncApp.exe'):
-        if d and os.path.isfile(os.path.join(d, exe)):
-            return os.path.join(d, exe)
-    return shutil.which('JxrEncApp')
+    return _tool('JxrEncApp')
 
 
 def _bmp_words(path):

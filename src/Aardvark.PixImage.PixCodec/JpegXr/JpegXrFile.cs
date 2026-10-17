@@ -148,17 +148,19 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                     int r = swapped ? hi : lo, g = mid, bl = swapped ? lo : hi;
                     if (bd == JxrBitDepth.Bd10)
                     {
+                        // 10 bit samples keep their values (as 10 bit DPX and TIFF), 5 and 6 bit ones are stretched (as BMP)
                         var u = (ushort[])px;
-                        u[i * ch] = (ushort)(r << 6 | r >> 4);
-                        u[i * ch + 1] = (ushort)(g << 6 | g >> 4);
-                        u[i * ch + 2] = (ushort)(bl << 6 | bl >> 4);
+                        u[i * ch] = (ushort)r;
+                        u[i * ch + 1] = (ushort)g;
+                        u[i * ch + 2] = (ushort)bl;
                     }
                     else
                     {
                         var b = (byte[])px;
-                        b[i * ch] = (byte)(r << 3 | r >> 2);
-                        b[i * ch + 1] = bd == JxrBitDepth.Bd565 ? (byte)(g << 2 | g >> 4) : (byte)(g << 3 | g >> 2);
-                        b[i * ch + 2] = (byte)(bl << 3 | bl >> 2);
+                        int gm = bd == JxrBitDepth.Bd565 ? 63 : 31;
+                        b[i * ch] = (byte)((r * 255 + 15) / 31);
+                        b[i * ch + 1] = (byte)((g * 255 + gm / 2) / gm);
+                        b[i * ch + 2] = (byte)((bl * 255 + 15) / 31);
                     }
                 }
             }
@@ -219,7 +221,7 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             {
                 case JxrBitDepth.Bd8: ((byte[])px)[i] = (byte)v; break;
                 case JxrBitDepth.Bd16: ((ushort[])px)[i] = (ushort)v; break;
-                case JxrBitDepth.Bd10: ((ushort[])px)[i] = (ushort)(v << 6 | v >> 4); break;
+                case JxrBitDepth.Bd10: ((ushort[])px)[i] = (ushort)v; break;
                 case JxrBitDepth.Bd16S: ((float[])px)[i] = v / 8192f; break;
                 case JxrBitDepth.Bd32S: ((float[])px)[i] = (float)(v / 16777216.0); break;
                 case JxrBitDepth.Bd16F: ((Half[])px)[i] = BitConverter.UInt16BitsToHalf((ushort)v); break;
