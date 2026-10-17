@@ -31,6 +31,89 @@ namespace Aardvark.ImageCodecs
         internal static readonly JpegXrDecodeOptions Default = new();
     }
 
+    /// <summary>The pixel format (Table A.6 of T.832) to write; Auto picks one from the sample type and colour model.</summary>
+    public enum JpegXrPixelFormat
+    {
+        /// <summary>Gray / Rgb / Rgba (GrayAlpha as Rgba): 8 bit, 16 bit, half or float formats by sample type; Other: n channels.</summary>
+        Auto = 0,
+        Gray8, Gray16, Gray16Fixed, Gray16Half, Gray32Fixed, Gray32Float, BlackWhite,
+        Rgb24, Bgr24, Bgr32, Rgb48, Rgb48Fixed, Rgb48Half, Rgb64Fixed, Rgb64Half, Rgb96Fixed, Rgb128Fixed, Rgb128Float,
+        Bgr555, Bgr565, Bgr101010,
+        /// <summary>Radiance RGBE (from float samples).</summary>
+        Rgbe,
+        Bgra32, Rgba64, Rgba64Fixed, Rgba64Half, Rgba128Fixed, Rgba128Float,
+        /// <summary>Premultiplied alpha formats: the colours are multiplied by alpha when encoding.</summary>
+        Pbgra32, Prgba64, Prgba128Float,
+        /// <summary>CMYK formats take 4 (or 5 with alpha) channels in the order C, M, Y, K (, alpha).</summary>
+        Cmyk32, Cmyk64, CmykAlpha40, CmykAlpha80, CmykDirect32, CmykDirect64, CmykDirectAlpha40, CmykDirectAlpha80,
+        /// <summary>3 .. 8 channels of 8 / 16 bits (<see cref="JpegXrEncodeOptions.LastChannelIsAlpha"/>: plus alpha).</summary>
+        Channels8, Channels16,
+        /// <summary>YCC interchange formats take 3 (or 4 with alpha) channels Y, Cb, Cr at full size; 4:2:0 / 4:2:2 ones are subsampled.</summary>
+        Ycc420, Ycc422, Ycc444, Ycc422_10, Ycc444_10, Ycc422_16, Ycc444_16, Ycc420Alpha, Ycc422Alpha, Ycc444Alpha,
+    }
+
+    /// <summary>Internal chroma format of RGB images.</summary>
+    public enum JpegXrSubsampling
+    {
+        Yuv444 = 0,
+        Yuv422 = 1,
+        Yuv420 = 2,
+        /// <summary>Luma only: the image is stored gray (decoders return R = G = B).</summary>
+        YOnly = 3,
+    }
+
+    /// <summary>Where the alpha channel goes.</summary>
+    public enum JpegXrAlphaMode
+    {
+        /// <summary>A separate coded image (ALPHA_OFFSET), what jxrlib writes by default.</summary>
+        Planar = 0,
+        /// <summary>An alpha image plane in the same codestream, macroblock interleaved.</summary>
+        Interleaved = 1,
+    }
+
+    /// <summary>Which frequency bands are kept (BANDS_PRESENT).</summary>
+    public enum JpegXrBands
+    {
+        All = 0,
+        NoFlexbits = 1,
+        NoHighpass = 2,
+        DcOnly = 3,
+    }
+
+    public sealed class JpegXrEncodeOptions
+    {
+        /// <summary>1 (default) is lossless (for 32 bit formats: as close as JPEG XR gets, 22 bits or more are kept); below 1 lossy, lower is smaller.</summary>
+        public double Quality { get; set; } = 1.0;
+        /// <summary>Quality of the alpha channel; null (default) is lossless.</summary>
+        public double? AlphaQuality { get; set; }
+        /// <summary>Explicit quantization parameter (1 .. 255) for all bands and components of lossy coding, instead of the one derived from Quality.</summary>
+        public int Qp { get; set; }
+        public JpegXrPixelFormat PixelFormat { get; set; } = JpegXrPixelFormat.Auto;
+        /// <summary>For n-channel formats from <see cref="ColorModel.Other"/>: the last channel is alpha.</summary>
+        public bool LastChannelIsAlpha { get; set; }
+        /// <summary>Overlap filtering 0, 1 or 2 levels; null: 1, or 2 for qualities below 0.5 (as jxrlib).</summary>
+        public int? Overlap { get; set; }
+        /// <summary>Chroma subsampling of RGB images; null: 4:4:4, or 4:2:0 for qualities below 0.5 (as jxrlib).</summary>
+        public JpegXrSubsampling? Subsampling { get; set; }
+        public JpegXrAlphaMode AlphaMode { get; set; } = JpegXrAlphaMode.Planar;
+        /// <summary>Frequency ordered codestream (DC, LP, HP and flexbits packets per tile) instead of spatial order.</summary>
+        public bool FrequencyOrder { get; set; }
+        /// <summary>Tile size in pixels (rounded up to macroblocks of 16); 0 = one tile across / down the image.</summary>
+        public int TileWidth { get; set; }
+        public int TileHeight { get; set; }
+        /// <summary>Hard tiles: no overlap filtering across tile boundaries.</summary>
+        public bool HardTiling { get; set; }
+        /// <summary>Flexbits trimmed from the highpass coefficients (0 .. 15).</summary>
+        public int TrimFlexbits { get; set; }
+        public JpegXrBands Bands { get; set; } = JpegXrBands.All;
+        /// <summary>Encode tiles and large images on several threads (same result).</summary>
+        public bool Multithreaded { get; set; } = true;
+
+        /// <summary>Top and left windowing margins (TOP_MARGIN, LEFT_MARGIN, 0 .. 63): coded but not output (tests).</summary>
+        internal int TopMargin { get; set; }
+        internal int LeftMargin { get; set; }
+    }
+
     /// <summary>
     /// JPEG XR (ITU-T T.832 | ISO/IEC 29199-2, formerly HD Photo / Windows Media Photo; .jxr, .wdp, .hdp).
     /// <para>Decoding: the tag based file format of Annex A (and bare codestreams), every pixel format of Table A.6, every
@@ -81,5 +164,18 @@ namespace Aardvark.ImageCodecs
         }
 
         public static RawImage Decode(Stream stream, JpegXrDecodeOptions? options = null) => Decode(ImageCodec.ReadAll(stream), options);
+
+        /// <summary>Encodes an image (lossless by default) with its ICC profile, XMP and resolution.</summary>
+        public static byte[] Encode(RawImage image, JpegXrEncodeOptions? options = null)
+        {
+            ArgumentNullException.ThrowIfNull(image);
+            return JxrEncoder.Encode(image, options ?? new JpegXrEncodeOptions());
+        }
+
+        public static void Encode(RawImage image, Stream output, JpegXrEncodeOptions? options = null)
+        {
+            ArgumentNullException.ThrowIfNull(output);
+            output.Write(Encode(image, options));
+        }
     }
 }

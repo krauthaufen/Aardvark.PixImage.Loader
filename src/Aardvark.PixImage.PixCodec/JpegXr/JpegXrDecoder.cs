@@ -71,6 +71,15 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
 
         public static Result Decode(JxrCodestream cs, bool parallel)
         {
+            var res = DecodeParseOnly(cs);
+            res.Primary.Reconstruct(parallel);
+            res.Alpha?.Reconstruct(parallel);
+            return res;
+        }
+
+        /// <summary>Parsing and coefficient decoding of all tiles, without the sample reconstruction.</summary>
+        public static Result DecodeParseOnly(JxrCodestream cs)
+        {
             var ih = cs.Ih;
             var primary = new JxrPlane(ih, cs.Primary, false);
             var alpha = cs.Alpha != null ? new JxrPlane(ih, cs.Alpha, true) : null;
@@ -176,8 +185,6 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                     }
                 }
             }
-            primary.Reconstruct(parallel);
-            alpha?.Reconstruct(parallel);
             return new Result { Cs = cs, Primary = primary, Alpha = alpha };
         }
 

@@ -219,7 +219,8 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                                 r = t + g - ((v[2] + 1) >> 1);
                                 b = v[2] + r;
                             }
-                            if (Packed && !_ih.RedBlueNotSwapped) (r, b) = (b, r);
+                            // packed formats: the computed R goes into the least significant field (jxrlib, and NOTE 3 of
+                            // A.7.18: with RED_BLUE_NOT_SWAPPED_FLAG 0 that field is blue); Table 185 would swap here
                             if (_of == JxrOutputFormat.Rgbe)
                             {
                                 r = (r + _round) >> scale; g = (g + _round) >> scale; b = (b + _round) >> scale;

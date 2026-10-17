@@ -285,7 +285,11 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                 }
         }
 
-        /// <summary>The regions overlap filtering works on, in macroblocks: the whole image, or each tile with hard tiling.</summary>
+        /// <summary>
+        /// The regions overlap filtering works on, in macroblocks: the whole image, or each tile with hard tiling. (jxrlib
+        /// applies the filters of hard tiles on the transposed tile grid - tile column positions as row boundaries and the
+        /// other way round - so it agrees with this only where both grids coincide.)
+        /// </summary>
         void ForRegions(Action<int, int, int, int> f)
         {
             var ih = Ih;
