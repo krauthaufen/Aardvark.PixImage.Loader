@@ -34,7 +34,7 @@ namespace Aardvark.ImageCodecs
                 {
                     case ImageFormat.Jpeg: case ImageFormat.JpegLs: Jpeg(d, b); break;
                     case ImageFormat.Png: Png(d, b); break;
-                    case ImageFormat.Tiff: case ImageFormat.Dng: Tiff(d, b); break;
+                    case ImageFormat.Tiff: case ImageFormat.Dng: case ImageFormat.JpegXr: Tiff(d, b); break;
                     case ImageFormat.Webp: Webp(d, b); break;
                     case ImageFormat.Gif: Gif(d, b); break;
                     case ImageFormat.Jp2: Jp2(d, b); break;

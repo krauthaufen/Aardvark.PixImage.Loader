@@ -746,6 +746,12 @@ namespace Aardvark.Data
                 SaveJxl(image, fj);
                 return;
             }
+            if (saveParams == null && codec == ImageFormat.JpegXr)
+            {
+                using var fx = File.Create(path);
+                SaveJpegXr(image, fx);
+                return;
+            }
             if (saveParams == null && codec is ImageFormat.Qoi or ImageFormat.Ktx or ImageFormat.Pvr or ImageFormat.Astc or ImageFormat.Icns or ImageFormat.Ani or ImageFormat.Dcx or ImageFormat.Dpx or ImageFormat.Cineon or ImageFormat.JpegLs)
             {
                 using var fs = File.Create(path);
@@ -787,6 +793,24 @@ namespace Aardvark.Data
         {
             using var fs = File.Create(path);
             SaveJxl(image, fs, options);
+        }
+
+        /// <summary>
+        /// Saves as JPEG XR (lossless by default; <see cref="JpegXrEncodeOptions.Quality"/> below 1 for lossy). 8 bit, 16 bit
+        /// and float images keep their sample type; other types are written as float.
+        /// </summary>
+        public static void SaveJpegXr(PixImage image, Stream stream, JpegXrEncodeOptions? options = null)
+        {
+            var t = image.PixFormat.Type;
+            if (t != typeof(byte) && t != typeof(ushort) && t != typeof(float)) image = image.ToPixImage<float>();
+            JpegXr.Encode(PixCodecLoader.ToRawImage(image), stream, options);
+        }
+
+        /// <inheritdoc cref="SaveJpegXr(PixImage, Stream, JpegXrEncodeOptions?)"/>
+        public static void SaveJpegXr(PixImage image, string path, JpegXrEncodeOptions? options = null)
+        {
+            using var fs = File.Create(path);
+            SaveJpegXr(image, fs, options);
         }
 
         /// <summary>

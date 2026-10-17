@@ -84,6 +84,8 @@ namespace Aardvark.ImageCodecs
         Jxl,
         /// <summary>Adobe Digital Negative: a TIFF file with DNGVersion in its first directory (raw camera data).</summary>
         Dng,
+        /// <summary>JPEG XR (HD Photo; .jxr, .wdp, .hdp).</summary>
+        JpegXr,
     }
 
     /// <summary>

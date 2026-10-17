@@ -219,9 +219,11 @@ namespace Aardvark.ImageCodecs
             Span<byte> h = stackalloc byte[16];
             if (src.Length < 8) throw new ImageFormatException("TIFF: file too short");
             src.Read(0, h.Slice(0, 8));
-            if (!IsMatch(h)) throw new ImageFormatException("not a TIFF file");
+            // JPEG XR files (T.832 Annex A) are little endian TIFF directories behind the magic II 0xBC 0x01
+            bool jxr = h[0] == (byte)'I' && h[1] == (byte)'I' && h[2] == 0xBC && h[3] == 1;
+            if (!IsMatch(h) && !jxr) throw new ImageFormatException("not a TIFF file");
             BigEndian = h[0] == (byte)'M';
-            Big = U16(h.Slice(2)) == 43;
+            Big = !jxr && U16(h.Slice(2)) == 43;
             if (Big)
             {
                 if (src.Length < 16) throw new ImageFormatException("TIFF: file too short");
