@@ -508,19 +508,19 @@ namespace Aardvark.ImageCodecs.Heif
                         Span<double> px = stackalloc double[4];
                         Sample(li, x, y, scale, px);
                         long o = (cy * ow + cx) * 4;
-                        double a = px[3];
-                        for (int j = 0; j < 3; j++) acc[o + j] = px[j] * a + acc[o + j] * (1 - a);
-                        acc[o + 3] = a + acc[o + 3] * (1 - a);
+                        // later inputs over earlier ones (straight alpha "over")
+                        double a = px[3], below = acc[o + 3] * (1 - a), outA = a + below;
+                        for (int j = 0; j < 3; j++) acc[o + j] = outA > 0 ? (px[j] * a + acc[o + j] * below) / outA : 0;
+                        acc[o + 3] = outA;
                     }
                 }
             }
             double outMax = wide ? maxStored : 255;
             for (long i = 0; i < (long)ow * oh; i++)
             {
-                double a = acc[i * 4 + 3];
                 for (int j = 0; j < 4; j++)
                 {
-                    double v = j < 3 && a > 0 ? acc[i * 4 + j] : acc[i * 4 + j];
+                    double v = acc[i * 4 + j];
                     int q = (int)Math.Round(Math.Clamp(v, 0, 1) * outMax);
                     if (wide) ((ushort[])canvas.Data)[i * 4 + j] = (ushort)q;
                     else ((byte[])canvas.Data)[i * 4 + j] = (byte)q;

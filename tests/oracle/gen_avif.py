@@ -13,13 +13,14 @@ Tools: avifenc, avifdec, avifgainmaputil, aomenc, dav1d from PATH (tests/oracle/
 .tmp/tools/usr/bin (the Debian trixie packages libavif-bin 1.2.1, aom-tools 3.12.1 and dav1d 1.5.1 unpacked there, with
 their libraries in .tmp/tools/usr/lib/x86_64-linux-gnu); the fixtures were made with those versions.
 
-usage: python3 gen_avif.py [avif] [gainmap] [av1]
+usage: python3 gen_avif.py [avif] [gainmap] [overlay] [av1]
 """
 import hashlib
 import json
 import math
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import numpy as np
@@ -341,6 +342,119 @@ def gen_av1():
     ivf_case('good_10', y4m10, ['--cpu-used=4', '--cq-level=30', '--bit-depth=10', '--input-bit-depth=10'], n)
 
 
+# ------------------------------------------------------------------ hand-made HEIF files (overlay)
+
+def boxes(d, pos, end):
+    while pos + 8 <= end:
+        size, typ = struct.unpack('>I4s', d[pos:pos + 8])
+        hdr = 8
+        if size == 1: size, hdr = struct.unpack('>Q', d[pos + 8:pos + 16])[0], 16
+        elif size == 0: size = end - pos
+        yield typ.decode('latin1'), pos, pos + hdr, pos + size
+        pos += size
+
+
+def primary_av1(path):
+    """The primary item of a single image avifenc file: (av1C box, ispe box, coded data)."""
+    d = open(path, 'rb').read()
+    meta = next(b for b in boxes(d, 0, len(d)) if b[0] == 'meta')
+    sub = {t: (s, p, e) for t, s, p, e in boxes(d, meta[2] + 4, meta[3])}
+    pitm = struct.unpack('>H', d[sub['pitm'][1] + 4:sub['pitm'][1] + 6])[0]
+    # iloc (version 0 / 1, as libavif writes it)
+    _, p, e = sub['iloc']
+    ver = d[p]
+    q = p + 4
+    osz, lsz = d[q] >> 4, d[q] & 15
+    bsz, isz = d[q + 1] >> 4, (d[q + 1] & 15 if ver in (1, 2) else 0)
+    q += 2
+    count = struct.unpack('>H', d[q:q + 2])[0]; q += 2
+    rd = lambda n, at: int.from_bytes(d[at:at + n], 'big') if n else 0
+    data = None
+    for _ in range(count):
+        iid = struct.unpack('>H', d[q:q + 2])[0]; q += 2
+        if ver in (1, 2): q += 2
+        q += 2   # data_reference_index
+        base = rd(bsz, q); q += bsz
+        n = struct.unpack('>H', d[q:q + 2])[0]; q += 2
+        parts = []
+        for _ in range(n):
+            q += isz
+            off = rd(osz, q); q += osz
+            ln = rd(lsz, q); q += lsz
+            parts.append(d[base + off:base + off + ln])
+        if iid == pitm: data = b''.join(parts)
+    iprp = sub['iprp']
+    pb = {t: (s, pp, ee) for t, s, pp, ee in boxes(d, iprp[1], iprp[2])}
+    props = [d[s:ee] for t, s, pp, ee in boxes(d, pb['ipco'][1], pb['ipco'][2])]
+    _, p, e = pb['ipma']
+    ver, flags = d[p], int.from_bytes(d[p + 1:p + 4], 'big')
+    q = p + 4
+    count = struct.unpack('>I', d[q:q + 4])[0]; q += 4
+    mine = []
+    for _ in range(count):
+        if ver < 1: iid = struct.unpack('>H', d[q:q + 2])[0]; q += 2
+        else: iid = struct.unpack('>I', d[q:q + 4])[0]; q += 4
+        n = d[q]; q += 1
+        for _ in range(n):
+            if flags & 1: idx = struct.unpack('>H', d[q:q + 2])[0] & 0x7FFF; q += 2
+            else: idx = d[q] & 0x7F; q += 1
+            if iid == pitm: mine.append(props[idx - 1])
+    av1c = next(b for b in mine if b[4:8] == b'av1C')
+    ispe = next(b for b in mine if b[4:8] == b'ispe')
+    return av1c, ispe, data
+
+
+def box(t, payload): return struct.pack('>I4s', 8 + len(payload), t.encode()) + payload
+
+
+def fullbox(t, ver, flags, payload): return box(t, struct.pack('>I', (ver << 24) | flags) + payload)
+
+
+def heif_overlay(out, inputs, canvas, fill):
+    """An overlay (iovl) primary item of the AV1 items of the given avifenc files at (x, y) on the canvas."""
+    items = [primary_av1(p) for p, _, _ in inputs]
+    n = len(items)
+    ov = n + 1
+    iovl = struct.pack('>BB4HHH', 0, 0, *fill, *canvas) + b''.join(struct.pack('>hh', x, y) for _, x, y in inputs)
+    payloads = [it[2] for it in items] + [iovl]
+    ipco = b''.join(it[0] + it[1] for it in items) + fullbox('ispe', 0, 0, struct.pack('>II', *canvas))
+    ipma_entries = b''.join(struct.pack('>HB', i + 1, 2) + bytes([0x80 | (2 * i + 1), 2 * i + 2]) for i in range(n))
+    ipma_entries += struct.pack('>HB', ov, 1) + bytes([2 * n + 1])
+    ipma = fullbox('ipma', 0, 0, struct.pack('>I', n + 1) + ipma_entries)
+    iinf = fullbox('iinf', 0, 0, struct.pack('>H', n + 1) + b''.join(
+        fullbox('infe', 2, 0, struct.pack('>HH4s', i + 1, 0, b'av01' if i < n else b'iovl') + b'\0') for i in range(n + 1)))
+    iref = fullbox('iref', 0, 0, box('dimg', struct.pack('>HH', ov, n) + b''.join(struct.pack('>H', i + 1) for i in range(n))))
+    hdlr = fullbox('hdlr', 0, 0, b'\0' * 4 + b'pict' + b'\0' * 12 + b'\0')
+    pitm = fullbox('pitm', 0, 0, struct.pack('>H', ov))
+    ftyp = box('ftyp', b'avif' + struct.pack('>I', 0) + b'avifmif1miaf')
+
+    def build(offsets):
+        iloc = fullbox('iloc', 0, 0, bytes([0x44, 0x00]) + struct.pack('>H', n + 1) + b''.join(
+            struct.pack('>HHHII', i + 1, 0, 1, offsets[i], len(payloads[i])) for i in range(n + 1)))
+        meta = fullbox('meta', 0, 0, hdlr + pitm + iloc + iinf + iref + box('iprp', box('ipco', ipco) + ipma))
+        return ftyp + meta
+    head = build([0] * (n + 1))
+    offs, o = [], len(head) + 8
+    for pl in payloads: offs.append(o); o += len(pl)
+    with open(out, 'wb') as f: f.write(build(offs) + box('mdat', b''.join(payloads)))
+
+
+def gen_overlay():
+    """
+    iovl: two of the stills on a grey canvas, the second one partly outside it, in avif/overlay. libavif does not read
+    overlays: the reference is the composition of the inputs' own .ref files (the test does it).
+    """
+    ins = [(os.path.join(OUT, 'nat_420_s6.avif'), 10, 5), (os.path.join(OUT, 'odd_size.avif'), 140, 100)]
+    os.makedirs(os.path.join(OUT, 'overlay'), exist_ok=True)
+    out = os.path.join(OUT, 'overlay', 'overlay.avif')
+    canvas, fill = (240, 160), (13107, 26214, 39321, 65535)
+    heif_overlay(out, ins, canvas, fill)
+    with open(out + '.json', 'w') as f:
+        json.dump({'canvas': list(canvas), 'fill': list(fill),
+                   'inputs': [{'file': os.path.basename(p), 'x': x, 'y': y} for p, x, y in ins]}, f, indent=1)
+    print('overlay', os.path.getsize(out))
+
+
 def gen_gainmap():
     """An SDR base image with a gain map to a brighter BT.2100 PQ alternate (ISO 21496-1 tone map item)."""
     os.makedirs(TMP, exist_ok=True)
@@ -366,5 +480,6 @@ if __name__ == '__main__':
     what = sys.argv[1:] or ['avif', 'av1']
     if 'avif' in what: gen_stills()
     if 'gainmap' in what or 'avif' in what: gen_gainmap()
+    if 'overlay' in what or 'avif' in what: gen_overlay()
     if 'av1' in what: gen_av1()
     shutil.rmtree(TMP, ignore_errors=True)

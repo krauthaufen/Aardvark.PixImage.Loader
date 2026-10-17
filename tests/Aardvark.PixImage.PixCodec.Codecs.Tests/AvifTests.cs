@@ -247,6 +247,41 @@ public class AvifTests(ITestOutputHelper output)
         Assert.Equal(ImageOps.ApplyOrientation(kept, kept.Metadata.Orientation).GetBytes().ToArray(), img.GetBytes().ToArray());
     }
 
+    /// <summary>
+    /// An overlay (iovl, made by gen_avif.py; libavif does not read overlays): the inputs' avifdec references pasted on
+    /// the fill colour, the second input partly outside the canvas.
+    /// </summary>
+    [Fact]
+    public void Overlay()
+    {
+        var path = Fixture("avif/overlay/overlay.avif");
+        var j = Json(path);
+        var c = j.GetProperty("canvas").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+        var fill = j.GetProperty("fill").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+        var expected = RawImage.Create(c[0], c[1], ColorModel.Rgb, SampleType.UInt8, 3);
+        var ed = (byte[])expected.Data;
+        for (int i = 0; i < c[0] * c[1]; i++)
+            for (int k = 0; k < 3; k++) ed[i * 3 + k] = (byte)Math.Round(fill[k] / 65535.0 * 255);
+        foreach (var inp in j.GetProperty("inputs").EnumerateArray())
+        {
+            var r = LoadRef(Fixture("avif/" + inp.GetProperty("file").GetString()) + ".ref");
+            int ox = inp.GetProperty("x").GetInt32(), oy = inp.GetProperty("y").GetInt32();
+            var rd = (byte[])r.Data;
+            for (int y = 0; y < r.Height; y++)
+                for (int x = 0; x < r.Width; x++)
+                {
+                    int cx = ox + x, cy = oy + y;
+                    if (cx < 0 || cy < 0 || cx >= c[0] || cy >= c[1]) continue;
+                    for (int k = 0; k < 3; k++) ed[(cy * c[0] + cx) * 3 + k] = rd[(y * r.Width + x) * r.Channels + k];
+                }
+        }
+        var data = File.ReadAllBytes(path);
+        var img = Avif.Decode(data);
+        Assert.True(MaxDiff(expected, img) <= 1, $"max difference {MaxDiff(expected, img)}");
+        var info = Avif.GetInfo(data);
+        Assert.Equal((c[0], c[1], 3), (info.Width, info.Height, info.Channels));
+    }
+
     [Fact]
     public void ExifAndXmpItems()
     {
