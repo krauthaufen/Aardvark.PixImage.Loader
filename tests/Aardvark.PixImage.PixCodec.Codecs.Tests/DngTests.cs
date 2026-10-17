@@ -477,6 +477,53 @@ public class DngTests
     }
 
     [Fact]
+    public void DefaultScaleResamples()
+    {
+        // non-square pixels: DefaultScale 2 x 1 doubles the width of the rendering (and of what GetInfo reports)
+        var src = Dng.DecodeRaw(File.ReadAllBytes(F("bayer16_rggb.dng")));
+        var i = src.Info;
+        var info = new DngInfo
+        {
+            Layout = i.Layout, ColorPlanes = 3, SamplesPerPixel = 1, BitsPerSample = 16, CfaRepeatRows = 2, CfaRepeatCols = 2, CfaPattern = i.CfaPattern,
+            ActiveArea = i.ActiveArea, BlackLevelRepeatRows = 2, BlackLevelRepeatCols = 2, BlackLevel = i.BlackLevel, WhiteLevel = i.WhiteLevel,
+            DefaultCropX = i.DefaultCropX, DefaultCropY = i.DefaultCropY, DefaultCropWidth = i.DefaultCropWidth, DefaultCropHeight = i.DefaultCropHeight,
+            DefaultScaleH = 2, DefaultScaleV = 1, Calibrations = i.Calibrations, AsShotNeutral = i.AsShotNeutral,
+        };
+        var ms = new MemoryStream();
+        Dng.Encode(src.Image, info, ms);
+        var bytes = ms.ToArray();
+        var gi = Dng.GetInfo(bytes);
+        Assert.Equal((184, 60), (gi.Width, gi.Height));
+        var img = Dng.Decode(bytes);
+        Assert.Equal((184, 60, SampleType.UInt16), (img.Width, img.Height, img.SampleType));
+        var plain = Dng.Decode(bytes, new DngDecodeOptions { ApplyDefaultScale = false });
+        Assert.Equal((92, 60), (plain.Width, plain.Height));
+        // flat patches stay flat: the middle of the first patch keeps its colour
+        var a = img.GetData<ushort>(); var b = plain.GetData<ushort>();
+        for (int c = 0; c < 3; c++) Assert.InRange(a[(20 * 184 + 2 * 6) * 3 + c] - b[(20 * 92 + 6) * 3 + c], -40, 40);
+    }
+
+    [Fact]
+    public void ColourModelPieces()
+    {
+        // correlated colour temperatures of the CIE illuminants from their chromaticities
+        Assert.InRange(DngColor.Temperature(0.44757, 0.40745), 2846, 2866);   // A, 2856 K
+        Assert.InRange(DngColor.Temperature(0.31271, 0.32902), 6494, 6514);   // D65, 6504 K
+        Assert.InRange(DngColor.Temperature(0.34567, 0.35850), 4993, 5013);   // D50, 5003 K
+        // calibrations weighted by inverse temperature between the two that enclose the white balance
+        var cals = new[] { new DngCalibration { Temperature = 2856 }, new DngCalibration { Temperature = 6504 }, new DngCalibration { Temperature = 4000 } };
+        var w = DngColor.Weights(cals, 5000);
+        Assert.Equal(0, w[0]);
+        Assert.Equal((1 / 5000.0 - 1 / 6504.0) / (1 / 4000.0 - 1 / 6504.0), w[2], 12);
+        Assert.Equal(1, w[1] + w[2], 12);
+        Assert.Equal(new double[] { 1, 0, 0 }, DngColor.Weights(cals, 2000));
+        Assert.Equal(new double[] { 0, 1, 0 }, DngColor.Weights(cals, 9000));
+        // XYZ D50 -> linear sRGB maps D50 white to (1, 1, 1)
+        var white = DngColor.Apply(DngColor.XyzD50ToLinearSrgb, 3, 3, DngColor.XyToXyz(DngColor.D50));
+        Assert.All(white, v => Assert.Equal(1, v, 4));
+    }
+
+    [Fact]
     public void EncodeChecksArguments()
     {
         var raw = Dng.DecodeRaw(File.ReadAllBytes(F("bayer16_rggb.dng")));
