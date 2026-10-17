@@ -108,7 +108,7 @@ in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF or
 is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
 turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the
 stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`,
-`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `Jxl`, `JpegLs`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`, `Dpx`, `Cineon`) with format specific options and extras: animations (GIF, APNG, WebP, JPEG XL), TIFF pages / tags / regions / overviews,
+`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `Jxl`, `JpegLs`, `Dng`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`, `Dpx`, `Cineon`) with format specific options and extras: animations (GIF, APNG, WebP, JPEG XL), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data, DPX / Cineon headers (`Dpx.GetHeader`, `Cineon.GetHeader`) and DPX image
 elements. Bit depths that do not fill a sample type keep their stored values: 10 bit DPX and Cineon decode to UInt16 0..1023,
 12 bit to 0..4095 (as 12 bit TIFF and JPEG); 1, 2 and 4 bit samples are stretched to 0..255.
@@ -140,6 +140,35 @@ lossless), orientation and intensity target are kept; `Jxl.EncodeAnimation` writ
 a 12 MP photo, 8 threads / 1 thread (busy machine): lossless effort 1 / 3 / 7 0.57 / 0.88 / 3.9 s and 1.7 / 3.5 / 11.5 s
 (cjxl 0.14 / 1.4 / 3.6 s and 0.11 / 2.1 / 13.5 s), lossy effort 3 / 7 0.77 / 2.2 s and 2.2 / 10 s (cjxl 0.63 / 1.5 s and
 0.45 / 4.5 s).
+
+### DNG
+
+`Dng.Decode` (also `ImageCodec.Decode`, the loader for `.dng`) renders the raw image the way the DNG 1.7.1 specification
+describes it: OpcodeList1 on the stored values, LinearizationTable, black levels (pattern, BlackLevelDeltaH / V), white
+level, OpcodeList2, white balance (AsShotNeutral or AsShotWhiteXY, or `WhiteBalanceNeutral` / `WhiteBalanceXY`),
+highlight clipping, demosaicing, OpcodeList3, camera to XYZ D50 with the colour calibrations interpolated in inverse
+correlated colour temperature (forward matrices when present, else the inverted colour matrices with linear Bradford
+adaptation; colour matrices are used normalized so that D50 maps to a neutral with largest component 1), the profile's
+hue / saturation map (and with `ApplyLookTable` its look table), BaselineExposure, default crop and scale, orientation.
+Output is 16 bit (default) or 8 bit sRGB, or linear Float32 (sRGB, XYZ D50 or white balanced camera colours). Demosaicing
+of Bayer data follows Menon, Andriani and Calvagno, "Demosaicing With Directional Filtering and a Posteriori Decision"
+(IEEE TIP 2007) without its refinement step; other patterns (X-Trans, four colour CFAs) use colour difference
+interpolation; `DngDemosaicAlgorithm.Bilinear` is the fast alternative. Opcodes: WarpRectilinear (1 and 2), WarpFisheye,
+FixVignetteRadial, FixBadPixelsConstant / List, TrimBounds, MapTable, MapPolynomial, GainMap, Delta / ScalePerRow /
+Column; unknown optional opcodes are skipped, unknown required ones throw `ImageNotSupportedException`.
+
+`Dng.ReadInfo` returns every parameter without decoding (`DngInfo`: camera, raw layout and size, active area, crop, CFA,
+levels, linearization table, calibrations, white balance, exposure, opcode lists, previews); `Dng.DecodeRaw` the stored
+samples (`DngRawStage.Stored`, as in the file, masked areas included) or the linear reference values of the active area
+(`DngRawStage.Linear`, Float32); `Dng.DecodePreview` / `Dng.ExtractPreviewJpeg` the embedded previews (fast).
+`Dng.Encode` writes a DNG from stored samples and a `DngInfo` (e.g. what `DecodeRaw` returned): lossless JPEG,
+uncompressed or Deflate tiles, every parameter, EXIF / XMP, optionally a preview.
+
+Checked against tifffile (stored samples of all test files, bit exact), LibRaw through rawpy (raw values bit exact; colours of
+flat patches within 0.002; camera files after box averaging within 0.012 mean / 0.08 99th percentile in sRGB encoded
+values, with LibRaw's exposure convention normalized) and a numpy model of the specification for what no reader
+implements (opcode lists, interpolated calibrations with forward matrices, hue / saturation maps). Rendering a 24 MP Bayer
+file takes about 0.4 .. 0.5 s on 8 threads (a 16 MP X-Trans file with a lens warp and a hue / saturation map 1.4 s).
 
 ### Volumes and scientific images
 
