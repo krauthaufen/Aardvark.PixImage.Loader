@@ -356,7 +356,17 @@ namespace Aardvark.ImageCodecs
 
         static T Guard<T>(Func<T> f, Stream? stream = null, long origin = 0)
         {
-            try { return f(); }
+            try
+            {
+                try { return f(); }
+                catch (AggregateException ae)
+                {
+                    // from the parallel loops: the first real failure
+                    var inner = ae.Flatten().InnerExceptions.FirstOrDefault(x => x is ImageFormatException or ImageNotSupportedException) ?? ae.Flatten().InnerExceptions[0];
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(inner).Throw();
+                    throw;
+                }
+            }
             catch (Exception e) when (e is IndexOutOfRangeException || e is OverflowException || e is InvalidCastException
                 || e is DivideByZeroException || e is EndOfStreamException || e is InvalidDataException
                 || (e is ArgumentException && e is not TiffArgumentException && !e.Message.StartsWith("DNG:")))

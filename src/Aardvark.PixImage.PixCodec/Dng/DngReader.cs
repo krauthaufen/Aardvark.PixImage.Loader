@@ -201,7 +201,7 @@ namespace Aardvark.ImageCodecs
 
             // black / white
             var bdim = f.Integers(e, 50713);
-            int brr = bdim != null && bdim.Length >= 2 && bdim[0] > 0 ? (int)bdim[0] : 1, brc = bdim != null && bdim.Length >= 2 && bdim[1] > 0 ? (int)bdim[1] : 1;
+            int brr = bdim != null && bdim.Length >= 2 && bdim[0] > 0 ? (int)Math.Min(bdim[0], 256) : 1, brc = bdim != null && bdim.Length >= 2 && bdim[1] > 0 ? (int)Math.Min(bdim[1], 256) : 1;
             var black = D(f, e, 50714) ?? new double[] { 0 };
             var white = D(f, e, 50717);
             double defWhite = isFloat ? 1 : bits >= 32 ? uint.MaxValue : (1L << bits) - 1;
