@@ -283,6 +283,28 @@ public class AvifTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Thumbnail()
+    {
+        var data = File.ReadAllBytes(Fixture("avif/overlay/thumbnail.avif"));
+        Assert.True(MaxDiff(LoadRef(Fixture("avif/nat_420_s6.avif.ref")), Avif.Decode(data)) <= 1);
+        var t = Avif.DecodeThumbnail(data)!;
+        Assert.True(MaxDiff(LoadRef(Fixture("avif/tiny.avif.ref")), t) <= 1);
+        Assert.Null(Avif.DecodeThumbnail(File.ReadAllBytes(Fixture("avif/tiny.avif"))));
+    }
+
+    [Fact]
+    public void DepthAuxiliaryImage()
+    {
+        var data = File.ReadAllBytes(Fixture("avif/overlay/depth.avif"));
+        var img = Avif.Decode(data);
+        Assert.Equal(ColorModel.Rgb, img.Color);   // a depth map is no alpha
+        var aux = Avif.DecodeAuxiliaryImages(data);
+        Assert.Single(aux);
+        Assert.Equal("urn:mpeg:hevc:2015:auxid:2", aux[0].AuxType);
+        Assert.True(MaxDiff(LoadRef(Fixture("avif/gray_400.avif.ref")), aux[0].Image) <= 1);
+    }
+
+    [Fact]
     public void ExifAndXmpItems()
     {
         var data = File.ReadAllBytes(Fixture("avif/exif_xmp.avif"));

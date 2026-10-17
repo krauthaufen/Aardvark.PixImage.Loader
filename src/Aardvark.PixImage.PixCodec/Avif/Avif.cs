@@ -427,6 +427,20 @@ namespace Aardvark.ImageCodecs
             });
         }
 
+        /// <summary>The first thumbnail item ('thmb' reference to the primary image), decoded; null if there is none.</summary>
+        public static RawImage? DecodeThumbnail(ReadOnlySpan<byte> data, AvifDecodeOptions? options = null)
+        {
+            var copy = data.ToArray();
+            return Guard(() =>
+            {
+                var opt = options ?? AvifDecodeOptions.Default;
+                var rd = new AvifReader(copy, opt);
+                if (rd.Primary is not HeifItem p) return null;
+                foreach (var it in rd.File.Referencing(p.Id, "thmb")) return rd.DecodeItem(it, opt.ApplyOrientation);
+                return null;
+            });
+        }
+
         /// <summary>
         /// Decodes the auxiliary images attached to the primary item other than alpha (depth maps and others), with their
         /// aux_type URN; each comes back as a one channel image of its stored size.

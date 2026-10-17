@@ -355,7 +355,7 @@ def boxes(d, pos, end):
 
 
 def primary_av1(path):
-    """The primary item of a single image avifenc file: (av1C box, ispe box, coded data)."""
+    """The primary item of a single image avifenc file: ([av1C, ispe, pixi boxes], coded data)."""
     d = open(path, 'rb').read()
     meta = next(b for b in boxes(d, 0, len(d)) if b[0] == 'meta')
     sub = {t: (s, p, e) for t, s, p, e in boxes(d, meta[2] + 4, meta[3])}
@@ -401,7 +401,8 @@ def primary_av1(path):
             if iid == pitm: mine.append(props[idx - 1])
     av1c = next(b for b in mine if b[4:8] == b'av1C')
     ispe = next(b for b in mine if b[4:8] == b'ispe')
-    return av1c, ispe, data
+    pixi = next(b for b in mine if b[4:8] == b'pixi')
+    return [av1c, ispe, pixi], data
 
 
 def box(t, payload): return struct.pack('>I4s', 8 + len(payload), t.encode()) + payload
@@ -410,33 +411,48 @@ def box(t, payload): return struct.pack('>I4s', 8 + len(payload), t.encode()) + 
 def fullbox(t, ver, flags, payload): return box(t, struct.pack('>I', (ver << 24) | flags) + payload)
 
 
-def heif_overlay(out, inputs, canvas, fill):
-    """An overlay (iovl) primary item of the AV1 items of the given avifenc files at (x, y) on the canvas."""
-    items = [primary_av1(p) for p, _, _ in inputs]
+def heif_file(out, items, refs, primary):
+    """
+    A HEIF file of the given items: (type, [property boxes, the first one essential], payload); refs: (type, from, [to]),
+    1 based item ids; the payloads go into mdat.
+    """
     n = len(items)
-    ov = n + 1
-    iovl = struct.pack('>BB4HHH', 0, 0, *fill, *canvas) + b''.join(struct.pack('>hh', x, y) for _, x, y in inputs)
-    payloads = [it[2] for it in items] + [iovl]
-    ipco = b''.join(it[0] + it[1] for it in items) + fullbox('ispe', 0, 0, struct.pack('>II', *canvas))
-    ipma_entries = b''.join(struct.pack('>HB', i + 1, 2) + bytes([0x80 | (2 * i + 1), 2 * i + 2]) for i in range(n))
-    ipma_entries += struct.pack('>HB', ov, 1) + bytes([2 * n + 1])
-    ipma = fullbox('ipma', 0, 0, struct.pack('>I', n + 1) + ipma_entries)
-    iinf = fullbox('iinf', 0, 0, struct.pack('>H', n + 1) + b''.join(
-        fullbox('infe', 2, 0, struct.pack('>HH4s', i + 1, 0, b'av01' if i < n else b'iovl') + b'\0') for i in range(n + 1)))
-    iref = fullbox('iref', 0, 0, box('dimg', struct.pack('>HH', ov, n) + b''.join(struct.pack('>H', i + 1) for i in range(n))))
+    props, ipma_entries = b'', b''
+    k = 0
+    for i, (_, pr, _) in enumerate(items):
+        idx = []
+        for j, pb in enumerate(pr):
+            props += pb
+            k += 1
+            idx.append((0x80 if j == 0 and pb[4:8] == b'av1C' else 0) | k)
+        ipma_entries += struct.pack('>HB', i + 1, len(idx)) + bytes(idx)
+    ipma = fullbox('ipma', 0, 0, struct.pack('>I', n) + ipma_entries)
+    iinf = fullbox('iinf', 0, 0, struct.pack('>H', n) + b''.join(
+        fullbox('infe', 2, 0, struct.pack('>HH4s', i + 1, 0, t.encode()) + b'\0') for i, (t, _, _) in enumerate(items)))
+    iref = fullbox('iref', 0, 0, b''.join(box(t, struct.pack('>HH', f, len(to)) + b''.join(struct.pack('>H', x) for x in to)) for t, f, to in refs))
     hdlr = fullbox('hdlr', 0, 0, b'\0' * 4 + b'pict' + b'\0' * 12 + b'\0')
-    pitm = fullbox('pitm', 0, 0, struct.pack('>H', ov))
+    pitm = fullbox('pitm', 0, 0, struct.pack('>H', primary))
     ftyp = box('ftyp', b'avif' + struct.pack('>I', 0) + b'avifmif1miaf')
+    payloads = [pl for _, _, pl in items]
 
     def build(offsets):
-        iloc = fullbox('iloc', 0, 0, bytes([0x44, 0x00]) + struct.pack('>H', n + 1) + b''.join(
-            struct.pack('>HHHII', i + 1, 0, 1, offsets[i], len(payloads[i])) for i in range(n + 1)))
-        meta = fullbox('meta', 0, 0, hdlr + pitm + iloc + iinf + iref + box('iprp', box('ipco', ipco) + ipma))
+        iloc = fullbox('iloc', 0, 0, bytes([0x44, 0x00]) + struct.pack('>H', n) + b''.join(
+            struct.pack('>HHHII', i + 1, 0, 1, offsets[i], len(payloads[i])) for i in range(n)))
+        meta = fullbox('meta', 0, 0, hdlr + pitm + iloc + iinf + (iref if refs else b'') + box('iprp', box('ipco', props) + ipma))
         return ftyp + meta
-    head = build([0] * (n + 1))
+    head = build([0] * n)
     offs, o = [], len(head) + 8
     for pl in payloads: offs.append(o); o += len(pl)
     with open(out, 'wb') as f: f.write(build(offs) + box('mdat', b''.join(payloads)))
+
+
+def heif_overlay(out, inputs, canvas, fill):
+    """An overlay (iovl) primary item of the AV1 items of the given avifenc files at (x, y) on the canvas."""
+    srcs = [primary_av1(p) for p, _, _ in inputs]
+    n = len(srcs)
+    iovl = struct.pack('>BB4HHH', 0, 0, *fill, *canvas) + b''.join(struct.pack('>hh', x, y) for _, x, y in inputs)
+    items = [('av01', pr, d) for pr, d in srcs] + [('iovl', [fullbox('ispe', 0, 0, struct.pack('>II', *canvas))], iovl)]
+    heif_file(out, items, [('dimg', n + 1, list(range(1, n + 1)))], n + 1)
 
 
 def gen_overlay():
@@ -453,6 +469,14 @@ def gen_overlay():
         json.dump({'canvas': list(canvas), 'fill': list(fill),
                    'inputs': [{'file': os.path.basename(p), 'x': x, 'y': y} for p, x, y in ins]}, f, indent=1)
     print('overlay', os.path.getsize(out))
+    # a thumbnail item (thmb) of the primary image: the image of tiny.avif
+    pr, d = primary_av1(os.path.join(OUT, 'nat_420_s6.avif'))
+    tpr, td = primary_av1(os.path.join(OUT, 'tiny.avif'))
+    heif_file(os.path.join(OUT, 'overlay', 'thumbnail.avif'), [('av01', pr, d), ('av01', tpr, td)], [('thmb', 2, [1])], 1)
+    # a depth map (auxiliary item, not alpha): the image of gray_400.avif
+    gpr, gd = primary_av1(os.path.join(OUT, 'gray_400.avif'))
+    auxc = fullbox('auxC', 0, 0, b'urn:mpeg:hevc:2015:auxid:2\0')
+    heif_file(os.path.join(OUT, 'overlay', 'depth.avif'), [('av01', pr, d), ('av01', gpr + [auxc], gd)], [('auxl', 2, [1])], 1)
 
 
 def gen_gainmap():
