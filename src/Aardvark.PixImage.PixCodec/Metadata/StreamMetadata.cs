@@ -26,7 +26,7 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Webp: return Chunks(s, start, 12, png: false);
                 case ImageFormat.Jp2: return Boxes(s, start, prefix);
                 case ImageFormat.Jxl: return JxlBoxes(s, start, prefix);
-                case ImageFormat.Tiff: return Tiff(s, start) ?? prefix;
+                case ImageFormat.Tiff: case ImageFormat.Dng: return Tiff(s, start) ?? prefix;
                 default: return prefix;
             }
         }

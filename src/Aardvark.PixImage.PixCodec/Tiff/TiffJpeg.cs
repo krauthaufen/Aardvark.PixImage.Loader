@@ -27,12 +27,23 @@ namespace Aardvark.ImageCodecs
         public static void Decode16(JpegTiffTables? prepared, ReadOnlySpan<byte> data, int width, int height, int components, bool ycc, Span<ushort> dst)
         {
             var info = Jpeg.GetTiffStreamInfo(data);
-            if (!info.Lossless || (info.Components == components && info.Width >= width))
+            long rowSamples = (long)info.Width * info.Components, need = (long)width * components;
+            bool flatShape = info.Lossless && rowSamples * info.Height == need * height && rowSamples != need;
+            if (!info.Lossless || (info.Components == components && info.Width >= width && !flatShape))
             {
                 Jpeg.DecodeForTiff(prepared, data, width, height, components, ycc, dst);
                 return;
             }
-            long rowSamples = (long)info.Width * info.Components, need = (long)width * components;
+            if (flatShape)
+            {
+                // DNG: "only the total sample counts need to match" - the frame is the tile's samples in scan order
+                // (e.g. two tile rows per frame row, W*2 x H/2)
+                if (need * height > Array.MaxLength) throw new ImageNotSupportedException("TIFF: lossless JPEG frame too large");
+                var flat = new ushort[need * height];
+                Jpeg.DecodeForTiff(prepared, data, info.Width, info.Height, info.Components, false, flat);
+                flat.CopyTo(dst);
+                return;
+            }
             if (rowSamples < need || info.Height < height || rowSamples * info.Height > Array.MaxLength)
                 throw new ImageFormatException($"TIFF: lossless JPEG frame {info.Width}x{info.Height}x{info.Components} does not cover the {width}x{height}x{components} strip or tile");
             var frame = new ushort[rowSamples * info.Height];

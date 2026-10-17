@@ -29,6 +29,7 @@ namespace Aardvark.ImageCodecs
                 case ImageFormat.Webp: return MetadataWriter.Webp(data, plan);
                 case ImageFormat.Jp2: return MetadataWriter.Jp2(data, plan);
                 case ImageFormat.Tiff:
+                case ImageFormat.Dng:
                 {
                     var bytes = data.ToArray();
                     var src = new ArraySource(bytes);
@@ -53,7 +54,7 @@ namespace Aardvark.ImageCodecs
                 var head = new byte[16];
                 int n = input.Read(head, 0, head.Length);
                 input.Position = start;
-                if (DetectFormat(head.AsSpan(0, n)) == ImageFormat.Tiff)
+                if (DetectFormat(head.AsSpan(0, n)) is ImageFormat.Tiff or ImageFormat.Dng)
                 {
                     var plan = MetadataPlan.Build(edit);
                     XmpEditor.CheckPrefixes(plan);
@@ -82,7 +83,7 @@ namespace Aardvark.ImageCodecs
                     var head = new byte[16];
                     int n = f.Read(head, 0, head.Length);
                     f.Position = 0;
-                    if (DetectFormat(head.AsSpan(0, n)) == ImageFormat.Tiff)
+                    if (DetectFormat(head.AsSpan(0, n)) is ImageFormat.Tiff or ImageFormat.Dng)
                     {
                         var plan = MetadataPlan.Build(edit);
                         XmpEditor.CheckPrefixes(plan);
