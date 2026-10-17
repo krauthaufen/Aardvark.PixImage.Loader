@@ -113,37 +113,6 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             b -= a >> 10;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static void T2x2hPost(ref int a, ref int b, ref int c, ref int d)
-        {
-            b -= c;
-            a += (d * 3 + 4) >> 3;
-            d -= b >> 1;
-            c = ((a - b) >> 1) - c;
-            int t = c;
-            c = d;
-            d = t;
-            a -= d;
-            b += c;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static void InvToddOddPost(ref int a, ref int b, ref int c, ref int d)
-        {
-            d += a;
-            c -= b;
-            int t1 = d >> 1, t2 = c >> 1;
-            a -= t1;
-            b += t2;
-            a -= (b * 3 + 6) >> 3;
-            b += (a * 3 + 2) >> 2;
-            a -= (b * 3 + 4) >> 3;
-            b -= t2;
-            a += t1;
-            c += b;
-            d -= a;
-        }
-
         /// <summary>OverlapPostFilter4( ) (Table 169).</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void PostFilter4(ref int a, ref int b, ref int c, ref int d)
@@ -277,13 +246,6 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static void FwdRotate(ref int a, ref int b)
-        {
-            b -= (a + 1) >> 1;
-            a += (b + 1) >> 1;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void FwdScale(ref int a, ref int b)
         {
             b -= (a * 3) >> 4;
@@ -300,37 +262,6 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
         {
             b -= (a + 1) >> 1;
             a += (b + 1) >> 1;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static void UndoT2x2hPost(ref int a, ref int b, ref int c, ref int d)
-        {
-            b -= c;
-            a += d;
-            int t = c;
-            c = d;
-            d = t;
-            c = ((a - b) >> 1) - c;
-            d += b >> 1;
-            a -= (d * 3 + 4) >> 3;
-            b += c;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static void UndoInvToddOddPost(ref int a, ref int b, ref int c, ref int d)
-        {
-            d += a;
-            c -= b;
-            int t1 = d >> 1, t2 = c >> 1;
-            a -= t1;
-            b += t2;
-            a += (b * 3 + 4) >> 3;
-            b -= (a * 3 + 2) >> 2;
-            a += (b * 3 + 6) >> 3;
-            b -= t2;
-            a += t1;
-            c += b;
-            d -= a;
         }
 
         /// <summary>The exact inverse of <see cref="PostFilter4"/>.</summary>
