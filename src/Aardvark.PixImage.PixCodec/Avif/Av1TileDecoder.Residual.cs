@@ -440,15 +440,27 @@ namespace Aardvark.ImageCodecs.Av1
             return eob;
         }
 
+        /// <summary>Sig_Ref_Diff_Offset per transform class as offsets into the padded levels.</summary>
+        static readonly int[] sigRefOffsets = MakeSigRefOffsets();
+
+        static int[] MakeSigRefOffsets()
+        {
+            var r = new int[15];
+            for (int i = 0; i < 15; i++) r[i] = T.SigRefDiffOffset[i * 2] * LevelStride + T.SigRefDiffOffset[i * 2 + 1];
+            return r;
+        }
+
         /// <summary>get_coeff_base_ctx (8.3.2) on the padded levels (positions past the block read 0).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         int CoeffBaseCtx(int txSz, int txClass, int bwl, int width, int height, int pos)
         {
             int row = pos >> bwl, col = pos & (width - 1);
-            int mag = 0;
-            var offs = T.SigRefDiffOffset;
             int o = row * LevelStride + col;
-            for (int idx = 0; idx < 5; idx++)
-                mag += Math.Min((int)levels[o + offs[(txClass * 5 + idx) * 2] * LevelStride + offs[(txClass * 5 + idx) * 2 + 1]], 3);
+            var lv = levels;
+            var offs = sigRefOffsets;
+            int k = txClass * 5;
+            int mag = Math.Min((int)lv[o + offs[k]], 3) + Math.Min((int)lv[o + offs[k + 1]], 3) + Math.Min((int)lv[o + offs[k + 2]], 3)
+                      + Math.Min((int)lv[o + offs[k + 3]], 3) + Math.Min((int)lv[o + offs[k + 4]], 3);
             int ctx = Math.Min((mag + 1) >> 1, 4);
             if (txClass == 0)
             {

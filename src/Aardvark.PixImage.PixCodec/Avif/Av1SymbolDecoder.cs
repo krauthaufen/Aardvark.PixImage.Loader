@@ -10,9 +10,9 @@ namespace Aardvark.ImageCodecs.Av1
     /// renormalisation is a shift of the bit count only and bytes are fetched in groups. Bits past the end of the tile
     /// data read as zero (inverted: one), as the spec pads them.
     /// </summary>
-    internal sealed class Av1SymbolDecoder
+    internal struct Av1SymbolDecoder
     {
-        byte[] buf = Array.Empty<byte>();
+        byte[] buf;
         int pos, end;
         ulong dif;     // SymbolValue << cnt | next cnt inverted bits
         int cnt;

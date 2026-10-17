@@ -144,17 +144,25 @@ namespace Aardvark.ImageCodecs.Av1
             Span<short> buf = stackalloc short[B * B + 16];
             // available: inside the frame in units of 4x4 luma blocks
             int maxY = (f.MiRows << Av1C.MiSizeLog2) >> sy, maxX = (f.MiCols << Av1C.MiSizeLog2) >> sx;
-            for (int i = -2; i < hh + 2; i++)
+            if (y0 >= 2 && y0 + hh + 2 <= maxY && x0 >= 2 && x0 + w + 2 <= maxX)
             {
-                int yy = y0 + i;
-                int bo = (i + 2) * B + 2;
-                bool rowOk = yy >= 0 && yy < maxY;
-                for (int j = -2; j < w + 2; j++)
-                {
-                    int xx = x0 + j;
-                    buf[bo + j] = rowOk && xx >= 0 && xx < maxX ? (short)src[yy * stride + xx] : Na;
-                }
+                // inside the frame: plain row copies (samples are below 2^15)
+                var s16 = MemoryMarshal.Cast<ushort, short>(src.AsSpan());
+                for (int i = -2; i < hh + 2; i++)
+                    s16.Slice((y0 + i) * stride + x0 - 2, w + 4).CopyTo(buf.Slice((i + 2) * B, w + 4));
             }
+            else
+                for (int i = -2; i < hh + 2; i++)
+                {
+                    int yy = y0 + i;
+                    int bo = (i + 2) * B + 2;
+                    bool rowOk = yy >= 0 && yy < maxY;
+                    for (int j = -2; j < w + 2; j++)
+                    {
+                        int xx = x0 + j;
+                        buf[bo + j] = rowOk && xx >= 0 && xx < maxX ? (short)src[yy * stride + xx] : Na;
+                    }
+                }
             int priTap = (priStr >> coeffShift) & 1;
             int p0 = T.CdefPriTaps[priTap * 2], p1 = T.CdefPriTaps[priTap * 2 + 1];
             int s0 = T.CdefSecTaps[priTap * 2], s1 = T.CdefSecTaps[priTap * 2 + 1];

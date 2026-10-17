@@ -18,7 +18,8 @@ namespace Aardvark.ImageCodecs.Av1
         int blockCount;
         ushort[] palettePool = new ushort[256];
         int paletteCount;
-        readonly Av1SymbolDecoder sd = new();
+        // a struct: its state lives in the tile decoder (one indirection less per symbol)
+        Av1SymbolDecoder sd;
         public readonly ushort[] Cdf = Av1Cdf.Create();
         readonly ushort[] intraFrameYModeCdf = Av1Cdf.IntraFrameYModeDefaults();
         readonly ushort[] tmpCdf = new ushort[3];
