@@ -43,4 +43,16 @@ public class DngLoaderTests
         Assert.Equal(typeof(ushort), info.Format.Type);
         Assert.Equal(format, info.Format.Format);
     }
+
+    [Fact]
+    public void LoadWithOptions()
+    {
+        var path = Fixture("dng/bayer16_rggb.dng");
+        var f = PixCodec.LoadDng(path, new DngDecodeOptions { OutputType = SampleType.Float32 });
+        Assert.Equal(typeof(float), f.PixFormat.Type);
+        var raw = Dng.Decode(File.ReadAllBytes(path), new DngDecodeOptions { OutputType = SampleType.Float32 });
+        Assert.Equal((float[])raw.Data, Samples<float>(f));
+        var b = PixCodec.LoadDng(new MemoryStream(File.ReadAllBytes(path)), new DngDecodeOptions { OutputType = SampleType.UInt8 });
+        Assert.Equal(typeof(byte), b.PixFormat.Type);
+    }
 }
