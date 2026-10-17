@@ -69,7 +69,7 @@ if [ ! -f "$D/libultrahdr/build/ultrahdr_app$X" ]; then
   fetch "https://github.com/google/libultrahdr/archive/refs/tags/v$UHDR.tar.gz" "$D/libultrahdr.tar.gz"
   unpack "$D/libultrahdr.tar.gz" "$D/libultrahdr"
   gen=(); command -v ninja > /dev/null && gen=(-G Ninja)
-  (cd "$D/libultrahdr" && export CMAKE_POLICY_VERSION_MINIMUM=3.5 && cmake -S . -B build "${gen[@]+"${gen[@]}"}" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+  (cd "$D/libultrahdr" && export CMAKE_POLICY_VERSION_MINIMUM=3.5 CXXFLAGS="${CXXFLAGS:-} -include cstdint" && cmake -S . -B build "${gen[@]+"${gen[@]}"}" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
       -DUHDR_BUILD_DEPS=ON -DUHDR_WRITE_XMP=ON -DUHDR_WRITE_ISO=ON -DUHDR_ENABLE_INSTALL=OFF -DUHDR_BUILD_EXAMPLES=ON > "$D/libultrahdr.log" 2>&1 \
     && cmake --build build --config Release -j4 --target ultrahdr_app >> "$D/libultrahdr.log" 2>&1) || { tail -40 "$D/libultrahdr.log"; exit 1; }
   deps "$D/libultrahdr/build/ultrahdr_app$X"
