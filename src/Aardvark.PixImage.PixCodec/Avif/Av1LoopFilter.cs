@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 using System.Threading.Tasks;
 using T = Aardvark.ImageCodecs.Av1.Av1Tables;
 
@@ -99,8 +101,157 @@ namespace Aardvark.ImageCodecs.Av1
             int step = pass == 0 ? 1 : stride;      // across the edge
             int along = pass == 0 ? stride : 1;     // along the edge
             int bd = s.BitDepth;
+            if (Vector128.IsHardwareAccelerated)
+            {
+                FilterVec(pl, yP * stride + xP, step, along, limit, blimit, thresh, filterSize, plane, bd);
+                return;
+            }
             for (int i = 0; i < Av1C.MiSize; i++)
                 SampleFilter(pl, (yP + dx * i) * stride + xP + dy * i, step, limit, blimit, thresh, filterSize, plane, bd);
+        }
+
+        /// <summary>The 4 samples across one edge (lane i at o + i * along), offset k from it: sample o + i * along + k * step.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector128<int> Tap(ushort[] p, int o, int step, int along, int k)
+        {
+            int b = o + k * step;
+            if (along == 1) return Vector128.WidenLower(Vector128.Create(p[b], p[b + 1], p[b + 2], p[b + 3], 0, 0, 0, 0)).AsInt32();
+            return Vector128.Create(p[b], p[b + along], p[b + 2 * along], p[b + 3 * along]);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void Store(ushort[] p, int o, int step, int along, int k, Vector128<int> v)
+        {
+            int b = o + k * step;
+            p[b] = (ushort)v.GetElement(0);
+            p[b + along] = (ushort)v.GetElement(1);
+            p[b + 2 * along] = (ushort)v.GetElement(2);
+            p[b + 3 * along] = (ushort)v.GetElement(3);
+        }
+
+        /// <summary>
+        /// The sample filtering process (7.14.6) for the four samples of an edge at once: the masks of 7.14.6.2 per lane,
+        /// the narrow and wide filters (7.14.6.3, 7.14.6.4) computed for all lanes and selected per lane.
+        /// </summary>
+        static void FilterVec(ushort[] p, int o, int step, int along, int limit, int blimit, int thresh, int filterSize, int plane, int bd)
+        {
+            int sh = bd - 8;
+            int filterLen = filterSize == 4 ? 4 : plane != 0 ? 6 : filterSize == 8 ? 8 : 16;
+            var q0 = Tap(p, o, step, along, 0); var q1 = Tap(p, o, step, along, 1);
+            var p0 = Tap(p, o, step, along, -1); var p1 = Tap(p, o, step, along, -2);
+            var limitBd = Vector128.Create(limit << sh);
+            var blimitBd = Vector128.Create(blimit << sh);
+            var threshBd = Vector128.Create(thresh << sh);
+            var ap1p0 = Vector128.Abs(p1 - p0);
+            var aq1q0 = Vector128.Abs(q1 - q0);
+            var hev = Vector128.GreaterThan(ap1p0, threshBd) | Vector128.GreaterThan(aq1q0, threshBd);
+            var mask = Vector128.GreaterThan(ap1p0, limitBd) | Vector128.GreaterThan(aq1q0, limitBd)
+                       | Vector128.GreaterThan(Vector128.Abs(p0 - q0) * 2 + (Vector128.Abs(p1 - q1) >> 1), blimitBd);
+            Vector128<int> p2 = default, q2 = default, p3 = default, q3 = default;
+            if (filterLen >= 6)
+            {
+                q2 = Tap(p, o, step, along, 2); p2 = Tap(p, o, step, along, -3);
+                mask |= Vector128.GreaterThan(Vector128.Abs(p2 - p1), limitBd) | Vector128.GreaterThan(Vector128.Abs(q2 - q1), limitBd);
+            }
+            if (filterLen >= 8)
+            {
+                q3 = Tap(p, o, step, along, 3); p3 = Tap(p, o, step, along, -4);
+                mask |= Vector128.GreaterThan(Vector128.Abs(p3 - p2), limitBd) | Vector128.GreaterThan(Vector128.Abs(q3 - q2), limitBd);
+            }
+            // lanes to filter
+            var on = ~mask;
+            if (on == Vector128<int>.Zero) return;
+            var one = Vector128.Create(1 << sh);
+            Vector128<int> flat = Vector128<int>.Zero, flat2 = Vector128<int>.Zero;
+            if (filterSize >= 8)
+            {
+                var nf = Vector128.GreaterThan(ap1p0, one) | Vector128.GreaterThan(aq1q0, one)
+                         | Vector128.GreaterThan(Vector128.Abs(p2 - p0), one) | Vector128.GreaterThan(Vector128.Abs(q2 - q0), one);
+                if (filterLen >= 8) nf |= Vector128.GreaterThan(Vector128.Abs(p3 - p0), one) | Vector128.GreaterThan(Vector128.Abs(q3 - q0), one);
+                flat = ~nf;
+            }
+            Span<Vector128<int>> v = stackalloc Vector128<int>[32];
+            if (filterSize >= 16)
+            {
+                var q4 = Tap(p, o, step, along, 4); var q5 = Tap(p, o, step, along, 5); var q6 = Tap(p, o, step, along, 6);
+                var p4 = Tap(p, o, step, along, -5); var p5 = Tap(p, o, step, along, -6); var p6 = Tap(p, o, step, along, -7);
+                var nf2 = Vector128.GreaterThan(Vector128.Abs(p6 - p0), one) | Vector128.GreaterThan(Vector128.Abs(q6 - q0), one)
+                          | Vector128.GreaterThan(Vector128.Abs(p5 - p0), one) | Vector128.GreaterThan(Vector128.Abs(q5 - q0), one)
+                          | Vector128.GreaterThan(Vector128.Abs(p4 - p0), one) | Vector128.GreaterThan(Vector128.Abs(q4 - q0), one);
+                flat2 = ~nf2;
+                v[15 - 7] = p6; v[15 - 6] = p5; v[15 - 5] = p4; v[15 + 4] = q4; v[15 + 5] = q5; v[15 + 6] = q6;
+            }
+            v[15 - 4] = p3; v[15 - 3] = p2; v[15 - 2] = p1; v[15 - 1] = p0; v[15] = q0; v[15 + 1] = q1; v[15 + 2] = q2; v[15 + 3] = q3;
+
+            // narrow filter (7.14.6.3) for all lanes
+            int offv = 0x80 << sh;
+            var off = Vector128.Create(offv);
+            var lo = Vector128.Create(-(1 << (bd - 1)));
+            var hi = Vector128.Create((1 << (bd - 1)) - 1);
+            static Vector128<int> C(Vector128<int> x, Vector128<int> lo, Vector128<int> hi) => Vector128.Min(Vector128.Max(x, lo), hi);
+            var ps1 = p1 - off; var ps0 = p0 - off; var qs0 = q0 - off; var qs1 = q1 - off;
+            var filt = C(ps1 - qs1, lo, hi) & hev;
+            filt = C(filt + (qs0 - ps0) * 3, lo, hi);
+            var f1 = C(filt + Vector128.Create(4), lo, hi) >> 3;
+            var f2 = C(filt + Vector128.Create(3), lo, hi) >> 3;
+            var nq0 = C(qs0 - f1, lo, hi) + off;
+            var np0 = C(ps0 + f2, lo, hi) + off;
+            var f3 = (f1 + Vector128.Create(1)) >> 1;
+            var nq1 = Vector128.ConditionalSelect(hev, q1, C(qs1 - f3, lo, hi) + off);
+            var np1 = Vector128.ConditionalSelect(hev, p1, C(ps1 + f3, lo, hi) + off);
+            var useNarrow = filterSize == 4 ? on : on & ~flat;
+            // wide filters for the lanes that are flat
+            Span<Vector128<int>> w8 = stackalloc Vector128<int>[12];
+            Span<Vector128<int>> w16 = stackalloc Vector128<int>[12];
+            Vector128<int> use8 = Vector128<int>.Zero, use16 = Vector128<int>.Zero;
+            if (filterSize >= 8)
+            {
+                use8 = filterSize == 8 ? on & flat : on & flat & ~flat2;
+                use16 = filterSize >= 16 ? on & flat & flat2 : Vector128<int>.Zero;
+                if (use8 != Vector128<int>.Zero) WideVec(v, 3, plane, w8);
+                if (use16 != Vector128<int>.Zero) WideVec(v, 4, plane, w16);
+            }
+            // outputs: samples -n .. n - 1 of the wide filters, -2 .. 1 of the narrow one
+            int nOut = filterSize >= 16 ? 6 : filterSize >= 8 ? (plane == 0 ? 3 : 2) : 2;
+            for (int k = -nOut; k < nOut; k++)
+            {
+                var cur = v[15 + k];
+                var r = cur;
+                if (k >= -2 && k <= 1)
+                {
+                    var nv = k == -2 ? np1 : k == -1 ? np0 : k == 0 ? nq0 : nq1;
+                    r = Vector128.ConditionalSelect(useNarrow, nv, r);
+                }
+                if (filterSize >= 8)
+                {
+                    int n8 = plane == 0 ? 3 : 2;
+                    if (k >= -n8 && k < n8) r = Vector128.ConditionalSelect(use8, w8[k + 6], r);
+                    if (filterSize >= 16) r = Vector128.ConditionalSelect(use16, w16[k + 6], r);
+                }
+                if (r != cur) Store(p, o, step, along, k, r);
+            }
+        }
+
+        /// <summary><see cref="WideFilter"/> on four lanes: out[i + 6] for i = -n .. n - 1.</summary>
+        static void WideVec(Span<Vector128<int>> v0, int log2Size, int plane, Span<Vector128<int>> outv)
+        {
+            int n = log2Size == 4 ? 6 : plane == 0 ? 3 : 2;
+            int n2 = log2Size == 3 && plane == 0 ? 0 : 1;
+            Span<Vector128<int>> v = stackalloc Vector128<int>[32];
+            int lo = -(n + 1), hi = n;
+            for (int k = lo; k <= hi; k++) v[k + 15] = v0[k + 15];
+            for (int k = lo - n; k < lo; k++) v[k + 15] = v0[lo + 15];
+            for (int k = hi + 1; k <= hi + n; k++) v[k + 15] = v0[hi + 15];
+            var round = Vector128.Create(1 << (log2Size - 1));
+            var sum = Vector128<int>.Zero;
+            for (int j = -n; j <= n; j++) sum += v[-n + j + 15];
+            for (int i = -n; i < n; i++)
+            {
+                var extra = Vector128<int>.Zero;
+                for (int j = -n2; j <= n2; j++) extra += v[i + j + 15];
+                outv[i + 6] = (sum + extra + round) >> log2Size;
+                sum += v[i + n + 1 + 15] - v[i - n + 15];
+            }
         }
 
         static int FilterLevel(Av1FrameState f, ref Av1Block b, int plane, int pass)
