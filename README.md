@@ -104,7 +104,7 @@ Icns.Encode(new[] { img16, img32, img128, img512 }, stream);   // Icns.ReadEntri
 ```
 
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
-in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF orientation (JPEG, PNG, WebP, TIFF, JPEG 2000, JPEG XL)
+in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF orientation (JPEG, PNG, WebP, TIFF, DNG, JPEG 2000, JPEG XL)
 is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
 turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the
 stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`,
@@ -167,8 +167,9 @@ uncompressed or Deflate tiles, every parameter, EXIF / XMP, optionally a preview
 Checked against tifffile (stored samples of all test files, bit exact), LibRaw through rawpy (raw values bit exact; colours of
 flat patches within 0.002; camera files after box averaging within 0.012 mean / 0.08 99th percentile in sRGB encoded
 values, with LibRaw's exposure convention normalized) and a numpy model of the specification for what no reader
-implements (opcode lists, interpolated calibrations with forward matrices, hue / saturation maps). Rendering a 24 MP Bayer
-file takes about 0.4 .. 0.5 s on 8 threads (a 16 MP X-Trans file with a lens warp and a hue / saturation map 1.4 s).
+implements (opcode lists, interpolated calibrations with forward matrices, hue / saturation maps). Rendering takes about
+0.5 s for an 18 MP Bayer file or a 22 MP lossy LinearRaw file and 1.4 s for a 16 MP X-Trans file with a lens warp and a
+hue / saturation map (8 threads of an i7-9700E that was busy with other work).
 
 ### Volumes and scientific images
 
