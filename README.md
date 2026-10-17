@@ -25,7 +25,8 @@ code living in any `Aardvark.*` namespace.
 | Format | Decode | Encode |
 |---|---|---|
 | PNG | everything in the spec, interlaced, 16 bit, APNG, all standard ancillary chunks | 8/16 bit gray, gray+alpha, RGB, RGBA, palette, 1/2/4 bit, interlaced, APNG |
-| JPEG | baseline, progressive, lossless, hierarchical, arithmetic coding, 8 and 12 bit, CMYK/YCCK, scaled decode | baseline, progressive, lossless (Huffman and arithmetic), arithmetic, 8 and 12 bit; own tuned quantization tables (about 13% smaller than libjpeg-turbo at equal SSIMULACRA2), optional trellis quantization (about 16%) |
+| JPEG | baseline, progressive, lossless, hierarchical, arithmetic coding, 8 and 12 bit, CMYK/YCCK, scaled decode; HDR gain maps (Ultra HDR v1.1 XMP and ISO 21496-1, HDR rendition for any display headroom) | baseline, progressive, lossless (Huffman and arithmetic), arithmetic, 8 and 12 bit; own tuned quantization tables (about 13% smaller than libjpeg-turbo at equal SSIMULACRA2), optional trellis quantization (about 16%); Ultra HDR / ISO 21496-1 gain map JPEGs from HDR images |
+| MPO / MPF | CIPA DC-007 Multi-Picture Format: MP index and attributes, every individual image (stereo / multi-view MPO, large thumbnails, gain map images); damaged MP data falls back to the primary image | Extended MP files (.mpo: disparity, multi-angle, panorama views), MPF of gain map JPEGs |
 | TIFF | classic + BigTIFF, strips + tiles, 1..64 bit int, 16/24/32/64 bit float, LZW, Deflate, PackBits, CCITT, JPEG (incl. old-style, 12 bit, lossless), ZSTD, LZMA, WebP, JPEG 2000 (incl. Aperio), JBIG, LERC (decode only), PixarLog, LogLuv, Lab, multi-page, raw tags, regions, files > 4 GB | every sample type, strips or tiles, None / LZW / Deflate / PackBits / ZSTD / LZMA / JPEG / WebP / lossless JPEG 2000 / JBIG / CCITT G3 and G4, multi-page, overviews, cloud-optimized layout, extra tags |
 | GIF | 87a/89a, interlace, transparency, animations (compositing verified against Chromium) | single images and animations, quantizer + dithering |
 | OpenEXR | scanline, tiled, multi-part, deep, mip/rip levels, half/float/uint, luminance/chroma, all compressions incl. PIZ, B44, DWA, ZSTD, HTJ2K, region decode from a stream | scanline, tiled, multi-part, deep, luminance/chroma, all of those compressions |
@@ -113,6 +114,21 @@ elements. Bit depths that do not fill a sample type keep their stored values: 10
 12 bit to 0..4095 (as 12 bit TIFF and JPEG); 1, 2 and 4 bit samples are stretched to 0..255.
 
 Malformed files throw `ImageFormatException`, valid files using an unimplemented feature throw `ImageNotSupportedException`.
+
+### HDR gain maps and multi-picture JPEG
+
+`Jpeg.Decode` of an Ultra HDR / ISO 21496-1 JPEG returns the SDR baseline as before. `Jpeg.GetGainMap` gives the gain
+map (`GainMap`: ISO 21496-1 metadata as `GainMapMetadata`, read from the binary APP2 payload or mapped from the Ultra HDR
+/ Adobe `hdrgm` XMP, the decoded gain map image, the alternate colour space), found through the MPF index, the GContainer
+directory or the MPF images' headers; unusable metadata means no gain map. `GainMap.Apply` reconstructs the alternate
+rendition as ISO 21496-1 clause 6 says (linear Float32 RGB, 1.0 = SDR white) for a display headroom (log2; full by
+default), and `Jpeg.DecodeHdr` / `Jxl.DecodeHdr` / `ImageCodec.DecodeHdr` / `PixCodec.LoadHdr` do it in one call; JPEG
+XL `jhgm` boxes go through the same code (`JxlGainMap.ToGainMap`). `Jpeg.EncodeUltraHdr` writes a gain map JPEG from an
+HDR image (tone mapped baseline) or an SDR + HDR pair, with MPF, Ultra HDR XMP and ISO 21496-1 metadata; libultrahdr
+decodes the files to within 0.04 stops of our own reconstruction. `ImageInfo.HasGainMap` and `ImageInfo.MultiPicture`
+(the MPF index) come from the headers; for MPO files `FrameCount` is the number of views, `Jpeg.DecodeAll` /
+`ImageCodec.DecodeAll` return them and `Jpeg.DecodePicture` / `ExtractPicture` any individual image. `Jpeg.EncodeMpo`
+writes stereo and multi-view MPO files.
 
 ### JPEG XL
 
