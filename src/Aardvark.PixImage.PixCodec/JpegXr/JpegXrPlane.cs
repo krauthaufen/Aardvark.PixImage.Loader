@@ -112,7 +112,10 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
         public readonly bool IsAlpha;
         readonly int _mbw, _mbh;
 
-        /// <summary>The samples of each component (extended size), coefficients until reconstruction is done.</summary>
+        /// <summary>
+        /// The samples of each component (extended size), coefficients until reconstruction is done; block-major (see
+        /// <see cref="JxrTransform.At"/>), with DcW blocks per row.
+        /// </summary>
         public readonly int[][] Px;
         public readonly int[] PxW, PxH;
         /// <summary>The DC-LP arrays (one coefficient per 4x4 block).</summary>
@@ -736,8 +739,8 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         int BlockOffset(int c, int blk)
         {
-            int bw = _mbPxW[c] >> 2;
-            return (_mby * _mbPxH[c] + 4 * (blk / bw)) * PxW[c] + _mbx * _mbPxW[c] + 4 * (blk % bw);
+            int bw = _mbPxW[c] >> 2, bh = _mbPxH[c] >> 2;
+            return ((_mby * bh + blk / bw) * DcW[c] + _mbx * bw + blk % bw) << 4;
         }
 
         /// <summary>
@@ -774,7 +777,6 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                 int bits = chroma ? _modelHp.Bits1 : _modelHp.Bits0;
                 int cb = _cbphp[_mbi * Nc + c];
                 var px = Px[c];
-                int stride = PxW[c];
                 for (int b = 0; b < nBlocks * 4; b++, cb >>= 1)
                 {
                     int map = nBlocks == 4 ? JxrTables.HierScanOrder[b] : b;
@@ -789,8 +791,7 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                             k += rl[kk * 2];
                             if (k > 15) throw new ImageFormatException("JPEG XR: HP run out of range");
                             // AdaptiveHPScan( )
-                            int pos = scan[k];
-                            px[o + (pos >> 2) * stride + (pos & 3)] = rl[kk * 2 + 1];
+                            px[o + scan[k]] = rl[kk * 2 + 1];
                             totals[k]++;
                             if (k > 1 && totals[k] > totals[k - 1])
                             {
@@ -800,7 +801,7 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                             k++;
                         }
                     }
-                    if (flex) BlockFlexbits(r, px, o, stride, bits, trim);
+                    if (flex) BlockFlexbits(r, px, o, bits, trim);
                     if (chroma) lap1 += numNz; else lap0 += numNz;
                 }
             }
@@ -820,14 +821,18 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
         /// BLOCK_FLEXBITS( ) merged with the HP remapping (9.5.4): the 15 HP coefficients of a block become
         /// (VLC part &lt;&lt; model bits) + flexbits. Without flexbits (bits == trim, or NOFLEXBITS) only the shift remains.
         /// </summary>
-        static void BlockFlexbits(JxrBitReader r, int[] px, int o, int stride, int bits, int trim)
+        static void BlockFlexbits(JxrBitReader r, int[] px, int o, int bits, int trim)
         {
             int left = Math.Max(bits - trim, 0);
+            if (left == 0)
+            {
+                ShiftBlock(px, o, bits);
+                return;
+            }
             var t = JxrTables.Transpose444;
             for (int n = 1; n < 16; n++)
             {
-                int pos = t[n];
-                ref int v = ref px[o + (pos >> 2) * stride + (pos & 3)];
+                ref int v = ref px[o + t[n]];
                 int flex = 0;
                 if (left != 0)
                 {
@@ -854,23 +859,21 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                 int nBlocks = chroma && Is420 ? 1 : chroma && Is422 ? 2 : 4;
                 int bits = _modelBitsHp[_mbi * 2 + (chroma ? 1 : 0)];
                 var px = Px[c];
-                int stride = PxW[c];
                 for (int b = 0; b < nBlocks * 4; b++)
                 {
                     int map = nBlocks == 4 ? JxrTables.HierScanOrder[b] : b;
                     int o = BlockOffset(c, map);
-                    if (r != null) BlockFlexbits(r, px, o, stride, bits, TrimFlexbits);
-                    else ShiftBlock(px, o, stride, bits);
+                    if (r != null) BlockFlexbits(r, px, o, bits, TrimFlexbits);
+                    else ShiftBlock(px, o, bits);
                 }
             }
         }
 
-        static void ShiftBlock(int[] px, int o, int stride, int bits)
+        static void ShiftBlock(int[] px, int o, int bits)
         {
             if (bits == 0) return;
-            for (int y = 0; y < 4; y++)
-                for (int x = 0; x < 4; x++)
-                    if (x != 0 || y != 0) px[o + y * stride + x] <<= bits;
+            var b = px.AsSpan(o + 1, 15);
+            for (int k = 0; k < 15; k++) b[k] <<= bits;
         }
     }
 }

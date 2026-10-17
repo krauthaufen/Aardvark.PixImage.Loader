@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Threading.Tasks;
 
 namespace Aardvark.ImageCodecs.JpegXrImpl
@@ -17,6 +19,43 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             public int[] W = Array.Empty<int>(), H = Array.Empty<int>();
         }
 
+        /// <summary>The components of a plane by rows: block-major, or raster for chroma upsampled to the luma size.</summary>
+        sealed class Src
+        {
+            readonly int[][] _a;
+            readonly bool[] _raster;
+            readonly int[] _w, _bw;
+
+            public Src(JxrPlane p, bool upsample)
+            {
+                int n = p.Nc;
+                _a = (int[][])p.Px.Clone();
+                _raster = new bool[n];
+                _w = (int[])p.PxW.Clone();
+                _bw = (int[])p.DcW.Clone();
+                if (upsample && p.Is42x)
+                {
+                    var ph = p.Ph;
+                    for (int c = 1; c < 3; c++)
+                    {
+                        _a[c] = Upsample(JxrTransform.ToRaster(p.Px[c], p.PxW[c], p.PxH[c]), p.PxW[c], p.PxH[c], p.Ih.ExtWidth, p.Ih.ExtHeight,
+                            p.Is420, ph.ChromaCenteringX, ph.ChromaCenteringY);
+                        _raster[c] = true;
+                        _w[c] = p.Ih.ExtWidth;
+                    }
+                }
+            }
+
+            public int Width(int c) => _w[c];
+
+            /// <summary>Row y of component c (its whole width).</summary>
+            public void Row(int c, int y, Span<int> dst)
+            {
+                if (_raster[c]) _a[c].AsSpan(y * _w[c], _w[c]).CopyTo(dst);
+                else JxrTransform.ReadRow(_a[c], _bw[c], y, 0, _w[c], dst);
+            }
+        }
+
         static bool Packed(JxrOutputFormat f, JxrBitDepth bd) => f == JxrOutputFormat.Rgb && bd is JxrBitDepth.Bd5 or JxrBitDepth.Bd565 or JxrBitDepth.Bd10;
 
         /// <summary>Output arrays of a plane; the alpha plane is formatted as YONLY.</summary>
@@ -33,12 +72,7 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             int W = ih.Width, H = ih.Height;
 
             // sampling conversion (9.10.3): chroma to full size for RGB / YUV444 output
-            var src = p.Px;
-            if (p.Is42x && ofmt is JxrOutputFormat.Rgb or JxrOutputFormat.Yuv444)
-            {
-                src = (int[][])src.Clone();
-                for (int c = 1; c < 3; c++) src[c] = Upsample(p.Px[c], p.PxW[c], p.PxH[c], ew, eh, p.Is420, ph.ChromaCenteringX, ph.ChromaCenteringY);
-            }
+            var src = new Src(p, ofmt is JxrOutputFormat.Rgb or JxrOutputFormat.Yuv444);
 
             int arrays = Packed(ofmt, bd) ? 1
                 : ofmt is JxrOutputFormat.Rgb or JxrOutputFormat.Yuv444 or JxrOutputFormat.Yuv422 or JxrOutputFormat.Yuv420 ? 3
@@ -75,15 +109,15 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
 
             if (bd is JxrBitDepth.Bd1White1 or JxrBitDepth.Bd1Black1)
             {
-                var y0 = src[0];
+                var y0 = new int[ew];
                 var o = res.A[0];
                 int ow = res.W[0];
                 for (int y = 0; y < H; y++)
                 {
-                    int so = (y + top) * ew + left;
+                    src.Row(0, y + top, y0);
                     for (int x = 0; x < W; x++)
                     {
-                        int v = Math.Clamp((y0[so + x] + round) >> scale, 0, 1);
+                        int v = Math.Clamp((y0[left + x] + round) >> scale, 0, 1);
                         if (bd == JxrBitDepth.Bd1Black1) v = 1 - v;
                         o[y * ow + (x >> 3)] |= v << (7 - (x & 7));
                     }
@@ -103,11 +137,12 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
                     var o = res.A[i];
                     if (i > 0 && ifmt == JxrInternalFormat.YOnly) { o.AsSpan().Fill(ctx.Single(0, i)); continue; }
                     int cl = i > 0 ? left / 2 : left, ct = i > 0 && ofmt == JxrOutputFormat.Yuv420 ? top / 2 : top;
-                    int sw = p.PxW[i];
-                    var s = src[i];
+                    var row = new int[src.Width(i)];
                     for (int y = 0; y < ch; y++)
-                        for (int x = 0; x < cw; x++)
-                            o[y * cw + x] = ctx.Single(s[(y + ct) * sw + x + cl], i);
+                    {
+                        src.Row(i, y + ct, row);
+                        for (int x = 0; x < cw; x++) o[y * cw + x] = ctx.Single(row[x + cl], i);
+                    }
                 }
                 return res;
             }
@@ -116,13 +151,15 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             {
                 Span<int> v = stackalloc int[Math.Max(nc, 4)];
                 Span<int> outv = stackalloc int[Math.Max(nc, 4)];
+                int n = ifmt == JxrInternalFormat.YOnly ? 1 : nc;
+                var rows = new int[n][];
+                for (int c = 0; c < n; c++) rows[c] = new int[ew];
                 for (int y = r0; y < r1; y++)
                 {
-                    int so = (y + top) * ew + left;
+                    for (int c = 0; c < n; c++) src.Row(c, y + top, rows[c]);
                     for (int x = 0; x < W; x++)
                     {
-                        int n = ifmt == JxrInternalFormat.YOnly ? 1 : Math.Min(nc, src.Length);
-                        for (int c = 0; c < n; c++) v[c] = src[c][so + x];
+                        for (int c = 0; c < n; c++) v[c] = rows[c][left + x];
                         ctx.Pixel(v, outv);
                         int di = y * W + x;
                         if (arrays == 1 && ctx.Packed) res.A[0][di] = outv[0];
@@ -133,6 +170,111 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             if (parallel && H >= 256) Parallel.For(0, (H + 63) / 64, k => Rows(k * 64, Math.Min(H, k * 64 + 64)));
             else Rows(0, H);
             return res;
+        }
+
+        /// <summary>
+        /// The common cases straight into the samples of the result: 8 / 16 bit RGB (from YUV444, or 4:2:2 / 4:2:0 chroma
+        /// upsampled first) and Y only output (also the alpha plane), into channel <paramref name="c0"/> of
+        /// <paramref name="dst"/> with <paramref name="ch"/> channels. False for anything else.
+        /// </summary>
+        public static bool FormatInto(JxrPlane p, bool alphaPlane, Array dst, int ch, int c0, bool parallel)
+        {
+            var ih = p.Ih;
+            var ph = p.Ph;
+            var ofmt = alphaPlane ? JxrOutputFormat.YOnly : ih.OutputFormat;
+            var bd = ih.BitDepth;
+            if (bd is not (JxrBitDepth.Bd8 or JxrBitDepth.Bd16)) return false;
+            bool rgb = ofmt == JxrOutputFormat.Rgb && p.Fmt != JxrInternalFormat.YOnly;
+            if (!rgb && !(ofmt == JxrOutputFormat.YOnly || ofmt == JxrOutputFormat.Rgb && p.Fmt == JxrInternalFormat.YOnly)) return false;
+            bool gray3 = ofmt == JxrOutputFormat.Rgb && p.Fmt == JxrInternalFormat.YOnly;
+            bool interleavedAlpha = alphaPlane && p.IsAlpha;
+            int scale = ph.Scaled ? 3 : 0;
+            int round = !ph.Scaled ? 0 : bd == JxrBitDepth.Bd16 || interleavedAlpha ? 4 : 3;
+            int shift = bd == JxrBitDepth.Bd16 ? ph.ShiftBits : 0;
+            int bias = (bd == JxrBitDepth.Bd8 ? 1 << 7 : (1 << 15) >> shift) << scale;
+            int max = bd == JxrBitDepth.Bd8 ? 255 : 65535;
+            int ew = ih.ExtWidth, eh = ih.ExtHeight, W = ih.Width, H = ih.Height, top = ih.TopMargin, left = ih.LeftMargin;
+            var src = new Src(p, rgb);
+            var b8 = dst as byte[];
+            var b16 = bd == JxrBitDepth.Bd16 ? (ushort[])dst : null;
+            int add = bias + round;
+            void Rows(int r0, int r1)
+            {
+                var Y = new int[ew];
+                var U = rgb ? new int[ew] : Y;
+                var V = rgb ? new int[ew] : Y;
+                Span<int> t4 = stackalloc int[12];
+                for (int y = r0; y < r1; y++)
+                {
+                    int so = left;
+                    long d = (long)y * W * ch + c0;
+                    src.Row(0, y + top, Y);
+                    if (rgb)
+                    {
+                        src.Row(1, y + top, U);
+                        src.Row(2, y + top, V);
+                        int x = 0;
+                        if (Vector128.IsHardwareAccelerated)
+                        {
+                            var vadd = Vector128.Create(add);
+                            var vmax = Vector128.Create(max);
+                            var one = Vector128.Create(1);
+                            ref int t0 = ref MemoryMarshal.GetReference(t4);
+                            for (; x + 4 <= W; x += 4)
+                            {
+                                var yv = Vector128.LoadUnsafe(ref MemoryMarshal.GetArrayDataReference(Y), (nuint)(so + x));
+                                var u = Vector128.LoadUnsafe(ref MemoryMarshal.GetArrayDataReference(U), (nuint)(so + x));
+                                var v = Vector128.LoadUnsafe(ref MemoryMarshal.GetArrayDataReference(V), (nuint)(so + x));
+                                var t = -u;
+                                var g = yv - Vector128.ShiftRightArithmetic(t, 1);
+                                var r = t + g - Vector128.ShiftRightArithmetic(v + one, 1);
+                                var b = v + r;
+                                r = Vector128.Min(Vector128.Max(Vector128.ShiftLeft(Vector128.ShiftRightArithmetic(r + vadd, scale), shift), Vector128<int>.Zero), vmax);
+                                g = Vector128.Min(Vector128.Max(Vector128.ShiftLeft(Vector128.ShiftRightArithmetic(g + vadd, scale), shift), Vector128<int>.Zero), vmax);
+                                b = Vector128.Min(Vector128.Max(Vector128.ShiftLeft(Vector128.ShiftRightArithmetic(b + vadd, scale), shift), Vector128<int>.Zero), vmax);
+                                r.StoreUnsafe(ref t0, 0); g.StoreUnsafe(ref t0, 4); b.StoreUnsafe(ref t0, 8);
+                                if (b8 != null)
+                                    for (int k = 0; k < 4; k++, d += ch) { b8[d] = (byte)t4[k]; b8[d + 1] = (byte)t4[4 + k]; b8[d + 2] = (byte)t4[8 + k]; }
+                                else
+                                    for (int k = 0; k < 4; k++, d += ch) { b16![d] = (ushort)t4[k]; b16[d + 1] = (ushort)t4[4 + k]; b16[d + 2] = (ushort)t4[8 + k]; }
+                            }
+                        }
+                        for (; x < W; x++, d += ch)
+                        {
+                            int yv = Y[so + x], u = U[so + x], v = V[so + x];
+                            int t = -u;
+                            int g = yv - (t >> 1);
+                            int r = t + g - ((v + 1) >> 1);
+                            int b = v + r;
+                            r = Math.Clamp(((r + add) >> scale) << shift, 0, max);
+                            g = Math.Clamp(((g + add) >> scale) << shift, 0, max);
+                            b = Math.Clamp(((b + add) >> scale) << shift, 0, max);
+                            if (b8 != null) { b8[d] = (byte)r; b8[d + 1] = (byte)g; b8[d + 2] = (byte)b; }
+                            else { b16![d] = (ushort)r; b16[d + 1] = (ushort)g; b16[d + 2] = (ushort)b; }
+                        }
+                    }
+                    else
+                    {
+                        for (int x = 0; x < W; x++, d += ch)
+                        {
+                            int v = Math.Clamp(((Y[so + x] + add) >> scale) << shift, 0, max);
+                            if (b8 != null)
+                            {
+                                b8[d] = (byte)v;
+                                if (gray3) { b8[d + 1] = (byte)v; b8[d + 2] = (byte)v; }
+                            }
+                            else
+                            {
+                                b16![d] = (ushort)v;
+                                if (gray3) { b16[d + 1] = (ushort)v; b16[d + 2] = (ushort)v; }
+                            }
+                        }
+                    }
+                }
+            }
+            if (parallel && H >= 256) Parallel.For(0, (H + 63) / 64, k => Rows(k * 64, Math.Min(H, k * 64 + 64)));
+            else Rows(0, H);
+            return true;
         }
 
         /// <summary>Per pixel conversion state.</summary>

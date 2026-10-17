@@ -160,7 +160,7 @@ namespace Aardvark.ImageCodecs
         public static RawImage Decode(ReadOnlySpan<byte> data, JpegXrDecodeOptions? options = null)
         {
             options ??= JpegXrDecodeOptions.Default;
-            var f = JxrFile.Open(data, false);
+            var f = JxrFile.Open(data, true);
             if ((long)f.Cs.Ih.Width * f.Cs.Ih.Height > options.MaxPixels)
                 throw new ImageNotSupportedException($"JPEG XR: {f.Cs.Ih.Width} x {f.Cs.Ih.Height} exceeds MaxPixels ({options.MaxPixels})");
             var img = f.Decode(data, options);

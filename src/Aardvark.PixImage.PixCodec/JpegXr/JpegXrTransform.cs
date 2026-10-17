@@ -1,5 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace Aardvark.ImageCodecs.JpegXrImpl
 {
@@ -85,29 +87,6 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             T2x2h(ref c[4], ref c[7], ref c[8], ref c[11], 0);
         }
 
-        /// <summary>
-        /// ICT4x4( ) of the 4x4 block at <paramref name="o"/> of a sample array with row stride <paramref name="s"/> (9.9.5):
-        /// the permutation is folded into the reads.
-        /// </summary>
-        public static void Ict4x4(int[] p, int o, int s)
-        {
-            Span<int> t = stackalloc int[16];
-            // t[InvPermArr[i]] = block[i], block in raster order
-            ref int r0 = ref p[o];
-            t[0] = r0; t[8] = Unsafe.Add(ref r0, 1); t[4] = Unsafe.Add(ref r0, 2); t[13] = Unsafe.Add(ref r0, 3);
-            ref int r1 = ref Unsafe.Add(ref r0, s);
-            t[2] = r1; t[15] = Unsafe.Add(ref r1, 1); t[3] = Unsafe.Add(ref r1, 2); t[14] = Unsafe.Add(ref r1, 3);
-            ref int r2 = ref Unsafe.Add(ref r1, s);
-            t[1] = r2; t[12] = Unsafe.Add(ref r2, 1); t[5] = Unsafe.Add(ref r2, 2); t[9] = Unsafe.Add(ref r2, 3);
-            ref int r3 = ref Unsafe.Add(ref r2, s);
-            t[7] = r3; t[11] = Unsafe.Add(ref r3, 1); t[6] = Unsafe.Add(ref r3, 2); t[10] = Unsafe.Add(ref r3, 3);
-            Ict4x4Permuted(t);
-            r0 = t[0]; Unsafe.Add(ref r0, 1) = t[1]; Unsafe.Add(ref r0, 2) = t[2]; Unsafe.Add(ref r0, 3) = t[3];
-            r1 = t[4]; Unsafe.Add(ref r1, 1) = t[5]; Unsafe.Add(ref r1, 2) = t[6]; Unsafe.Add(ref r1, 3) = t[7];
-            r2 = t[8]; Unsafe.Add(ref r2, 1) = t[9]; Unsafe.Add(ref r2, 2) = t[10]; Unsafe.Add(ref r2, 3) = t[11];
-            r3 = t[12]; Unsafe.Add(ref r3, 1) = t[13]; Unsafe.Add(ref r3, 2) = t[14]; Unsafe.Add(ref r3, 3) = t[15];
-        }
-
         /// <summary>T2pt( ) (Table 167).</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void T2pt(ref int a, ref int b)
@@ -163,28 +142,6 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             a += t1;
             c += b;
             d -= a;
-        }
-
-        /// <summary>OverlapPostFilter4x4( ) (Table 168) on 16 values in raster order.</summary>
-        static void PostFilter4x4(Span<int> c)
-        {
-            T2x2h(ref c[0], ref c[3], ref c[12], ref c[15], 0);
-            T2x2h(ref c[1], ref c[2], ref c[13], ref c[14], 0);
-            T2x2h(ref c[4], ref c[7], ref c[8], ref c[11], 0);
-            T2x2h(ref c[5], ref c[6], ref c[9], ref c[10], 0);
-            InvRotate(ref c[13], ref c[12]);
-            InvRotate(ref c[9], ref c[8]);
-            InvRotate(ref c[7], ref c[3]);
-            InvRotate(ref c[6], ref c[2]);
-            InvToddOddPost(ref c[10], ref c[11], ref c[14], ref c[15]);
-            InvScale(ref c[0], ref c[15]);
-            InvScale(ref c[1], ref c[14]);
-            InvScale(ref c[4], ref c[11]);
-            InvScale(ref c[5], ref c[10]);
-            T2x2hPost(ref c[0], ref c[3], ref c[12], ref c[15]);
-            T2x2hPost(ref c[1], ref c[2], ref c[13], ref c[14]);
-            T2x2hPost(ref c[4], ref c[7], ref c[8], ref c[11]);
-            T2x2hPost(ref c[5], ref c[6], ref c[9], ref c[10]);
         }
 
         /// <summary>OverlapPostFilter4( ) (Table 169).</summary>
@@ -319,16 +276,6 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             t.CopyTo(c);
         }
 
-        public static void Fct4x4(int[] p, int o, int s)
-        {
-            Span<int> t = stackalloc int[16];
-            for (int y = 0; y < 4; y++)
-                for (int x = 0; x < 4; x++) t[y * 4 + x] = p[o + y * s + x];
-            Fct4x4(t);
-            for (int y = 0; y < 4; y++)
-                for (int x = 0; x < 4; x++) p[o + y * s + x] = t[y * 4 + x];
-        }
-
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void FwdRotate(ref int a, ref int b)
         {
@@ -384,28 +331,6 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             a += t1;
             c += b;
             d -= a;
-        }
-
-        /// <summary>The exact inverse of <see cref="PostFilter4x4"/> (Table D.18 as derived from Table 168).</summary>
-        static void PreFilter4x4(Span<int> c)
-        {
-            UndoT2x2hPost(ref c[5], ref c[6], ref c[9], ref c[10]);
-            UndoT2x2hPost(ref c[4], ref c[7], ref c[8], ref c[11]);
-            UndoT2x2hPost(ref c[1], ref c[2], ref c[13], ref c[14]);
-            UndoT2x2hPost(ref c[0], ref c[3], ref c[12], ref c[15]);
-            FwdScale(ref c[5], ref c[10]);
-            FwdScale(ref c[4], ref c[11]);
-            FwdScale(ref c[1], ref c[14]);
-            FwdScale(ref c[0], ref c[15]);
-            UndoInvToddOddPost(ref c[10], ref c[11], ref c[14], ref c[15]);
-            UndoInvRotate(ref c[6], ref c[2]);
-            UndoInvRotate(ref c[7], ref c[3]);
-            UndoInvRotate(ref c[9], ref c[8]);
-            UndoInvRotate(ref c[13], ref c[12]);
-            T2x2hInverse(ref c[5], ref c[6], ref c[9], ref c[10], 0);
-            T2x2hInverse(ref c[4], ref c[7], ref c[8], ref c[11], 0);
-            T2x2hInverse(ref c[1], ref c[2], ref c[13], ref c[14], 0);
-            T2x2hInverse(ref c[0], ref c[3], ref c[12], ref c[15], 0);
         }
 
         /// <summary>The exact inverse of <see cref="PostFilter4"/>.</summary>
@@ -465,6 +390,271 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             b -= (a + 2) >> 2;
         }
 
+        // ------------------------------------------------------------------ unrolled kernels on a sample array
+        // (generated: the lifting steps above with the 16 values in locals)
+
+        /// <summary>ICT4x4( ) (Table 160, with InvPermute( )) of the 4x4 block at o of a sample array with row stride s.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public static void Ict4x4(int[] p, int o, int s)
+        {
+            int t1, t2;
+            ref int r0 = ref p[o];
+            ref int r1 = ref p[o + 1 * s];
+            ref int r2 = ref p[o + 2 * s];
+            ref int r3 = ref p[o + 3 * s];
+            int c0 = Unsafe.Add(ref r0, 0); int c1 = Unsafe.Add(ref r0, 1); int c2 = Unsafe.Add(ref r0, 2); int c3 = Unsafe.Add(ref r0, 3); int c4 = Unsafe.Add(ref r1, 0); int c5 = Unsafe.Add(ref r1, 1); int c6 = Unsafe.Add(ref r1, 2); int c7 = Unsafe.Add(ref r1, 3); int c8 = Unsafe.Add(ref r2, 0); int c9 = Unsafe.Add(ref r2, 1); int c10 = Unsafe.Add(ref r2, 2); int c11 = Unsafe.Add(ref r2, 3); int c12 = Unsafe.Add(ref r3, 0); int c13 = Unsafe.Add(ref r3, 1); int c14 = Unsafe.Add(ref r3, 2); int c15 = Unsafe.Add(ref r3, 3);
+            c0 += c10; c8 -= c2; t1 = (c0 - c8 + 1) >> 1; t2 = c2; c2 = t1 - c10; c10 = t1 - t2; c0 -= c10; c8 += c2;
+            c6 += c12; c4 -= c14; c12 -= c6 >> 1; c14 += (c4 + 1) >> 1; c4 -= (3 * c6 + 4) >> 3; c6 += (3 * c4 + 4) >> 3; c14 -= (3 * c12 + 4) >> 3; c12 += (3 * c14 + 4) >> 3; c14 -= (c6 + 1) >> 1; c12 = ((c4 + 1) >> 1) - c12; c6 += c14; c4 -= c12;
+            c9 += c3; c1 -= c11; c3 -= c9 >> 1; c11 += (c1 + 1) >> 1; c1 -= (3 * c9 + 4) >> 3; c9 += (3 * c1 + 4) >> 3; c11 -= (3 * c3 + 4) >> 3; c3 += (3 * c11 + 4) >> 3; c11 -= (c9 + 1) >> 1; c3 = ((c1 + 1) >> 1) - c3; c9 += c11; c1 -= c3;
+            c5 += c15; c7 -= c13; t1 = c5 >> 1; t2 = c7 >> 1; c15 -= t1; c13 += t2; c15 -= (c13 * 3 + 3) >> 3; c13 += (c15 * 3 + 3) >> 2; c15 -= (c13 * 3 + 4) >> 3; c13 -= t2; c15 += t1; c7 += c13; c5 -= c15; c13 = -c13; c7 = -c7;
+            c0 += c5; c6 -= c9; t1 = (c0 - c6 + 0) >> 1; t2 = c9; c9 = t1 - c5; c5 = t1 - t2; c0 -= c5; c6 += c9;
+            c10 += c15; c14 -= c11; t1 = (c10 - c14 + 0) >> 1; t2 = c11; c11 = t1 - c15; c15 = t1 - t2; c10 -= c15; c14 += c11;
+            c8 += c7; c4 -= c3; t1 = (c8 - c4 + 0) >> 1; t2 = c3; c3 = t1 - c7; c7 = t1 - t2; c8 -= c7; c4 += c3;
+            c2 += c13; c12 -= c1; t1 = (c2 - c12 + 0) >> 1; t2 = c1; c1 = t1 - c13; c13 = t1 - t2; c2 -= c13; c12 += c1;
+            Unsafe.Add(ref r0, 0) = c0; Unsafe.Add(ref r0, 1) = c8; Unsafe.Add(ref r0, 2) = c4; Unsafe.Add(ref r0, 3) = c6; Unsafe.Add(ref r1, 0) = c2; Unsafe.Add(ref r1, 1) = c10; Unsafe.Add(ref r1, 2) = c14; Unsafe.Add(ref r1, 3) = c12; Unsafe.Add(ref r2, 0) = c1; Unsafe.Add(ref r2, 1) = c11; Unsafe.Add(ref r2, 2) = c15; Unsafe.Add(ref r2, 3) = c13; Unsafe.Add(ref r3, 0) = c9; Unsafe.Add(ref r3, 1) = c3; Unsafe.Add(ref r3, 2) = c7; Unsafe.Add(ref r3, 3) = c5;
+        }
+
+        /// <summary>FCT4x4( ) (Table D.13, with FwdPermute( )): the exact inverse of <see cref="Ict4x4(int[], int, int)"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public static void Fct4x4(int[] p, int o, int s)
+        {
+            int t1, t2;
+            ref int r0 = ref p[o];
+            ref int r1 = ref p[o + 1 * s];
+            ref int r2 = ref p[o + 2 * s];
+            ref int r3 = ref p[o + 3 * s];
+            int c0 = Unsafe.Add(ref r0, 0); int c1 = Unsafe.Add(ref r0, 1); int c2 = Unsafe.Add(ref r0, 2); int c3 = Unsafe.Add(ref r0, 3); int c4 = Unsafe.Add(ref r1, 0); int c5 = Unsafe.Add(ref r1, 1); int c6 = Unsafe.Add(ref r1, 2); int c7 = Unsafe.Add(ref r1, 3); int c8 = Unsafe.Add(ref r2, 0); int c9 = Unsafe.Add(ref r2, 1); int c10 = Unsafe.Add(ref r2, 2); int c11 = Unsafe.Add(ref r2, 3); int c12 = Unsafe.Add(ref r3, 0); int c13 = Unsafe.Add(ref r3, 1); int c14 = Unsafe.Add(ref r3, 2); int c15 = Unsafe.Add(ref r3, 3);
+            c3 -= c12; c0 += c15; t1 = (c0 - c3 + 0) >> 1; t2 = t1 - c12; c12 = t1 - c15; c15 = t2; c0 -= c15; c3 += c12;
+            c6 -= c9; c5 += c10; t1 = (c5 - c6 + 0) >> 1; t2 = t1 - c9; c9 = t1 - c10; c10 = t2; c5 -= c10; c6 += c9;
+            c2 -= c13; c1 += c14; t1 = (c1 - c2 + 0) >> 1; t2 = t1 - c13; c13 = t1 - c14; c14 = t2; c1 -= c14; c2 += c13;
+            c7 -= c8; c4 += c11; t1 = (c4 - c7 + 0) >> 1; t2 = t1 - c8; c8 = t1 - c11; c11 = t2; c4 -= c11; c7 += c8;
+            c1 -= c4; c0 += c5; t1 = (c0 - c1 + 1) >> 1; t2 = t1 - c4; c4 = t1 - c5; c5 = t2; c0 -= c5; c1 += c4;
+            c3 -= c6; c2 += c7; c6 += (c3 + 1) >> 1; c7 = ((c2 + 1) >> 1) - c7; c3 -= (3 * c2 + 4) >> 3; c2 += (3 * c3 + 4) >> 3; c7 -= (3 * c6 + 4) >> 3; c6 += (3 * c7 + 4) >> 3; c7 += c3 >> 1; c6 -= (c2 + 1) >> 1; c3 -= c7; c2 += c6;
+            c12 -= c9; c8 += c13; c9 += (c12 + 1) >> 1; c13 = ((c8 + 1) >> 1) - c13; c12 -= (3 * c8 + 4) >> 3; c8 += (3 * c12 + 4) >> 3; c13 -= (3 * c9 + 4) >> 3; c9 += (3 * c13 + 4) >> 3; c13 += c12 >> 1; c9 -= (c8 + 1) >> 1; c12 -= c13; c8 += c9;
+            c11 = -c11; c14 = -c14; c15 += c10; c14 -= c11; t1 = c15 >> 1; t2 = c14 >> 1; c10 -= t1; c11 += t2; c10 += (c11 * 3 + 4) >> 3; c11 -= (c10 * 3 + 3) >> 2; c10 += (c11 * 3 + 3) >> 3; c11 -= t2; c10 += t1; c14 += c11; c15 -= c10;
+            Unsafe.Add(ref r0, 0) = c0; Unsafe.Add(ref r0, 1) = c8; Unsafe.Add(ref r0, 2) = c4; Unsafe.Add(ref r0, 3) = c13; Unsafe.Add(ref r1, 0) = c2; Unsafe.Add(ref r1, 1) = c15; Unsafe.Add(ref r1, 2) = c3; Unsafe.Add(ref r1, 3) = c14; Unsafe.Add(ref r2, 0) = c1; Unsafe.Add(ref r2, 1) = c12; Unsafe.Add(ref r2, 2) = c5; Unsafe.Add(ref r2, 3) = c9; Unsafe.Add(ref r3, 0) = c7; Unsafe.Add(ref r3, 1) = c11; Unsafe.Add(ref r3, 2) = c6; Unsafe.Add(ref r3, 3) = c10;
+        }
+
+        /// <summary>OverlapPostFilter4x4( ) (Table 168) of the 4x4 area at o.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public static void PostFilter4x4(int[] p, int o, int s)
+        {
+            int t1, t2;
+            ref int r0 = ref p[o];
+            ref int r1 = ref p[o + 1 * s];
+            ref int r2 = ref p[o + 2 * s];
+            ref int r3 = ref p[o + 3 * s];
+            int c0 = Unsafe.Add(ref r0, 0); int c1 = Unsafe.Add(ref r0, 1); int c2 = Unsafe.Add(ref r0, 2); int c3 = Unsafe.Add(ref r0, 3); int c4 = Unsafe.Add(ref r1, 0); int c5 = Unsafe.Add(ref r1, 1); int c6 = Unsafe.Add(ref r1, 2); int c7 = Unsafe.Add(ref r1, 3); int c8 = Unsafe.Add(ref r2, 0); int c9 = Unsafe.Add(ref r2, 1); int c10 = Unsafe.Add(ref r2, 2); int c11 = Unsafe.Add(ref r2, 3); int c12 = Unsafe.Add(ref r3, 0); int c13 = Unsafe.Add(ref r3, 1); int c14 = Unsafe.Add(ref r3, 2); int c15 = Unsafe.Add(ref r3, 3);
+            c0 += c15; c3 -= c12; t1 = (c0 - c3 + 0) >> 1; t2 = c12; c12 = t1 - c15; c15 = t1 - t2; c0 -= c15; c3 += c12;
+            c1 += c14; c2 -= c13; t1 = (c1 - c2 + 0) >> 1; t2 = c13; c13 = t1 - c14; c14 = t1 - t2; c1 -= c14; c2 += c13;
+            c4 += c11; c7 -= c8; t1 = (c4 - c7 + 0) >> 1; t2 = c8; c8 = t1 - c11; c11 = t1 - t2; c4 -= c11; c7 += c8;
+            c5 += c10; c6 -= c9; t1 = (c5 - c6 + 0) >> 1; t2 = c9; c9 = t1 - c10; c10 = t1 - t2; c5 -= c10; c6 += c9;
+            c13 -= (c12 + 1) >> 1; c12 += (c13 + 1) >> 1;
+            c9 -= (c8 + 1) >> 1; c8 += (c9 + 1) >> 1;
+            c7 -= (c3 + 1) >> 1; c3 += (c7 + 1) >> 1;
+            c6 -= (c2 + 1) >> 1; c2 += (c6 + 1) >> 1;
+            c15 += c10; c14 -= c11; t1 = c15 >> 1; t2 = c14 >> 1; c10 -= t1; c11 += t2; c10 -= (c11 * 3 + 6) >> 3; c11 += (c10 * 3 + 2) >> 2; c10 -= (c11 * 3 + 4) >> 3; c11 -= t2; c10 += t1; c14 += c11; c15 -= c10;
+            c0 += c15; c15 = (c0 >> 1) - c15; c0 += (c15 * 3) >> 3; c15 += (c0 * 3) >> 4; c15 += c0 >> 7; c15 -= c0 >> 10;
+            c1 += c14; c14 = (c1 >> 1) - c14; c1 += (c14 * 3) >> 3; c14 += (c1 * 3) >> 4; c14 += c1 >> 7; c14 -= c1 >> 10;
+            c4 += c11; c11 = (c4 >> 1) - c11; c4 += (c11 * 3) >> 3; c11 += (c4 * 3) >> 4; c11 += c4 >> 7; c11 -= c4 >> 10;
+            c5 += c10; c10 = (c5 >> 1) - c10; c5 += (c10 * 3) >> 3; c10 += (c5 * 3) >> 4; c10 += c5 >> 7; c10 -= c5 >> 10;
+            c3 -= c12; c0 += (c15 * 3 + 4) >> 3; c15 -= c3 >> 1; t1 = ((c0 - c3) >> 1) - c12; c12 = c15; c15 = t1; c0 -= c15; c3 += c12;
+            c2 -= c13; c1 += (c14 * 3 + 4) >> 3; c14 -= c2 >> 1; t1 = ((c1 - c2) >> 1) - c13; c13 = c14; c14 = t1; c1 -= c14; c2 += c13;
+            c7 -= c8; c4 += (c11 * 3 + 4) >> 3; c11 -= c7 >> 1; t1 = ((c4 - c7) >> 1) - c8; c8 = c11; c11 = t1; c4 -= c11; c7 += c8;
+            c6 -= c9; c5 += (c10 * 3 + 4) >> 3; c10 -= c6 >> 1; t1 = ((c5 - c6) >> 1) - c9; c9 = c10; c10 = t1; c5 -= c10; c6 += c9;
+            Unsafe.Add(ref r0, 0) = c0; Unsafe.Add(ref r0, 1) = c1; Unsafe.Add(ref r0, 2) = c2; Unsafe.Add(ref r0, 3) = c3; Unsafe.Add(ref r1, 0) = c4; Unsafe.Add(ref r1, 1) = c5; Unsafe.Add(ref r1, 2) = c6; Unsafe.Add(ref r1, 3) = c7; Unsafe.Add(ref r2, 0) = c8; Unsafe.Add(ref r2, 1) = c9; Unsafe.Add(ref r2, 2) = c10; Unsafe.Add(ref r2, 3) = c11; Unsafe.Add(ref r3, 0) = c12; Unsafe.Add(ref r3, 1) = c13; Unsafe.Add(ref r3, 2) = c14; Unsafe.Add(ref r3, 3) = c15;
+        }
+
+        /// <summary>The exact inverse of <see cref="PostFilter4x4"/> (OverlapPreFilter4x4( ), Table D.18).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public static void PreFilter4x4(int[] p, int o, int s)
+        {
+            int t1, t2;
+            ref int r0 = ref p[o];
+            ref int r1 = ref p[o + 1 * s];
+            ref int r2 = ref p[o + 2 * s];
+            ref int r3 = ref p[o + 3 * s];
+            int c0 = Unsafe.Add(ref r0, 0); int c1 = Unsafe.Add(ref r0, 1); int c2 = Unsafe.Add(ref r0, 2); int c3 = Unsafe.Add(ref r0, 3); int c4 = Unsafe.Add(ref r1, 0); int c5 = Unsafe.Add(ref r1, 1); int c6 = Unsafe.Add(ref r1, 2); int c7 = Unsafe.Add(ref r1, 3); int c8 = Unsafe.Add(ref r2, 0); int c9 = Unsafe.Add(ref r2, 1); int c10 = Unsafe.Add(ref r2, 2); int c11 = Unsafe.Add(ref r2, 3); int c12 = Unsafe.Add(ref r3, 0); int c13 = Unsafe.Add(ref r3, 1); int c14 = Unsafe.Add(ref r3, 2); int c15 = Unsafe.Add(ref r3, 3);
+            c6 -= c9; c5 += c10; t1 = c9; c9 = c10; c10 = t1; c9 = ((c5 - c6) >> 1) - c9; c10 += c6 >> 1; c5 -= (c10 * 3 + 4) >> 3; c6 += c9;
+            c7 -= c8; c4 += c11; t1 = c8; c8 = c11; c11 = t1; c8 = ((c4 - c7) >> 1) - c8; c11 += c7 >> 1; c4 -= (c11 * 3 + 4) >> 3; c7 += c8;
+            c2 -= c13; c1 += c14; t1 = c13; c13 = c14; c14 = t1; c13 = ((c1 - c2) >> 1) - c13; c14 += c2 >> 1; c1 -= (c14 * 3 + 4) >> 3; c2 += c13;
+            c3 -= c12; c0 += c15; t1 = c12; c12 = c15; c15 = t1; c12 = ((c0 - c3) >> 1) - c12; c15 += c3 >> 1; c0 -= (c15 * 3 + 4) >> 3; c3 += c12;
+            c10 -= (c5 * 3) >> 4; c10 -= c5 >> 7; c10 += c5 >> 10; c5 -= (c10 * 3) >> 3; c10 = (c5 >> 1) - c10; c5 -= c10;
+            c11 -= (c4 * 3) >> 4; c11 -= c4 >> 7; c11 += c4 >> 10; c4 -= (c11 * 3) >> 3; c11 = (c4 >> 1) - c11; c4 -= c11;
+            c14 -= (c1 * 3) >> 4; c14 -= c1 >> 7; c14 += c1 >> 10; c1 -= (c14 * 3) >> 3; c14 = (c1 >> 1) - c14; c1 -= c14;
+            c15 -= (c0 * 3) >> 4; c15 -= c0 >> 7; c15 += c0 >> 10; c0 -= (c15 * 3) >> 3; c15 = (c0 >> 1) - c15; c0 -= c15;
+            c15 += c10; c14 -= c11; t1 = c15 >> 1; t2 = c14 >> 1; c10 -= t1; c11 += t2; c10 += (c11 * 3 + 4) >> 3; c11 -= (c10 * 3 + 2) >> 2; c10 += (c11 * 3 + 6) >> 3; c11 -= t2; c10 += t1; c14 += c11; c15 -= c10;
+            c2 -= (c6 + 1) >> 1; c6 += (c2 + 1) >> 1;
+            c3 -= (c7 + 1) >> 1; c7 += (c3 + 1) >> 1;
+            c8 -= (c9 + 1) >> 1; c9 += (c8 + 1) >> 1;
+            c12 -= (c13 + 1) >> 1; c13 += (c12 + 1) >> 1;
+            c6 -= c9; c5 += c10; t1 = (c5 - c6 + 0) >> 1; t2 = t1 - c9; c9 = t1 - c10; c10 = t2; c5 -= c10; c6 += c9;
+            c7 -= c8; c4 += c11; t1 = (c4 - c7 + 0) >> 1; t2 = t1 - c8; c8 = t1 - c11; c11 = t2; c4 -= c11; c7 += c8;
+            c2 -= c13; c1 += c14; t1 = (c1 - c2 + 0) >> 1; t2 = t1 - c13; c13 = t1 - c14; c14 = t2; c1 -= c14; c2 += c13;
+            c3 -= c12; c0 += c15; t1 = (c0 - c3 + 0) >> 1; t2 = t1 - c12; c12 = t1 - c15; c15 = t2; c0 -= c15; c3 += c12;
+            Unsafe.Add(ref r0, 0) = c0; Unsafe.Add(ref r0, 1) = c1; Unsafe.Add(ref r0, 2) = c2; Unsafe.Add(ref r0, 3) = c3; Unsafe.Add(ref r1, 0) = c4; Unsafe.Add(ref r1, 1) = c5; Unsafe.Add(ref r1, 2) = c6; Unsafe.Add(ref r1, 3) = c7; Unsafe.Add(ref r2, 0) = c8; Unsafe.Add(ref r2, 1) = c9; Unsafe.Add(ref r2, 2) = c10; Unsafe.Add(ref r2, 3) = c11; Unsafe.Add(ref r3, 0) = c12; Unsafe.Add(ref r3, 1) = c13; Unsafe.Add(ref r3, 2) = c14; Unsafe.Add(ref r3, 3) = c15;
+        }
+
+        // ------------------------------------------------------------------ block-major sample arrays
+
+        /// <summary>
+        /// Offset of the sample (x, y) in a block-major array: 4x4 blocks of 16 consecutive values (raster order inside),
+        /// <paramref name="bw"/> blocks per row of blocks.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static int At(int bw, int x, int y) => ((y >> 2) * bw + (x >> 2)) << 4 | (y & 3) << 2 | (x & 3);
+
+        /// <summary>Row y (x0 .. x0 + n - 1, x0 a multiple of 4) of a block-major array.</summary>
+        public static void ReadRow(int[] p, int bw, int y, int x0, int n, Span<int> dst)
+        {
+            int o = At(bw, x0, y);
+            int i = 0;
+            if ((x0 & 3) == 0 && dst.Length >= n && (long)o + ((n >> 2) - 1) * 16L + 4 <= p.Length)
+            {
+                ref int s = ref MemoryMarshal.GetArrayDataReference(p);
+                ref int d = ref MemoryMarshal.GetReference(dst);
+                for (; i + 4 <= n; i += 4, o += 16)
+                    Vector128.StoreUnsafe(Vector128.LoadUnsafe(ref s, (nuint)o), ref d, (nuint)i);
+            }
+            for (; i + 4 <= n; i += 4, o += 16)
+            {
+                dst[i] = p[o]; dst[i + 1] = p[o + 1]; dst[i + 2] = p[o + 2]; dst[i + 3] = p[o + 3];
+            }
+            for (int k = 0; i < n; i++, k++) dst[i] = p[o + k];
+        }
+
+        /// <summary>A raster array (width a multiple of 4) as a block-major one and back.</summary>
+        public static void ToBlocks(int[] raster, int w, int h, int[] blocks)
+        {
+            int bw = w >> 2;
+            for (int y = 0; y < h; y++)
+            {
+                int r = y * w, o = At(bw, 0, y);
+                for (int x = 0; x < w; x += 4, o += 16)
+                {
+                    blocks[o] = raster[r + x]; blocks[o + 1] = raster[r + x + 1]; blocks[o + 2] = raster[r + x + 2]; blocks[o + 3] = raster[r + x + 3];
+                }
+            }
+        }
+
+        public static int[] ToRaster(int[] blocks, int w, int h)
+        {
+            var r = new int[w * h];
+            for (int y = 0; y < h; y++) ReadRow(blocks, w >> 2, y, 0, w, r.AsSpan(y * w, w));
+            return r;
+        }
+
+        /// <summary>OverlapPostFilter4x4( ) around a block corner of a block-major array (blocks b00, b10 to its right, b01 below, b11).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public static void PostFilter4x4B(int[] p, int b00, int b10, int b01, int b11)
+        {
+            int t1, t2;
+            ref int q00 = ref p[b00 + 15]; ref int q10 = ref p[b10 + 15]; ref int q01 = ref p[b01 + 15]; ref int q11 = ref p[b11 + 15];
+            q00 = ref p[b00]; q10 = ref p[b10]; q01 = ref p[b01]; q11 = ref p[b11];
+            int c0 = Unsafe.Add(ref q00, 10); int c1 = Unsafe.Add(ref q00, 11); int c2 = Unsafe.Add(ref q10, 8); int c3 = Unsafe.Add(ref q10, 9); int c4 = Unsafe.Add(ref q00, 14); int c5 = Unsafe.Add(ref q00, 15); int c6 = Unsafe.Add(ref q10, 12); int c7 = Unsafe.Add(ref q10, 13); int c8 = Unsafe.Add(ref q01, 2); int c9 = Unsafe.Add(ref q01, 3); int c10 = Unsafe.Add(ref q11, 0); int c11 = Unsafe.Add(ref q11, 1); int c12 = Unsafe.Add(ref q01, 6); int c13 = Unsafe.Add(ref q01, 7); int c14 = Unsafe.Add(ref q11, 4); int c15 = Unsafe.Add(ref q11, 5);
+            c0 += c15; c3 -= c12; t1 = (c0 - c3 + 0) >> 1; t2 = c12; c12 = t1 - c15; c15 = t1 - t2; c0 -= c15; c3 += c12;
+            c1 += c14; c2 -= c13; t1 = (c1 - c2 + 0) >> 1; t2 = c13; c13 = t1 - c14; c14 = t1 - t2; c1 -= c14; c2 += c13;
+            c4 += c11; c7 -= c8; t1 = (c4 - c7 + 0) >> 1; t2 = c8; c8 = t1 - c11; c11 = t1 - t2; c4 -= c11; c7 += c8;
+            c5 += c10; c6 -= c9; t1 = (c5 - c6 + 0) >> 1; t2 = c9; c9 = t1 - c10; c10 = t1 - t2; c5 -= c10; c6 += c9;
+            c13 -= (c12 + 1) >> 1; c12 += (c13 + 1) >> 1;
+            c9 -= (c8 + 1) >> 1; c8 += (c9 + 1) >> 1;
+            c7 -= (c3 + 1) >> 1; c3 += (c7 + 1) >> 1;
+            c6 -= (c2 + 1) >> 1; c2 += (c6 + 1) >> 1;
+            c15 += c10; c14 -= c11; t1 = c15 >> 1; t2 = c14 >> 1; c10 -= t1; c11 += t2; c10 -= (c11 * 3 + 6) >> 3; c11 += (c10 * 3 + 2) >> 2; c10 -= (c11 * 3 + 4) >> 3; c11 -= t2; c10 += t1; c14 += c11; c15 -= c10;
+            c0 += c15; c15 = (c0 >> 1) - c15; c0 += (c15 * 3) >> 3; c15 += (c0 * 3) >> 4; c15 += c0 >> 7; c15 -= c0 >> 10;
+            c1 += c14; c14 = (c1 >> 1) - c14; c1 += (c14 * 3) >> 3; c14 += (c1 * 3) >> 4; c14 += c1 >> 7; c14 -= c1 >> 10;
+            c4 += c11; c11 = (c4 >> 1) - c11; c4 += (c11 * 3) >> 3; c11 += (c4 * 3) >> 4; c11 += c4 >> 7; c11 -= c4 >> 10;
+            c5 += c10; c10 = (c5 >> 1) - c10; c5 += (c10 * 3) >> 3; c10 += (c5 * 3) >> 4; c10 += c5 >> 7; c10 -= c5 >> 10;
+            c3 -= c12; c0 += (c15 * 3 + 4) >> 3; c15 -= c3 >> 1; t1 = ((c0 - c3) >> 1) - c12; c12 = c15; c15 = t1; c0 -= c15; c3 += c12;
+            c2 -= c13; c1 += (c14 * 3 + 4) >> 3; c14 -= c2 >> 1; t1 = ((c1 - c2) >> 1) - c13; c13 = c14; c14 = t1; c1 -= c14; c2 += c13;
+            c7 -= c8; c4 += (c11 * 3 + 4) >> 3; c11 -= c7 >> 1; t1 = ((c4 - c7) >> 1) - c8; c8 = c11; c11 = t1; c4 -= c11; c7 += c8;
+            c6 -= c9; c5 += (c10 * 3 + 4) >> 3; c10 -= c6 >> 1; t1 = ((c5 - c6) >> 1) - c9; c9 = c10; c10 = t1; c5 -= c10; c6 += c9;
+            Unsafe.Add(ref q00, 10) = c0; Unsafe.Add(ref q00, 11) = c1; Unsafe.Add(ref q10, 8) = c2; Unsafe.Add(ref q10, 9) = c3; Unsafe.Add(ref q00, 14) = c4; Unsafe.Add(ref q00, 15) = c5; Unsafe.Add(ref q10, 12) = c6; Unsafe.Add(ref q10, 13) = c7; Unsafe.Add(ref q01, 2) = c8; Unsafe.Add(ref q01, 3) = c9; Unsafe.Add(ref q11, 0) = c10; Unsafe.Add(ref q11, 1) = c11; Unsafe.Add(ref q01, 6) = c12; Unsafe.Add(ref q01, 7) = c13; Unsafe.Add(ref q11, 4) = c14; Unsafe.Add(ref q11, 5) = c15;
+        }
+
+        /// <summary>The exact inverse of <see cref="PostFilter4x4B"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public static void PreFilter4x4B(int[] p, int b00, int b10, int b01, int b11)
+        {
+            int t1, t2;
+            ref int q00 = ref p[b00 + 15]; ref int q10 = ref p[b10 + 15]; ref int q01 = ref p[b01 + 15]; ref int q11 = ref p[b11 + 15];
+            q00 = ref p[b00]; q10 = ref p[b10]; q01 = ref p[b01]; q11 = ref p[b11];
+            int c0 = Unsafe.Add(ref q00, 10); int c1 = Unsafe.Add(ref q00, 11); int c2 = Unsafe.Add(ref q10, 8); int c3 = Unsafe.Add(ref q10, 9); int c4 = Unsafe.Add(ref q00, 14); int c5 = Unsafe.Add(ref q00, 15); int c6 = Unsafe.Add(ref q10, 12); int c7 = Unsafe.Add(ref q10, 13); int c8 = Unsafe.Add(ref q01, 2); int c9 = Unsafe.Add(ref q01, 3); int c10 = Unsafe.Add(ref q11, 0); int c11 = Unsafe.Add(ref q11, 1); int c12 = Unsafe.Add(ref q01, 6); int c13 = Unsafe.Add(ref q01, 7); int c14 = Unsafe.Add(ref q11, 4); int c15 = Unsafe.Add(ref q11, 5);
+            c6 -= c9; c5 += c10; t1 = c9; c9 = c10; c10 = t1; c9 = ((c5 - c6) >> 1) - c9; c10 += c6 >> 1; c5 -= (c10 * 3 + 4) >> 3; c6 += c9;
+            c7 -= c8; c4 += c11; t1 = c8; c8 = c11; c11 = t1; c8 = ((c4 - c7) >> 1) - c8; c11 += c7 >> 1; c4 -= (c11 * 3 + 4) >> 3; c7 += c8;
+            c2 -= c13; c1 += c14; t1 = c13; c13 = c14; c14 = t1; c13 = ((c1 - c2) >> 1) - c13; c14 += c2 >> 1; c1 -= (c14 * 3 + 4) >> 3; c2 += c13;
+            c3 -= c12; c0 += c15; t1 = c12; c12 = c15; c15 = t1; c12 = ((c0 - c3) >> 1) - c12; c15 += c3 >> 1; c0 -= (c15 * 3 + 4) >> 3; c3 += c12;
+            c10 -= (c5 * 3) >> 4; c10 -= c5 >> 7; c10 += c5 >> 10; c5 -= (c10 * 3) >> 3; c10 = (c5 >> 1) - c10; c5 -= c10;
+            c11 -= (c4 * 3) >> 4; c11 -= c4 >> 7; c11 += c4 >> 10; c4 -= (c11 * 3) >> 3; c11 = (c4 >> 1) - c11; c4 -= c11;
+            c14 -= (c1 * 3) >> 4; c14 -= c1 >> 7; c14 += c1 >> 10; c1 -= (c14 * 3) >> 3; c14 = (c1 >> 1) - c14; c1 -= c14;
+            c15 -= (c0 * 3) >> 4; c15 -= c0 >> 7; c15 += c0 >> 10; c0 -= (c15 * 3) >> 3; c15 = (c0 >> 1) - c15; c0 -= c15;
+            c15 += c10; c14 -= c11; t1 = c15 >> 1; t2 = c14 >> 1; c10 -= t1; c11 += t2; c10 += (c11 * 3 + 4) >> 3; c11 -= (c10 * 3 + 2) >> 2; c10 += (c11 * 3 + 6) >> 3; c11 -= t2; c10 += t1; c14 += c11; c15 -= c10;
+            c2 -= (c6 + 1) >> 1; c6 += (c2 + 1) >> 1;
+            c3 -= (c7 + 1) >> 1; c7 += (c3 + 1) >> 1;
+            c8 -= (c9 + 1) >> 1; c9 += (c8 + 1) >> 1;
+            c12 -= (c13 + 1) >> 1; c13 += (c12 + 1) >> 1;
+            c6 -= c9; c5 += c10; t1 = (c5 - c6 + 0) >> 1; t2 = t1 - c9; c9 = t1 - c10; c10 = t2; c5 -= c10; c6 += c9;
+            c7 -= c8; c4 += c11; t1 = (c4 - c7 + 0) >> 1; t2 = t1 - c8; c8 = t1 - c11; c11 = t2; c4 -= c11; c7 += c8;
+            c2 -= c13; c1 += c14; t1 = (c1 - c2 + 0) >> 1; t2 = t1 - c13; c13 = t1 - c14; c14 = t2; c1 -= c14; c2 += c13;
+            c3 -= c12; c0 += c15; t1 = (c0 - c3 + 0) >> 1; t2 = t1 - c12; c12 = t1 - c15; c15 = t2; c0 -= c15; c3 += c12;
+            Unsafe.Add(ref q00, 10) = c0; Unsafe.Add(ref q00, 11) = c1; Unsafe.Add(ref q10, 8) = c2; Unsafe.Add(ref q10, 9) = c3; Unsafe.Add(ref q00, 14) = c4; Unsafe.Add(ref q00, 15) = c5; Unsafe.Add(ref q10, 12) = c6; Unsafe.Add(ref q10, 13) = c7; Unsafe.Add(ref q01, 2) = c8; Unsafe.Add(ref q01, 3) = c9; Unsafe.Add(ref q11, 0) = c10; Unsafe.Add(ref q11, 1) = c11; Unsafe.Add(ref q01, 6) = c12; Unsafe.Add(ref q01, 7) = c13; Unsafe.Add(ref q11, 4) = c14; Unsafe.Add(ref q11, 5) = c15;
+        }
+
+        /// <summary>
+        /// The 4x4 / 4-point overlap filters (9.9.6, D.5) of one region of a block-major array, in blocks
+        /// [bx0, bx1) x [by0, by1): every interior block corner, the two outer rows and columns, the four corners.
+        /// </summary>
+        public static void Overlap4B(int[] p, int bw, int bx0, int by0, int bx1, int by1, bool forward)
+        {
+            Overlap4BInterior(p, bw, bx0, by0, bx1, by1, by0, by1, forward);
+            Overlap4BEdges(p, bw, bx0, by0, bx1, by1, forward);
+        }
+
+        /// <summary>The interior filters at the corners below block rows j with jFrom &lt;= j &lt; jTo.</summary>
+        public static void Overlap4BInterior(int[] p, int bw, int bx0, int by0, int bx1, int by1, int jFrom, int jTo, bool forward)
+        {
+            int j0 = Math.Max(jFrom, by0), j1 = Math.Min(jTo, by1 - 1);
+            int row = bw << 4;
+            for (int j = j0; j < j1; j++)
+            {
+                int b = (j * bw + bx0) << 4;
+                for (int i = bx0; i < bx1 - 1; i++, b += 16)
+                    if (forward) PreFilter4x4B(p, b, b + 16, b + row, b + row + 16);
+                    else PostFilter4x4B(p, b, b + 16, b + row, b + row + 16);
+            }
+        }
+
+        public static void Overlap4BEdges(int[] p, int bw, int bx0, int by0, int bx1, int by1, bool forward)
+        {
+            int row = bw << 4;
+            // left and right two columns: vertical 4-point filters across block rows
+            for (int j = by0; j < by1 - 1; j++)
+            {
+                int l = (j * bw + bx0) << 4, r = (j * bw + bx1 - 1) << 4;
+                for (int u = 0; u < 2; u++)
+                {
+                    F4(p, l + 8 + u, l + 12 + u, l + row + u, l + row + 4 + u, forward);
+                    F4(p, r + 10 + u, r + 14 + u, r + row + 2 + u, r + row + 6 + u, forward);
+                }
+            }
+            // top and bottom two rows: horizontal filters across block columns
+            for (int i = bx0; i < bx1 - 1; i++)
+            {
+                int t = (by0 * bw + i) << 4, b = ((by1 - 1) * bw + i) << 4;
+                for (int v = 0; v < 2; v++)
+                {
+                    F4(p, t + v * 4 + 2, t + v * 4 + 3, t + 16 + v * 4, t + 16 + v * 4 + 1, forward);
+                    F4(p, b + 8 + v * 4 + 2, b + 8 + v * 4 + 3, b + 16 + 8 + v * 4, b + 16 + 8 + v * 4 + 1, forward);
+                }
+            }
+            // corners: top-left, top-right, bottom-left, bottom-right
+            int tl = (by0 * bw + bx0) << 4, tr = (by0 * bw + bx1 - 1) << 4, bl = ((by1 - 1) * bw + bx0) << 4, br = ((by1 - 1) * bw + bx1 - 1) << 4;
+            F4(p, tl, tl + 1, tl + 4, tl + 5, forward);
+            F4(p, tr + 2, tr + 3, tr + 6, tr + 7, forward);
+            F4(p, bl + 8, bl + 9, bl + 12, bl + 13, forward);
+            F4(p, br + 10, br + 11, br + 14, br + 15, forward);
+        }
+
         // ------------------------------------------------------------------ geometric application
 
         /// <summary>
@@ -483,26 +673,16 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
         /// <summary>Interior 4x4 filters whose top row y satisfies yFrom &lt;= y &lt; yTo (with y = y0 + 2 + 4k).</summary>
         public static void Overlap4Interior(int[] p, int s, int x0, int y0, int x1, int y1, int yFrom, int yTo, bool forward)
         {
-            Span<int> t = stackalloc int[16];
             int yStart = y0 + 2;
             if (yFrom > yStart) yStart += (yFrom - yStart + 3) / 4 * 4;
             int yEnd = Math.Min(yTo, y1 - 2);
             for (int y = yStart; y < yEnd; y += 4)
+            {
+                int o = y * s;
+                if (o + 3 * s + x1 > p.Length) throw new IndexOutOfRangeException();
                 for (int x = x0 + 2; x < x1 - 2; x += 4)
-                {
-                    int o = y * s + x;
-                    for (int r = 0; r < 4; r++)
-                    {
-                        int q = o + r * s;
-                        t[r * 4] = p[q]; t[r * 4 + 1] = p[q + 1]; t[r * 4 + 2] = p[q + 2]; t[r * 4 + 3] = p[q + 3];
-                    }
-                    if (forward) PreFilter4x4(t); else PostFilter4x4(t);
-                    for (int r = 0; r < 4; r++)
-                    {
-                        int q = o + r * s;
-                        p[q] = t[r * 4]; p[q + 1] = t[r * 4 + 1]; p[q + 2] = t[r * 4 + 2]; p[q + 3] = t[r * 4 + 3];
-                    }
-                }
+                    if (forward) PreFilter4x4(p, o + x, s); else PostFilter4x4(p, o + x, s);
+            }
         }
 
         public static void Overlap4Edges(int[] p, int s, int x0, int y0, int x1, int y1, bool forward)

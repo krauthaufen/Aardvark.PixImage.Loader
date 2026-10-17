@@ -97,12 +97,57 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
 
         public RawImage Decode(ReadOnlySpan<byte> d, JpegXrDecodeOptions o)
         {
-            var (prim, alpha) = DecodeArrays(d, o.Multithreaded);
             var (ch, type, model, _) = Plan(o);
             var ih = Cs.Ih;
             int w = ih.Width, h = ih.Height;
             long n = (long)w * h;
             var px = RawImage.CreateArray(type, checked((int)(n * ch)));
+            var img = Fast(d, o, px, ch) ? new RawImage(w, h, model, px, ch, Metadata(d, type)) : Generic(d, o, px, ch, type, model);
+            if (HasAlpha && Premultiplied && o.Unpremultiply && img.HasAlpha) DdsImpl.DdsSurfaces.Unpremultiply(img);
+            return img;
+        }
+
+        /// <summary>8 / 16 bit RGB and gray (with alpha) formatted straight into the result.</summary>
+        bool Fast(ReadOnlySpan<byte> d, JpegXrDecodeOptions o, Array px, int ch)
+        {
+            var ih = Cs.Ih;
+            if (ih.BitDepth is not (JxrBitDepth.Bd8 or JxrBitDepth.Bd16) || ih.OutputFormat is not (JxrOutputFormat.Rgb or JxrOutputFormat.YOnly)) return false;
+            if (AlphaCs != null && (AlphaCs.Ih.BitDepth != ih.BitDepth || AlphaCs.Primary.Format != JxrInternalFormat.YOnly || AlphaCs.Ih.AlphaPlane)) return false;
+            bool parallel = o.Multithreaded;
+            var full = Container != null ? JxrCodestream.Parse(Container.Image(d), false) : JxrCodestream.Parse(d, false);
+            var res = JxrDecoder.Decode(full, parallel);
+            if (!JxrOutput.FormatInto(res.Primary, false, px, ch, 0, parallel)) return false;
+            int a = ch - 1;
+            if (res.Alpha != null) JxrOutput.FormatInto(res.Alpha, true, px, ch, a, parallel);
+            else if (Container != null && Container.AlphaOffset > 0)
+            {
+                var acs = JxrCodestream.Parse(Container.Alpha(d), false);
+                if (acs.Ih.Width != ih.Width || acs.Ih.Height != ih.Height) throw new ImageFormatException("JPEG XR: the alpha plane does not fit the image");
+                JxrOutput.FormatInto(JxrDecoder.Decode(acs, parallel).Primary, false, px, ch, a, parallel);
+            }
+            return true;
+        }
+
+        ImageMetadata? Metadata(ReadOnlySpan<byte> d, SampleType type)
+        {
+            if (Container == null && Orientation <= 1) return null;
+            var meta = new ImageMetadata { DpiX = DpiX, DpiY = DpiY, Orientation = Orientation };
+            if (Container != null)
+            {
+                meta.IccProfile = Container.Icc;
+                meta.Xmp = Container.Xmp;
+                meta.Exif = JxrMetadata.Exif(d);
+            }
+            if (type is SampleType.Float16 or SampleType.Float32) meta.Transfer = TransferFunction.Linear;
+            return meta;
+        }
+
+        RawImage Generic(ReadOnlySpan<byte> d, JpegXrDecodeOptions o, Array px, int ch, SampleType type, ColorModel model)
+        {
+            var (prim, alpha) = DecodeArrays(d, o.Multithreaded);
+            var ih = Cs.Ih;
+            int w = ih.Width, h = ih.Height;
+            long n = (long)w * h;
             int color = ch - (alpha != null ? 1 : 0);
             var bd = ih.BitDepth;
             var fmt = ih.OutputFormat;
@@ -196,22 +241,7 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             if (alpha != null)
                 for (long i = 0; i < n; i++) Store(px, type, i * ch + ch - 1, alpha.A[0][i], bd);
 
-            ImageMetadata? meta = null;
-            var cont = Container;
-            if (cont != null || Orientation > 1)
-            {
-                meta = new ImageMetadata { DpiX = DpiX, DpiY = DpiY, Orientation = Orientation };
-                if (cont != null)
-                {
-                    meta.IccProfile = cont.Icc;
-                    meta.Xmp = cont.Xmp;
-                    meta.Exif = JxrMetadata.Exif(d);
-                }
-                if (type is SampleType.Float16 or SampleType.Float32) meta.Transfer = TransferFunction.Linear;
-            }
-            var img = new RawImage(w, h, model, px, ch, meta);
-            if (alpha != null && Premultiplied && o.Unpremultiply && img.HasAlpha) DdsImpl.DdsSurfaces.Unpremultiply(img);
-            return img;
+            return new RawImage(w, h, model, px, ch, Metadata(d, type));
         }
 
         /// <summary>One reference output value as a sample of the RawImage (fixed point and float bit patterns converted).</summary>

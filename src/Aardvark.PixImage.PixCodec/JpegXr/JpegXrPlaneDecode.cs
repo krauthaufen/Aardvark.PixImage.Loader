@@ -188,43 +188,37 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             for (int c = 0; c < Nc; c++)
             {
                 var px = Px[c];
-                int s = PxW[c];
                 int f = hf[c];
                 int bw = _mbPxW[c] >> 2, bh = _mbPxH[c] >> 2;
-                int o0 = _mby * _mbPxH[c] * s + _mbx * _mbPxW[c];
+                int row = DcW[c] << 4;
+                int o0 = ((_mby * bh) * DcW[c] + _mbx * bw) << 4;
                 if (f != 1)
-                    for (int y = 0; y < bh * 4; y++)
+                    for (int by = 0; by < bh; by++)
                     {
-                        int o = o0 + y * s;
-                        for (int x = 0; x < bw * 4; x++)
-                            if (((x | y) & 3) != 0) px[o + x] *= f;
+                        var blocks = px.AsSpan(o0 + by * row, bw * 16);
+                        for (int k = 0; k < blocks.Length; k++) if ((k & 15) != 0) blocks[k] *= f;
                     }
                 if (mode == 2) continue;
-                // prediction across the blocks of the macroblock (all of luma / 444 chroma, the 2 or 4 x 2 blocks of 42x chroma)
+                // prediction across the blocks of the macroblock: from the left the first column (coefficients 4, 8, 12) of
+                // every block but those of the first block column, from the top the first row (1, 2, 3)
                 if (mode == 0)
-                {
-                    // from the left: the first column (coefficients 4, 8, 12) of each block but those of the first block column
                     for (int by = 0; by < bh; by++)
                         for (int bx = 1; bx < bw; bx++)
                         {
-                            int o = o0 + 4 * by * s + 4 * bx;
-                            px[o + s] += px[o + s - 4];
-                            px[o + 2 * s] += px[o + 2 * s - 4];
-                            px[o + 3 * s] += px[o + 3 * s - 4];
+                            int o = o0 + by * row + (bx << 4);
+                            px[o + 4] += px[o - 12];
+                            px[o + 8] += px[o - 8];
+                            px[o + 12] += px[o - 4];
                         }
-                }
                 else
-                {
-                    // from the top: the first row (coefficients 1, 2, 3)
                     for (int by = 1; by < bh; by++)
                         for (int bx = 0; bx < bw; bx++)
                         {
-                            int o = o0 + 4 * by * s + 4 * bx;
-                            px[o + 1] += px[o + 1 - 4 * s];
-                            px[o + 2] += px[o + 2 - 4 * s];
-                            px[o + 3] += px[o + 3 - 4 * s];
+                            int o = o0 + by * row + (bx << 4);
+                            px[o + 1] += px[o - row + 1];
+                            px[o + 2] += px[o - row + 2];
+                            px[o + 3] += px[o - row + 3];
                         }
-                }
             }
         }
 
@@ -248,14 +242,14 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             {
                 var px = Px[c];
                 var dc = Dc[c];
-                int s = PxW[c], dw = DcW[c], dh = DcH[c];
+                int dw = DcW[c], dh = DcH[c];
+                // coefficient combination (9.9.4) and the second level inverse transform (9.9.5), block by block
                 void Rows(int r0, int r1)
                 {
-                    for (int y = r0; y < r1; y++)
+                    for (int b = r0 * dw, e = r1 * dw; b < e; b++)
                     {
-                        int po = 4 * y * s, dofs = y * dw;
-                        for (int x = 0; x < dw; x++) px[po + 4 * x] = dc[dofs + x];
-                        for (int x = 0; x < dw; x++) JxrTransform.Ict4x4(px, po + 4 * x, s);
+                        px[b << 4] = dc[b];
+                        JxrTransform.Ict4x4(px, b << 4, 4);
                     }
                 }
                 if (parallel && dh >= 64) Parallel.For(0, (dh + 31) / 32, k => Rows(k * 32, Math.Min(dh, k * 32 + 32)));
@@ -264,23 +258,23 @@ namespace Aardvark.ImageCodecs.JpegXrImpl
             if (ih.Overlap != 0)
                 for (int c = 0; c < Nc; c++)
                 {
-                    int mw = _mbPxW[c], mh = _mbPxH[c];
+                    int mw = _mbPxW[c] >> 2, mh = _mbPxH[c] >> 2;   // blocks per macroblock
                     var px = Px[c];
-                    int s = PxW[c];
+                    int bw = DcW[c];
                     ForRegions((x0, y0, x1, y1) =>
                     {
                         int X0 = x0 * mw, Y0 = y0 * mh, X1 = x1 * mw, Y1 = y1 * mh;
-                        if (parallel && Y1 - Y0 >= 256)
+                        if (parallel && Y1 - Y0 >= 64)
                         {
-                            int bands = (Y1 - Y0) / 128;
+                            int bands = (Y1 - Y0) / 32;
                             Parallel.For(0, bands, k =>
                             {
                                 int from = Y0 + (Y1 - Y0) * k / bands, to = Y0 + (Y1 - Y0) * (k + 1) / bands;
-                                JxrTransform.Overlap4Interior(px, s, X0, Y0, X1, Y1, from, to, false);
+                                JxrTransform.Overlap4BInterior(px, bw, X0, Y0, X1, Y1, from, to, false);
                             });
-                            JxrTransform.Overlap4Edges(px, s, X0, Y0, X1, Y1, false);
+                            JxrTransform.Overlap4BEdges(px, bw, X0, Y0, X1, Y1, false);
                         }
-                        else JxrTransform.Overlap4(px, s, X0, Y0, X1, Y1, false);
+                        else JxrTransform.Overlap4B(px, bw, X0, Y0, X1, Y1, false);
                     });
                 }
         }
