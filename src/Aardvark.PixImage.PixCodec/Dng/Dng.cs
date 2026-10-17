@@ -205,13 +205,28 @@ namespace Aardvark.ImageCodecs
             return DngRender.Render(f, info, raw, o, Metadata(f));
         }
 
+        /// <summary>
+        /// Tags of TIFF-EP that DNG allows in IFD 0 instead of the EXIF directory (exposure, aperture, ISO, dates, focal
+        /// length, flash, ...): kept in the EXIF blob together with the EXIF and GPS directories.
+        /// </summary>
+        internal static bool IsTiffEpExif(int tag) => tag is 306 or 33434 or 33437 or 34850 or 34855 or 34856 or 34857 or 34858 or 34859
+            or 36864 or 36867 or 36868 or (>= 37377 and <= 37386) or (>= 37393 and <= 37399) or (>= 37520 and <= 37522) or 41495;
+
         static ImageMetadata Metadata(TiffFile f)
         {
             var m = new ImageMetadata();
             try
             {
                 var e = f.ReadIfd(f.FirstIfd);
-                if (TiffFile.Find(e, 34665, out _) || TiffFile.Find(e, 34853, out _)) m.Exif = TiffExif.Extract(f, f.FirstIfd);
+                var node = TiffIfdNode.Read(f, f.FirstIfd, t => TiffExif.IsDescriptive(t) || IsTiffEpExif(t));
+                if (node.Fields.Count > 0)
+                {
+                    var dir = node.Serialize(8, 0, false, false);
+                    var blob = new byte[8 + dir.Length];
+                    blob[0] = blob[1] = (byte)'I'; blob[2] = 42; blob[4] = 8;
+                    dir.CopyTo(blob, 8);
+                    m.Exif = blob;
+                }
                 var xmp = f.Bytes(e, 700);
                 if (xmp != null && xmp.Length > 0) m.Xmp = xmp;
             }
@@ -240,7 +255,11 @@ namespace Aardvark.ImageCodecs
         {
             var info = DngReader.Read(f, out long raw);
             var stored = DngRender.ReadStored(f, info, raw, true, 0);
-            if (stage == DngRawStage.Stored) return new DngRawImage { Image = stored, Info = info, Stage = stage };
+            if (stage == DngRawStage.Stored)
+            {
+                stored.Metadata = Metadata(f);   // EXIF / XMP, for writing the image back
+                return new DngRawImage { Image = stored, Info = info, Stage = stage };
+            }
             var lin = DngRender.Linearize(stored, info, opcodes, new System.Threading.Tasks.ParallelOptions(), out var trim);
             int n = lin.Planes, w = lin.Width, h = lin.Height;
             var d = new float[(long)w * h * n];
@@ -251,6 +270,25 @@ namespace Aardvark.ImageCodecs
             }
             var color = n == 1 ? ColorModel.Gray : n == 3 ? ColorModel.Rgb : ColorModel.Other;
             return new DngRawImage { Image = new RawImage(w, h, color, d, n), Info = info, Stage = stage, OffsetX = trim.X, OffsetY = trim.Y };
+        }
+
+        // ------------------------------------------------------------------------------------------ encoding
+
+        /// <summary>
+        /// Writes a DNG from raw samples as stored (one channel CFA data, or LinearRaw planes; UInt8 / UInt16 / UInt32 /
+        /// Float16 / Float32) and the parameters in <paramref name="info"/> (all of them are written: CFA, levels,
+        /// linearization, active area, crop, calibrations, white balance, exposure, profile tables, opcode lists). EXIF / XMP
+        /// come from the image's metadata. Lossless: decoding the file gives the same samples and the same parameters.
+        /// </summary>
+        public static void Encode(RawImage stored, DngInfo info, Stream output, DngEncodeOptions? options = null)
+            => DngEncoder.Encode(stored, info, output ?? throw new ArgumentNullException(nameof(output)), options ?? new DngEncodeOptions());
+
+        /// <summary>Writes a raw image read with <see cref="DecodeRaw(ReadOnlySpan{byte}, DngRawStage, bool)"/> (stage <see cref="DngRawStage.Stored"/>) back as DNG.</summary>
+        public static void Encode(DngRawImage raw, Stream output, DngEncodeOptions? options = null)
+        {
+            if (raw == null) throw new ArgumentNullException(nameof(raw));
+            if (raw.Stage != DngRawStage.Stored) throw new ArgumentException("DNG: only stored samples can be written", nameof(raw));
+            Encode(raw.Image, raw.Info, output, options);
         }
 
         // ------------------------------------------------------------------------------------------ previews

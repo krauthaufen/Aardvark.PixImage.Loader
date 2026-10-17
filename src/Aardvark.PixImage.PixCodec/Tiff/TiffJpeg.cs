@@ -15,8 +15,17 @@ namespace Aardvark.ImageCodecs
         /// <summary>One strip/tile with up to 8 bits per sample, see <see cref="TiffJpegDecoder"/> for the contract.</summary>
         public static void Decode8(JpegTiffTables? prepared, ReadOnlySpan<byte> tables, ReadOnlySpan<byte> data, int width, int height, int components, bool ycc, Span<byte> dst)
         {
-            if (Tiff.JpegDecoder != null) Tiff.JpegDecoder(tables, data, width, height, components, ycc, dst);
-            else Jpeg.DecodeForTiff(prepared, data, width, height, components, ycc, dst);
+            if (Tiff.JpegDecoder != null) { Tiff.JpegDecoder(tables, data, width, height, components, ycc, dst); return; }
+            var info = Jpeg.GetTiffStreamInfo(data);
+            if (info.Lossless && (info.Components != components || (long)info.Width * info.Height != (long)width * height && info.Width < width))
+            {
+                // a reshaped lossless frame (8-bit DNG data): through the 16-bit path, which knows the shapes
+                var wide = new ushort[dst.Length];
+                Decode16(prepared, data, width, height, components, false, wide);
+                for (int i = 0; i < wide.Length; i++) dst[i] = (byte)wide[i];
+                return;
+            }
+            Jpeg.DecodeForTiff(prepared, data, width, height, components, ycc, dst);
         }
 
         /// <summary>

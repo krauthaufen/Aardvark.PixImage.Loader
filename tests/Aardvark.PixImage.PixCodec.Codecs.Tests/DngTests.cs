@@ -344,6 +344,149 @@ public class DngTests
         Assert.Throws<ArgumentException>(() => Dng.Decode(bytes, new DngDecodeOptions { OutputType = SampleType.Int16 }));
     }
 
+    // ------------------------------------------------------------------------------------------ encoding
+
+    static byte[] RoundTrip(DngRawImage raw, DngEncodeOptions? o = null)
+    {
+        var ms = new MemoryStream();
+        Dng.Encode(raw, ms, o);
+        return ms.ToArray();
+    }
+
+    static void AssertSameInfo(DngInfo a, DngInfo b)
+    {
+        Assert.Equal((a.Layout, a.ColorPlanes, a.CfaRepeatRows, a.CfaRepeatCols, a.CfaLayout), (b.Layout, b.ColorPlanes, b.CfaRepeatRows, b.CfaRepeatCols, b.CfaLayout));
+        Assert.Equal(a.CfaPattern, b.CfaPattern);
+        Assert.Equal((a.ActiveArea, a.Orientation, a.FinalWidth, a.FinalHeight), (b.ActiveArea, b.Orientation, b.FinalWidth, b.FinalHeight));
+        Assert.Equal((a.DefaultCropX, a.DefaultCropY, a.DefaultCropWidth, a.DefaultCropHeight), (b.DefaultCropX, b.DefaultCropY, b.DefaultCropWidth, b.DefaultCropHeight));
+        Assert.Equal(a.LinearizationTable, b.LinearizationTable);
+        Assert.Equal(a.BlackLevel, b.BlackLevel);
+        Assert.Equal(a.WhiteLevel, b.WhiteLevel);
+        Assert.Equal(a.AsShotNeutral, b.AsShotNeutral);
+        Assert.Equal(a.BaselineExposure, b.BaselineExposure, 9);
+        Assert.Equal(a.Calibrations.Count, b.Calibrations.Count);
+        for (int i = 0; i < a.Calibrations.Count; i++)
+        {
+            Assert.Equal(a.Calibrations[i].Illuminant, b.Calibrations[i].Illuminant);
+            Assert.Equal(a.Calibrations[i].ColorMatrix, b.Calibrations[i].ColorMatrix);
+            Assert.Equal(a.Calibrations[i].ForwardMatrix, b.Calibrations[i].ForwardMatrix);
+            Assert.Equal(a.Calibrations[i].HueSatMap, b.Calibrations[i].HueSatMap);
+        }
+        foreach (var (x, y) in new[] { (a.OpcodeList1, b.OpcodeList1), (a.OpcodeList2, b.OpcodeList2), (a.OpcodeList3, b.OpcodeList3) })
+            Assert.Equal(x.Select(o => (o.Id, o.Version, o.Optional, Convert.ToHexString(o.Parameters))), y.Select(o => (o.Id, o.Version, o.Optional, Convert.ToHexString(o.Parameters))));
+    }
+
+    /// <summary>Every fixture written back: the same samples, parameters and rendering; read by tifffile and LibRaw.</summary>
+    [Theory]
+    [MemberData(nameof(Fixtures))]
+    public void EncodeRoundTrip(string file)
+    {
+        var bytes = File.ReadAllBytes(TestUtil.Fixture(file));
+        if (file.Contains("unknown_required")) return;
+        var raw = Dng.DecodeRaw(bytes);
+        bool isFloat = raw.Image.SampleType is SampleType.Float16 or SampleType.Float32;
+        var o = new DngEncodeOptions { Compression = isFloat ? DngCompression.Deflate : DngCompression.LosslessJpeg, TileSize = 32 };
+        var enc = RoundTrip(raw, o);
+        var back = Dng.DecodeRaw(enc);
+        TestUtil.AssertEqual(raw.Image, back.Image);
+        AssertSameInfo(raw.Info, back.Info);
+        var opts = new DngDecodeOptions { OutputType = SampleType.Float32, ApplyLookTable = true };
+        TestUtil.AssertEqual(Dng.Decode(bytes, opts), Dng.Decode(enc, opts), 1e-6);
+        // uncompressed, with a preview in IFD 0 and the raw image in a SubIFD
+        // (a preview is stored like the raw image, before orientation)
+        var preview = Dng.Decode(bytes, new DngDecodeOptions { OutputType = SampleType.UInt8, ApplyOrientation = false });
+        if (preview.Channels == 3)
+        {
+            var enc2 = RoundTrip(raw, new DngEncodeOptions { Compression = isFloat ? DngCompression.Deflate : DngCompression.None, Preview = preview });
+            TestUtil.AssertEqual(raw.Image, Dng.DecodeRaw(enc2).Image);
+            Assert.Equal(new[] { 0 }, Dng.ReadInfo(enc2).RawSubImagePath);
+            var pv = Dng.DecodePreview(enc2)!;
+            Assert.Equal(raw.Info.Orientation >= 5 ? preview.Height : preview.Width, pv.Width);
+        }
+        // third-party readers
+        if (!TestUtil.PythonAvailable) return;
+        var tmp = Path.Combine(TestUtil.FixtureDir, "_tmp");
+        Directory.CreateDirectory(tmp);
+        var path = Path.Combine(tmp, Guid.NewGuid().ToString("N") + ".dng");
+        File.WriteAllBytes(path, enc);
+        try
+        {
+            var (exit, output) = TestUtil.RunPython($"check_dng.py \"{path}\"");
+            if (TestUtil.CannotVerify(exit, output)) return;
+            Assert.True(exit == 0, output);
+            var j = JsonDocument.Parse(output.Trim().Split('\n').Last()).RootElement;
+            Assert.Equal(Sha(raw.Image.GetBytes()), j.GetProperty("stored_sha256").GetString());
+            // (LibRaw applies the bad pixel opcodes of list 1 to its raw values)
+            if (j.TryGetProperty("libraw_sha256", out var lr) && raw.Image.SampleType is SampleType.UInt8 or SampleType.UInt16 && raw.Info.OpcodeList1.Count == 0)
+            {
+                var lin = raw.Info.LinearizationTable;
+                var src = TestUtil.ToDoubles(raw.Image);
+                var v = new ushort[src.Length];
+                for (int i = 0; i < v.Length; i++) v[i] = lin == null ? (ushort)src[i] : lin[Math.Min((int)src[i], lin.Length - 1)];
+                Assert.Equal(Sha(System.Runtime.InteropServices.MemoryMarshal.AsBytes(v.AsSpan())), lr.GetString());
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void EncodeFromScratch()
+    {
+        // 8-bit CFA samples and a hand made parameter set
+        int w = 70, h = 46;
+        var px = new byte[w * h];
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) px[y * w + x] = (byte)(16 + (x * 3 + y * 5 + (x & 1) * 40 + (y & 1) * 70) % 220);
+        var info = new DngInfo
+        {
+            Layout = DngRawLayout.ColorFilterArray, ColorPlanes = 3, SamplesPerPixel = 1, BitsPerSample = 8,
+            CfaRepeatRows = 2, CfaRepeatCols = 2, CfaPattern = new byte[] { 1, 2, 0, 1 },
+            BlackLevel = new[] { 16.0 }, WhiteLevel = new[] { 250.0 }, Orientation = 8, Make = "Maker", Model = "Model 1",
+            DefaultCropX = 2, DefaultCropY = 2, DefaultCropWidth = 64, DefaultCropHeight = 40,
+            Calibrations = new[] { new DngCalibration { Illuminant = 21, ColorMatrix = new[] { 0.6722, -0.0635, -0.0963, -0.4287, 1.2460, 0.2028, -0.0908, 0.2162, 0.5668 } } },
+            AsShotNeutral = new[] { 0.5, 1, 0.7 }, BaselineExposure = 0.25,
+        };
+        var raw = new RawImage(w, h, ColorModel.Gray, px);
+        foreach (var c in new[] { DngCompression.LosslessJpeg, DngCompression.None })
+        {
+            var ms = new MemoryStream();
+            Dng.Encode(raw, info, ms, new DngEncodeOptions { Compression = c, TileSize = 32 });
+            var bytes = ms.ToArray();
+            var back = Dng.DecodeRaw(bytes);
+            Assert.Equal(px, back.Image.GetData<byte>());
+            Assert.Equal((8, "Maker", "Maker Model 1", 8), (back.Info.BitsPerSample, back.Info.Make, back.Info.UniqueCameraModel, back.Info.Orientation));
+            Assert.Equal(info.AsShotNeutral, back.Info.AsShotNeutral);
+            var gi = ImageCodec.GetInfo(bytes);
+            Assert.Equal((ImageFormat.Dng, 40, 64), (gi.Format, gi.Width, gi.Height));
+            Assert.Equal((40, 64), (Dng.Decode(bytes).Width, Dng.Decode(bytes).Height));
+            if (!TestUtil.PythonAvailable) continue;
+            var path = Path.Combine(TestUtil.FixtureDir, "_tmp", Guid.NewGuid().ToString("N") + ".dng");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllBytes(path, bytes);
+            try
+            {
+                var (exit, output) = TestUtil.RunPython($"check_dng.py \"{path}\"");
+                if (TestUtil.CannotVerify(exit, output)) continue;
+                Assert.True(exit == 0, output);
+                var j = JsonDocument.Parse(output.Trim().Split('\n').Last()).RootElement;
+                Assert.Equal(Sha(px), j.GetProperty("stored_sha256").GetString());
+                var wide = px.Select(v => (ushort)v).ToArray();
+                Assert.Equal(Sha(System.Runtime.InteropServices.MemoryMarshal.AsBytes(wide.AsSpan())), j.GetProperty("libraw_sha256").GetString());
+            }
+            finally { File.Delete(path); }
+        }
+    }
+
+    [Fact]
+    public void EncodeChecksArguments()
+    {
+        var raw = Dng.DecodeRaw(File.ReadAllBytes(F("bayer16_rggb.dng")));
+        var ms = new MemoryStream();
+        Assert.Throws<ArgumentException>(() => Dng.Encode(raw, ms, new DngEncodeOptions { Compression = DngCompression.Deflate }));
+        Assert.Throws<ArgumentException>(() => Dng.Encode(raw, ms, new DngEncodeOptions { TileSize = 20 }));
+        Assert.Throws<ArgumentException>(() => Dng.Encode(Dng.DecodeRaw(File.ReadAllBytes(F("bayer16_rggb.dng")), DngRawStage.Linear), ms));
+        Assert.Throws<ArgumentException>(() => Dng.Encode(RawImage.Create(8, 8, ColorModel.Rgb, SampleType.UInt16), raw.Info, ms));
+    }
+
     [Fact]
     public void CorruptFilesFailCleanly()
     {
@@ -495,6 +638,26 @@ public class DngTests
                 var d = m.DateTaken!.Value;   // (with SubSecTimeOriginal where the file has it)
                 Assert.Equal(DateTime.ParseExact(t.GetProperty("date").GetString()!, "yyyy:MM:dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture), d.AddTicks(-(d.Ticks % TimeSpan.TicksPerSecond)));
             }
+            n++;
+        }
+        Assert.True(n >= 14);
+    }
+
+    /// <summary>Every camera file written back: same samples (and same parameters) when read again; tifffile reads them too.</summary>
+    [TestDataFact(Samples)]
+    public void RealSamplesEncodeRoundTrip()
+    {
+        int n = 0;
+        foreach (var (path, j) in RealSamples())
+        {
+            var raw = Dng.DecodeRaw(File.ReadAllBytes(path));
+            bool isFloat = raw.Image.SampleType is SampleType.Float16 or SampleType.Float32;
+            var ms = new MemoryStream();
+            Dng.Encode(raw, ms, new DngEncodeOptions { Compression = isFloat ? DngCompression.Deflate : DngCompression.LosslessJpeg });
+            var back = Dng.DecodeRaw(ms.ToArray());
+            Assert.True(Sha(raw.Image.GetBytes()) == Sha(back.Image.GetBytes()), Path.GetFileName(path));
+            AssertSameInfo(raw.Info, back.Info);
+            Assert.Equal(ImageCodec.ReadMetadata(File.ReadAllBytes(path)).DateTaken, ImageCodec.ReadMetadata(ms.ToArray()).DateTaken);
             n++;
         }
         Assert.True(n >= 14);
