@@ -312,12 +312,7 @@ namespace Aardvark.ImageCodecs
             // default crop (relative to the active area, moved by TrimBounds)
             int cx0 = 0, cy0 = 0, cw = img.Width, ch = img.Height;
             if (o.ApplyDefaultCrop)
-            {
-                cx0 = Math.Clamp((int)Math.Round(info.DefaultCropX) - trim.X, 0, img.Width - 1);
-                cy0 = Math.Clamp((int)Math.Round(info.DefaultCropY) - trim.Y, 0, img.Height - 1);
-                cw = Math.Clamp((int)Math.Round(info.DefaultCropWidth), 1, img.Width - cx0);
-                ch = Math.Clamp((int)Math.Round(info.DefaultCropHeight), 1, img.Height - cy0);
-            }
+                (cx0, cy0, cw, ch) = DngOpcodes.CropRect(info.DefaultCropX, info.DefaultCropY, info.DefaultCropWidth, info.DefaultCropHeight, trim, img.Width, img.Height);
             bool resize = o.ApplyDefaultScale && (Math.Abs(info.DefaultScaleH - 1) > 1e-9 || Math.Abs(info.DefaultScaleV - 1) > 1e-9);
             var type = resize ? SampleType.Float32 : o.OutputType;
             bool srgb = o.ColorSpace == DngColorSpace.Srgb && type != SampleType.Float32;

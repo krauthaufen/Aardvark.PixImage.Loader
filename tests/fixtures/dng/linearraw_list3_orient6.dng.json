@@ -1,0 +1,17 @@
+{
+ "bits": 16,
+ "final_upright": [
+  29,
+  43
+ ],
+ "height": 32,
+ "layout": "linear",
+ "opcodes": [
+  0,
+  0,
+  3
+ ],
+ "orientation": 6,
+ "planes": 3,
+ "width": 48
+}

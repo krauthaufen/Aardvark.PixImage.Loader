@@ -60,6 +60,36 @@ namespace Aardvark.ImageCodecs
             public float F32() { Need(4); var v = BinaryPrimitives.ReadSingleBigEndian(_b.Slice(_p)); _p += 4; return v; }
         }
 
+        /// <summary>
+        /// Offset and size of the image after the TrimBounds opcodes of lists 2 and 3 (relative to the active area), for
+        /// reporting the final size without decoding. Malformed parameters are ignored here (decoding reports them).
+        /// </summary>
+        public static (int X, int Y, int W, int H) TrimmedArea(int w, int h, params IReadOnlyList<DngOpcode>[] lists)
+        {
+            int x = 0, y = 0;
+            foreach (var list in lists)
+                foreach (var op in list)
+                {
+                    if (op.Id != TrimBounds || op.Parameters.Length < 16) continue;
+                    var p = new P(op.Parameters);
+                    int t = Math.Clamp(p.I32(), 0, h), l = Math.Clamp(p.I32(), 0, w);
+                    int b = Math.Clamp(p.I32(), t, h), r = Math.Clamp(p.I32(), l, w);
+                    if (b - t <= 0 || r - l <= 0) continue;
+                    x += l; y += t; w = r - l; h = b - t;
+                }
+            return (x, y, w, h);
+        }
+
+        /// <summary>The default crop (relative to the active area) in the coordinates of an image that starts at <paramref name="trim"/>, clipped to it.</summary>
+        public static (int X, int Y, int W, int H) CropRect(double cx, double cy, double cw, double ch, (int X, int Y) trim, int w, int h)
+        {
+            int x0 = (int)Math.Round(cx) - trim.X, y0 = (int)Math.Round(cy) - trim.Y;
+            int x1 = x0 + (int)Math.Round(cw), y1 = y0 + (int)Math.Round(ch);
+            x0 = Math.Clamp(x0, 0, w - 1); y0 = Math.Clamp(y0, 0, h - 1);
+            x1 = Math.Clamp(x1, x0 + 1, w); y1 = Math.Clamp(y1, y0 + 1, h);
+            return (x0, y0, x1 - x0, y1 - y0);
+        }
+
         /// <summary>Per-pixel colour of a Bayer image for the bad pixel opcodes, from BayerPhase (0 red, 1 / 2 green, 3 blue at the top-left).</summary>
         static int BayerColour(int phase, int x, int y)
         {

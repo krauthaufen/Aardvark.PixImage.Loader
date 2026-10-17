@@ -956,7 +956,8 @@ namespace Aardvark.ImageCodecs
                         // (decoding runs in parallel over the strips / tiles already)
                         var img = Jxl.Decode(File.Src.Get(offset, (int)count, ref srcRent),
                             new JxlDecodeOptions { Multithreaded = false, ApplyOrientation = false, MaxPixels = Math.Max((long)cw * ChunkH, 1L << 20) * 4 });
-                        JxlToSamples(img, b, cw, rows, ps);
+                        // (some writers store the edge tiles cropped to the image)
+                        JxlToSamples(img, b, cw, rows, ps, Math.Min(cw, Width - x0), Math.Min(rows, Height - y0));
                         Transfer(b, rowBytes, g, TiffChunkKind.Samples);
                     }
                     finally
@@ -1077,36 +1078,37 @@ namespace Aardvark.ImageCodecs
         /// Copies a decoded JPEG XL strip / tile into cw x rows pixels of ps native samples. The codestream holds the
         /// samples as stored (integers with their coded values, or half floats); 8-bit codestreams may fill wider samples.
         /// </summary>
-        void JxlToSamples(RawImage img, byte* dst, int cw, int rows, int ps)
+        void JxlToSamples(RawImage img, byte* dst, int cw, int rows, int ps, int needW, int needH)
         {
-            if (img.Width < cw || img.Height < rows || img.Channels != ps)
+            if (img.Width < needW || img.Height < needH || img.Channels != ps)
                 throw new ImageFormatException($"TIFF: JPEG XL strip/tile {img.Width}x{img.Height}x{img.Channels} does not match the {cw}x{rows}x{ps} layout");
-            int w = img.Width, n = cw * ps;
-            for (int y = 0; y < rows; y++)
+            int w = img.Width, n = Math.Min(cw, w) * ps;
+            for (int y = 0; y < Math.Min(rows, img.Height); y++)
             {
                 int si = y * w * ps;
+                long rowStart = (long)y * cw * ps;
                 switch ((img.SampleType, RawType))
                 {
                     case (SampleType.UInt8, SampleType.UInt8):
-                        img.GetData<byte>().AsSpan(si, n).CopyTo(new Span<byte>(dst + (long)y * n, n)); break;
+                        img.GetData<byte>().AsSpan(si, n).CopyTo(new Span<byte>(dst + rowStart, n)); break;
                     case (SampleType.UInt16, SampleType.UInt16):
-                        img.GetData<ushort>().AsSpan(si, n).CopyTo(new Span<ushort>(dst + (long)y * n * 2, n)); break;
+                        img.GetData<ushort>().AsSpan(si, n).CopyTo(new Span<ushort>(dst + rowStart * 2, n)); break;
                     case (SampleType.UInt8, SampleType.UInt16):
                     {
-                        var s = img.GetData<byte>(); var d = (ushort*)dst + (long)y * n;
+                        var s = img.GetData<byte>(); var d = (ushort*)dst + rowStart;
                         for (int i = 0; i < n; i++) d[i] = s[si + i];
                         break;
                     }
                     case (SampleType.Float16, SampleType.Float16):
-                        img.GetData<Half>().AsSpan(si, n).CopyTo(new Span<Half>(dst + (long)y * n * 2, n)); break;
+                        img.GetData<Half>().AsSpan(si, n).CopyTo(new Span<Half>(dst + rowStart * 2, n)); break;
                     case (SampleType.Float16, SampleType.Float32):
                     {
-                        var s = img.GetData<Half>(); var d = (float*)dst + (long)y * n;
+                        var s = img.GetData<Half>(); var d = (float*)dst + rowStart;
                         for (int i = 0; i < n; i++) d[i] = (float)s[si + i];
                         break;
                     }
                     case (SampleType.Float32, SampleType.Float32):
-                        img.GetData<float>().AsSpan(si, n).CopyTo(new Span<float>(dst + (long)y * n * 4, n)); break;
+                        img.GetData<float>().AsSpan(si, n).CopyTo(new Span<float>(dst + rowStart * 4, n)); break;
                     default: throw new ImageNotSupportedException($"TIFF: JPEG XL strip/tile with {img.SampleType} samples in a {RawType} image");
                 }
             }

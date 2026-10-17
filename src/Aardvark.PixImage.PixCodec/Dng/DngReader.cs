@@ -111,6 +111,12 @@ namespace Aardvark.ImageCodecs
             return r;
         }
 
+        static (int X, int Y) Trimmed(int w, int h, IReadOnlyList<DngOpcode> l2, IReadOnlyList<DngOpcode> l3)
+        {
+            var (x, y, _, _) = DngOpcodes.TrimmedArea(w, h, l2, l3);
+            return (x, y);
+        }
+
         static bool IsPreview(TiffFile f, TiffEntry[] e)
         {
             long sub = f.Integer(e, 254, 0), pm = f.Integer(e, 262, -1);
@@ -249,6 +255,9 @@ namespace Aardvark.ImageCodecs
             var ver = B4(f.Bytes(ifd0, TagDngVersion));
             var bver = f.Bytes(ifd0, 50707) is { } bv ? B4(bv) : ver.Length == 4 ? new byte[] { ver[0], ver[1], 0, 0 } : Array.Empty<byte>();
             var dh = D(f, e, 50715); var dv = D(f, e, 50716);
+            var ops1 = Opcodes(f.Bytes(e, 51008)); var ops2 = Opcodes(f.Bytes(e, 51009)); var ops3 = Opcodes(f.Bytes(e, 51022));
+            var (_, _, tw, th) = DngOpcodes.TrimmedArea(active.Width, active.Height, ops2, ops3);
+            var crop = DngOpcodes.CropRect(cx, cy, cw, ch, Trimmed(active.Width, active.Height, ops2, ops3), tw, th);
             return new DngInfo
             {
                 Version = ver, BackwardVersion = bver,
@@ -263,7 +272,7 @@ namespace Aardvark.ImageCodecs
                 DefaultScaleH = sh, DefaultScaleV = sv,
                 BestQualityScale = D(f, e, 50780) is { Length: > 0 } bq && bq[0] > 0 ? bq[0] : 1,
                 DefaultUserCrop = D(f, e, 51125) is { Length: >= 4 } uc ? uc.Take(4).ToArray() : null,
-                FinalWidth = Math.Max(1, (int)Math.Round(cw * sh)), FinalHeight = Math.Max(1, (int)Math.Round(ch * sv)),
+                FinalWidth = Math.Max(1, (int)Math.Round(crop.W * sh)), FinalHeight = Math.Max(1, (int)Math.Round(crop.H * sv)),
                 Orientation = orient is >= 1 and <= 8 ? (int)orient : 1,
                 CfaRepeatRows = rr, CfaRepeatCols = rc, CfaPattern = pattern, CfaPlaneColor = planeColor,
                 CfaLayout = (int)f.Integer(e, 50711, 1), ColorPlanes = colorPlanes,
@@ -288,7 +297,7 @@ namespace Aardvark.ImageCodecs
                 CameraCalibrationSignature = Text(f, ifd0, 50931), ProfileCalibrationSignature = Text(f, ifd0, 50932),
                 ProfileName = Text(f, ifd0, 50936),
                 DefaultBlackRender = (int)f.Integer(ifd0, 51110, 0),
-                OpcodeList1 = Opcodes(f.Bytes(e, 51008)), OpcodeList2 = Opcodes(f.Bytes(e, 51009)), OpcodeList3 = Opcodes(f.Bytes(e, 51022)),
+                OpcodeList1 = ops1, OpcodeList2 = ops2, OpcodeList3 = ops3,
                 Previews = previews,
             };
         }
