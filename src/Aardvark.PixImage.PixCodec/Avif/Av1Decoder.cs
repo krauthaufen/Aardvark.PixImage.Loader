@@ -63,7 +63,68 @@ namespace Aardvark.ImageCodecs.Av1
         {
             int pos = offset, end = offset + length;
             int outputBefore = Output.Count;
+            while (pos < end) pos = Obu(data, pos, end);
+            EndTemporalUnit(outputBefore);
+        }
+
+        /// <summary>Decodes a length delimited bitstream (spec Annex B): temporal units of frame units of OBUs.</summary>
+        public void DecodeAnnexB(byte[] data, int offset, int length)
+        {
+            int pos = offset, end = offset + length;
             while (pos < end)
+            {
+                long tuSize = ReadLeb(data, ref pos, end);
+                int tuEnd = Checked(pos, tuSize, end);
+                int outputBefore = Output.Count;
+                while (pos < tuEnd)
+                {
+                    long fuSize = ReadLeb(data, ref pos, tuEnd);
+                    int fuEnd = Checked(pos, fuSize, tuEnd);
+                    while (pos < fuEnd)
+                    {
+                        long obuLen = ReadLeb(data, ref pos, fuEnd);
+                        int obuEnd = Checked(pos, obuLen, fuEnd);
+                        Obu(data, pos, obuEnd);
+                        pos = obuEnd;
+                    }
+                }
+                EndTemporalUnit(outputBefore);
+            }
+        }
+
+        static int Checked(int pos, long size, int end)
+        {
+            if (size < 0 || pos + size > end) throw new ImageFormatException("AV1: Annex B unit exceeds its container");
+            return (int)(pos + size);
+        }
+
+        static long ReadLeb(byte[] d, ref int pos, int end)
+        {
+            long v = 0;
+            for (int i = 0; i < 8; i++)
+            {
+                if (pos >= end) throw new ImageFormatException("AV1: truncated leb128");
+                int b = d[pos++];
+                v |= (long)(b & 0x7f) << (7 * i);
+                if ((b & 0x80) == 0) break;
+            }
+            return v;
+        }
+
+        void EndTemporalUnit(int outputBefore)
+        {
+            if (!Options.OutputAllLayers && Output.Count - outputBefore > 1)
+            {
+                // the output process shows the highest spatial layer of a temporal unit
+                var last = Output[^1];
+                Output.RemoveRange(outputBefore, Output.Count - outputBefore);
+                Output.Add(last);
+            }
+        }
+
+        /// <summary>Decodes the OBU at <paramref name="pos"/> (which ends at or before <paramref name="end"/>); returns the position after it.</summary>
+        int Obu(byte[] data, int pos, int end)
+        {
             {
                 var r = new Av1BitReader(data, pos, end - pos);
                 if (r.Bit() != 0) throw new ImageFormatException("AV1: forbidden bit set");
@@ -84,12 +145,12 @@ namespace Aardvark.ImageCodecs.Av1
                 int payload = pos + r.BytePosition;
                 if (obuSize < 0 || payload + obuSize > end) throw new ImageFormatException("AV1: OBU exceeds the data");
                 int size = (int)obuSize;
-                pos = payload + size;
+                int next = payload + size;
                 if (obuType != Av1C.ObuSequenceHeader && obuType != Av1C.ObuTemporalDelimiter && Seq != null && Seq.OperatingPointIdc0 != 0 && ext)
                 {
                     bool inTemporal = ((Seq.OperatingPointIdc0 >> tid) & 1) != 0;
                     bool inSpatial = ((Seq.OperatingPointIdc0 >> (sid + 8)) & 1) != 0;
-                    if (!inTemporal || !inSpatial) continue;   // drop_obu
+                    if (!inTemporal || !inSpatial) return next;   // drop_obu
                 }
                 temporalId = tid; spatialId = sid;
                 switch (obuType)
@@ -122,13 +183,7 @@ namespace Aardvark.ImageCodecs.Av1
                     default:
                         break;   // metadata, tile list, padding, reserved: ignored
                 }
-            }
-            if (!Options.OutputAllLayers && Output.Count - outputBefore > 1)
-            {
-                // the output process shows the highest spatial layer of a temporal unit
-                var last = Output[^1];
-                Output.RemoveRange(outputBefore, Output.Count - outputBefore);
-                Output.Add(last);
+                return next;
             }
         }
 

@@ -53,8 +53,10 @@ namespace Aardvark.ImageCodecs.Av1
                 }
                 int predW = BlockWidth(MiSize) >> sx, predH = BlockHeight(MiSize) >> sy;
                 bool someUseIntra = false;
-                for (int r = 0; r < (num4x4H << sy) && !someUseIntra; r++)
-                    for (int c = 0; c < (num4x4W << sx); c++)
+                // (positions past the frame edge belong to this inter block, which the spec stored there too)
+                int rEnd = Math.Min(num4x4H << sy, fs.MiRows - candRow), cEnd = Math.Min(num4x4W << sx, fs.MiCols - candCol);
+                for (int r = 0; r < rEnd && !someUseIntra; r++)
+                    for (int c = 0; c < cEnd; c++)
                         if (Nb(candRow + r, candCol + c).RefFrame0 == Av1C.IntraFrame) { someUseIntra = true; break; }
                 if (someUseIntra)
                 {
