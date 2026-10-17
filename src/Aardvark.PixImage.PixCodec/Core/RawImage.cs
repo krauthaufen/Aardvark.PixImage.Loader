@@ -82,6 +82,8 @@ namespace Aardvark.ImageCodecs
         Cineon,
         JpegLs,
         Jxl,
+        /// <summary>AV1 Image File Format (HEIF with AV1 images and sequences).</summary>
+        Avif,
     }
 
     /// <summary>

@@ -18,6 +18,7 @@ namespace Aardvark.ImageCodecs
             if (Webp.IsMatch(header)) return ImageFormat.Webp;
             if (Jp2.IsMatch(header)) return ImageFormat.Jp2;
             if (Jxl.IsMatch(header)) return ImageFormat.Jxl;
+            if (Avif.IsMatch(header)) return ImageFormat.Avif;
             if (Bmp.IsMatch(header)) return ImageFormat.Bmp;
             if (Dds.IsMatch(header)) return ImageFormat.Dds;
             if (Ktx.IsMatch(header)) return ImageFormat.Ktx;
@@ -95,6 +96,7 @@ namespace Aardvark.ImageCodecs
                 ".cin" or ".cineon" => ImageFormat.Cineon,
                 ".jls" => ImageFormat.JpegLs,
                 ".jxl" => ImageFormat.Jxl,
+                ".avif" or ".avifs" => ImageFormat.Avif,
                 _ => ImageFormat.Unknown,
             };
         }
@@ -141,6 +143,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Cineon => Cineon.GetInfo(data),
             ImageFormat.JpegLs => JpegLs.GetInfo(data),
             ImageFormat.Jxl => Jxl.GetInfo(data),
+            ImageFormat.Avif => Avif.GetInfo(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -383,6 +386,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Cineon => Cineon.Decode(data),
             ImageFormat.JpegLs => JpegLs.Decode(data),
             ImageFormat.Jxl => Jxl.Decode(data),
+            ImageFormat.Avif => Avif.Decode(data),
             _ => throw new ImageFormatException("unknown image format"),
         };
 
@@ -571,6 +575,8 @@ namespace Aardvark.ImageCodecs
                     return Dpx.DecodeAll(data);
                 case ImageFormat.Jxl:
                     return Jxl.DecodeAll(data);
+                case ImageFormat.Avif:
+                    return Avif.DecodeAll(data);
                 default:
                     return new[] { Decode(data) };
             }

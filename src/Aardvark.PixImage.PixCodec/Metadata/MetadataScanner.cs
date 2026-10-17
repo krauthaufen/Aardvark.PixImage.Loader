@@ -39,6 +39,7 @@ namespace Aardvark.ImageCodecs
                     case ImageFormat.Gif: Gif(d, b); break;
                     case ImageFormat.Jp2: Jp2(d, b); break;
                     case ImageFormat.Jxl: JpegXl.JxlMetadata.Scan(d, b); break;
+                    case ImageFormat.Avif: Heif.AvifMetadata.Scan(d, b); break;
                     case ImageFormat.Exr: b.ExrAttributes = Aardvark.ImageCodecs.Exr.ReadHeaders(d)[0].Attributes; break;
                     case ImageFormat.Dpx: Dpx(d, b); break;
                     case ImageFormat.Cineon: Cineon(d, b); break;
