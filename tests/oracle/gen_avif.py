@@ -125,7 +125,7 @@ def read_y4m(path):
         pos = d.index(b'\n', pos) + 1
         n = sum(pw * ph for pw, ph in dims) * bps
         frames.append(d[pos:pos + n])
-        pos += n
+        pos += n + (w * h * bps if 'alpha' in c else 0)   # (an alpha plane follows: not part of the hash)
     return w, h, bd, sub, frames
 
 

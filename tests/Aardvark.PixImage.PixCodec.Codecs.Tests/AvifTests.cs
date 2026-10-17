@@ -338,6 +338,50 @@ public class AvifTests(ITestOutputHelper output)
         Assert.Null(Avif.GetGainMap(File.ReadAllBytes(Fixture("avif/nat_420_s6.avif"))));
     }
 
+    public static IEnumerable<object[]> LibavifFiles
+    {
+        get
+        {
+            var refs = TestDataDir == null ? null : Path.Combine(TestDataDir, "fixtures", "avif", "libavif", "refs.txt");
+            if (refs == null || !File.Exists(refs)) yield break;
+            foreach (var l in File.ReadLines(refs))
+                if (l.Length > 0 && l[0] != '#') yield return new object[] { l.Split(' ')[0] };
+        }
+    }
+
+    /// <summary>
+    /// libavif's test files (fixtures/avif/libavif of the test-data repository, fetch_libavif_testdata.sh): what avifdec
+    /// (dav1d) decodes has to decode to the same planes; files avifdec rejects may be rejected or decoded, but never
+    /// with anything but the format exceptions.
+    /// </summary>
+    [TestDataTheory("fixtures/avif/libavif/white_1x1.avif"), MemberData(nameof(LibavifFiles))]
+    public void LibavifTestFiles(string file)
+    {
+        var dir = TestData(Path.Combine("fixtures", "avif", "libavif"));
+        var r = File.ReadLines(Path.Combine(dir, "refs.txt")).First(l => l.StartsWith(file + " ")).Split(' ');
+        var data = File.ReadAllBytes(Path.Combine(dir, file));
+        Assert.Equal(r[1], Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant());
+        if (r[2] == "fail")
+        {
+            try
+            {
+                var img = Avif.Decode(data);
+                output.WriteLine($"avifdec rejects it, decoded {img.Width}x{img.Height} {img.Color}");
+            }
+            catch (Exception e) when (e is ImageFormatException or ImageNotSupportedException) { output.WriteLine("rejected: " + e.Message); }
+            return;
+        }
+        var y = DecodeYuv(data)[0];
+        Assert.Equal((int.Parse(r[2]), int.Parse(r[3]), int.Parse(r[4])), (y.Width, y.Height, y.BitDepth));
+        Assert.Equal(r[5], y.Mono ? "mono" : $"{y.SubX}{y.SubY}");
+        Assert.Equal(r[6], Sha256(y));
+        var info = Avif.GetInfo(data);
+        var full = Avif.Decode(data);
+        Assert.Equal((info.Width, info.Height, info.Channels), (full.Width, full.Height, full.Channels));
+        Avif.GetGainMap(data)?.DecodeImage();
+        Avif.DecodeAll(data);
+    }
+
     // ------------------------------------------------------------------ robustness
 
     [Fact]
