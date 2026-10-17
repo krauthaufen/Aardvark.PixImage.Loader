@@ -1,0 +1,8 @@
+{
+ "bits": 16,
+ "float": true,
+ "height": 32,
+ "layout": "cfa",
+ "planes": 3,
+ "width": 64
+}

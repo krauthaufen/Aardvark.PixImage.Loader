@@ -1,0 +1,14 @@
+{
+ "bits": 8,
+ "height": 64,
+ "jpeg_preview": 641,
+ "layout": "linear",
+ "planes": 3,
+ "previews": [
+  [
+   30,
+   24
+  ]
+ ],
+ "width": 80
+}

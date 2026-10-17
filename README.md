@@ -28,6 +28,7 @@ code living in any `Aardvark.*` namespace.
 | JPEG | baseline, progressive, lossless, hierarchical, arithmetic coding, 8 and 12 bit, CMYK/YCCK, scaled decode; HDR gain maps (Ultra HDR v1.1 XMP and ISO 21496-1, HDR rendition for any display headroom) | baseline, progressive, lossless (Huffman and arithmetic), arithmetic, 8 and 12 bit; own tuned quantization tables (about 13% smaller than libjpeg-turbo at equal SSIMULACRA2), optional trellis quantization (about 16%); Ultra HDR / ISO 21496-1 gain map JPEGs from HDR images |
 | MPO / MPF | CIPA DC-007 Multi-Picture Format: MP index and attributes, every individual image (stereo / multi-view MPO, large thumbnails, gain map images); damaged MP data falls back to the primary image | Extended MP files (.mpo: disparity, multi-angle, panorama views), MPF of gain map JPEGs |
 | TIFF | classic + BigTIFF, strips + tiles, 1..64 bit int, 16/24/32/64 bit float, LZW, Deflate, PackBits, CCITT, JPEG (incl. old-style, 12 bit, lossless), ZSTD, LZMA, WebP, JPEG 2000 (incl. Aperio), JBIG, LERC (decode only), PixarLog, LogLuv, Lab, multi-page, raw tags, regions, files > 4 GB | every sample type, strips or tiles, None / LZW / Deflate / PackBits / ZSTD / LZMA / JPEG / WebP / lossless JPEG 2000 / JBIG / CCITT G3 and G4, multi-page, overviews, cloud-optimized layout, extra tags |
+| DNG | 1.0 .. 1.7.1: Bayer, X-Trans and other CFAs, LinearRaw and monochrome; uncompressed 8..32 bit int and 16/24/32 bit float, lossless JPEG (incl. reshaped frames), Deflate with the X2 / X4 predictors, lossy JPEG, JPEG XL tiles, row / column interleave; raw access (stored or linear values) with every parameter (`DngInfo`); rendering after the spec: linearization, black / white levels incl. deltas, opcode lists 1..3 (warps, vignette, gain maps, bad pixels, maps, per row / column ops, trim), white balance, edge directed demosaicing (Menon et al. 2007; bilinear optional), calibrations interpolated by temperature, forward matrices, baseline exposure, default crop / scale, orientation; to 8 / 16 bit sRGB or linear float (sRGB, XYZ D50 or camera); embedded previews | DNG 1.4 from raw samples and a `DngInfo` (every parameter it holds, EXIF / XMP, optional preview): lossless JPEG, uncompressed or (float) Deflate tiles; read back by tifffile and LibRaw |
 | GIF | 87a/89a, interlace, transparency, animations (compositing verified against Chromium) | single images and animations, quantizer + dithering |
 | OpenEXR | scanline, tiled, multi-part, deep, mip/rip levels, half/float/uint, luminance/chroma, all compressions incl. PIZ, B44, DWA, ZSTD, HTJ2K, region decode from a stream | scanline, tiled, multi-part, deep, luminance/chroma, all of those compressions |
 | WebP | lossy, lossless, alpha, animation | lossy, lossless, alpha, animation |
@@ -61,7 +62,7 @@ code living in any `Aardvark.*` namespace.
 | DPX | SMPTE 268M 1.0 / 2.0, both byte orders, 1/8/10/12/16 bit int and 32/64 bit float, packed / filled method A / B, RLE, several image elements, luma, R/G/B/A/depth, RGB, RGBA, ABGR, Cb Y Cr (Y) 4:2:2 / 4:4:4 (+ alpha) to RGB, user defined 2..8 components, orientation, padding, all header fields (time code, film, television) | gray, RGB, RGBA, 2..8 components at 8, 10, 12, 16 bit and 32/64 bit float, packed / filled A / B, either byte order, header fields |
 | Cineon | Kodak 4.5 draft: 1..16 and 32 bit, all packings, pixel / line / channel interleave, both byte orders, orientation, header fields | gray, RGB at 8, 10 (default for 8 bit images), 16 bit |
 
-Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL / JPEG XR inside TIFF, lossless JPEG recompression into JPEG XL (jbrd), lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions,
+Not supported: OS/2 Huffman BMP, 64 bit BMP, JPEG XL (other than DNG's compression 52546) / JPEG XR inside TIFF, lossless JPEG recompression into JPEG XL (jbrd), lossy HTJ2K (LJ2K) EXR, JPEG 2000 Part 2 / JPX extensions,
 PVRTC2, YUV and Basis Universal PVR formats, writing 3D ASTC footprints, ANI frames that are raw bitmaps (no AF_ICON),
 FITS HCOMPRESS_1 tiles (the convention does not specify its bit stream), FITS tables and random groups, NRRD's block type,
 NIfTI float128 / complex256, ASCII MetaImage data.
@@ -104,11 +105,11 @@ Icns.Encode(new[] { img16, img32, img128, img512 }, stream);   // Icns.ReadEntri
 ```
 
 `RawImage` is a tightly packed, top-down, channel-interleaved typed array (`byte[]`, `ushort[]`, `float[]`, ...)
-in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF orientation (JPEG, PNG, WebP, TIFF, JPEG 2000, JPEG XL)
+in R,G,B,A order with straight alpha. Images come back upright: the EXIF/TIFF orientation (JPEG, PNG, WebP, TIFF, DNG, JPEG 2000, JPEG XL)
 is applied while decoding, the metadata then says orientation 1 (also inside a kept EXIF blob, so a re-saved image is not
 turned again), and `ImageInfo` reports the upright size. Every format's options have `ApplyOrientation = false` for the
 stored pixels. Each format has its own static class (`Png`, `Jpeg`, `Tiff`, `Gif`, `Exr`, `Webp`, `Jp2`, `Bmp`, `Tga`,
-`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `Jxl`, `JpegLs`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`, `Dpx`, `Cineon`) with format specific options and extras: animations (GIF, APNG, WebP, JPEG XL), TIFF pages / tags / regions / overviews,
+`Dds`, `Ktx`, `Pvr`, `Astc`, `Hdr`, `Pnm`, `Pfm`, `Qoi`, `Ico`, `Ani`, `Icns`, `Lerc`, `Jbig`, `Jxl`, `JpegLs`, `Dng`, `Pcx`, `Sgi`, `SunRaster`, `Xbm`, `Xpm`, `Wbmp`, `Nrrd`, `Nifti`, `MetaImage`, `Fits`, `Dpx`, `Cineon`) with format specific options and extras: animations (GIF, APNG, WebP, JPEG XL), TIFF pages / tags / regions / overviews,
 EXR headers, named channels, levels and deep data, DPX / Cineon headers (`Dpx.GetHeader`, `Cineon.GetHeader`) and DPX image
 elements. Bit depths that do not fill a sample type keep their stored values: 10 bit DPX and Cineon decode to UInt16 0..1023,
 12 bit to 0..4095 (as 12 bit TIFF and JPEG); 1, 2 and 4 bit samples are stretched to 0..255.
@@ -155,6 +156,36 @@ lossless), orientation and intensity target are kept; `Jxl.EncodeAnimation` writ
 a 12 MP photo, 8 threads / 1 thread (busy machine): lossless effort 1 / 3 / 7 0.57 / 0.88 / 3.9 s and 1.7 / 3.5 / 11.5 s
 (cjxl 0.14 / 1.4 / 3.6 s and 0.11 / 2.1 / 13.5 s), lossy effort 3 / 7 0.77 / 2.2 s and 2.2 / 10 s (cjxl 0.63 / 1.5 s and
 0.45 / 4.5 s).
+
+### DNG
+
+`Dng.Decode` (also `ImageCodec.Decode`, the loader for `.dng`) renders the raw image the way the DNG 1.7.1 specification
+describes it: OpcodeList1 on the stored values, LinearizationTable, black levels (pattern, BlackLevelDeltaH / V), white
+level, OpcodeList2, white balance (AsShotNeutral or AsShotWhiteXY, or `WhiteBalanceNeutral` / `WhiteBalanceXY`),
+highlight clipping, demosaicing, OpcodeList3, camera to XYZ D50 with the colour calibrations interpolated in inverse
+correlated colour temperature (forward matrices when present, else the inverted colour matrices with linear Bradford
+adaptation; colour matrices are used normalized so that D50 maps to a neutral with largest component 1), the profile's
+hue / saturation map (and with `ApplyLookTable` its look table), BaselineExposure, default crop and scale, orientation.
+Output is 16 bit (default) or 8 bit sRGB, or linear Float32 (sRGB, XYZ D50 or white balanced camera colours). Demosaicing
+of Bayer data follows Menon, Andriani and Calvagno, "Demosaicing With Directional Filtering and a Posteriori Decision"
+(IEEE TIP 2007) without its refinement step; other patterns (X-Trans, four colour CFAs) use colour difference
+interpolation; `DngDemosaicAlgorithm.Bilinear` is the fast alternative. Opcodes: WarpRectilinear (1 and 2), WarpFisheye,
+FixVignetteRadial, FixBadPixelsConstant / List, TrimBounds, MapTable, MapPolynomial, GainMap, Delta / ScalePerRow /
+Column; unknown optional opcodes are skipped, unknown required ones throw `ImageNotSupportedException`.
+
+`Dng.ReadInfo` returns every parameter without decoding (`DngInfo`: camera, raw layout and size, active area, crop, CFA,
+levels, linearization table, calibrations, white balance, exposure, opcode lists, previews); `Dng.DecodeRaw` the stored
+samples (`DngRawStage.Stored`, as in the file, masked areas included) or the linear reference values of the active area
+(`DngRawStage.Linear`, Float32); `Dng.DecodePreview` / `Dng.ExtractPreviewJpeg` the embedded previews (fast).
+`Dng.Encode` writes a DNG from stored samples and a `DngInfo` (e.g. what `DecodeRaw` returned): lossless JPEG,
+uncompressed or Deflate tiles, every parameter, EXIF / XMP, optionally a preview.
+
+Checked against tifffile (stored samples of all test files, bit exact), LibRaw through rawpy (raw values bit exact; colours of
+flat patches within 0.002; camera files after box averaging within 0.012 mean / 0.08 99th percentile in sRGB encoded
+values, with LibRaw's exposure convention normalized) and a numpy model of the specification for what no reader
+implements (opcode lists, interpolated calibrations with forward matrices, hue / saturation maps). Rendering takes about
+0.5 s for an 18 MP Bayer file or a 22 MP lossy LinearRaw file and 1.4 s for a 16 MP X-Trans file with a lens warp and a
+hue / saturation map (8 threads of an i7-9700E that was busy with other work).
 
 ### Volumes and scientific images
 

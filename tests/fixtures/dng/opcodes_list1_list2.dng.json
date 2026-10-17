@@ -1,0 +1,12 @@
+{
+ "bits": 16,
+ "height": 48,
+ "layout": "cfa",
+ "opcodes": [
+  2,
+  6,
+  0
+ ],
+ "planes": 3,
+ "width": 64
+}

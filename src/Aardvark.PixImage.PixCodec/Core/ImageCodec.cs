@@ -13,7 +13,7 @@ namespace Aardvark.ImageCodecs
             if (JpegLs.IsMatch(header)) return ImageFormat.JpegLs;   // FF D8 like JPEG: look for its SOF55 first
             if (Jpeg.IsMatch(header)) return ImageFormat.Jpeg;
             if (Gif.IsMatch(header)) return ImageFormat.Gif;
-            if (Tiff.IsMatch(header)) return ImageFormat.Tiff;
+            if (Tiff.IsMatch(header)) return Dng.IsMatch(header) ? ImageFormat.Dng : ImageFormat.Tiff;
             if (Exr.IsMatch(header)) return ImageFormat.Exr;
             if (Webp.IsMatch(header)) return ImageFormat.Webp;
             if (Jp2.IsMatch(header)) return ImageFormat.Jp2;
@@ -63,6 +63,7 @@ namespace Aardvark.ImageCodecs
                 ".png" => ImageFormat.Png,
                 ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".mpo" => ImageFormat.Jpeg,
                 ".tif" or ".tiff" => ImageFormat.Tiff,
+                ".dng" => ImageFormat.Dng,
                 ".gif" => ImageFormat.Gif,
                 ".exr" => ImageFormat.Exr,
                 ".webp" => ImageFormat.Webp,
@@ -111,6 +112,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Jpeg => Jpeg.GetInfo(data),
             ImageFormat.Gif => Gif.GetInfo(data),
             ImageFormat.Tiff => Tiff.GetInfo(data),
+            ImageFormat.Dng => Dng.GetInfo(data),
             ImageFormat.Exr => Exr.GetInfo(data),
             ImageFormat.Webp => Webp.GetInfo(data),
             ImageFormat.Jp2 => Jp2.GetInfo(data),
@@ -287,17 +289,18 @@ namespace Aardvark.ImageCodecs
                 format = DetectFormat(buf.AsSpan(0, n));
             }
             if (format == ImageFormat.Unknown) throw new ImageFormatException("unknown image format");
-            if (format == ImageFormat.Tiff && stream.CanSeek)
+            if (format is ImageFormat.Tiff or ImageFormat.Dng && stream.CanSeek)
             {
                 prefix = buf.AsSpan(0, n).ToArray();
                 stream.Seek(-n, SeekOrigin.Current);
-                return Tiff.GetInfo(stream);
+                // (the prefix may end before the first directory, so DNG is checked on the stream)
+                return Dng.IsMatch(stream) ? Dng.GetInfo(stream) : Tiff.GetInfo(stream);
             }
             // TIFF directories can be anywhere, GIF frames have to be counted, the TGA footer and the PCX palette are at the
             // end and BMP run codes have to be walked: these need all the data. The others are parsed from a growing prefix; their
             // header parsers throw ImageFormatException when the prefix ends inside the headers, which is the signal
             // to read more.
-            bool needAll = format is ImageFormat.Tiff or ImageFormat.Gif or ImageFormat.Tga or ImageFormat.Ico or ImageFormat.Pcx or ImageFormat.Dcx or ImageFormat.Icns or ImageFormat.Ani or ImageFormat.Astc
+            bool needAll = format is ImageFormat.Tiff or ImageFormat.Dng or ImageFormat.Gif or ImageFormat.Tga or ImageFormat.Ico or ImageFormat.Pcx or ImageFormat.Dcx or ImageFormat.Icns or ImageFormat.Ani or ImageFormat.Astc
                 || format == ImageFormat.Bmp && Bmp.InfoNeedsAllData(buf.AsSpan(0, n));
             while (true)
             {
@@ -372,6 +375,7 @@ namespace Aardvark.ImageCodecs
             ImageFormat.Jpeg => Jpeg.Decode(data),
             ImageFormat.Gif => Gif.Decode(data),
             ImageFormat.Tiff => Tiff.Decode(data),
+            ImageFormat.Dng => Dng.Decode(data),
             ImageFormat.Exr => Exr.Decode(data),
             ImageFormat.Webp => Webp.Decode(data),
             ImageFormat.Jp2 => Jp2.Decode(data),

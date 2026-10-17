@@ -58,6 +58,7 @@ runs:
         python fetch_tiff_samples.py --gdal
         python fetch_jpegls_conformance.py
         python fetch_jxl_conformance.py
+        python fetch_dng_samples.py
         du -sh "$PIXCODEC_TESTDATA/downloads"
 
     - name: Save downloads

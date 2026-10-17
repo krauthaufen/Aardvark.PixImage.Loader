@@ -43,6 +43,8 @@ namespace Aardvark.ImageCodecs
         Webp,
         Jp2,
         Lerc,
+        /// <summary>JPEG XL codestream per strip/tile (DNG 1.7, compression 52546).</summary>
+        Jxl,
         /// <summary>SGI LogL / LogLuv, converted to floats while decoding.</summary>
         LogLuv,
         /// <summary>Pixar 11-bit log samples (deflate compressed, horizontally differenced), mapped to linear values while decoding.</summary>
@@ -130,7 +132,7 @@ namespace Aardvark.ImageCodecs
             _complex = complex;
             Compression = (int)file.Integer(e, 259, 1);
             _oldJpeg = Compression == 6;
-            IsJpeg = Compression == 7 || _oldJpeg;
+            IsJpeg = Compression == 7 || _oldJpeg || Compression == 34892; // 34892: DNG lossy JPEG (baseline DCT)
             IsCcitt = Compression is 2 or 3 or 4;
             IsJp2 = Compression is 34712 or 33003 or 33004 or 33005;
             long pm = file.Integer(e, 262, -1);
@@ -211,6 +213,7 @@ namespace Aardvark.ImageCodecs
                 5 => 4,
                 32803 => 1,                      // colour filter array (raw sensor data): returned as it is stored
                 34892 => Spp >= 3 ? 3 : 1,       // DNG LinearRaw
+                51177 or 52527 => 1,             // DNG depth map, semantic mask
                 _ => throw new ImageNotSupportedException($"TIFF: photometric interpretation {Photometric} is not supported"),
             };
             if (Spp < ColorSamples) throw new ImageFormatException("TIFF: SamplesPerPixel too small for the photometric interpretation");
@@ -239,7 +242,7 @@ namespace Aardvark.ImageCodecs
                 if (!UniformBits || !(Bits is 8 or 16 or 32 or 64)) throw new ImageNotSupportedException("TIFF: differing sample formats need samples of 8, 16, 32 or 64 bits");
                 for (int i = 0; i < Spp; i++)
                     if (_formats[i] == 3 && Bits == 8) throw new ImageFormatException("TIFF: 8-bit floating point samples");
-                if (Compression is 32909 or 50001 or 34661 or 34887 || IsJpeg || IsCcitt || IsJp2) throw new ImageNotSupportedException("TIFF: differing sample formats are not supported with this compression");
+                if (Compression is 32909 or 50001 or 34661 or 34887 or 52546 || IsJpeg || IsCcitt || IsJp2) throw new ImageNotSupportedException("TIFF: differing sample formats are not supported with this compression");
                 RawType = SampleType.Float64;
                 Kind = TiffChunkKind.Mixed;
             }
@@ -283,6 +286,7 @@ namespace Aardvark.ImageCodecs
                 else if (Compression == 50001) Kind = TiffChunkKind.Webp;
                 else if (IsJp2) Kind = TiffChunkKind.Jp2;
                 else if (Compression == 34887) Kind = TiffChunkKind.Lerc;
+                else if (Compression == 52546) Kind = TiffChunkKind.Jxl;
                 else if (Format == 3 && Bits == 24) Kind = TiffChunkKind.Float24;
                 else Kind = whole ? TiffChunkKind.Samples : TiffChunkKind.Packed;
             }
@@ -438,7 +442,7 @@ namespace Aardvark.ImageCodecs
             TiffChunkKind.YccPacked => YccBlockRowBytes * ((ChunkH + SubV - 1) / SubV),
             TiffChunkKind.LogLuv => (long)ChunkW * ChunkH * 4,
             TiffChunkKind.PixarLog => (long)ChunkW * ChunkH * Spp * Math.Max(2, Bps),
-            TiffChunkKind.Jpeg or TiffChunkKind.Webp or TiffChunkKind.Jp2 or TiffChunkKind.Lerc => (long)ChunkW * ChunkH * Spp * Bps,
+            TiffChunkKind.Jpeg or TiffChunkKind.Webp or TiffChunkKind.Jp2 or TiffChunkKind.Lerc or TiffChunkKind.Jxl => (long)ChunkW * ChunkH * Spp * Bps,
             _ => RowBytes(ChunkW, 0) * ChunkH,
         };
 
@@ -448,7 +452,7 @@ namespace Aardvark.ImageCodecs
             {
                 case 1: case 5: case 8: case 32946: case 32773: case 2: case 3: case 4: case 6: case 7:
                 case 50000: case 34925: case 50001: case 32909:
-                case 34661: case 34712: case 33003: case 33004: case 33005: case 34887:
+                case 34661: case 34712: case 33003: case 33004: case 33005: case 34887: case 34892: case 52546:
                     break;
                 case 32809:
                     if (Bits != 4 || Spp != 1) throw new ImageFormatException("TIFF: ThunderScan compression needs 4-bit single sample data");
@@ -469,8 +473,8 @@ namespace Aardvark.ImageCodecs
                 if (!(Kind == TiffChunkKind.Packed && !IsCcitt && Predictor == 2))
                     throw new ImageNotSupportedException("TIFF: predictor not supported with this compression");
             }
-            else if (Predictor == 2) { }
-            else if (Predictor == 3)
+            else if (Predictor is 2 or 34892 or 34893) { }
+            else if (Predictor is 3 or 34894 or 34895)
             {
                 if (Format != 3) throw new ImageFormatException("TIFF: floating point predictor on integer data");
             }
@@ -550,7 +554,7 @@ namespace Aardvark.ImageCodecs
                 if (cm == null || cm.Length < 3 << Bits) throw new ImageFormatException("TIFF: missing or short ColorMap");
                 _colorMap = Array.ConvertAll(cm, x => (ushort)x);
             }
-            if (Compression == 7)
+            if (Compression is 7 or 34892)
             {
                 _jpegTables = File.Bytes(e, 347) ?? Array.Empty<byte>();
                 _jpegPrepared = TiffJpegBridge.Prepare(_jpegTables);
@@ -843,7 +847,8 @@ namespace Aardvark.ImageCodecs
                         ReadOnlySpan<byte> src = _oldJpeg ? _ojpeg!.BuildStream(plane, Tiled ? index : -1, cw, crows)
                             : count > int.MaxValue ? throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression")
                             : File.Src.Get(offset, (int)count, ref srcRent);
-                        bool ycc = Photometric == 6 && !YccPlanar && !_ojpegTiffYcc;
+                        // DNG lossy JPEG holds colour as baseline JPEG does: YCbCr
+                        bool ycc = (Photometric == 6 || (Compression == 34892 && ps == 3)) && !YccPlanar && !_ojpegTiffYcc;
                         if (Bps == 1) TiffJpegBridge.Decode8(_jpegPrepared, _jpegTables, src, cw, crows, ps, ycc, new Span<byte>(b, (int)size));
                         else TiffJpegBridge.Decode16(_jpegPrepared, src, cw, crows, ps, ycc, new Span<ushort>(b, (int)(size / 2)));
                         if (_ojpegTiffYcc && Bps == 1) YccInPlace(b, (long)cw * crows);
@@ -931,6 +936,28 @@ namespace Aardvark.ImageCodecs
                             throw new ImageFormatException("TIFF: corrupt deflate data", ex);
                         }
                         LercToSamples(blob, b, cw, rows, ps);
+                        Transfer(b, rowBytes, g, TiffChunkKind.Samples);
+                    }
+                    finally
+                    {
+                        NativeMemory.Free(b);
+                        if (srcRent != null) ArrayPool<byte>.Shared.Return(srcRent);
+                    }
+                    return;
+                }
+                case TiffChunkKind.Jxl:
+                {
+                    if (count > int.MaxValue) throw new ImageNotSupportedException("TIFF: strips or tiles larger than 2 GB are not supported with this compression");
+                    byte[]? srcRent = null;
+                    long rowBytes = (long)cw * ps * Bps, size = rowBytes * rows;
+                    byte* b = (byte*)NativeMemory.AllocZeroed((nuint)Math.Max(size, 1));
+                    try
+                    {
+                        // (decoding runs in parallel over the strips / tiles already)
+                        var img = Jxl.Decode(File.Src.Get(offset, (int)count, ref srcRent),
+                            new JxlDecodeOptions { Multithreaded = false, ApplyOrientation = false, MaxPixels = Math.Max((long)cw * ChunkH, 1L << 20) * 4 });
+                        // (some writers store the edge tiles cropped to the image)
+                        JxlToSamples(img, b, cw, rows, ps, Math.Min(cw, Width - x0), Math.Min(rows, Height - y0));
                         Transfer(b, rowBytes, g, TiffChunkKind.Samples);
                     }
                     finally
@@ -1044,6 +1071,46 @@ namespace Aardvark.ImageCodecs
                 File.Src.Read(offset + done, d);
                 if (FillOrder == 2) TiffPredict.ReverseBits(d, d);
                 done += n;
+            }
+        }
+
+        /// <summary>
+        /// Copies a decoded JPEG XL strip / tile into cw x rows pixels of ps native samples. The codestream holds the
+        /// samples as stored (integers with their coded values, or half floats); 8-bit codestreams may fill wider samples.
+        /// </summary>
+        void JxlToSamples(RawImage img, byte* dst, int cw, int rows, int ps, int needW, int needH)
+        {
+            if (img.Width < needW || img.Height < needH || img.Channels != ps)
+                throw new ImageFormatException($"TIFF: JPEG XL strip/tile {img.Width}x{img.Height}x{img.Channels} does not match the {cw}x{rows}x{ps} layout");
+            int w = img.Width, n = Math.Min(cw, w) * ps;
+            for (int y = 0; y < Math.Min(rows, img.Height); y++)
+            {
+                int si = y * w * ps;
+                long rowStart = (long)y * cw * ps;
+                switch ((img.SampleType, RawType))
+                {
+                    case (SampleType.UInt8, SampleType.UInt8):
+                        img.GetData<byte>().AsSpan(si, n).CopyTo(new Span<byte>(dst + rowStart, n)); break;
+                    case (SampleType.UInt16, SampleType.UInt16):
+                        img.GetData<ushort>().AsSpan(si, n).CopyTo(new Span<ushort>(dst + rowStart * 2, n)); break;
+                    case (SampleType.UInt8, SampleType.UInt16):
+                    {
+                        var s = img.GetData<byte>(); var d = (ushort*)dst + rowStart;
+                        for (int i = 0; i < n; i++) d[i] = s[si + i];
+                        break;
+                    }
+                    case (SampleType.Float16, SampleType.Float16):
+                        img.GetData<Half>().AsSpan(si, n).CopyTo(new Span<Half>(dst + rowStart * 2, n)); break;
+                    case (SampleType.Float16, SampleType.Float32):
+                    {
+                        var s = img.GetData<Half>(); var d = (float*)dst + rowStart;
+                        for (int i = 0; i < n; i++) d[i] = (float)s[si + i];
+                        break;
+                    }
+                    case (SampleType.Float32, SampleType.Float32):
+                        img.GetData<float>().AsSpan(si, n).CopyTo(new Span<float>(dst + rowStart * 4, n)); break;
+                    default: throw new ImageNotSupportedException($"TIFF: JPEG XL strip/tile with {img.SampleType} samples in a {RawType} image");
+                }
             }
         }
 
@@ -1281,12 +1348,14 @@ namespace Aardvark.ImageCodecs
             int samples = cw * ps;
             if (Kind == TiffChunkKind.Packed) return;
             int width = Kind == TiffChunkKind.Float24 ? 3 : Bps;
-            if (Predictor == 3)
+            // DNG's predictors 34892..34895: horizontal / floating point differencing with the pixel 2 or 4 to the left
+            int stride = ps * (Predictor is 34892 or 34894 ? 2 : Predictor is 34893 or 34895 ? 4 : 1);
+            if (Predictor is 3 or 34894 or 34895)
             {
                 byte* t = (byte*)NativeMemory.Alloc((nuint)rowBytes);
                 try
                 {
-                    for (int y = 0; y < rows; y++) TiffPredict.UndoFloat(b + y * rowBytes, samples, ps, width, t);
+                    for (int y = 0; y < rows; y++) TiffPredict.UndoFloat(b + y * rowBytes, samples, stride, width, t);
                 }
                 finally { NativeMemory.Free(t); }
                 return;
@@ -1295,13 +1364,13 @@ namespace Aardvark.ImageCodecs
             if (Kind == TiffChunkKind.Float24)
             {
                 // stays in file byte order (converted in Transfer); the horizontal predictor adds 24-bit integers
-                if (Predictor == 2)
-                    for (int y = 0; y < rows; y++) TiffPredict.UndoHorizontal24(b + y * rowBytes, samples, ps, File.BigEndian);
+                if (Predictor is 2 or 34892 or 34893)
+                    for (int y = 0; y < rows; y++) TiffPredict.UndoHorizontal24(b + y * rowBytes, samples, stride, File.BigEndian);
                 return;
             }
             if (File.BigEndian && Bps > 1) TiffPredict.SwapBytes(b, rowBytes * rows, Bps);
-            if (Predictor == 2)
-                for (int y = 0; y < rows; y++) TiffPredict.UndoHorizontal(b + y * rowBytes, samples, ps, Bps);
+            if (Predictor is 2 or 34892 or 34893)
+                for (int y = 0; y < rows; y++) TiffPredict.UndoHorizontal(b + y * rowBytes, samples, stride, Bps);
         }
 
         struct Geometry
@@ -1358,7 +1427,7 @@ namespace Aardvark.ImageCodecs
                         break;
                     case TiffChunkKind.Float24:
                     {
-                        bool be = Predictor != 3 && File.BigEndian;
+                        bool be = Predictor is not (3 or 34894 or 34895) && File.BigEndian;
                         s += (long)sx * ps * 3;
                         float* f = (float*)d;
                         long total = (long)n * ps;

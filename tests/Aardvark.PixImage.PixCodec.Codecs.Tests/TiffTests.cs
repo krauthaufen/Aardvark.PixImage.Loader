@@ -267,11 +267,11 @@ public class TiffTests
         Assert.True(problems.Count == 0, string.Join("\n", problems));
         // the one broken file GDAL still reads (with a warning: its strip is said to be longer than the file)
         Assert.Equal(new[] { "minimum_tiff_tags_with_warning.tif" }, rejected);
-        // valid files Aardvark.PixImage.PixCodec does not read: JPEG XL, NeXT RLE, 12-bit YCbCr without JPEG, codecs nobody knows,
+        // valid files Aardvark.PixImage.PixCodec does not read: JPEG XL (but DNG's compression 52546), NeXT RLE, 12-bit YCbCr without JPEG, codecs nobody knows,
         // and headers describing images too large for one array
         Assert.Equal(new[]
         {
-            "bigtiff_header_extract.tif", "gtiff_byte_JXL.tif", "gtiff_byte_JXL_tiled.tif", "gtiff_byte_jxl_deprecated_50002.tif", "gtiff_byte_jxl_dng_1_7_52546.tif",
+            "bigtiff_header_extract.tif", "gtiff_byte_JXL.tif", "gtiff_byte_JXL_tiled.tif", "gtiff_byte_jxl_deprecated_50002.tif",
             "gtiff_jxl-rgbi.tif", "gtiff_rgbsmall_JXL.tif", "gtiff_rgbsmall_JXL_separate.tif", "gtiff_rgbsmall_JXL_tiled.tif", "gtiff_rgbsmall_JXL_tiled_separate.tif",
             "gtiff_unsupported_codec_unknown.tif", "huge-number-strips.tif", "huge4GB.tif", "int12_ycbcr_contig.tif", "leak-ZIPSetupDecode.tif",
             "next_default_case.tif", "next_literalrow.tif", "next_literalspan.tif", "strip_larger_than_2GB_header.tif", "tiff_dos_strip_chop.tif", "unknown_compression.tif",

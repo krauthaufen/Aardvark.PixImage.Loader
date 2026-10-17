@@ -716,6 +716,15 @@ namespace Aardvark.Data
         /// <inheritdoc cref="LoadSrgb(string)"/>
         public static PixImage LoadSrgb(Stream stream) => Convert(ImageOps.ToSrgb(ImageCodec.Decode(stream)));
 
+        /// <summary>
+        /// Renders a DNG raw file with the given options (output type, colour space, white balance, exposure, demosaicing, ...);
+        /// <see cref="Load(string)"/> uses the defaults (16 bit sRGB). <see cref="Dng.DecodeRaw(ReadOnlySpan{byte}, DngRawStage, bool)"/>
+        /// gives the raw sensor data.
+        /// </summary>
+        public static PixImage LoadDng(string path, DngDecodeOptions? options = null) => Convert(Dng.Decode(File.ReadAllBytes(path), options));
+        /// <inheritdoc cref="LoadDng(string, DngDecodeOptions?)"/>
+        public static PixImage LoadDng(Stream stream, DngDecodeOptions? options = null) => Convert(Dng.Decode(ImageCodec.ReadAll(stream), options));
+
         /// <summary>Reads only the headers: format, size, channels, sample type, orientation, dpi, ... (see <see cref="ImageInfo"/>).</summary>
         public static ImageInfo GetInfo(string path) => ImageCodec.GetInfo(path);
         /// <inheritdoc cref="GetInfo(string)"/>

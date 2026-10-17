@@ -82,6 +82,8 @@ namespace Aardvark.ImageCodecs
         Cineon,
         JpegLs,
         Jxl,
+        /// <summary>Adobe Digital Negative: a TIFF file with DNGVersion in its first directory (raw camera data).</summary>
+        Dng,
     }
 
     /// <summary>
