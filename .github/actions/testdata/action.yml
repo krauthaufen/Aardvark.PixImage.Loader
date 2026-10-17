@@ -14,7 +14,7 @@ runs:
     - name: Cache key
       id: key
       shell: bash
-      run: echo "key=testdata-v2-${{ hashFiles('tests/oracle/fetch_*.py', 'tests/oracle/gen_tiff.py', 'tests/oracle/pxref.py', 'tests/oracle/requirements.txt', 'testdata/fetch/*', 'testdata/fixtures/webp/vectors/refs.txt', 'testdata/fixtures/jp2/conformance/limits.txt', 'testdata/fixtures/tga/gimp/sha256.txt', 'testdata/fixtures/mpo/pillow/sha256.txt') }}" >> "$GITHUB_OUTPUT"
+      run: echo "key=testdata-v2-${{ hashFiles('tests/oracle/fetch_*.py', 'tests/oracle/gen_tiff.py', 'tests/oracle/pxref.py', 'tests/oracle/requirements.txt', 'testdata/fetch/*', 'testdata/fixtures/webp/vectors/refs.txt', 'testdata/fixtures/jp2/conformance/limits.txt', 'testdata/fixtures/tga/gimp/sha256.txt', 'testdata/fixtures/mpo/pillow/sha256.txt', 'testdata/fixtures/av1/aom/sha256.txt', 'testdata/fixtures/avif/libavif/refs.txt') }}" >> "$GITHUB_OUTPUT"
 
     - name: Look up downloads
       if: inputs.mode == 'fetch'
@@ -33,6 +33,11 @@ runs:
           testdata/fixtures/tga/gimp/*.tga
           testdata/fixtures/tga/gimp/*.png
           testdata/fixtures/mpo/pillow/*.mpo
+          testdata/fixtures/av1/aom/*.ivf
+          testdata/fixtures/av1/aom/*.md5
+          testdata/fixtures/avif/libavif/*.avif
+          testdata/fixtures/avif/libavif/io/
+          testdata/fixtures/avif/libavif/README.md
           testdata/fixtures/mpo/pillow/*.jpg
 
     - name: Fetch
@@ -51,7 +56,8 @@ runs:
           export PATH="$(pwd)/.tmp/ci-tools/magick/bin:$PATH"
         fi
         magick -version | head -1
-        for f in testdata/fetch/*.sh; do sh "$f"; done
+        # (Argon: 7 GB download, 30 GB unpacked; its test needs PIXCODEC_ARGON=1 and runs locally only)
+        for f in testdata/fetch/*.sh; do case "$f" in *argon*) continue ;; esac; sh "$f"; done
         cd tests/oracle
         python fetch_tiff_samples.py
         python fetch_tiff_samples.py --aperio
@@ -76,6 +82,11 @@ runs:
           testdata/fixtures/tga/gimp/*.tga
           testdata/fixtures/tga/gimp/*.png
           testdata/fixtures/mpo/pillow/*.mpo
+          testdata/fixtures/av1/aom/*.ivf
+          testdata/fixtures/av1/aom/*.md5
+          testdata/fixtures/avif/libavif/*.avif
+          testdata/fixtures/avif/libavif/io/
+          testdata/fixtures/avif/libavif/README.md
           testdata/fixtures/mpo/pillow/*.jpg
 
     - name: Restore downloads
@@ -94,4 +105,9 @@ runs:
           testdata/fixtures/tga/gimp/*.tga
           testdata/fixtures/tga/gimp/*.png
           testdata/fixtures/mpo/pillow/*.mpo
+          testdata/fixtures/av1/aom/*.ivf
+          testdata/fixtures/av1/aom/*.md5
+          testdata/fixtures/avif/libavif/*.avif
+          testdata/fixtures/avif/libavif/io/
+          testdata/fixtures/avif/libavif/README.md
           testdata/fixtures/mpo/pillow/*.jpg
